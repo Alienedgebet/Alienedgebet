@@ -1,0 +1,12 @@
+fixture_id,league_id,home_team,away_team,home_missing_key_players_count,away_missing_key_players_count,h2h_goal_parity,concede_parity,home_gg_count,away_gg_count,h2h_gg_count,home_gg_last3,away_gg_last3,home_goal_count,away_goal_count,total_gg_count,total_goal_count,tier,table_distance,gg_prob_pct,home_position,away_position,dominance_score
+19664106,696,Aucas,Manta,0,2,2,2,2,1,3,1,1,8,2,6,18,Below Threshold,12,56.32,4,16,4
+19701367,1082,Nigeria,Zimbabwe,9,2,3,4,2,4,2,2,2,14,8,8,24,Below Threshold,N/A,53.93,99,99,4
+19665111,1631,Corinthians W,Mixto W,4,3,3,8,4,2,1,3,1,16,2,7,28,Below Threshold,14,51.5,1,15,4
+19693448,1122,LDU Quito,Always Ready,3,5,6,6,1,1,2,1,1,7,2,3,13,Below Threshold,2,50.83,2,4,3
+19693447,1122,Lanús,Mirassol,3,7,1,7,0,4,0,0,2,3,6,4,12,Below Threshold,2,50.24,3,1,5
+19705052,1673,Saint-Étienne,Nice,3,2,7,2,1,3,2,1,3,13,5,6,19,Below Threshold,N/A,48.61,99,99,4
+19692702,1116,Millonarios,O'Higgins,1,4,2,7,2,3,0,0,2,6,10,5,22,Below Threshold,1,46.31,2,3,4
+19692697,1116,Grêmio,Montevideo City Torque,2,2,1,2,1,4,0,1,3,8,7,5,15,Below Threshold,1,45.88,2,1,4
+19692703,1116,São Paulo,Boston River,5,5,1,8,3,2,0,3,1,6,2,5,16,Below Threshold,3,42.56,1,4,5
+19708446,1082,Morocco,Burundi,9,0,3,2,3,0,0,2,0,7,5,3,7,Below Threshold,N/A,41.44,99,99,4
+19692696,1116,Palestino,Deportivo Riestra,7,5,0,5,1,1,0,1,1,6,1,2,11,Below Threshold,1,38.29,4,3,2

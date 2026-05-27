@@ -1,0 +1,570 @@
+[
+    {
+        "fixture": "Aucas vs Manta",
+        "fixture_id": 19664106,
+        "home_team": {
+            "team_name": "Manta",
+            "id": 11798,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 25.2,
+            "gk_leak": 1.0714285714285714,
+            "missing_details": [
+                {
+                    "name": "Alexander Medina",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Mateo Ortiz",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Maikel Valencia",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Josué Chalá",
+                    "pos": "Defender"
+                }
+            ],
+            "formation": "4-5-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "Aucas",
+            "id": 8239,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 5.5,
+            "gk_leak": 1.0666666666666667,
+            "missing_details": [
+                {
+                    "name": "Bruno Miranda",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Luis Arroyo",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "4-1-4-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    },
+    {
+        "fixture": "Saint-Étienne vs Nice",
+        "fixture_id": 19705052,
+        "home_team": {
+            "team_name": "Saint-Étienne",
+            "id": 108,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 21.6,
+            "gk_leak": 0.9230769230769231,
+            "missing_details": [
+                {
+                    "name": "Ben Old",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Mickaël Nadé",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Igor Miladinovic",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "4-2-3-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "Nice",
+            "id": 450,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 5.5,
+            "gk_leak": 1.5833333333333335,
+            "missing_details": [
+                {
+                    "name": "Elye Wahi",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Tom Louchet",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "4-2-3-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    },
+    {
+        "fixture": "Palestino vs Deportivo Riestra",
+        "fixture_id": 19692696,
+        "home_team": {
+            "team_name": "Palestino",
+            "id": 9890,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 45.7,
+            "gk_leak": 1.368421052631579,
+            "missing_details": [
+                {
+                    "name": "Sebastián Gallegos",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Vicente Espinoza",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Ian Garguez",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Dilan Zúñiga",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "César Munder",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Enzo Roco",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Jason León",
+                    "pos": "Defender"
+                }
+            ],
+            "formation": "4-2-3-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "Deportivo Riestra",
+            "id": 14578,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 17.0,
+            "gk_leak": 1.0,
+            "missing_details": [
+                {
+                    "name": "Cristian Paz",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Jonathan Herrera",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Pedro Ramírez",
+                    "pos": "Defender"
+                }
+            ],
+            "formation": "5-3-2",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    },
+    {
+        "fixture": "Grêmio vs Montevideo City Torque",
+        "fixture_id": 19692697,
+        "home_team": {
+            "team_name": "Montevideo City Torque",
+            "id": 5479,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 5.5,
+            "gk_leak": 1.0555555555555556,
+            "missing_details": [
+                {
+                    "name": "Ramiro Lecchini",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Pablo Siles",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "5-4-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "Grêmio",
+            "id": 2925,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 23.1,
+            "gk_leak": 0.875,
+            "missing_details": [
+                {
+                    "name": "Erick Noriega",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Gustavo Martins",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "José Enamorado",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Arthur Melo",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Gabriel Mec",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "4-4-2",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    },
+    {
+        "fixture": "Millonarios vs O'Higgins",
+        "fixture_id": 19692702,
+        "home_team": {
+            "team_name": "Millonarios",
+            "id": 7810,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 8.1,
+            "gk_leak": 1.0454545454545454,
+            "missing_details": [
+                {
+                    "name": "Carlos Sarabia",
+                    "pos": "Defender"
+                }
+            ],
+            "formation": "5-3-2",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "O'Higgins",
+            "id": 10014,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 23.1,
+            "gk_leak": 1.0526315789473684,
+            "missing_details": [
+                {
+                    "name": "Arnaldo Castillo",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Luis Pavez",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Nicolas Garrido",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Bryan Rabello",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "4-2-3-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    },
+    {
+        "fixture": "São Paulo vs Boston River",
+        "fixture_id": 19692703,
+        "home_team": {
+            "team_name": "São Paulo",
+            "id": 3496,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 27.4,
+            "gk_leak": 1.0454545454545454,
+            "missing_details": [
+                {
+                    "name": "Sabino",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Damián Bobadilla",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Luciano",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Enzo Díaz",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Cauly",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "4-2-3-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "Boston River",
+            "id": 5476,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 69.2,
+            "gk_leak": 0.0,
+            "missing_details": [
+                {
+                    "name": "Bruno Antúnez",
+                    "pos": "Goalkeeper"
+                },
+                {
+                    "name": "Agustín Amado",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Yair González",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Francisco Barrios",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Martín González ",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Leandro Suhr",
+                    "pos": "Attacker"
+                }
+            ],
+            "formation": "4-2-3-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    },
+    {
+        "fixture": "Lanús vs Mirassol",
+        "fixture_id": 19693447,
+        "home_team": {
+            "team_name": "Lanús",
+            "id": 9878,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 16.4,
+            "gk_leak": 1.1428571428571428,
+            "missing_details": [
+                {
+                    "name": "Tomás Guidara",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Marcelino Moreno",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Felipe Peña Biafore",
+                    "pos": "Midfielder"
+                }
+            ],
+            "formation": "4-2-3-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "Mirassol",
+            "id": 11126,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 66.4,
+            "gk_leak": 0.0,
+            "missing_details": [
+                {
+                    "name": "Walter",
+                    "pos": "Goalkeeper"
+                },
+                {
+                    "name": "Igor Formiga",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Alesson",
+                    "pos": "Attacker"
+                },
+                {
+                    "name": "Neto Moura",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Shaylon",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Negueba",
+                    "pos": "Attacker"
+                }
+            ],
+            "formation": "3-4-2-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    },
+    {
+        "fixture": "LDU Quito vs Always Ready",
+        "fixture_id": 19693448,
+        "home_team": {
+            "team_name": "LDU Quito",
+            "id": 10779,
+            "breach": false,
+            "danger_level": "✅ SAFE",
+            "vulnerability_pct": 13.5,
+            "gk_leak": 0.8421052631578948,
+            "missing_details": [
+                {
+                    "name": "Luis Segovia",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Gabriel Villamíl",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Deyverson",
+                    "pos": "Attacker"
+                }
+            ],
+            "formation": "5-3-2",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "away_team": {
+            "team_name": "Always Ready",
+            "id": 234259,
+            "breach": true,
+            "danger_level": "🔴 DANGER",
+            "vulnerability_pct": 26.3,
+            "gk_leak": 1.2000000000000002,
+            "missing_details": [
+                {
+                    "name": "Héctor Cuellar",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Alex Rambal",
+                    "pos": "Defender"
+                },
+                {
+                    "name": "Joel Amoroso",
+                    "pos": "Midfielder"
+                },
+                {
+                    "name": "Dieguito Rodriguez",
+                    "pos": "Defender"
+                }
+            ],
+            "formation": "4-1-4-1",
+            "style": {
+                "label": "Defensive",
+                "score": 0.0,
+                "da": 0.0
+            }
+        },
+        "style_alignment": "⚠️ TIGHT",
+        "match_chemistry_list": {
+            "Corner": "Strong",
+            "Gg": "Weak"
+        }
+    }
+]

@@ -1,0 +1,12 @@
+fixture_id,home_team,away_team,home_missing_key_players_count,away_missing_key_players_count,h2h_goal_parity,concede_parity,home_gg_count,away_gg_count,h2h_gg_count,home_goal_count,away_goal_count,total_gg_count,total_goal_count,tier,home_gg_last3,away_gg_last3,data_integrity_pass,dominance_score,gg_prob_pct,home_position,away_position,both_top8
+19701367,Nigeria,Zimbabwe,9,2,5,4,2,4,2,14,8,8,41,Below Threshold,2,2,True,2,67.56,0,0,False
+19705052,Saint-Étienne,Nice,3,2,11,2,1,3,2,13,5,6,43,Below Threshold,1,3,True,2,64.67,0,0,False
+19665111,Corinthians W,Mixto W,4,3,3,8,4,2,1,16,2,7,41,Below Threshold,3,1,True,2,64.11,1,15,False
+19664106,Aucas,Manta,0,2,2,2,2,1,3,8,2,6,28,Below Threshold,1,1,True,1,59.06,4,16,False
+19692702,Millonarios,O'Higgins,1,4,2,7,2,3,0,6,10,5,31,Below Threshold,0,2,True,2,58.18,2,3,True
+19692697,Grêmio,Montevideo City Torque,2,2,1,2,1,4,0,8,7,5,24,Below Threshold,1,3,True,2,57.41,2,1,True
+19708446,Morocco,Burundi,9,0,9,2,3,0,0,7,5,3,29,Below Threshold,2,0,True,2,55.73,0,0,False
+19693448,LDU Quito,Always Ready,3,5,4,6,1,1,2,7,2,3,25,Below Threshold,1,1,True,0,55.71,2,4,True
+19692703,São Paulo,Boston River,5,5,1,8,3,2,0,6,2,5,25,Below Threshold,3,1,True,2,54.09,1,4,True
+19693447,Lanús,Mirassol,3,7,1,7,0,4,0,3,6,4,17,Below Threshold,0,2,True,2,50.59,3,1,True
+19692696,Palestino,Deportivo Riestra,7,5,0,5,1,1,0,6,1,2,20,Below Threshold,1,1,True,0,49.32,4,3,True

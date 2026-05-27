@@ -1,0 +1,508 @@
+{
+    "11798": {
+        "team_name": "Manta",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 86.6,
+            "Goal_Intent": 69.5,
+            "BTTS_Friction": 71.7,
+            "Win_Dominance": 64.2
+        },
+        "Tactical_DNA": {
+            "Tempo": 26.2,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Direct"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 5.9,
+            "Estimated_Crosses": 20.6,
+            "Estimated_Blocks": 3.1,
+            "Dangerous_Attacks": 38.9,
+            "Passing_Control": 74.0
+        }
+    },
+    "8239": {
+        "team_name": "Aucas",
+        "Archetype": "Possession Controller (DRAW/UNDER)",
+        "Market_Power_Scores": {
+            "Corner_Power": 71.9,
+            "Goal_Intent": 71.0,
+            "BTTS_Friction": 51.7,
+            "Win_Dominance": 65.0
+        },
+        "Tactical_DNA": {
+            "Tempo": 35.5,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 5.2,
+            "Estimated_Crosses": 15.9,
+            "Estimated_Blocks": 3.9,
+            "Dangerous_Attacks": 40.6,
+            "Passing_Control": 86.0
+        }
+    },
+    "236273": {
+        "team_name": "Corinthians W",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 100,
+            "Goal_Intent": 100,
+            "BTTS_Friction": 48.0,
+            "Win_Dominance": 87.5
+        },
+        "Tactical_DNA": {
+            "Tempo": 34.3,
+            "Line_Height": "High",
+            "Risk_Appetite": "High",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 6.2,
+            "Estimated_Crosses": 23.7,
+            "Estimated_Blocks": 4.9,
+            "Dangerous_Attacks": 78.1,
+            "Passing_Control": 83.0
+        }
+    },
+    "255430": {
+        "team_name": "Mixto W",
+        "Archetype": "Elite Dominator (WIN/OVER)",
+        "Market_Power_Scores": {
+            "Corner_Power": 42.0,
+            "Goal_Intent": 98.4,
+            "BTTS_Friction": 57.2,
+            "Win_Dominance": 73.7
+        },
+        "Tactical_DNA": {
+            "Tempo": 19.7,
+            "Line_Height": "High",
+            "Risk_Appetite": "High",
+            "Verticality": "Direct"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 3.0,
+            "Estimated_Crosses": 9.9,
+            "Estimated_Blocks": 1.6,
+            "Dangerous_Attacks": 41.2,
+            "Passing_Control": 65.3
+        }
+    },
+    "18834": {
+        "team_name": "Burundi",
+        "Archetype": "Balanced",
+        "Market_Power_Scores": {
+            "Corner_Power": 48.2,
+            "Goal_Intent": 91.8,
+            "BTTS_Friction": 38.1,
+            "Win_Dominance": 40.7
+        },
+        "Tactical_DNA": {
+            "Tempo": 7.2,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 2.8,
+            "Estimated_Crosses": 12.0,
+            "Estimated_Blocks": 1.5,
+            "Dangerous_Attacks": 40.5,
+            "Passing_Control": 0
+        }
+    },
+    "18551": {
+        "team_name": "Morocco",
+        "Archetype": "Possession Controller (DRAW/UNDER)",
+        "Market_Power_Scores": {
+            "Corner_Power": 63.7,
+            "Goal_Intent": 93.4,
+            "BTTS_Friction": 54.3,
+            "Win_Dominance": 63.1
+        },
+        "Tactical_DNA": {
+            "Tempo": 35.0,
+            "Line_Height": "High",
+            "Risk_Appetite": "High",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.4,
+            "Estimated_Crosses": 15.4,
+            "Estimated_Blocks": 2.0,
+            "Dangerous_Attacks": 56.6,
+            "Passing_Control": 85.9
+        }
+    },
+    "18737": {
+        "team_name": "Nigeria",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 80.9,
+            "Goal_Intent": 84.9,
+            "BTTS_Friction": 60.1,
+            "Win_Dominance": 65.2
+        },
+        "Tactical_DNA": {
+            "Tempo": 34.0,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "High",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.1,
+            "Estimated_Crosses": 21.4,
+            "Estimated_Blocks": 1.3,
+            "Dangerous_Attacks": 44.4,
+            "Passing_Control": 88.4
+        }
+    },
+    "18547": {
+        "team_name": "Zimbabwe",
+        "Archetype": "Balanced",
+        "Market_Power_Scores": {
+            "Corner_Power": 52.1,
+            "Goal_Intent": 92.1,
+            "BTTS_Friction": 63.7,
+            "Win_Dominance": 50.2
+        },
+        "Tactical_DNA": {
+            "Tempo": 18.9,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "High",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.7,
+            "Estimated_Crosses": 10.0,
+            "Estimated_Blocks": 4.0,
+            "Dangerous_Attacks": 39.7,
+            "Passing_Control": 64.8
+        }
+    },
+    "108": {
+        "team_name": "Saint-\u00c9tienne",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 82.1,
+            "Goal_Intent": 89.9,
+            "BTTS_Friction": 58.4,
+            "Win_Dominance": 66.7
+        },
+        "Tactical_DNA": {
+            "Tempo": 35.7,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 5.6,
+            "Estimated_Crosses": 19.5,
+            "Estimated_Blocks": 3.0,
+            "Dangerous_Attacks": 60.8,
+            "Passing_Control": 85.0
+        }
+    },
+    "450": {
+        "team_name": "Nice",
+        "Archetype": "Balanced",
+        "Market_Power_Scores": {
+            "Corner_Power": 74.3,
+            "Goal_Intent": 70.1,
+            "BTTS_Friction": 49.7,
+            "Win_Dominance": 51.6
+        },
+        "Tactical_DNA": {
+            "Tempo": 27.3,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 5.4,
+            "Estimated_Crosses": 17.2,
+            "Estimated_Blocks": 3.0,
+            "Dangerous_Attacks": 33.8,
+            "Passing_Control": 79.5
+        }
+    },
+    "9890": {
+        "team_name": "Palestino",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 89.6,
+            "Goal_Intent": 66.5,
+            "BTTS_Friction": 67.7,
+            "Win_Dominance": 61.4
+        },
+        "Tactical_DNA": {
+            "Tempo": 26.6,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Direct"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.8,
+            "Estimated_Crosses": 21.2,
+            "Estimated_Blocks": 4.4,
+            "Dangerous_Attacks": 34.9,
+            "Passing_Control": 74.0
+        }
+    },
+    "14578": {
+        "team_name": "Deportivo Riestra",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 86.6,
+            "Goal_Intent": 88.8,
+            "BTTS_Friction": 84.4,
+            "Win_Dominance": 57.4
+        },
+        "Tactical_DNA": {
+            "Tempo": 21.3,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Direct"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 5.4,
+            "Estimated_Crosses": 20.8,
+            "Estimated_Blocks": 3.4,
+            "Dangerous_Attacks": 56.4,
+            "Passing_Control": 54.2
+        }
+    },
+    "5479": {
+        "team_name": "Montevideo City Torque",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 79.6,
+            "Goal_Intent": 81.6,
+            "BTTS_Friction": 70.4,
+            "Win_Dominance": 85.5
+        },
+        "Tactical_DNA": {
+            "Tempo": 28.9,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Direct"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.8,
+            "Estimated_Crosses": 18.3,
+            "Estimated_Blocks": 4.2,
+            "Dangerous_Attacks": 53.5,
+            "Passing_Control": 71.2
+        }
+    },
+    "2925": {
+        "team_name": "Gr\u00eamio",
+        "Archetype": "Balanced",
+        "Market_Power_Scores": {
+            "Corner_Power": 52.0,
+            "Goal_Intent": 72.3,
+            "BTTS_Friction": 61.5,
+            "Win_Dominance": 62.4
+        },
+        "Tactical_DNA": {
+            "Tempo": 27.1,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 2.9,
+            "Estimated_Crosses": 12.5,
+            "Estimated_Blocks": 2.2,
+            "Dangerous_Attacks": 31.0,
+            "Passing_Control": 82.4
+        }
+    },
+    "7810": {
+        "team_name": "Millonarios",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 90.0,
+            "Goal_Intent": 83.0,
+            "BTTS_Friction": 56.6,
+            "Win_Dominance": 57.1
+        },
+        "Tactical_DNA": {
+            "Tempo": 26.1,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 7.1,
+            "Estimated_Crosses": 20.5,
+            "Estimated_Blocks": 3.6,
+            "Dangerous_Attacks": 42.1,
+            "Passing_Control": 78.5
+        }
+    },
+    "10014": {
+        "team_name": "O'Higgins",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 100,
+            "Goal_Intent": 79.7,
+            "BTTS_Friction": 56.3,
+            "Win_Dominance": 56.4
+        },
+        "Tactical_DNA": {
+            "Tempo": 31.5,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 8.1,
+            "Estimated_Crosses": 30.8,
+            "Estimated_Blocks": 4.8,
+            "Dangerous_Attacks": 48.8,
+            "Passing_Control": 84.0
+        }
+    },
+    "3496": {
+        "team_name": "S\u00e3o Paulo",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 81.5,
+            "Goal_Intent": 81.3,
+            "BTTS_Friction": 68.4,
+            "Win_Dominance": 54.4
+        },
+        "Tactical_DNA": {
+            "Tempo": 25.9,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 6.0,
+            "Estimated_Crosses": 18.9,
+            "Estimated_Blocks": 3.2,
+            "Dangerous_Attacks": 36.8,
+            "Passing_Control": 80.2
+        }
+    },
+    "5476": {
+        "team_name": "Boston River",
+        "Archetype": "Elite Dominator (WIN/OVER)",
+        "Market_Power_Scores": {
+            "Corner_Power": 66.2,
+            "Goal_Intent": 91.9,
+            "BTTS_Friction": 53.9,
+            "Win_Dominance": 72.1
+        },
+        "Tactical_DNA": {
+            "Tempo": 29.2,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.4,
+            "Estimated_Crosses": 15.7,
+            "Estimated_Blocks": 2.6,
+            "Dangerous_Attacks": 47.8,
+            "Passing_Control": 82.9
+        }
+    },
+    "9878": {
+        "team_name": "Lan\u00fas",
+        "Archetype": "Balanced",
+        "Market_Power_Scores": {
+            "Corner_Power": 67.9,
+            "Goal_Intent": 84.6,
+            "BTTS_Friction": 58.0,
+            "Win_Dominance": 66.4
+        },
+        "Tactical_DNA": {
+            "Tempo": 31.6,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.4,
+            "Estimated_Crosses": 16.4,
+            "Estimated_Blocks": 2.4,
+            "Dangerous_Attacks": 51.6,
+            "Passing_Control": 78.4
+        }
+    },
+    "11126": {
+        "team_name": "Mirassol",
+        "Archetype": "Balanced",
+        "Market_Power_Scores": {
+            "Corner_Power": 75.2,
+            "Goal_Intent": 85.4,
+            "BTTS_Friction": 55.8,
+            "Win_Dominance": 53.2
+        },
+        "Tactical_DNA": {
+            "Tempo": 26.6,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.8,
+            "Estimated_Crosses": 18.0,
+            "Estimated_Blocks": 2.9,
+            "Dangerous_Attacks": 40.9,
+            "Passing_Control": 79.4
+        }
+    },
+    "10779": {
+        "team_name": "LDU Quito",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 83.6,
+            "Goal_Intent": 86.3,
+            "BTTS_Friction": 72.5,
+            "Win_Dominance": 51.9
+        },
+        "Tactical_DNA": {
+            "Tempo": 26.6,
+            "Line_Height": "Medium",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 5.0,
+            "Estimated_Crosses": 19.2,
+            "Estimated_Blocks": 4.4,
+            "Dangerous_Attacks": 46.4,
+            "Passing_Control": 80.6
+        }
+    },
+    "234259": {
+        "team_name": "Always Ready",
+        "Archetype": "Set-Piece Specialist (CORNERS)",
+        "Market_Power_Scores": {
+            "Corner_Power": 78.2,
+            "Goal_Intent": 67.4,
+            "BTTS_Friction": 69.4,
+            "Win_Dominance": 70.9
+        },
+        "Tactical_DNA": {
+            "Tempo": 26.5,
+            "Line_Height": "High",
+            "Risk_Appetite": "Low",
+            "Verticality": "Horizontal"
+        },
+        "Raw_Audit_Metrics": {
+            "Avg_Corners": 4.5,
+            "Estimated_Crosses": 19.0,
+            "Estimated_Blocks": 3.0,
+            "Dangerous_Attacks": 31.0,
+            "Passing_Control": 81.2
+        }
+    }
+}

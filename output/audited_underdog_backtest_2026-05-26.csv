@@ -1,0 +1,12 @@
+fixture_id,fixture,underdog_team,Audit_Real_Prob,Dog_Score_Prob,Fav_Spear_Power,Dominance_Gap,Audit_Verdict,parity_gap,dog_is_hot,dog_due_goal,fav_cs_streak
+19705052,Saint-Étienne vs Nice,Nice,85.67%,86.8%,86.76%,1.1,🔥 ELITE SCORER,-11,False,True,1
+19692702,Millonarios vs O'Higgins,O'Higgins,77.1%,77.1%,78.89%,1.8,🔥 ELITE SCORER,7,False,True,0
+19692697,Grêmio vs Montevideo City Torque,Montevideo City Torque,60.97%,60.97%,71.61%,10.6,⚔️ ACTIVE,3,True,False,0
+19693447,Lanús vs Mirassol,Mirassol,58.09%,58.74%,31.97%,-26.1,⚔️ ACTIVE,14,False,False,0
+19692696,Palestino vs Deportivo Riestra,Palestino,55.89%,55.89%,32.97%,-22.9,⚔️ ACTIVE,-1,True,False,0
+19693448,LDU Quito vs Always Ready,Always Ready,54.18%,54.18%,76.41%,22.2,⚔️ ACTIVE,-1,True,False,0
+19664106,Aucas vs Manta,Manta,48.47%,48.47%,65.33%,16.9,⚔️ ACTIVE,-9,False,False,0
+19692703,São Paulo vs Boston River,Boston River,46.32%,46.32%,88.16%,41.8,⚔️ ACTIVE,10,True,False,0
+19701367,Nigeria vs Zimbabwe,Zimbabwe,45.84%,45.93%,92.57%,46.7,⚔️ ACTIVE,-5,True,False,0
+19665111,Corinthians W vs Mixto W,Mixto W,39.64%,47.7%,99.19%,59.5,❌ WEAK (NEUTRALIZED),-7,False,False,0
+19708446,Morocco vs Burundi,Burundi,25.64%,25.64%,75.88%,50.2,⚠️ LOW THREAT,7,True,False,0

@@ -1,0 +1,5 @@
+id,Fixture,Time,Votes,Odds,Algorithm,Reasons
+19665111,Corinthians W vs Mixto W,00:00,8,1.22,9_Layer_Council,"Poisson(76%), Banker, Consistent, H2H, Trend, Leaky, LineupPass, Volatile"
+19708446,Burundi vs Morocco,11:00,8,1.55,9_Layer_Council,"Firepower, Poisson(91%), ValueOdds, Consistent, H2H, Trend, LineupPass, Volatile"
+19701367,Nigeria vs Zimbabwe,18:30,6,2.2,9_Layer_Council,"Firepower, Poisson(73%), Trend, Leaky, LineupPass, Volatile"
+19705052,Saint-Étienne vs Nice,18:45,6,2.2,9_Layer_Council,"Poisson(61%), H2H, Trend, Leaky, LineupPass, Volatile"

@@ -1,0 +1,12 @@
+fixture_id,league,fixture,o25_odds,kill_switch_pass,poisson_over_prob_num,council_votes,pos_gap,parity_diff,h2h_overs_last_5,combined_gs_last_5
+19692703,Copa Sudamericana,São Paulo vs Boston River,1.6,False,73.11,6/9,3,-10,0,16
+19701367,Friendly International,Nigeria vs Zimbabwe,2.04,False,59.88,5/9,99,5,0,21
+19665111,Brasileiro Women,Corinthians W vs Mixto W,1.22,False,55.4,5/9,14,7,1,12
+19708446,Friendly International,Morocco vs Burundi,1.55,False,55.4,4/9,99,-7,2,20
+19692697,Copa Sudamericana,Grêmio vs Montevideo City Torque,1.92,False,53.05,4/9,1,-3,0,19
+19705052,Ligue 1 Play-offs,Saint-Étienne vs Nice,2.2,False,50.64,4/9,99,11,3,12
+19692696,Copa Sudamericana,Palestino vs Deportivo Riestra,2.1,False,45.62,2/9,1,-1,0,12
+19692702,Copa Sudamericana,Millonarios vs O'Higgins,1.89,False,43.03,2/9,1,-7,0,15
+19693448,Copa Libertadores,LDU Quito vs Always Ready,1.55,False,43.03,5/9,2,1,3,13
+19693447,Copa Libertadores,Lanús vs Mirassol,2.33,False,37.73,2/9,2,-14,0,8
+19664106,Liga Pro,Aucas vs Manta,1.83,False,29.63,3/9,12,9,1,7

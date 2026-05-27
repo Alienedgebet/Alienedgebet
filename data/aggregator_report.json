@@ -1,0 +1,74 @@
+[
+    {
+        "fixture": "Palestino vs Deportivo Riestra",
+        "fixture_id": 19692696,
+        "incoming_probabilities": [
+            {
+                "type": "WIN",
+                "target_loc": "away",
+                "target_name": "Deportivo Riestra",
+                "reason": "Titan Lock Alignment"
+            }
+        ],
+        "danger_report": {
+            "home": {
+                "status": "🔴 DANGER",
+                "sync": "STABLE",
+                "breach": true
+            },
+            "away": {
+                "status": "✅ SAFE",
+                "sync": "STABLE",
+                "breach": false
+            }
+        },
+        "match_chemistry_list": {
+            "Gg": "Weak",
+            "Corner": "Strong",
+            "Home Win": "Very Weak",
+            "Away Win": "Strong",
+            "Over2.5": "Weak",
+            "Under3.5": "Very Strong",
+            "Over1.5": "Excellent"
+        }
+    },
+    {
+        "fixture": "São Paulo vs Boston River",
+        "fixture_id": 19692703,
+        "incoming_probabilities": [
+            {
+                "type": "TO_SCORE",
+                "target_loc": "home",
+                "target_name": "São Paulo",
+                "reason": "Underdog structural failure"
+            },
+            {
+                "type": "WIN_DRAW",
+                "target_loc": "home",
+                "target_name": "São Paulo",
+                "reason": "Professional Game Management"
+            }
+        ],
+        "danger_report": {
+            "home": {
+                "status": "🔴 DANGER",
+                "sync": "STABLE",
+                "breach": true
+            },
+            "away": {
+                "status": "🔴 DANGER",
+                "sync": "STABLE",
+                "breach": true
+            }
+        },
+        "match_chemistry_list": {
+            "Gg": "Weak",
+            "Corner": "Strong",
+            "Home Win": "Very Weak",
+            "Away Win": "Very Weak",
+            "Over2.5": "Weak",
+            "Under3.5": "Very Strong",
+            "Over1.5": "Excellent"
+        }
+    }
+]
