@@ -1,0 +1,23 @@
+fixture_id,fixture,side,team_name,win_odds,poisson_win_prob,poisson_draw_prob,last_5_wins_overall,last_5_wins_at_venue,last_5_goals_scored,opp_last_5_goals_scored,opp_last_5_losses,opp_last_5_conceded_raw,opp_no_clean_sheet_count,h2h_wins_last_5,last_3_no_draw_BOTH,parity_score,parity_even_count
+19665111,Corinthians W vs Mixto W,home,Corinthians W,1.04,72.46%,21.37%,4,4,10,2,4,12,5,1,False,7,2
+19701367,Nigeria vs Zimbabwe,home,Nigeria,1.55,61.1%,20.71%,4,5,13,8,2,6,3,3,False,5,4
+19708446,Morocco vs Burundi,home,Morocco,1.21,58.62%,23.79%,4,3,9,11,3,7,3,3,False,-7,2
+19693448,LDU Quito vs Always Ready,home,LDU Quito,1.32,56.16%,24.44%,3,4,8,5,4,6,4,3,False,1,4
+19664106,Aucas vs Manta,home,Aucas,1.4,51.98%,31.94%,2,4,5,2,2,5,3,1,False,9,1
+19705052,Saint-Étienne vs Nice,away,Nice,2.7,48.92%,23.49%,0,1,4,8,3,8,4,3,False,-11,4
+19693447,Lanús vs Mirassol,away,Mirassol,4.3,46.1%,44.7%,3,2,7,1,3,8,3,1,True,14,2
+19692702,Millonarios vs O'Higgins,away,O'Higgins,5.0,40.34%,33.07%,2,2,6,9,0,5,3,1,False,7,3
+19692696,Palestino vs Deportivo Riestra,home,Palestino,2.17,38.58%,46.59%,2,2,7,5,2,8,3,0,False,-1,3
+19692697,Grêmio vs Montevideo City Torque,away,Montevideo City Torque,6.0,36.31%,32.83%,4,2,10,9,1,4,3,1,False,3,0
+19692703,São Paulo vs Boston River,home,São Paulo,1.22,33.11%,39.96%,0,2,6,10,3,12,5,1,False,-10,3
+19692697,Grêmio vs Montevideo City Torque,home,Grêmio,1.53,30.85%,32.83%,3,4,9,10,1,5,4,0,False,-3,2
+19705052,Saint-Étienne vs Nice,home,Saint-Étienne,2.26,27.33%,23.49%,2,4,8,4,2,7,4,0,False,11,1
+19692703,São Paulo vs Boston River,away,Boston River,10.0,26.93%,39.96%,2,0,10,6,3,10,5,0,False,10,1
+19692702,Millonarios vs O'Higgins,home,Millonarios,1.57,26.58%,33.07%,2,2,9,6,2,4,2,0,False,-7,5
+19693448,LDU Quito vs Always Ready,away,Always Ready,6.75,19.23%,24.44%,1,0,5,8,1,5,4,1,False,-1,2
+19701367,Nigeria vs Zimbabwe,away,Zimbabwe,6.5,17.66%,20.71%,2,2,8,13,0,4,3,0,False,-5,1
+19708446,Morocco vs Burundi,away,Burundi,13.0,17.39%,23.79%,2,2,11,9,0,2,2,0,False,7,3
+19664106,Aucas vs Manta,away,Manta,7.5,16.06%,31.94%,1,1,2,5,2,7,3,0,False,-9,2
+19692696,Palestino vs Deportivo Riestra,away,Deportivo Riestra,2.4,14.82%,46.59%,2,0,5,7,2,5,4,0,False,1,2
+19693447,Lanús vs Mirassol,home,Lanús,1.8,9.2%,44.7%,1,3,1,7,1,6,4,0,True,-14,4
+19665111,Corinthians W vs Mixto W,away,Mixto W,34.0,5.98%,21.37%,0,0,2,10,1,5,3,0,False,-7,3
