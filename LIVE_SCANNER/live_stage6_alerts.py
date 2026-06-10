@@ -14,21 +14,26 @@ from dotenv import load_dotenv
 # --- 1. HOSTING & ENVIRONMENT SETUP ---
 load_dotenv()
 
-# --- 2. DYNAMIC PATHS (The Standard Architecture) ---
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# --- 2. DYNAMIC PATHS ---
+BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR   = os.path.join(BASE_DIR, "data")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(DATA_DIR,   exist_ok=True)
 
-AGGREGATOR_REPORT_FILE = os.path.join(DATA_DIR, "aggregator_report.json")
-SH_GG_WINNER_FILE = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json") 
-CACHE_FILE = os.path.join(DATA_DIR, "squad_cache.json")
-OUTPUT_ALERTS_FILE = os.path.join(OUTPUT_DIR, "ready_to_push.json")
-LOG_FILE = os.path.join(OUTPUT_DIR, "system.log")
+AGGREGATOR_REPORT_FILE = os.path.join(DATA_DIR,   "aggregator_report.json")
+SH_GG_WINNER_FILE      = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json")
+CACHE_FILE             = os.path.join(DATA_DIR,   "squad_cache.json")
+OUTPUT_ALERTS_FILE     = os.path.join(OUTPUT_DIR, "ready_to_push.json")
+LOG_FILE               = os.path.join(OUTPUT_DIR, "system.log")
 
-# 🚨 ENTERPRISE UPGRADE: PROFESSIONAL LOGGING SYSTEM 🚨
+SESSION_ID       = datetime.now().strftime("%Y%m%d_%H%M%S")
+SESSION_LOG_FILE = os.path.join(OUTPUT_DIR, f"alerts_{SESSION_ID}.json")
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -38,33 +43,65 @@ logging.basicConfig(
     ]
 )
 
-# --- 3. CONFIGURATION ---
-API_TOKEN = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
-BASE_URL = "https://api.sportmonks.com/v3/football/livescores/inplay"
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+API_TOKEN   = os.getenv("SPORTMONKS_API_KEY")
+BASE_URL    = "https://api.sportmonks.com/v3/football/livescores/inplay"
 HISTORY_URL = "https://api.sportmonks.com/v3/football"
 
-# GLOBAL STATE VAULTS 
-SQUAD_VAULT = {}           
-LIVE_METRICS_VAULT = {}    
-VALIDATION_STATE = {}      
-MARKET_SETTLEMENT = {}     
-ALERT_HISTORY = set()      
+# Thresholds — lowered for real match conditions
+CONFIDENCE_PREMIUM_THRESHOLD  = 50
+CONFIDENCE_STANDARD_THRESHOLD = 30
+PRESSURE_SHARE_THRESHOLD      = 55
+MIN_CHAOS_FOR_FUSED            = 5.0
 
-# SYSTEM LOCKS & QUEUES 
-cache_lock = threading.Lock()
-alert_lock = threading.Lock()
-FETCHING_TEAMS = set() 
+# GLOBAL STATE
+SQUAD_VAULT        = {}
+LIVE_METRICS_VAULT = {}
+VALIDATION_STATE   = {}
+MARKET_SETTLEMENT  = {}
+ALERT_HISTORY      = set()
+SESSION_ALERTS     = []
+
+cache_lock    = threading.Lock()
+alert_lock    = threading.Lock()
+FETCHING_TEAMS = set()
+FETCHING_LOCK  = threading.Lock()
 
 # ==============================================================================
-# 🛠️ SYSTEM UTILITIES
+# UTILITIES
 # ==============================================================================
 def load_memory():
     global SQUAD_VAULT
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                SQUAD_VAULT = json.load(f)
-            logging.info(f"MEMORY RESTORED: {len(SQUAD_VAULT)} teams loaded from squad_cache.json")
+                raw = json.load(f)
+            # ── FIX: Normalise cache format ───────────────────────────────
+            # Old cache stored flat {pid: {...}} per team.
+            # New format stores {"players": {...}, "team_avg_leak": float}.
+            # If we load old format entries the engine crashes with
+            # KeyError: 'home_sq' / 'away_sq' because the Detective's
+            # get_squad_data returns the flat dict directly.
+            # Fix: wrap any flat dict into the new format on load.
+            normalised = {}
+            for tid, entry in raw.items():
+                if isinstance(entry, dict):
+                    if "players" in entry:
+                        # Already new format — use as-is
+                        normalised[tid] = entry
+                    else:
+                        # Old flat format — wrap it
+                        normalised[tid] = {
+                            "players":       entry,
+                            "team_avg_leak": 1.2
+                        }
+            SQUAD_VAULT = normalised
+            logging.info(
+                f"MEMORY RESTORED: {len(SQUAD_VAULT)} teams loaded "
+                f"(normalised to new format)"
+            )
         except Exception as e:
             logging.error(f"Memory Load Failed: {e}")
             SQUAD_VAULT = {}
@@ -87,93 +124,111 @@ def safe_get(d, *keys, default=None):
 def GET(url, params=None):
     if params is None: params = {}
     params.setdefault("api_token", API_TOKEN)
-    
     backoff = 2.0
     for attempt in range(3):
         try:
             r = requests.get(url, params=params, timeout=25)
-            if r.status_code == 200: 
-                return r.json()
+            if r.status_code == 200: return r.json()
             elif r.status_code == 429:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            r.raise_for_status() 
-        except Exception as e:
-            time.sleep(1)
-            continue
-    return {"data":[]}
+                time.sleep(backoff); backoff *= 2; continue
+            r.raise_for_status()
+        except Exception:
+            time.sleep(1); continue
+    return {"data": []}
 
 # ==============================================================================
-# 🧠 MODULE 1: SYNTHETIC INTELLIGENCE BRAIN 
+# 🧠 MODULE 1: SYNTHETIC INTELLIGENCE BRAIN
 # ==============================================================================
 class SyntheticIntelligenceBrain:
     def __init__(self):
-        self.W_P_SOT = 2.0
-        self.W_P_BOX = 1.5
-        self.W_P_DA = 0.6
+        self.W_P_SOT  = 2.0
+        self.W_P_BOX  = 1.5
+        self.W_P_DA   = 0.6
         self.W_P_CORN = 0.5
-        self.W_X_SOT = 0.45
-        self.W_X_BOX = 0.25
-        self.W_X_DA = 0.15
+        self.W_X_SOT  = 0.45
+        self.W_X_BOX  = 0.25
+        self.W_X_DA   = 0.15
         self.W_X_CORN = 0.10
-        self.W_X_POS = 0.05
+        self.W_X_POS  = 0.05
 
     def compute_team_metrics(self, f_id, stats, side, minute):
         if f_id not in LIVE_METRICS_VAULT:
-            LIVE_METRICS_VAULT[f_id] = {"home": deque(maxlen=25), "away": deque(maxlen=25)}
-        
-        sot = int(stats.get('shots-on-target', 0))
-        box = int(stats.get('box', 0))
-        da  = int(stats.get('dangerous-attacks', 0))
-        corn = int(stats.get('corners', 0))
-        pos  = int(stats.get('ball-possession', 50))
-        
-        pressure = (sot * self.W_P_SOT) + (box * self.W_P_BOX) + (da * self.W_P_DA) + (corn * self.W_P_CORN)
-        live_xg = (sot * self.W_X_SOT) + (box * self.W_X_BOX) + (da * self.W_X_DA) + (corn * self.W_X_CORN) + (pos * self.W_X_POS / 100)
-        
-        buffer = LIVE_METRICS_VAULT[f_id][side]
-        buffer.append({"xg": live_xg, "min": minute, "da": da, "sot": sot, "pressure": pressure})
-        
-        recent_xg_list = [x['xg'] for x in buffer if x['min'] > (minute - 10)]
-        rolling_xg = sum(recent_xg_list) / len(recent_xg_list) if recent_xg_list else 0
-        
-        last_5 = [x['xg'] for x in buffer if x['min'] > (minute - 5)]
-        prev_5 =[x['xg'] for x in buffer if (minute - 10) < x['min'] <= (minute - 5)]
-        accel = (sum(last_5)/len(last_5)) - (sum(prev_5)/len(prev_5)) if (last_5 and prev_5) else 0.0
+            LIVE_METRICS_VAULT[f_id] = {
+                "home": deque(maxlen=25),
+                "away": deque(maxlen=25)
+            }
+
+        sot  = int(stats.get('shots-on-target',  0))
+        box  = int(stats.get('box',               0))
+        da   = int(stats.get('dangerous-attacks', 0))
+        corn = int(stats.get('corners',            0))
+        pos  = int(stats.get('ball-possession',   50))
+
+        pressure = ((sot  * self.W_P_SOT) + (box  * self.W_P_BOX) +
+                    (da   * self.W_P_DA)  + (corn * self.W_P_CORN))
+        live_xg  = ((sot  * self.W_X_SOT) + (box  * self.W_X_BOX) +
+                    (da   * self.W_X_DA)  + (corn * self.W_X_CORN) +
+                    (pos  * self.W_X_POS / 100))
+
+        buf = LIVE_METRICS_VAULT[f_id][side]
+        buf.append({
+            "xg": live_xg, "min": minute,
+            "da": da, "sot": sot, "pressure": pressure
+        })
+
+        recent = [x['xg'] for x in buf if x['min'] > (minute - 10)]
+        rolling = sum(recent) / len(recent) if recent else 0
+
+        last5 = [x['xg'] for x in buf if x['min'] > (minute - 5)]
+        prev5 = [x['xg'] for x in buf
+                 if (minute - 10) < x['min'] <= (minute - 5)]
+        accel = ((sum(last5)/len(last5)) - (sum(prev5)/len(prev5))
+                 if (last5 and prev5) else 0.0)
 
         return {
-            "pressure_raw": pressure, "live_xg": round(live_xg, 2), "rolling_10_xg": round(rolling_xg, 2),
-            "acceleration": round(accel, 2), "da_velocity": round(da / max(1, minute), 2),
+            "pressure_raw":  pressure,
+            "live_xg":       round(live_xg,    2),
+            "rolling_10_xg": round(rolling,    2),
+            "acceleration":  round(accel,       2),
+            "da_velocity":   round(da / max(1, minute), 2),
             "sot": sot, "box": box, "da": da, "corn": corn
         }
 
     def analyze_match_state(self, f_id, h_s, a_s, minute, events):
         h = self.compute_team_metrics(f_id, h_s, "home", minute)
         a = self.compute_team_metrics(f_id, a_s, "away", minute)
-        
-        total_p = h['pressure_raw'] + a['pressure_raw']
-        h_p_share = (h['pressure_raw'] / total_p * 100) if total_p > 0 else 50
-        
-        total_xg = h['live_xg'] + a['live_xg']
-        h_dom = (h['live_xg'] / total_xg * 100) if total_xg > 0 else 50
-        
-        recent_e =[e for e in events if (e.get('minute') or 0) > (minute - 12)]
-        cards = len([e for e in recent_e if "card" in str(safe_get(e, "type", "code", default=""))])
-        c_burst = len([e for e in recent_e if safe_get(e, "type", "code") == "corner"])
-        chaos = (c_burst * 2.5) + (cards * 4.0) + ((h['da_velocity'] + a['da_velocity']) * 10)
 
-        # 🚨 ENTERPRISE UPGRADE: CONFIDENCE SCORING
-        confidence_score = min(100, max(0, (total_p * 0.8) + (chaos * 2.0)))
+        total_p   = h['pressure_raw'] + a['pressure_raw']
+        h_p_share = (h['pressure_raw'] / total_p * 100) if total_p > 0 else 50
+
+        total_xg = h['live_xg'] + a['live_xg']
+        h_dom    = (h['live_xg'] / total_xg * 100) if total_xg > 0 else 50
+
+        recent_e = [e for e in events if (e.get('minute') or 0) > (minute - 12)]
+        cards    = len([e for e in recent_e
+                        if "card" in str(safe_get(e,"type","code",default=""))])
+        c_burst  = len([e for e in recent_e
+                        if safe_get(e,"type","code") == "corner"])
+        chaos    = ((c_burst * 2.5) + (cards * 4.0) +
+                    ((h['da_velocity'] + a['da_velocity']) * 10))
+
+        # Confidence scoring — generous scaling for real match conditions
+        pressure_score   = min(60, total_p * 1.2)
+        chaos_score      = min(40, chaos * 3.0)
+        confidence_score = round(min(100, pressure_score + chaos_score), 1)
 
         return {
-            "home": h, "away": a,
+            "home":  h,
+            "away":  a,
             "match": {
-                "total_pressure": round(total_p, 2), "h_pressure_share": round(h_p_share, 1),
-                "a_pressure_share": round(100 - h_p_share, 1), "h_dominance": round(h_dom, 1),
-                "a_dominance": round(100 - h_dom, 1), "chaos_index": round(chaos, 2),
-                "xg_diff_slope": round(h['live_xg'] - a['live_xg'], 2),
-                "confidence_score": round(confidence_score, 1)
+                "total_pressure":   round(total_p,       2),
+                "h_pressure_share": round(h_p_share,     1),
+                "a_pressure_share": round(100-h_p_share, 1),
+                "h_dominance":      round(h_dom,         1),
+                "a_dominance":      round(100-h_dom,     1),
+                "chaos_index":      round(chaos,         2),
+                "xg_diff_slope":    round(h['live_xg'] - a['live_xg'], 2),
+                "confidence_score": confidence_score
             }
         }
 
@@ -183,40 +238,75 @@ class SyntheticIntelligenceBrain:
 class StructuralDetective:
     def get_squad_data(self, team_id):
         tid_str = str(team_id)
-        if tid_str in SQUAD_VAULT: return SQUAD_VAULT[tid_str]
-        
-        start_dt = (datetime.now(timezone.utc).date() - timedelta(days=150)).isoformat()
-        end_dt = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
-        url = f"{HISTORY_URL}/fixtures/between/{start_dt}/{end_dt}/{team_id}"
-        
-        resp = GET(url, params={"include": "lineups.details.type;lineups.player.position;scores;participants", "per_page": 25})
-        
+        if tid_str in SQUAD_VAULT:
+            entry = SQUAD_VAULT[tid_str]
+            # ── FIX: Safe format check ────────────────────────────────────
+            # If the cached entry is the new format, return players dict.
+            # If it is the old flat format, return it directly but also
+            # migrate it so next access is correct.
+            if isinstance(entry, dict) and "players" in entry:
+                return entry["players"]
+            else:
+                # Old flat format — migrate in place
+                SQUAD_VAULT[tid_str] = {
+                    "players":       entry,
+                    "team_avg_leak": 1.2
+                }
+                return entry
+
+        start_dt = (datetime.now(timezone.utc).date()
+                    - timedelta(days=150)).isoformat()
+        end_dt   = (datetime.now(timezone.utc).date()
+                    - timedelta(days=1)).isoformat()
+        url      = (f"{HISTORY_URL}/fixtures/between/"
+                    f"{start_dt}/{end_dt}/{team_id}")
+
+        resp = GET(url, params={
+            "include":  "lineups.details.type;lineups.player.position;"
+                        "scores;participants",
+            "per_page": 25
+        })
+
         stats = {}
-        for fx in resp.get("data",[]):
+        for fx in resp.get("data", []):
             hid = str(safe_get(fx, "participants", 0, "id"))
             h_g = safe_get(fx, "scores", 0, "score", "goals", default=0)
             a_g = safe_get(fx, "scores", 1, "score", "goals", default=0)
             opp_goals = a_g if tid_str == hid else h_g
 
-            for l in fx.get("lineups",[]):
+            for l in fx.get("lineups", []):
                 if str(l.get("team_id")) == tid_str:
                     pid = str(l.get("player_id"))
                     if not l.get("player"): continue
                     m_val = r_val = 0.0; c_val = -1.0
-                    for d in l.get("details",[]):
-                        t_name = str(d.get('type', {}).get('name', '')).lower()
-                        raw_v = d.get("data", {}).get("value") or d.get("value")
+                    for d in l.get("details", []):
+                        t_name = str(
+                            d.get('type', {}).get('name', '')
+                        ).lower()
+                        raw_v  = (d.get("data", {}).get("value")
+                                  or d.get("value"))
                         try: val = float(str(raw_v).replace('%', ''))
                         except: val = 0.0
-                        if "minutes" in t_name: m_val = val
+                        if "minutes"  in t_name: m_val = val
                         elif "rating" in t_name: r_val = val
                         elif "conceded" in t_name: c_val = val
-                    
-                    if m_val == 0 and str(l.get("formation_position")) == "1": m_val = 90
+
+                    if m_val == 0 and \
+                       str(l.get("formation_position")) == "1":
+                        m_val = 90
                     if c_val == -1.0: c_val = float(opp_goals)
+
                     if pid not in stats:
-                        stats[pid] = {"ratings":[], "apps": 0, "mins": 0, "conceded": 0, "clean_sheets": 0, "pos": safe_get(l["player"], "position", "name")}
-                    stats[pid]["mins"] += m_val; stats[pid]["apps"] += 1
+                        stats[pid] = {
+                            "ratings":      [],
+                            "apps":         0,
+                            "mins":         0,
+                            "conceded":     0,
+                            "clean_sheets": 0,
+                            "pos": safe_get(l["player"], "position", "name")
+                        }
+                    stats[pid]["mins"] += m_val
+                    stats[pid]["apps"] += 1
                     if r_val > 0: stats[pid]["ratings"].append(r_val)
                     if m_val > 0:
                         stats[pid]["conceded"] += c_val
@@ -224,361 +314,671 @@ class StructuralDetective:
 
         processed = {}
         for pid, d in stats.items():
-            avg_r = sum(d["ratings"])/len(d["ratings"]) if d["ratings"] else 6.0
-            worth = (d["apps"] * 5000) + (d["mins"] * avg_r)
-            c_p90 = (d["conceded"] / d["mins"]) * 90 if d["mins"] > 0 else 0.0
-            doom = (c_p90 * 0.6) + ((1 - (d["clean_sheets"]/d["apps"] if d["apps"]>0 else 0)) * 2)
-            processed[pid] = {"worth": worth, "doom": doom, "pos": d["pos"]}
-            
+            avg_r  = (sum(d["ratings"]) / len(d["ratings"])
+                      if d["ratings"] else 6.0)
+            worth  = (d["apps"] * 5000) + (d["mins"] * avg_r)
+            c_p90  = (d["conceded"] / d["mins"]) * 90 if d["mins"] > 0 else 0.0
+            doom   = ((c_p90 * 0.6) +
+                      ((1 - (d["clean_sheets"] / d["apps"]
+                              if d["apps"] > 0 else 0)) * 2))
+            processed[pid] = {
+                "worth": worth, "doom": doom, "pos": d["pos"]
+            }
+
+        # Store in new format
         with cache_lock:
-            SQUAD_VAULT[tid_str] = processed
-        save_memory() 
+            SQUAD_VAULT[tid_str] = {
+                "players":       processed,
+                "team_avg_leak": 1.2
+            }
+        save_memory()
         return processed
 
     def investigate(self, ctx, pre):
-        h_id, a_id = str(ctx['home']['id']), str(ctx['away']['id'])
-        h_sq, a_sq = SQUAD_VAULT.get(h_id, {}), SQUAD_VAULT.get(a_id, {})
-        
-        if not h_sq or not a_sq: return {"status": "INSUFFICIENT_SQUAD_DATA"}
+        # ── FIX: Safe key access for home/away IDs ────────────────────────
+        # Original code accessed ctx['home']['id'] and ctx['away']['id']
+        # directly. If extract_impact_context failed to find a participant
+        # those keys were None and the squad lookup silently returned {}.
+        # Now we validate before looking up.
+        h_id = str(ctx.get('home', {}).get('id') or '')
+        a_id = str(ctx.get('away', {}).get('id') or '')
 
-        h_doom_avg = sum(p['doom'] for p in h_sq.values()) / len(h_sq) if len(h_sq) > 0 else 0
-        a_doom_avg = sum(p['doom'] for p in a_sq.values()) / len(a_sq) if len(a_sq) > 0 else 0
-        
-        h_triple = h_doom_avg >= (a_doom_avg * 3) if a_doom_avg > 0 else False
-        a_triple = a_doom_avg >= (h_doom_avg * 3) if h_doom_avg > 0 else False
-        
+        if not h_id or not a_id:
+            return {"status": "MISSING_TEAM_IDS"}
+
+        # ── FIX: Access players sub-dict correctly ─────────────────────────
+        # SQUAD_VAULT stores {"players": {...}, "team_avg_leak": float}
+        # The old code did SQUAD_VAULT.get(h_id, {}) which returned the
+        # whole entry including "players" key, then iterated it as if
+        # it were the player dict. This caused 'tier' KeyError downstream
+        # because it was iterating over {"players":..., "team_avg_leak":...}
+        # Fix: always extract the "players" sub-dict.
+        h_entry = SQUAD_VAULT.get(h_id, {})
+        a_entry = SQUAD_VAULT.get(a_id, {})
+
+        h_sq = (h_entry.get("players", {})
+                if isinstance(h_entry, dict) and "players" in h_entry
+                else h_entry)
+        a_sq = (a_entry.get("players", {})
+                if isinstance(a_entry, dict) and "players" in a_entry
+                else a_entry)
+
+        if not h_sq or not a_sq:
+            return {"status": "INSUFFICIENT_SQUAD_DATA"}
+
+        # Safety check: skip if values are not player dicts
+        # (catches migrated flat entries with unexpected structure)
+        def is_player_dict(d):
+            return isinstance(d, dict) and any(
+                isinstance(v, dict) and 'doom' in v
+                for v in d.values()
+            )
+
+        if not is_player_dict(h_sq) or not is_player_dict(a_sq):
+            return {"status": "STALE_CACHE_FORMAT"}
+
+        h_doom_avg = (sum(p['doom'] for p in h_sq.values()) / len(h_sq)
+                      if h_sq else 0)
+        a_doom_avg = (sum(p['doom'] for p in a_sq.values()) / len(a_sq)
+                      if a_sq else 0)
+
+        # Doom threshold: 2x (was 3x — more matches qualify)
+        h_triple = (h_doom_avg >= a_doom_avg * 2) if a_doom_avg > 0 else False
+        a_triple = (a_doom_avg >= h_doom_avg * 2) if h_doom_avg > 0 else False
+
         return {
-            "h_doom": h_doom_avg, "a_doom": a_doom_avg,
-            "h_triple": h_triple, "a_triple": a_triple,
-            "h_red": ctx['impact']['home']['reds'] > 0,
-            "a_red": ctx['impact']['away']['reds'] > 0,
-            "h_gk": ctx['impact']['home']['gk_risk'],
-            "a_gk": ctx['impact']['away']['gk_risk']
+            "h_doom":   h_doom_avg,
+            "a_doom":   a_doom_avg,
+            "h_triple": h_triple,
+            "a_triple": a_triple,
+            "h_red":    ctx['impact']['home']['reds'] > 0,
+            "a_red":    ctx['impact']['away']['reds'] > 0,
+            "h_gk":     ctx['impact']['home']['gk_risk'],
+            "a_gk":     ctx['impact']['away']['gk_risk'],
         }
 
 # ==============================================================================
-# 🎯 MODULE 3: USER-RULE EVALUATOR 
+# 🎯 MODULE 3: USER-RULE EVALUATOR
 # ==============================================================================
 class UserRuleEvaluator:
-    def evaluate(self, f_id, intel, structural, pre, configs): 
+    def evaluate(self, f_id, intel, structural, pre, configs):
         triggered = []
-        conf = intel['match']['confidence_score']
-        
-        # 🚨 ENTERPRISE UPGRADE: ALERT SCORING TIERS 🚨
-        if conf >= 80: tier = "🔥 PREMIUM"
-        elif conf >= 60: tier = "✅ STANDARD"
-        else: return triggered  # Silent - Kills Noise
+        conf      = intel['match']['confidence_score']
+
+        if conf >= CONFIDENCE_PREMIUM_THRESHOLD:
+            tier = "🔥 PREMIUM"
+        elif conf >= CONFIDENCE_STANDARD_THRESHOLD:
+            tier = "✅ STANDARD"
+        else:
+            tier = "📊 MONITOR"
 
         for cfg in configs:
             if cfg['type'] == "PRESSURE_SHARE":
                 target = cfg['side']
                 if 'require_prematch_flag' in cfg:
-                    req_flag = cfg['require_prematch_flag']
                     flags = safe_get(pre, 'flags') or {}
-                    if not flags.get(req_flag): continue 
+                    if not flags.get(cfg['require_prematch_flag']): continue
 
-                if intel['match'][f'{target[0]}_pressure_share'] >= cfg['min_pct']:
-                    alert_msg = f"{target.upper()} dominating Pressure Share ({intel['match'][f'{target[0]}_pressure_share']}%)."
-                    triggered.append({"id": f"{f_id}_USER_PRESSURE", "msg": alert_msg, "tier": tier, "conf": conf})
-            
+                share = intel['match'][f'{target[0]}_pressure_share']
+                if share >= cfg.get('min_pct', PRESSURE_SHARE_THRESHOLD):
+                    alert_msg = (
+                        f"{target.upper()} dominating Pressure Share "
+                        f"({share}%) | xG: {intel[target]['live_xg']} "
+                        f"| SOT: {intel[target]['sot']} "
+                        f"| DA: {intel[target]['da']}"
+                    )
+                    triggered.append({
+                        "id":   f"{f_id}_USER_PRESSURE_{target.upper()}",
+                        "msg":  alert_msg,
+                        "tier": tier,
+                        "conf": conf
+                    })
+
             if cfg['type'] == "FUSED_PREMATCH_LIVE":
-                req_label = cfg.get('required_label')
-                min_chaos = cfg.get('min_chaos', 0)
-                pick_labels = pre.get('pick_labels',[])
+                req_label   = cfg.get('required_label')
+                min_chaos   = cfg.get('min_chaos', MIN_CHAOS_FOR_FUSED)
+                pick_labels = pre.get('pick_labels', [])
+                if (req_label in pick_labels and
+                        intel['match']['chaos_index'] >= min_chaos):
+                    alert_msg = (
+                        f"Pre-match '{req_label}' fused with live chaos "
+                        f"({intel['match']['chaos_index']:.1f}) "
+                        f"| Conf: {conf}%"
+                    )
+                    triggered.append({
+                        "id":   f"{f_id}_USER_FUSED",
+                        "msg":  alert_msg,
+                        "tier": tier,
+                        "conf": conf
+                    })
 
-                if req_label in pick_labels and intel['match']['chaos_index'] >= min_chaos:
-                    alert_msg = f"Pre-match Engine 1 '{req_label}' matched with high live chaos ({intel['match']['chaos_index']})."
-                    triggered.append({"id": f"{f_id}_USER_FUSED", "msg": alert_msg, "tier": tier, "conf": conf})
-                    
+            # Live Snapshot — fires every cycle for all live matches
+            if cfg['type'] == "LIVE_SNAPSHOT":
+                alert_msg = (
+                    f"Live Snapshot | Conf: {conf}% | "
+                    f"H-Pressure: {intel['match']['h_pressure_share']}% | "
+                    f"A-Pressure: {intel['match']['a_pressure_share']}% | "
+                    f"Chaos: {intel['match']['chaos_index']:.1f} | "
+                    f"H-xG: {intel['home']['live_xg']} | "
+                    f"A-xG: {intel['away']['live_xg']}"
+                )
+                triggered.append({
+                    "id":   f"{f_id}_SNAPSHOT",
+                    "msg":  alert_msg,
+                    "tier": "📊 MONITOR",
+                    "conf": conf
+                })
+
         return triggered
 
 # ==============================================================================
-# 🔄 THE SUPREME ORCHESTRATOR 
+# 🔄 THE SUPREME ORCHESTRATOR
 # ==============================================================================
 class SupremeOrchestrator:
     def __init__(self):
-        self.Brain = SyntheticIntelligenceBrain()
+        self.Brain     = SyntheticIntelligenceBrain()
         self.Detective = StructuralDetective()
         self.UserLogic = UserRuleEvaluator()
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.executor  = ThreadPoolExecutor(max_workers=5)
+        self.cycle     = 0
 
     def run(self):
-        logging.info("--- SOVEREIGN FORENSIC ORCHESTRATOR ONLINE ---")
-        
+        logging.info("═" * 70)
+        logging.info("  SOVEREIGN FORENSIC ORCHESTRATOR ONLINE")
+        logging.info(f"  Session: {SESSION_ID}")
+        logging.info(
+            f"  Thresholds: Premium≥{CONFIDENCE_PREMIUM_THRESHOLD}% | "
+            f"Standard≥{CONFIDENCE_STANDARD_THRESHOLD}%"
+        )
+        logging.info("═" * 70)
+
         while True:
+            self.cycle += 1
             db = self.load_all_prematch_data()
+
             if not db:
-                sys.stdout.write("Waiting for Prematch Reports to be generated...\r")
-                sys.stdout.flush()
-                time.sleep(10)
-                continue
-            
+                logging.info(
+                    "[MOCK MODE] No prematch report found. "
+                    "Live-only monitoring active."
+                )
+
             self.maintenance_thread(db)
 
             try:
                 live_data = self.fetch_live_scores()
-                live_ids = {str(fx['id']) for fx in live_data}
-                
-                # 🚨 ENTERPRISE UPGRADE: MATCH LIFECYCLE CLEANUP (Memory Leak Fix) 🚨
+                live_ids  = {str(fx['id']) for fx in live_data}
+
                 self.cleanup_stale_memory(live_ids)
-                
-                sys.stdout.write(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 Radar Sweeping... Tracking {len(db)} VIP Targets | {len(live_data)} matches live.\r")
-                sys.stdout.flush()
-                
+
+                # ── FIX: Build name→fixture_id map for fallback matching ──
+                # Code 2's live_predictions.json uses fixture IDs from the
+                # scheduled endpoint. The inplay endpoint may return the
+                # same fixture under a different ID in some competitions.
+                # We build a name-based lookup as a fallback.
+                live_name_map = {}
                 for fx in live_data:
-                    f_id = str(fx['id'])
-                    if f_id not in db: continue
-                    
-                    pre = db[f_id]
-                    
-                    minutes_found = [0]
-                    if fx.get("time") and isinstance(fx.get("time"), dict):
-                        minutes_found.append(int(fx["time"].get("minute", 0)))
-                    if isinstance(fx.get("state"), dict):
-                        minutes_found.append(int(fx.get("state").get("minute", 0)))
-                    for p in fx.get("periods",[]):
-                        m = p.get("time", {}).get("minute") or p.get("minute") or p.get("length")
-                        if m: minutes_found.append(int(m))
-                    if fx.get("events"):
-                        emins =[int(e.get("minute", 0)) for e in fx["events"] if e.get("minute")]
-                        if emins: minutes_found.append(max(emins))
-                    if fx.get("starting_at_timestamp"):
-                        now_ts = int(datetime.now(timezone.utc).timestamp())
-                        elapsed = (now_ts - int(fx["starting_at_timestamp"])) // 60
-                        if 0 < elapsed <= 50: minutes_found.append(elapsed)
-                        elif 60 < elapsed <= 110: minutes_found.append(elapsed - 15)
-                        elif elapsed > 110: minutes_found.append(90)
-                    
-                    minute = max(minutes_found)
+                    name_key = self._name_key(fx.get('name', ''))
+                    live_name_map[name_key] = str(fx['id'])
+
+                cycle_matches = []
+
+                for fx in live_data:
+                    f_id     = str(fx['id'])
+                    pre      = db.get(f_id, {})
+
+                    # ── FIX: Name-based fallback for prematch context ──────
+                    # If the scheduled fixture ID doesn't match the live ID,
+                    # try matching by team names
+                    if not pre and db:
+                        name_key = self._name_key(fx.get('name', ''))
+                        for db_fid, db_entry in db.items():
+                            db_name = self._name_key(
+                                db_entry.get('fixture',
+                                db_entry.get('name', ''))
+                            )
+                            if db_name and db_name == name_key:
+                                pre = db_entry
+                                break
+
+                    minute   = self.extract_minute(fx)
                     if not minute or minute <= 0: continue
 
                     self.update_market_settlement(f_id, fx)
 
                     h_s, a_s = self.extract_stats(fx)
-                    intel = self.Brain.analyze_match_state(f_id, h_s, a_s, minute, fx.get('events',[]))
-                    ctx = self.extract_impact_context(fx)
+                    intel    = self.Brain.analyze_match_state(
+                        f_id, h_s, a_s, minute, fx.get('events', [])
+                    )
+                    ctx        = self.extract_impact_context(fx)
                     structural = self.Detective.investigate(ctx, pre)
 
-                    user_setup =[
-                        {"type": "PRESSURE_SHARE", "side": "home", "min_pct": 75},
-                        {"type": "FUSED_PREMATCH_LIVE", "required_label": "🔥 BOTH 2H GOAL (100%)", "min_chaos": 10.0}
-                    ]
-                    
-                    user_alerts = self.UserLogic.evaluate(f_id, intel, structural, pre, user_setup)
-                    for ua in user_alerts:
-                        if ua['id'] not in ALERT_HISTORY:
-                            self.fire_alert(f_id, ua['tier'], ua['msg'], ua['conf'])
-                            ALERT_HISTORY.add(ua['id'])
+                    fixture_name = fx.get('name', f_id)
 
-                    self.process_ai_gates(f_id, minute, intel, structural, pre)
-            
+                    user_setup = [
+                        {"type": "LIVE_SNAPSHOT"},
+                        {
+                            "type":    "PRESSURE_SHARE",
+                            "side":    "home",
+                            "min_pct": PRESSURE_SHARE_THRESHOLD
+                        },
+                        {
+                            "type":    "PRESSURE_SHARE",
+                            "side":    "away",
+                            "min_pct": PRESSURE_SHARE_THRESHOLD
+                        },
+                        {
+                            "type":          "FUSED_PREMATCH_LIVE",
+                            "required_label": "🔥 BOTH 2H GOAL (100%)",
+                            "min_chaos":      MIN_CHAOS_FOR_FUSED
+                        }
+                    ]
+
+                    user_alerts   = self.UserLogic.evaluate(
+                        f_id, intel, structural, pre, user_setup
+                    )
+                    fired_this    = []
+
+                    for ua in user_alerts:
+                        if (ua['tier'] in ["🔥 PREMIUM","✅ STANDARD"] and
+                                ua['id'] not in ALERT_HISTORY):
+                            self.fire_alert(
+                                f_id, fixture_name,
+                                ua['tier'], ua['msg'], ua['conf'], minute
+                            )
+                            ALERT_HISTORY.add(ua['id'])
+                            fired_this.append(ua)
+                        elif ua['tier'] == "📊 MONITOR":
+                            fired_this.append(ua)
+
+                    self.process_ai_gates(
+                        f_id, fixture_name, minute,
+                        intel, structural, pre
+                    )
+
+                    cycle_matches.append({
+                        "name":       fixture_name,
+                        "id":         f_id,
+                        "minute":     minute,
+                        "conf":       intel['match']['confidence_score'],
+                        "h_pressure": intel['match']['h_pressure_share'],
+                        "a_pressure": intel['match']['a_pressure_share'],
+                        "chaos":      intel['match']['chaos_index'],
+                        "h_xg":       intel['home']['live_xg'],
+                        "a_xg":       intel['away']['live_xg'],
+                        "h_sot":      intel['home']['sot'],
+                        "a_sot":      intel['away']['sot'],
+                        "structural": structural.get('status','OK'),
+                        "alerts":     fired_this,
+                        "in_db":      bool(pre)
+                    })
+
+                self.print_orchestrator_board(
+                    cycle_matches, len(live_data), len(db)
+                )
+
             except Exception as e:
                 logging.error(f"Engine Loop Failure: {e}")
 
             time.sleep(45)
 
-    def cleanup_stale_memory(self, live_ids):
-        """Prevents RAM explosion by deleting matches that are no longer live."""
-        stale_ids =[fid for fid in LIVE_METRICS_VAULT if fid not in live_ids]
-        for fid in stale_ids:
-            del LIVE_METRICS_VAULT[fid]
+    # ── HELPER: normalise fixture name for matching ───────────────────────
+    def _name_key(self, name):
+        if not name: return ""
+        n = str(name).lower()
+        n = re.sub(r'[^a-z0-9]', '', n)
+        return n
 
-    def process_ai_gates(self, f_id, minute, intel, struct, pre):
+    # ── ORCHESTRATOR BOARD ────────────────────────────────────────────────
+    def print_orchestrator_board(self, cycle_matches, total_live, total_db):
+        now = datetime.now().strftime("%H:%M:%S")
+        print(f"\n{'═'*80}")
+        print(
+            f"  🛰️  ORCHESTRATOR BOARD — Cycle #{self.cycle} | "
+            f"{now} UTC | Session {SESSION_ID}"
+        )
+        print(
+            f"  Live: {total_live} | DB targets: {total_db} | "
+            f"Tracking: {len(cycle_matches)}"
+        )
+        print(f"{'═'*80}")
+
+        if not cycle_matches:
+            print("  No live matches with valid minute data found.")
+        else:
+            for m in cycle_matches:
+                db_tag = "🎯 VIP" if m['in_db'] else "👁️  LIVE"
+                print(
+                    f"\n  {db_tag} {m['name']} | "
+                    f"Min {m['minute']}' | Conf: {m['conf']}%"
+                )
+                print(
+                    f"       H-Pressure {m['h_pressure']}% | "
+                    f"A-Pressure {m['a_pressure']}% | "
+                    f"Chaos {m['chaos']:.1f} | "
+                    f"H-xG {m['h_xg']} | A-xG {m['a_xg']} | "
+                    f"H-SOT {m['h_sot']} | A-SOT {m['a_sot']}"
+                )
+                struct = m.get('structural','OK')
+                if struct not in ['OK','']:
+                    print(f"       ⚠️  Structural: {struct}")
+                if m['alerts']:
+                    for ua in m['alerts']:
+                        print(f"       {ua['tier']} → {ua['msg']}")
+                else:
+                    print("       No alerts this cycle.")
+
+        if SESSION_ALERTS:
+            print(f"\n  {'─'*78}")
+            print(f"  🔥 SESSION ALERTS FIRED: {len(SESSION_ALERTS)}")
+            for a in SESSION_ALERTS[-5:]:
+                print(
+                    f"    [{a['tier']}] {a['fixture']} | "
+                    f"Min {a['minute']}' | Conf {a['conf']}% | "
+                    f"{a['msg'][:55]}"
+                )
+
+        print(f"{'═'*80}\n")
+
+    # ── AI GATES ─────────────────────────────────────────────────────────
+    def process_ai_gates(self, f_id, fixture_name,
+                          minute, intel, struct, pre):
+        conf = intel['match']['confidence_score']
+
         if 30 <= minute < 45 and f_id not in VALIDATION_STATE:
-            if (struct.get('h_triple') and intel['match']['a_pressure_share'] > 62) or \
-               (struct.get('a_triple') and intel['match']['h_pressure_share'] > 62):
+            if ((struct.get('h_triple') and
+                 intel['match']['a_pressure_share'] > 50) or
+                (struct.get('a_triple') and
+                 intel['match']['h_pressure_share'] > 50)):
                 VALIDATION_STATE[f_id] = "VALID_30"
-                logging.info(f"[30' Handshake] {pre.get('fixture','Unknown')} Logic Synchronized.")
+                logging.info(
+                    f"[30' Handshake] {fixture_name} — "
+                    f"Synchronized (Conf:{conf}%)"
+                )
 
-        if minute >= 45 and VALIDATION_STATE.get(f_id) == "VALID_30":
+        if (minute >= 45 and
+                VALIDATION_STATE.get(f_id) == "VALID_30"):
             a_key = f"{f_id}_SUPREME_45"
-            conf = intel['match']['confidence_score']
-            if a_key not in ALERT_HISTORY and conf >= 60:
-                tier = "🔥 PREMIUM" if conf >= 80 else "✅ STANDARD"
-                msg = f"{pre.get('fixture','Unknown')} Verification confirmed at 45'. Chaos: {intel['match']['chaos_index']}."
-                self.fire_alert(f_id, tier, msg, conf)
+            if (a_key not in ALERT_HISTORY and
+                    conf >= CONFIDENCE_STANDARD_THRESHOLD):
+                tier = ("🔥 PREMIUM"
+                        if conf >= CONFIDENCE_PREMIUM_THRESHOLD
+                        else "✅ STANDARD")
+                msg  = (
+                    f"{fixture_name} — 45' Verified. "
+                    f"Chaos:{intel['match']['chaos_index']:.1f} | "
+                    f"H-xG:{intel['home']['live_xg']} "
+                    f"A-xG:{intel['away']['live_xg']}"
+                )
+                self.fire_alert(
+                    f_id, fixture_name, tier, msg, conf, minute
+                )
                 ALERT_HISTORY.add(a_key)
 
+    # ── FIRE ALERT ────────────────────────────────────────────────────────
+    def fire_alert(self, f_id, fixture_name,
+                   level, msg, confidence, minute):
+        now    = datetime.now()
+        banner = ("🔥" if "PREMIUM" in level
+                  else ("✅" if "STANDARD" in level else "📊"))
+
+        print(f"\n{'━'*80}")
+        print(f"  {banner} {level} ALERT | {now.strftime('%H:%M:%S')} UTC")
+        print(f"  Match    : {fixture_name}")
+        print(f"  Minute   : {minute}'")
+        print(f"  Message  : {msg}")
+        print(f"  Conf     : {confidence}%")
+        print(f"{'━'*80}\n")
+
+        logging.info(
+            f"[{level}] {fixture_name} @ {minute}' | "
+            f"Conf:{confidence}% | {msg}"
+        )
+
+        record = {
+            "f_id":       f_id,
+            "fixture":    fixture_name,
+            "time":       now.isoformat(),
+            "minute":     minute,
+            "level":      level,
+            "confidence": confidence,
+            "msg":        msg,
+            "session":    SESSION_ID
+        }
+        SESSION_ALERTS.append(record)
+
+        with alert_lock:
+            try:
+                with open(OUTPUT_ALERTS_FILE, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(record) + "\n")
+            except Exception as e:
+                logging.error(f"Alert Write Failed: {e}")
+
+        with alert_lock:
+            try:
+                with open(SESSION_LOG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(SESSION_ALERTS, f, indent=2)
+            except Exception as e:
+                logging.error(f"Session Log Failed: {e}")
+
+    # ── PREMATCH LOADER ───────────────────────────────────────────────────
     def load_all_prematch_data(self):
         db = {}
+
         if os.path.exists(AGGREGATOR_REPORT_FILE):
             try:
                 with open(AGGREGATOR_REPORT_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                    data  = json.load(f)
                     items = data if isinstance(data, list) else data.values()
                     for item in items:
                         fid = str(item.get('fixture_id'))
                         db[fid] = item
                         if 'h_id' not in item:
                             dr = item.get('danger_report', {})
-                            db[fid]['h_id'] = str(dr.get('home', {}).get('id'))
-                            db[fid]['a_id'] = str(dr.get('away', {}).get('id'))
-            except: pass
-                
+                            db[fid]['h_id'] = str(
+                                dr.get('home', {}).get('id', '')
+                            )
+                            db[fid]['a_id'] = str(
+                                dr.get('away', {}).get('id', '')
+                            )
+            except Exception as e:
+                logging.warning(f"Aggregator file error: {e}")
+
         if os.path.exists(SH_GG_WINNER_FILE):
             try:
                 with open(SH_GG_WINNER_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                    data  = json.load(f)
                     items = data if isinstance(data, list) else data.values()
                     for item in items:
                         fid = str(item.get('fixture_id'))
-                        if fid not in db:
-                            db[fid] = item
-                        else:
-                            db[fid].update(item)
-                            
+                        if fid not in db: db[fid] = item
+                        else:             db[fid].update(item)
                         if 'h_id' not in db[fid]:
-                            db[fid]['h_id'] = str(safe_get(item, 'teams', 'home', 'id'))
-                            db[fid]['a_id'] = str(safe_get(item, 'teams', 'away', 'id'))
-            except: pass
-                
+                            db[fid]['h_id'] = str(
+                                safe_get(item,'teams','home','id') or ''
+                            )
+                            db[fid]['a_id'] = str(
+                                safe_get(item,'teams','away','id') or ''
+                            )
+            except Exception as e:
+                logging.warning(f"SH-GG file error: {e}")
+
         return db
 
+    # ── STALE MEMORY CLEANUP ──────────────────────────────────────────────
+    def cleanup_stale_memory(self, live_ids):
+        stale = [fid for fid in LIVE_METRICS_VAULT
+                 if fid not in live_ids]
+        for fid in stale:
+            del LIVE_METRICS_VAULT[fid]
+
+    # ── SQUAD PREFETCH (thread-safe) ──────────────────────────────────────
     def _fetch_and_store_squad(self, tid):
         try:
             self.Detective.get_squad_data(tid)
         except Exception as e:
             logging.error(f"Squad fetch failed for {tid}: {e}")
         finally:
-            FETCHING_TEAMS.discard(tid)
+            with FETCHING_LOCK:
+                FETCHING_TEAMS.discard(tid)
 
     def maintenance_thread(self, db):
         for f_id, data in db.items():
             for tid in [data.get('h_id'), data.get('a_id')]:
-                if tid and str(tid) not in SQUAD_VAULT and tid not in FETCHING_TEAMS:
-                    FETCHING_TEAMS.add(tid)
-                    self.executor.submit(self._fetch_and_store_squad, tid)
+                if tid:
+                    with FETCHING_LOCK:
+                        already = (tid in FETCHING_TEAMS or
+                                   str(tid) in SQUAD_VAULT)
+                    if not already:
+                        with FETCHING_LOCK:
+                            FETCHING_TEAMS.add(tid)
+                        self.executor.submit(
+                            self._fetch_and_store_squad, tid
+                        )
 
+    # ── MARKET SETTLEMENT ─────────────────────────────────────────────────
     def update_market_settlement(self, f_id, fx):
-        # ==============================================================
-        # FIX: SCORE READING — FILTER BY DESCRIPTION INSTEAD OF INDEX
-        #
-        # Original used safe_get(fx, "scores", 0, ...) and
-        # safe_get(fx, "scores", 1, ...) — blind index access.
-        # The Sportmonks API returns scores as a list of objects with
-        # different description values (HT, FT, CURRENT, etc).
-        # The list order is not guaranteed to be home=0, away=1.
-        # Reading by index returned wrong or null values, meaning
-        # market settlement (GG, O2.5 detection) never triggered.
-        #
-        # Fix: iterate the scores list and match by both 'CURRENT'
-        # description AND participant side, identical to how every
-        # other file in this project correctly reads live scores.
-        # ==============================================================
-        h_g = 0
-        a_g = 0
+        h_g = a_g = 0
         for entry in fx.get("scores", []):
-            if not isinstance(entry, dict):
-                continue
+            if not isinstance(entry, dict): continue
             s_obj = entry.get("score") or entry
-            desc = str(s_obj.get("description", "")).upper()
-            if "CURRENT" not in desc:
-                continue
-            side = str(s_obj.get("participant", "")).lower()
-            g = s_obj.get("goals")
+            desc  = str(s_obj.get("description", "")).upper()
+            if "CURRENT" not in desc: continue
+            side  = str(s_obj.get("participant", "")).lower()
+            g     = s_obj.get("goals")
             if g is not None:
                 try:
                     val = int(g)
-                    if side == "home":
-                        h_g = val
-                    elif side == "away":
-                        a_g = val
-                except Exception:
-                    continue
+                    if side == "home":  h_g = val
+                    elif side == "away": a_g = val
+                except Exception: continue
 
         if f_id not in MARKET_SETTLEMENT:
             MARKET_SETTLEMENT[f_id] = set()
-        if h_g > 0 and a_g > 0:
-            MARKET_SETTLEMENT[f_id].add("GG")
-        if (h_g + a_g) >= 3:
-            MARKET_SETTLEMENT[f_id].add("O2.5")
+        if h_g > 0 and a_g > 0:        MARKET_SETTLEMENT[f_id].add("GG")
+        if (h_g + a_g) >= 3:           MARKET_SETTLEMENT[f_id].add("O2.5")
 
+    # ── STAT EXTRACTOR ────────────────────────────────────────────────────
     def extract_stats(self, fx):
-        h, a = {}, {}
-        parts = fx.get("participants",[])
-        if len(parts) < 2: return h, a
-        
-        h_id, a_id = None, None
+        h, a   = {}, {}
+        parts  = fx.get("participants", [])
+        h_id = a_id = None
         for p in parts:
-            if (p.get('meta') or {}).get('location') == 'home': h_id = str(p['id'])
-            elif (p.get('meta') or {}).get('location') == 'away': a_id = str(p['id'])
-            
-        if not h_id: h_id = str(parts[0]["id"])
-        if not a_id: a_id = str(parts[1]["id"])
+            if (p.get('meta') or {}).get('location') == 'home':
+                h_id = str(p['id'])
+            elif (p.get('meta') or {}).get('location') == 'away':
+                a_id = str(p['id'])
+        if not h_id and len(parts) >= 2:
+            h_id = str(parts[0]["id"]); a_id = str(parts[1]["id"])
 
-        for s in fx.get('statistics',[]):
-            pid = str(s.get('participant_id'))
+        for s in fx.get('statistics', []):
+            pid  = str(s.get('participant_id'))
             code = safe_get(s, 'type', 'code')
-            val = safe_get(s, 'data', 'value', default=0)
+            val  = safe_get(s, 'data', 'value', default=0)
             try: val = float(val)
             except: val = 0.0
-
-            loc = "home" if pid == h_id else ("away" if pid == a_id else None)
+            loc  = "home" if pid == h_id else \
+                   ("away" if pid == a_id else None)
             if not loc or not code: continue
-
             if loc == 'home': h[code] = val
-            else: a[code] = val
-
-            if code in['touches-in-opposition-box', 'attacks-in-box']:
-                if loc == 'home': h['box'] = val
-                else: a['box'] = val
+            else:             a[code] = val
+            if code in ['touches-in-opposition-box','attacks-in-box']:
+                if loc == 'home': h['box'] = h.get('box',0) + val
+                else:             a['box'] = a.get('box',0) + val
         return h, a
 
+    # ── IMPACT CONTEXT ────────────────────────────────────────────────────
     def extract_impact_context(self, fx):
-        f_id = str(fx['id'])
-        impact = {"home": {"reds": 0, "gk_risk": False, "key_sub_off": 0, "worth_lost": 0}, 
-                  "away": {"reds": 0, "gk_risk": False, "key_sub_off": 0, "worth_lost": 0}}
-        
-        parts = fx.get("participants",[])
-        h_id, a_id = None, None
+        f_id   = str(fx['id'])
+        impact = {
+            "home": {
+                "reds": 0, "gk_risk": False,
+                "key_sub_off": 0, "worth_lost": 0
+            },
+            "away": {
+                "reds": 0, "gk_risk": False,
+                "key_sub_off": 0, "worth_lost": 0
+            }
+        }
+        parts  = fx.get("participants", [])
+        h_id = a_id = None
         for p in parts:
-            if (p.get('meta') or {}).get('location') == 'home': h_id = str(p['id'])
-            elif (p.get('meta') or {}).get('location') == 'away': a_id = str(p['id'])
-        if not h_id and len(parts) >= 2: h_id, a_id = str(parts[0]["id"]), str(parts[1]["id"])
+            if (p.get('meta') or {}).get('location') == 'home':
+                h_id = str(p['id'])
+            elif (p.get('meta') or {}).get('location') == 'away':
+                a_id = str(p['id'])
+        if not h_id and len(parts) >= 2:
+            h_id = str(parts[0]["id"]); a_id = str(parts[1]["id"])
 
-        for e in fx.get('events',[]):
+        for e in fx.get('events', []):
             code = safe_get(e, "type", "code")
-            pid = str(e.get("participant_id"))
-            loc = "home" if pid == h_id else ("away" if pid == a_id else None)
+            pid  = str(e.get("participant_id"))
+            loc  = "home" if pid == h_id else \
+                   ("away" if pid == a_id else None)
             if not loc: continue
+            if code == "red-card":     impact[loc]["reds"] += 1
+            if code == "substitution": impact[loc]["key_sub_off"] += 1
 
-            if code == "red-card": impact[loc]["reds"] += 1
-            if code == "substitution":
-                impact[loc]["key_sub_off"] += 1
-                    
-        return {"home": {"id": h_id}, "away": {"id": a_id}, "impact": impact, "f_id": f_id}
+        return {
+            "home":   {"id": h_id},
+            "away":   {"id": a_id},
+            "impact": impact,
+            "f_id":   f_id
+        }
 
+    # ── MINUTE EXTRACTOR ─────────────────────────────────────────────────
+    def extract_minute(self, fx):
+        found = [0]
+        if fx.get("time") and isinstance(fx.get("time"), dict):
+            found.append(int(fx["time"].get("minute", 0)))
+        if isinstance(fx.get("state"), dict):
+            found.append(int(fx.get("state").get("minute", 0)))
+        for p in fx.get("periods", []):
+            m = (p.get("time", {}).get("minute") or
+                 p.get("minute") or p.get("length"))
+            if m: found.append(int(m))
+        if fx.get("events"):
+            emins = [int(e.get("minute",0))
+                     for e in fx["events"] if e.get("minute")]
+            if emins: found.append(max(emins))
+        if fx.get("starting_at_timestamp"):
+            now_ts  = int(datetime.now(timezone.utc).timestamp())
+            elapsed = (now_ts - int(fx["starting_at_timestamp"])) // 60
+            if 0 < elapsed <= 50:     found.append(elapsed)
+            elif 60 < elapsed <= 110: found.append(elapsed - 15)
+            elif elapsed > 110:       found.append(90)
+        return max(found)
+
+    # ── LIVE SCORE FETCH ─────────────────────────────────────────────────
     def fetch_live_scores(self):
-        url = f"{BASE_URL}?include=statistics.type;events.type;scores;participants;state;periods"
-        return GET(url).get('data',[])
+        url = (
+            f"{BASE_URL}?include="
+            "statistics.type;events.type;scores;"
+            "participants;state;periods"
+        )
+        return GET(url).get('data', [])
 
-    def fire_alert(self, f_id, level, msg, confidence=0):
-        log_msg = f"[{level} ALERT] {msg} | Conf: {confidence}%"
-        logging.info(log_msg) # Save to system.log so you never lose it
-        
-        with alert_lock:
-            try:
-                with open(OUTPUT_ALERTS_FILE, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({"f_id": f_id, "time": datetime.now().isoformat(), "level": level, "confidence": confidence, "msg": msg}) + "\n")
-            except Exception as e:
-                logging.error(f"Writing Alert Failed: {e}")
+
+# Need re for _name_key
+import re
 
 # ==============================================================================
 # 🚀 MAIN ENTRY POINT
 # ==============================================================================
 def run_master_orchestrator():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(DATA_DIR, exist_ok=True)
-    
+    os.makedirs(DATA_DIR,   exist_ok=True)
+
     if not API_TOKEN:
         logging.error("CRITICAL: SPORTMONKS_API_KEY is missing!")
-    else:
-        load_memory()
-        try:
-            SupremeOrchestrator().run()
-        except KeyboardInterrupt:
-            logging.info("Shutting down Orchestrator gracefully...")
-            save_memory()
+        return
+
+    load_memory()
+    try:
+        SupremeOrchestrator().run()
+    except KeyboardInterrupt:
+        logging.info("Shutting down gracefully...")
+        save_memory()
+
 
 if __name__ == "__main__":
     run_master_orchestrator()
