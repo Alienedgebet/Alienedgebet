@@ -7,10 +7,8 @@ import requests
 import pandas as pd
 import numpy as np
 import glob
-import re  # 🟢 [NEW] ADDED FOR NAME CLEANING
+import re
 from datetime import datetime, timedelta, timezone
-from dateutil import parser
-from collections import defaultdict, Counter
 
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 from dotenv import load_dotenv
@@ -27,8 +25,8 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 def run_gg_forensic_aggregator(target_date):
     """
     Executes the Final GG Judgment.
-    Handshakes GG Engines 1 & 2 with the DNA Central Engine.
-    All mathematical rules and scoring are 100% untouched.
+    Reads candidate fixtures directly from the new unified ALIENEDGE_GG_PICKS_{target_date}.csv.
+    Filters exclusively for Tier 1 matches and extracts dual goalkeeper liabilities.
     """
     # Ensure directories exist
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -37,7 +35,7 @@ def run_gg_forensic_aggregator(target_date):
     # -------------------------
     # CONFIGURATION
     # -------------------------
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
     BASE_URL = "https://api.sportmonks.com/v3/football"
     
     # User's Belief Rules (PRESERVED)
@@ -48,7 +46,6 @@ def run_gg_forensic_aggregator(target_date):
     RULE_NO_ZERO_ZERO = True     
     RULE_MIN_PROB = 55.0         
 
-    # 🟢 [UPGRADE: FLEXIBLE STANDINGS DISTANCE]
     MIN_TABLE_DISTANCE = 1
     MAX_TABLE_DISTANCE = 10
 
@@ -60,7 +57,7 @@ def run_gg_forensic_aggregator(target_date):
         return []
 
     # -------------------------
-    # 🟢[NEW] NAME CLEANING UTILITY FOR FLAWLESS DNA MATCHING
+    # NAME CLEANING UTILITY FOR DNA MATCHING
     # -------------------------
     def get_match_key(name):
         n = str(name).lower()
@@ -74,15 +71,9 @@ def run_gg_forensic_aggregator(target_date):
     # DNA INTELLIGENCE LOGIC (GG FOCUS)
     # -------------------------
     def get_gg_tactical_opinion(h_id, a_id, h_name, a_name, dna_db):
-        """
-        Independent Tactical Interpreter for GG.
-        Compares Tempo and Risk to identify Advantage vs Trap.
-        """
         def find_profile(tid, name):
-            # First try exact ID
             p = dna_db.get(str(tid))
             if p: return p
-            # 🟢 [UPGRADE] Fallback to smart key matching instead of strict lowercase
             search_key = get_match_key(name)
             for _, prof in dna_db.items():
                 if get_match_key(prof.get('team_name', '')) == search_key:
@@ -131,7 +122,7 @@ def run_gg_forensic_aggregator(target_date):
 
     def extract_goals_v3(scores_list):
         home, away = None, None
-        for entry in (scores_list or[]):
+        for entry in (scores_list or []):
             if not isinstance(entry, dict): continue
             s_obj = entry.get("score") or entry
             p = s_obj.get("participant") or entry.get("participant")
@@ -145,9 +136,9 @@ def run_gg_forensic_aggregator(target_date):
         return home, away
 
     def get_match_stats_v3(fx, team_id):
-        hg, ag = extract_goals_v3(fx.get("scores",[]))
+        hg, ag = extract_goals_v3(fx.get("scores", []))
         if hg is None or ag is None: return None
-        is_home = any(int(p.get("id")) == int(team_id) and p.get("meta", {}).get("location") == "home" for p in fx.get("participants",[]))
+        is_home = any(int(p.get("id")) == int(team_id) and p.get("meta", {}).get("location") == "home" for p in fx.get("participants", []))
         scored = hg if is_home else ag
         conceded = ag if is_home else hg
         return {"s": scored, "c": conceded, "is_gg": (hg > 0 and ag > 0), "is_00": (hg == 0 and ag == 0)}
@@ -157,7 +148,7 @@ def run_gg_forensic_aggregator(target_date):
         start = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
         data = GET_REQUEST(f"/fixtures/between/{start}/{end}/{team_id}", 
                    params={"include":"scores;participants", "per_page": 5, "order":"desc", "filters":"fixtureStates:5"})
-        fixtures = data.get("data",[])
+        fixtures = data.get("data", [])
         if not fixtures: return 0, False, 0.5
         gg_last_3, has_00, total_gs = 0, False, 0
         for i, f in enumerate(fixtures):
@@ -173,7 +164,7 @@ def run_gg_forensic_aggregator(target_date):
         fixtures = data.get("data", [])[:5]
         gg_count, total_diff, valid = 0, 0, 0
         for f in fixtures:
-            hg, ag = extract_goals_v3(f.get("scores",[]))
+            hg, ag = extract_goals_v3(f.get("scores", []))
             if hg is not None and ag is not None:
                 if hg > 0 and ag > 0: gg_count += 1
                 total_diff += abs(hg - ag); valid += 1
@@ -182,7 +173,7 @@ def run_gg_forensic_aggregator(target_date):
     def get_league_rank_verified(season_id, team_id):
         if not season_id: return 99
         data = GET_REQUEST(f"/standings/seasons/{season_id}")
-        for entry in data.get("data",[]):
+        for entry in data.get("data", []):
             if int(entry.get("participant_id", 0)) == int(team_id):
                 return int(entry.get("position", 99))
         return 99
@@ -199,26 +190,60 @@ def run_gg_forensic_aggregator(target_date):
     print(f"   ⚖️  GG FORENSIC AGGREGATOR | DATE: {target_date} ")
     print("="*85 + "\n")
 
-    # 1. LOAD CANDIDATES FROM OUTPUT FOLDER
     candidates = {}
-    scout_files =["picks_gg1.csv", "picks_gg2.csv"]
-    for f_name in scout_files:
-        f_path = os.path.join(OUTPUT_DIR, f_name)
-        if os.path.exists(f_path):
-            print(f"[FILE] Loading candidates from {f_path}...")
-            df = pd.read_csv(f_path).head(25)
-            for _, r in df.iterrows():
+    scout_file = f"ALIENEDGE_GG_PICKS_{target_date}.csv"
+    f_path = os.path.join(OUTPUT_DIR, scout_file)
+    
+    special_gk_list = []  # To store matches where both keepers are liabilities
+
+    if os.path.exists(f_path):
+        try:
+            df = pd.read_csv(f_path)
+            
+            # Filter EXCLUSIVELY for GG Tier 1 predictions
+            tier1_df = df[df["gg_tier"].str.contains("TIER 1", na=False, case=False)]
+            
+            print("==========================================================================")
+            print("💎 GG TIER 1 CANDIDATES IDENTIFIED FROM UNIFIED HEAD ENGINE:")
+            print("==========================================================================")
+            for idx, r in enumerate(tier1_df.itertuples(), 1):
+                print(f"  {idx:>2}. {r.fixture:<40} | Tier: {r.gg_tier:<28} | Score: {r.gg_score}")
+                
+                # Check Goalkeeper Liability variables
+                h_liable = str(r.home_gk_liable).lower() == 'true' or r.home_gk_liable == True
+                a_liable = str(r.away_gk_liable).lower() == 'true' or r.away_gk_liable == True
+                
+                if h_liable and a_liable:
+                    special_gk_list.append(r.fixture)
+            
+            # Print Special Target List of Double Keeper Liabilities
+            print("\n==========================================================================")
+            print("🚨 SPECIAL LIST: DOUBLE KEEPER LIABILITY SHIFT (TIER 1 ONLY):")
+            print("==========================================================================")
+            if special_gk_list:
+                for idx, fixture_name in enumerate(special_gk_list, 1):
+                    print(f"  🔥 {idx:>2}. {fixture_name:<40} [Both Goalkeepers Classified as Liabilities]")
+            else:
+                print("  (No Tier 1 matches met the double goalkeeper liability criteria today.)")
+            print("==========================================================================\n")
+
+            # Load only the validated Tier 1 matches into candidates
+            for _, r in tier1_df.iterrows():
                 try:
                     fid = str(int(float(r['fixture_id'])))
-                    # Use standard append, duplicates are fine here since it's a dict override by fixture ID
                     candidates[fid] = {
                         'h_name': r.get('home_team'), 
                         'a_name': r.get('away_team'),
-                        'league_id': r.get('league_id', 'Unknown') # Retaining league ID
+                        'league_id': r.get('league_id', 'Unknown')
                     }
                 except: continue
+        except Exception as e:
+            print(f"🛑 Error reading unified file: {e}")
+            return []
+    else:
+        print(f"[ERROR] Unified GG output file {scout_file} not found at {f_path}.")
+        return []
 
-    # 2. LOAD DNA LIBRARY FROM DATA FOLDER
     dna_path = os.path.join(DATA_DIR, "team_dna_profiles.json")
     dna_db = {}
     if os.path.exists(dna_path):
@@ -229,11 +254,11 @@ def run_gg_forensic_aggregator(target_date):
         print(f"[WARN] DNA Library not found at {dna_path}.")
 
     if not candidates:
-        print("[ERROR] No candidate picks found in output folder.")
+        print("[ERROR] No candidate picks passed the Tier 1 filter today.")
         return []
 
-    print(f"\n[INFO] Auditing {len(candidates)} matches for GG perfection...\n")
-    final_picks =[]
+    print(f"\n[INFO] Auditing {len(candidates)} Tier 1 matches for GG perfection...\n")
+    final_picks = []
 
     for fid, c in candidates.items():
         print(f"Judging {c['h_name']} vs {c['a_name']}...", end="", flush=True)
@@ -265,10 +290,9 @@ def run_gg_forensic_aggregator(target_date):
 
         # APPLY BELIEF SCORING (OUT OF 6)
         mark = 0
-        details =[]
+        details = []
         if h_gg3 >= RULE_MIN_GG_LAST_3 and a_gg3 >= RULE_MIN_GG_LAST_3: mark += 1; details.append("✅Form")
         
-        # 🟢 [UPGRADE: FLEXIBLE DISTANCE SCORING]
         valid_ranks = (1 <= h_rank <= 90) and (1 <= a_rank <= 90)
         pos_diff = abs(h_rank - a_rank)
         if valid_ranks and (MIN_TABLE_DISTANCE <= pos_diff <= MAX_TABLE_DISTANCE): 
@@ -295,7 +319,7 @@ def run_gg_forensic_aggregator(target_date):
         })
         time.sleep(0.1)
 
-    if not final_picks: return[]
+    if not final_picks: return []
 
     df_final = pd.DataFrame(final_picks).sort_values(by=["Score", "Poisson%"], ascending=[False, False])
     
@@ -309,8 +333,3 @@ def run_gg_forensic_aggregator(target_date):
     print(f"\n[SUCCESS] Final Judged list saved to {final_output_path}")
 
     return df_final.to_dict(orient="records")
-
-# --- LOCAL EXECUTION ---
-if __name__ == "__main__":
-    test_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    run_gg_forensic_aggregator(test_date)
