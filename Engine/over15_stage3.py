@@ -131,20 +131,21 @@ def run_over15_stage3(target_date):
                    params={"include":"scores", "sortBy":"starting_at", "order":"desc", "per_page": 10})
         
         all_data = resp.get("data") or []
-        last_5_games = all_data[:5] 
+        # Slice only the last 3 H2H games
+        last_3_games = all_data[:3] 
         
         score_history = []
         over_count = 0
         
-        for f in last_5_games:
+        for f in last_3_games:
             score_str = extract_final_score_string(f.get("scores", []))
             total = get_total_goals(f.get("scores", []))
             
             score_history.append(score_str)
-            if total >= 3:
+            if total >= 2: # Over 1.5 Goals checked here
                 over_count += 1
                 
-        passed = (over_count >= 3)
+        passed = (over_count >= 2) # Requires at least 2 out of 3 matches
         return passed, over_count, score_history
 
     def get_fixture_details(fixture_id):
@@ -203,17 +204,39 @@ def run_over15_stage3(target_date):
         match_name = f"{parts[0]['name']} vs {parts[1]['name']}"
         league_name = (details.get("league") or {}).get("name", "Unknown")
         
-        # ----------------------------------------------------
-        # THE STRICT H2H KILL SWITCH
-        # ----------------------------------------------------
-        passed, count, history = check_strict_h2h_debug(h_id, a_id)
+        # Stats are fetched first so they are available for current form gates
+        h_s, h_c, h_cnt, h_low = get_advanced_stats(h_id, today_str)
+        a_s, a_c, a_cnt, a_low = get_advanced_stats(a_id, today_str)
+
+        # ── GATE 1: HISTORICAL MATCHUP FILTER (H2H 2/3 OVER 1.5) ──
+        passed_h2h, h2h_count, h2h_history = check_strict_h2h_debug(h_id, a_id)
+
+        # ── GATE 2: ACTIVE DEFENSIVE LEAK FILTER (CONCEDED >= 5 EACH) ──
+        passed_conceded = (h_c >= 5.0) and (a_c >= 5.0)
+
+        # ── GATE 3: COMBINED ATTACKING OUTPUT FILTER (SCORED COMBINED > 10) ──
+        passed_scored = (h_s + a_s) > 10.0
+
+        # All 3 Gates must pass for the Handshake to succeed
+        passed_gate = passed_h2h and passed_conceded and passed_scored
         
-        if not passed:
-            print(f"[REJECTED] {match_name} | Reason: Only {count}/5 Overs in H2H History.")
+        if not passed_gate:
+            rejections = []
+            if not passed_h2h:
+                rejections.append(f"H2H history only {h2h_count}/3 Over 1.5 (Scores: {h2h_history})")
+            if not passed_conceded:
+                rejections.append(f"Defenses too tight (Home Conceded: {h_c}/5, Away Conceded: {a_c}/5)")
+            if not passed_scored:
+                rejections.append(f"Combined scoring output <= 10 (Home Scored: {h_s}/5 + Away Scored: {a_s}/5 = {h_s+a_s})")
+            
+            print(f"[REJECTED] {match_name}")
+            for rej in rejections:
+                print(f"   Reason: {rej}")
             print("-" * 30)
             continue
         else:
-            print(f"[ACCEPTED] {match_name} | Reason: {count}/5 Overs in H2H History.")
+            print(f"[ACCEPTED] {match_name}")
+            print(f"   Pass Details: H2H={h2h_count}/3 | Home Conceded={h_c}, Away Conceded={a_c} | Combined Scored={h_s+a_s}")
             print("-" * 30)
 
         # Odds Check
@@ -225,10 +248,6 @@ def run_over15_stage3(target_date):
                  try: odds_val = float(o.get("value"))
                  except: pass
                  break
-        
-        # Stats
-        h_s, h_c, h_cnt, h_low = get_advanced_stats(h_id, today_str)
-        a_s, a_c, a_cnt, a_low = get_advanced_stats(a_id, today_str)
         
         h_avg_s = h_s / max(1, h_cnt)
         a_avg_s = a_s / max(1, a_cnt)
@@ -260,7 +279,7 @@ def run_over15_stage3(target_date):
             "Poisson%": poisson_pct,
             "Grade": f"{score}/6",
             "GradeNum": score,
-            "H2H_Record": str(history),
+            "H2H_Record": str(h2h_history),
             "PickedBy": ",".join(all_picks[fid]["strategies"]),
             "Failures": " ".join(fails)
         })
@@ -282,3 +301,8 @@ def run_over15_stage3(target_date):
     else:
         print("\n[O1.5 Stage 3] No matches passed strict criteria.")
         return []
+
+if __name__ == "__main__":
+    # Test execution
+    test_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    run_over15_stage3(test_date)
