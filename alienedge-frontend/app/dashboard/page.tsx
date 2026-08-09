@@ -246,7 +246,7 @@ function DashboardOverview() {
             </div>
           </div>
 
-          <EngineStatusList configs={DASHBOARD_MARKETS} results={rawResults} />
+          <EngineStatusList rows={marketRows} />
         </div>
       </div>
 
