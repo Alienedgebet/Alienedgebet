@@ -1,9 +1,12 @@
 "use client";
 
+import { useMemo } from "react";
 import { Scale } from "lucide-react";
 import { specialsApi, type DrawPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi } from "@/lib/use-api";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_DRAW } from "@/lib/mock-chains";
 
@@ -49,10 +52,19 @@ const drawColumns: PredictionColumn<DrawPick>[] = [
 
 export default function DrawPage() {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
   const result = useApi(() => specialsApi.getDraw(date), [date], {
     fallback: MOCK_DRAW,
     cacheKey: `draw:${date}`,
   });
+
+  const drawColumnsWithDna = useMemo(
+    () => [
+      createDnaColumn<DrawPick>(dnaV2?.market_factors, "draw", date),
+      ...drawColumns,
+    ],
+    [dnaV2, date]
+  );
 
   // Render-time fallback — same contract as dashboard withFallback / ChainStage.
   const live = result.data;
@@ -85,7 +97,7 @@ export default function DrawPage() {
         data={payload.draws}
         loading={result.loading}
         error={null}
-        columns={drawColumns}
+        columns={drawColumnsWithDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No draw picks for this date."
       />
@@ -96,7 +108,7 @@ export default function DrawPage() {
         data={payload.parity_list}
         loading={result.loading}
         error={null}
-        columns={drawColumns}
+        columns={drawColumnsWithDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No high-parity fixtures for this date."
       />
@@ -107,7 +119,7 @@ export default function DrawPage() {
         data={payload.amateurs_list}
         loading={result.loading}
         error={null}
-        columns={drawColumns}
+        columns={drawColumnsWithDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No amateur-table fixtures for this date."
       />

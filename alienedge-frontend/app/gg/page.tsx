@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { Zap } from "lucide-react";
 import {
   ggApi,
@@ -12,6 +13,8 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi } from "@/lib/use-api";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import {
   ChainBranch,
   ChainStage,
@@ -527,10 +530,26 @@ const crossVerifyColumns: PredictionColumn<GGCrossVerifyPick>[] = [
 
 export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
   const precision = useApi(() => ggApi.getPrecision(date), [date], {
     fallback: MOCK_GG_PRECISION,
     cacheKey: `gg-precision:${date}`,
   });
+
+  const supremeColumnsWithDna = useMemo(
+    () => [
+      createDnaColumn<GGSupremePick>(dnaV2?.market_factors, "gg", date),
+      ...supremeColumns,
+    ],
+    [dnaV2, date]
+  );
+  const o15ColumnsWithDna = useMemo(
+    () => [
+      createDnaColumn<GGO15Pick>(dnaV2?.market_factors, "over15", date),
+      ...o15Columns,
+    ],
+    [dnaV2, date]
+  );
 
   // Render-time fallback (dashboard parity): never blank the twin-head
   // branches on Network Error when Sportmonks / API is offline.
@@ -568,7 +587,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
           description="Top-of-chain picks after full 3-stage GG audit"
           fetcher={() => ggApi.getSupreme(date)}
           deps={[date]}
-          columns={supremeColumns}
+          columns={supremeColumnsWithDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No supreme picks for this date."
           fallbackData={MOCK_GG_SUPREME}
@@ -629,7 +648,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
           data={precisionPayload.o15}
           loading={precision.loading}
           error={null}
-          columns={o15Columns}
+          columns={o15ColumnsWithDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Over 1.5 precision picks for this date."
         />

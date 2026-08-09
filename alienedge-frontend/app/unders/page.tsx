@@ -1,9 +1,12 @@
 "use client";
 
+import { useMemo } from "react";
 import { TrendingDown } from "lucide-react";
 import { specialsApi, type UndersPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi } from "@/lib/use-api";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UNDERS } from "@/lib/mock-chains";
 
@@ -102,10 +105,26 @@ const u35Columns: PredictionColumn<UndersPick>[] = [
 
 export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
   const result = useApi(() => specialsApi.getUnders(date), [date], {
     fallback: MOCK_UNDERS,
     cacheKey: `unders:${date}`,
   });
+
+  const u25ColumnsWithDna = useMemo(
+    () => [
+      createDnaColumn<UndersPick>(dnaV2?.market_factors, "unders", date),
+      ...u25Columns,
+    ],
+    [dnaV2, date]
+  );
+  const u35ColumnsWithDna = useMemo(
+    () => [
+      createDnaColumn<UndersPick>(dnaV2?.market_factors, "unders", date),
+      ...u35Columns,
+    ],
+    [dnaV2, date]
+  );
 
   // Render-time fallback — same contract as dashboard withFallback / ChainStage.
   const live = result.data;
@@ -144,7 +163,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           data={payload.u25}
           loading={result.loading}
           error={null}
-          columns={u25Columns}
+          columns={u25ColumnsWithDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Under 2.5 picks for this date."
         />
@@ -161,7 +180,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           data={payload.u35}
           loading={result.loading}
           error={null}
-          columns={u35Columns}
+          columns={u35ColumnsWithDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Under 3.5 picks for this date."
         />

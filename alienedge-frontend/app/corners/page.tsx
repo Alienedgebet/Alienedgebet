@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { CornerUpRight } from "lucide-react";
 import {
   cornersApi,
@@ -10,6 +11,8 @@ import {
   type CornerStage1Pick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import {
   MOCK_CORNER_AGG,
@@ -170,6 +173,20 @@ const stage1Columns: PredictionColumn<CornerStage1Pick>[] = [
 
 export default function CornersPage() {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
+
+  const aggregatorColumnsWithDna = useMemo(
+    () => [
+      createDnaColumnByLabel<CornerAggregatorPick>(
+        dnaV2?.market_factors,
+        "corners",
+        date,
+        (r) => r.Fixture
+      ),
+      ...aggregatorColumns,
+    ],
+    [dnaV2, date]
+  );
 
   return (
     <div
@@ -194,7 +211,7 @@ export default function CornersPage() {
           description="Elite output"
           fetcher={() => cornersApi.getAggregator(date)}
           deps={[date]}
-          columns={aggregatorColumns}
+          columns={aggregatorColumnsWithDna}
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No aggregator picks for this date."
           fallbackData={MOCK_CORNER_AGG}
