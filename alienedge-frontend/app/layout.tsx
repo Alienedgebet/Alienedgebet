@@ -3,6 +3,7 @@ import "./globals.css";
 import { AppShell } from "@/components/layout/AppShell";
 import { DateProvider } from "@/lib/date-context";
 import { SidebarProvider } from "@/lib/sidebar-context";
+import { RightPanelProvider } from "@/lib/right-panel-context";
 
 export const metadata: Metadata = {
   title: "AlienEdge — Football Intelligence Platform",
@@ -20,7 +21,9 @@ export default function RootLayout({
       <body className="min-h-full bg-bg-primary text-text-primary antialiased">
         <DateProvider>
           <SidebarProvider>
-            <AppShell>{children}</AppShell>
+            <RightPanelProvider>
+              <AppShell>{children}</AppShell>
+            </RightPanelProvider>
           </SidebarProvider>
         </DateProvider>
       </body>

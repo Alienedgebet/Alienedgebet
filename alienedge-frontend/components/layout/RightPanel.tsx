@@ -8,10 +8,12 @@ import {
   Send,
   Shield,
   TrendingUp,
+  X,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { getProbColor, getTierEmoji } from "@/lib/api";
+import { useRightPanel } from "@/lib/right-panel-context";
 
 // ── Mock types ────────────────────────────────────────────────────────────────
 // Replaced in Phase 13 with real types from socialApi in lib/api.ts
@@ -125,35 +127,65 @@ const RANK_STYLE: Record<number, string> = {
 
 export function RightPanel() {
   const [tab, setTab] = useState<"warroom" | "leaderboard">("warroom");
+  const { mobileOpen, close } = useRightPanel();
 
   return (
-    <aside className="fixed right-0 top-[56px] z-[50] flex h-[calc(100vh-56px)] w-[320px] flex-col border-l border-border bg-bg-primary">
-      {/* Tab switcher */}
-      <div className="flex shrink-0 border-b border-border">
-        {(
-          [
-            { id: "warroom",     label: "War Room",    icon: MessageSquare },
-            { id: "leaderboard", label: "Leaderboard", icon: Crown         },
-          ] as const
-        ).map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={cn(
-              "flex flex-1 items-center justify-center gap-1.5 border-b-2 py-3 text-xs font-medium transition-colors",
-              tab === id
-                ? "border-accent-indigo text-text-primary"
-                : "border-transparent text-text-muted hover:text-text-secondary"
-            )}
-          >
-            <Icon className="h-3.5 w-3.5" />
-            {label}
-          </button>
-        ))}
-      </div>
+    <>
+      {/* Mobile backdrop — tap to close. Desktop never renders this (panel is always docked, not an overlay). */}
+      {mobileOpen && (
+        <div
+          aria-hidden
+          className="fixed inset-0 z-[54] bg-black/60 md:hidden"
+          onClick={close}
+        />
+      )}
 
-      {tab === "warroom" ? <WarRoomTab /> : <LeaderboardTab />}
-    </aside>
+      <aside
+        className={cn(
+          "fixed inset-y-0 right-0 top-[56px] z-[55] flex h-[calc(100vh-56px)] w-[85vw] max-w-[320px] flex-col border-l border-border bg-bg-primary",
+          "transition-transform duration-200 ease-ae-ease",
+          mobileOpen ? "translate-x-0" : "translate-x-full",
+          "md:w-[320px] md:translate-x-0"
+        )}
+      >
+        {/* Tab switcher */}
+        <div className="flex shrink-0 items-center border-b border-border">
+          <div className="flex flex-1">
+            {(
+              [
+                { id: "warroom",     label: "War Room",    icon: MessageSquare },
+                { id: "leaderboard", label: "Leaderboard", icon: Crown         },
+              ] as const
+            ).map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                className={cn(
+                  "flex flex-1 items-center justify-center gap-1.5 border-b-2 py-3 text-xs font-medium transition-colors",
+                  tab === id
+                    ? "border-accent-indigo text-text-primary"
+                    : "border-transparent text-text-muted hover:text-text-secondary"
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+          {/* Close — mobile drawer only, panel is always visible on desktop */}
+          <button
+            type="button"
+            onClick={close}
+            aria-label="Close panel"
+            className="mx-2 flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border text-text-muted transition-colors hover:border-border-bright hover:text-text-primary md:hidden"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        {tab === "warroom" ? <WarRoomTab /> : <LeaderboardTab />}
+      </aside>
+    </>
   );
 }
 
