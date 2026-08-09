@@ -1,0 +1,373 @@
+/*
+ * Tailwind v4 CSS-first config. v4 no longer auto-detects tailwind.config.ts,
+ * and bridging it back in via @config proved unreliable in this project's
+ * Turbopack/Windows setup — every custom design token (colors, spacing,
+ * shadows, z-index, animations, font sizes) was silently missing from the
+ * compiled CSS, which is why the whole dark "Bloomberg Terminal" system was
+ * invisible (washed-out backgrounds, uniform type sizes, overlapping fixed
+ * panels). The full theme now lives natively here via @theme so nothing
+ * depends on the legacy JS/TS config loading correctly.
+ * tailwind.config.ts is left in place, unreferenced, as a historical record
+ * of the original token values.
+ *
+ * Fonts: do NOT @import Google Fonts over the network here. That remote CSS
+ * fetch stalls PostCSS/webpack on this machine and leaves routes stuck on
+ * "Compiling /..." forever. Theme stacks already fall back to system fonts.
+ */
+/* source(..) pins scanning to this package — cwd alone is not enough when
+   Next spawns workers from a parent monorepo path, and walking ../output can
+   stall the first CSS/webpack compile indefinitely on a slow disk. */
+@import "tailwindcss" source("..");
+@import "tw-animate-css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", Consolas, monospace;
+
+  --text-2xs: 0.625rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.125rem;
+  --text-xl--line-height: 1.625rem;
+  --text-2xl: 1.25rem;
+  --text-2xl--line-height: 1.75rem;
+  --text-3xl: 1.5rem;
+  --text-3xl--line-height: 2rem;
+  --text-4xl: 1.875rem;
+  --text-4xl--line-height: 2.25rem;
+  --text-5xl: 2.25rem;
+  --text-5xl--line-height: 2.5rem;
+
+  --spacing-sidebar: 240px;
+  --spacing-topbar: 56px;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 20px;
+
+  --color-bg-primary: #060912;
+  --color-bg-secondary: #0a0f1e;
+  --color-bg-card: #0d1426;
+  --color-bg-elevated: #111d35;
+  --color-bg-hover: #162040;
+
+  --color-border: #1a2540;
+  --color-border-bright: #253660;
+  --color-border-accent: rgba(99, 102, 241, 0.4);
+
+  --color-accent: #162040;
+  --color-accent-foreground: #f0f4ff;
+  --color-accent-indigo: #6366f1;
+  --color-accent-cyan: #06b6d4;
+  --color-accent-green: #22c55e;
+  --color-accent-amber: #f59e0b;
+  --color-accent-red: #ef4444;
+  --color-accent-purple: #a855f7;
+  --color-accent-blue: #3b82f6;
+
+  --color-text-primary: #f0f4ff;
+  --color-text-secondary: #8b9cc8;
+  --color-text-muted: #4a5880;
+  --color-text-dim: #2d3a5c;
+
+  --color-background: #060912;
+  --color-foreground: #f0f4ff;
+  --color-card: #0d1426;
+  --color-card-foreground: #f0f4ff;
+  --color-popover: #111d35;
+  --color-popover-foreground: #f0f4ff;
+  --color-primary: #6366f1;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #111d35;
+  --color-secondary-foreground: #8b9cc8;
+  --color-muted: #111d35;
+  --color-muted-foreground: #4a5880;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
+  --color-input: #111d35;
+  --color-ring: #6366f1;
+
+  --shadow-glow: 0 0 30px rgba(99, 102, 241, 0.2), 0 0 60px rgba(99, 102, 241, 0.08);
+  --shadow-glow-cyan: 0 0 30px rgba(6, 182, 212, 0.2), 0 0 60px rgba(6, 182, 212, 0.08);
+  --shadow-glow-green: 0 0 30px rgba(34, 197, 94, 0.2), 0 0 60px rgba(34, 197, 94, 0.08);
+  --shadow-glow-amber: 0 0 30px rgba(245, 158, 11, 0.2), 0 0 60px rgba(245, 158, 11, 0.08);
+  --shadow-glow-red: 0 0 30px rgba(239, 68, 68, 0.2), 0 0 60px rgba(239, 68, 68, 0.08);
+  --shadow-glow-purple: 0 0 30px rgba(168, 85, 247, 0.2), 0 0 60px rgba(168, 85, 247, 0.08);
+  --shadow-card: 0 4px 32px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  --shadow-card-hover: 0 8px 48px rgba(0, 0, 0, 0.7);
+  --shadow-elevated: 0 8px 48px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --shadow-panel: 0 0 0 1px #1a2540, 0 4px 32px rgba(0, 0, 0, 0.5);
+  --shadow-inner: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  --blur-xs: 2px;
+  --blur-sm: 4px;
+  --blur-md: 12px;
+  --blur-lg: 16px;
+  --blur-xl: 24px;
+
+  --ease-ae-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-ae-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --z-index-sidebar: 50;
+  --z-index-topbar: 40;
+  --z-index-modal: 100;
+  --z-index-tooltip: 200;
+  --z-index-toast: 300;
+
+  --animate-fade-in: fadeIn 0.3s ease-out forwards;
+  --animate-slide-up: slideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  --animate-slide-right: slideInRight 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  --animate-scale-in: scaleIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  --animate-spin-slow: spin 3s linear infinite;
+  --animate-pulse-slow: pulse 3s ease-in-out infinite;
+  --animate-live-pulse: livePulse 1.5s ease-in-out infinite;
+  --animate-glow-pulse: glowPulse 2s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.5s linear infinite;
+  --animate-border-glow: borderGlow 2s ease-in-out infinite;
+  --animate-float: float 3s ease-in-out infinite;
+  --animate-count-up: countUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes livePulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.8); }
+}
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(99, 102, 241, 0.15); }
+  50%      { box-shadow: 0 0 50px rgba(99, 102, 241, 0.4); }
+}
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+@keyframes borderGlow {
+  0%, 100% { border-color: #1a2540; }
+  50%      { border-color: rgba(99, 102, 241, 0.6); box-shadow: 0 0 20px rgba(99, 102, 241, 0.15); }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+@keyframes countUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/*
+ * Gradient background-image utilities. Not bridged through @theme (no
+ * documented namespace + zero variant-prefixed usage in the codebase), so
+ * plain classes matching the exact names already used in components.
+ */
+.bg-gradient-ae       { background-image: linear-gradient(135deg, #6366f1 0%, #06b6d4 50%, #22c55e 100%); }
+.bg-gradient-ae-blue   { background-image: linear-gradient(135deg, #6366f1, #06b6d4); }
+.bg-gradient-ae-warm   { background-image: linear-gradient(135deg, #f59e0b, #ef4444); }
+.bg-gradient-ae-green  { background-image: linear-gradient(135deg, #22c55e, #06b6d4); }
+.bg-gradient-ae-purple { background-image: linear-gradient(135deg, #a855f7, #6366f1); }
+.bg-gradient-card      { background-image: linear-gradient(135deg, rgba(13, 20, 38, 0.9) 0%, rgba(10, 15, 30, 0.95) 100%); }
+.bg-gradient-sidebar   { background-image: linear-gradient(180deg, #060912 0%, #0a0f1e 100%); }
+.bg-card-shine         { background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.03) 0%, transparent 50%); }
+.bg-hero-glow          { background-image: radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.15), transparent); }
+.bg-gradient-hero-purple { background-image: linear-gradient(135deg, #1e1147 0%, #150b30 48%, #0a0618 100%); }
+
+/*
+ * Deep-space nebula scene for the dashboard hero — pure CSS, no raster art.
+ * Layered radial gradients stand in for glowing planets + starfield dust so
+ * the mascot has an actual cosmic backdrop instead of flat navy. Purple /
+ * indigo / magenta only — no diffuse cyan-blue wash, which read as an
+ * unintended "blue background" against the reference art.
+ */
+.bg-nebula {
+  background-color: #0a0618;
+  background-image:
+    radial-gradient(ellipse 45% 55% at 40% 32%, rgba(139, 92, 246, 0.20), transparent 70%),
+    radial-gradient(ellipse 40% 50% at 58% 62%, rgba(99, 102, 241, 0.18), transparent 70%),
+    radial-gradient(circle at 15% 80%, rgba(168, 85, 247, 0.10), transparent 50%),
+    radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.5), transparent),
+    radial-gradient(1px 1px at 65% 15%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 40% 70%, rgba(255,255,255,0.35), transparent),
+    radial-gradient(1px 1px at 85% 55%, rgba(255,255,255,0.45), transparent),
+    radial-gradient(1px 1px at 30% 90%, rgba(255,255,255,0.3), transparent),
+    linear-gradient(135deg, #1a1042 0%, #100a2e 55%, #0a0618 100%);
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+:root {
+  --bg-primary:    #060912;
+  --bg-secondary:  #0a0f1e;
+  --bg-card:       #0d1426;
+  --bg-elevated:   #111d35;
+  --bg-hover:      #162040;
+  --border:        #1a2540;
+  --border-bright: #253660;
+  --accent-blue:   #3b82f6;
+  --accent-indigo: #6366f1;
+  --accent-cyan:   #06b6d4;
+  --accent-green:  #22c55e;
+  --accent-amber:  #f59e0b;
+  --accent-red:    #ef4444;
+  --accent-purple: #a855f7;
+  --text-primary:  #f0f4ff;
+  --text-secondary:#8b9cc8;
+  --text-muted:    #4a5880;
+  --text-dim:      #2d3a5c;
+  --glow-blue:  0 0 20px rgba(59,130,246,0.15);
+  --glow-green: 0 0 20px rgba(34,197,94,0.15);
+  --glow-amber: 0 0 20px rgba(245,158,11,0.15);
+}
+
+* {
+  border-color: var(--border);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-bright) transparent;
+}
+
+*::-webkit-scrollbar { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+html { font-size: 14px; }
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+.font-mono { font-family: 'JetBrains Mono', monospace; }
+
+/* Glass card */
+.glass {
+  background: rgba(13, 20, 38, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+}
+
+/* Glow effects */
+.glow-blue { box-shadow: var(--glow-blue); }
+.glow-green { box-shadow: var(--glow-green); }
+.glow-amber { box-shadow: var(--glow-amber); }
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Tier badge glow */
+.tier-diamond { 
+  background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(6,182,212,0.2));
+  border-color: #6366f1;
+  color: #a5b4fc;
+}
+.tier-fire { 
+  background: rgba(245,158,11,0.1);
+  border-color: #f59e0b;
+  color: #fcd34d;
+}
+.tier-solid { 
+  background: rgba(34,197,94,0.1);
+  border-color: #22c55e;
+  color: #86efac;
+}
+.tier-avoid { 
+  background: rgba(239,68,68,0.1);
+  border-color: #ef4444;
+  color: #fca5a5;
+}
+.tier-monitor {
+  background: rgba(100,116,139,0.08);
+  border-color: #475569;
+  color: #94a3b8;
+}
+
+/* Avoid/veto tier — faint diagonal hazard stripes instead of a flat red fill */
+.tier-avoid-hazard {
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(239, 68, 68, 0.16) 0px,
+    rgba(239, 68, 68, 0.16) 5px,
+    transparent 5px,
+    transparent 10px
+  );
+}
+
+/* Monitor/caution tier — dashed border reads as "watching", not confirmed */
+.tier-monitor-dashed {
+  border-style: dashed;
+}
+
+/* Animated border */
+@keyframes border-pulse {
+  0%, 100% { border-color: var(--border); }
+  50% { border-color: var(--accent-blue); }
+}
+.border-animate { animation: border-pulse 2s ease-in-out infinite; }
+
+/* Score bar */
+.score-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #6366f1, #06b6d4);
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Score bar fill variants — driven by getScoreBarVariant() in lib/api.ts */
+.score-fill-green  { background: linear-gradient(90deg, #22c55e, #06b6d4); }
+.score-fill-indigo { background: linear-gradient(90deg, #6366f1, #06b6d4); }
+.score-fill-amber  { background: linear-gradient(90deg, #f59e0b, #ef4444); }
+
+/* Sidebar active */
+.nav-active {
+  background: linear-gradient(90deg, rgba(99,102,241,0.15), transparent);
+  border-left: 2px solid #6366f1;
+  color: #a5b4fc;
+}
+
+/* Live pulse */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+.live-dot { animation: live-pulse 1.5s ease-in-out infinite; }
+
+/* Table row hover */
+.pred-row {
+  transition: background 0.15s ease;
+  border-bottom: 1px solid var(--border);
+}
+.pred-row:hover { background: rgba(99,102,241,0.05); }
