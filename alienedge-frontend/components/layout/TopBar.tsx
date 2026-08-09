@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, Menu, Wifi, WifiOff } from "lucide-react";
+import { Activity, Menu, MessageSquare, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { healthApi } from "@/lib/api";
 import { DateSelector } from "@/components/layout/DateSelector";
 import { useSidebar } from "@/lib/sidebar-context";
+import { useRightPanel } from "@/lib/right-panel-context";
 
 type ApiStatus = "checking" | "online" | "offline";
 
 export function TopBar() {
   const [status, setStatus] = useState<ApiStatus>("checking");
-  const { toggle } = useSidebar();
+  const { toggle, close: closeSidebar } = useSidebar();
+  const { toggle: toggleRightPanel, close: closeRightPanel } = useRightPanel();
 
   useEffect(() => {
     let live = true;
@@ -30,10 +32,13 @@ export function TopBar() {
         "bg-bg-primary/95 backdrop-blur-md"
       )}
     >
-      {/* Hamburger — mobile only */}
+      {/* Hamburger — mobile only. Closes the War Room drawer first so the two off-canvas panels never sit open at once. */}
       <button
         type="button"
-        onClick={toggle}
+        onClick={() => {
+          closeRightPanel();
+          toggle();
+        }}
         aria-label="Toggle navigation"
         className="mr-3 flex h-8 w-8 shrink-0 items-center justify-center rounded border border-border text-text-secondary transition-colors hover:border-border-bright hover:text-text-primary md:hidden"
       >
@@ -73,6 +78,19 @@ export function TopBar() {
             <span className="h-1.5 w-1.5 rounded-full bg-accent-green animate-live-pulse" />
           )}
         </div>
+
+        {/* War Room / Leaderboard drawer toggle — mobile only, desktop keeps it always docked */}
+        <button
+          type="button"
+          onClick={() => {
+            closeSidebar();
+            toggleRightPanel();
+          }}
+          aria-label="Toggle War Room panel"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-border text-text-secondary transition-colors hover:border-border-bright hover:text-text-primary md:hidden"
+        >
+          <MessageSquare className="h-4 w-4" />
+        </button>
 
         {/* User avatar — placeholder until Phase 13 auth */}
         <div className="flex h-7 w-7 cursor-pointer select-none items-center justify-center rounded-full border border-border bg-bg-elevated text-xs font-semibold text-text-secondary transition-colors hover:border-border-bright hover:text-text-primary">
