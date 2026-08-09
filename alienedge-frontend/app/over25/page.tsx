@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { TrendingUp } from "lucide-react";
 import {
   over25Api,
@@ -12,6 +13,8 @@ import {
   type Over25Stage1Pick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import {
   MOCK_O25_APEX,
@@ -185,6 +188,15 @@ const stage1Columns: PredictionColumn<Over25Stage1Pick>[] = [
 
 export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
+
+  const apexColumnsWithDna = useMemo(
+    () => [
+      createDnaColumn<Over25ApexPick>(dnaV2?.market_factors, "over25", date),
+      ...apexColumns,
+    ],
+    [dnaV2, date]
+  );
 
   return (
     <div
@@ -210,7 +222,7 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
           description="Elite output"
           fetcher={() => over25Api.getApex(date)}
           deps={[date]}
-          columns={apexColumns}
+          columns={apexColumnsWithDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No apex picks for this date."
           fallbackData={MOCK_O25_APEX}

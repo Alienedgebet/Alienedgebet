@@ -4,7 +4,8 @@ import { Suspense, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi, type UseApiResult } from "@/lib/use-api";
-import { getTierClass } from "@/lib/api";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { getTierClass, type DnaV2MarketKey } from "@/lib/api";
 import { isDashboardMarketTab } from "@/lib/dashboard-tabs";
 import { RadialGauge } from "@/components/predictions/RadialGauge";
 import { EngineFeedBar } from "./EngineFeedBar";
@@ -47,8 +48,20 @@ function withFallback(
   return { data: mock, isMock: true };
 }
 
+/** Only these 7 of the 11 dashboard markets are covered by DNA Engine V2. */
+const DNA_SUPPORTED_MARKET_KEYS = new Set<string>([
+  "win",
+  "gg",
+  "over25",
+  "over15",
+  "unders",
+  "draw",
+  "corners",
+]);
+
 function DashboardOverview() {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
 
   // Cache key = dashboard + market key + date. Means: leave the dashboard,
   // come back within the TTL window → instant paint from cache instead of
@@ -144,6 +157,9 @@ function DashboardOverview() {
           value,
           suffix: pick.prob != null ? "%" : "/100",
           isMock,
+          dnaMarketKey: DNA_SUPPORTED_MARKET_KEYS.has(config.key)
+            ? (config.key as DnaV2MarketKey)
+            : undefined,
         });
       }
     });
@@ -214,6 +230,8 @@ function DashboardOverview() {
           <EliteRankList
             items={allElite}
             emptyMessage="No elite-tier picks yet for this date."
+            marketFactors={dnaV2?.market_factors}
+            date={date}
           />
         </div>
 

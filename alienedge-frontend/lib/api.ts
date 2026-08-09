@@ -60,6 +60,117 @@ export interface DnaProfile {
   };
 }
 
+// ============================================================
+// DNA ENGINE V2 — fully separate universal DNA provider.
+// Never merge with DnaProfile above; v1 and v2 are independent.
+// ============================================================
+export interface DnaV2Profile {
+  team_name: string;
+  Archetype: string;
+  Market_Power_Scores: {
+    Corner_Power: number;
+    Goal_Intent: number;
+    BTTS_Friction: number;
+    Win_Dominance: number;
+    Box_Dominance: number;
+  };
+  Tactical_DNA: {
+    Tempo: number;
+    Line_Height: string;
+    Risk_Appetite: string;
+    Verticality: string;
+    Shot_Quality: string;
+    Transition_Style: string;
+    Transition_Score: number;
+  };
+  Raw_Audit_Metrics: {
+    Avg_Corners: number;
+    Estimated_Crosses: number;
+    Estimated_Blocks: number;
+    Dangerous_Attacks: number;
+    Passing_Control: number;
+    Big_Chances_Created: number;
+    Shots_Insidebox: number;
+    Shots_Outsidebox: number;
+    Inside_Shot_Ratio_Pct: number;
+    Tackles_Avg: number;
+    Interceptions_Avg: number;
+    Own_Pass_Quality_Pct: number;
+    Opp_Pass_Acc_Allowed: number;
+    Opp_Dangerous_Attacks: number;
+    Resistance_Score: number;
+  };
+}
+
+export interface DnaV2PillarClash {
+  home_score: number;
+  away_score: number;
+  difference: number;
+  edge: string;
+  margin: "Clear" | "Tight";
+}
+
+export interface DnaV2Clash {
+  fixture: string;
+  home_team: string;
+  away_team: string;
+  fixture_id: string;
+  fixture_date: string;
+  pillar_clash: {
+    Corner_Power: DnaV2PillarClash;
+    Goal_Intent: DnaV2PillarClash;
+    BTTS_Friction: DnaV2PillarClash;
+    Win_Dominance: DnaV2PillarClash;
+    Box_Dominance: DnaV2PillarClash;
+  };
+  home_pillar_edges: number;
+  away_pillar_edges: number;
+  overall_structural_edge: string;
+  combined_box_dominance: number;
+  combined_goal_intent: number;
+  market_signals: {
+    Over_Under: string;
+    GG_NoGG: string;
+    Corners: string;
+  };
+}
+
+export type DnaV2MarketKey =
+  | "win"
+  | "gg"
+  | "over25"
+  | "over15"
+  | "unders"
+  | "draw"
+  | "corners";
+
+export interface DnaV2Factor {
+  name: string;
+  home_value: number;
+  away_value: number;
+  winner: "home" | "away" | "neutral";
+}
+
+export interface DnaV2MarketCount {
+  home_count: number;
+  away_count: number;
+  factors: DnaV2Factor[];
+}
+
+export interface DnaV2FixtureFactors {
+  fixture_id: string;
+  fixture: string;
+  home_team: string;
+  away_team: string;
+  markets: Record<DnaV2MarketKey, DnaV2MarketCount>;
+}
+
+export interface DnaV2Response {
+  dna_profiles: Record<string, DnaV2Profile>;
+  fixture_clashes: DnaV2Clash[];
+  market_factors: Record<string, DnaV2FixtureFactors>;
+}
+
 export interface UnderdogBasePick {
   fixture_id: string;
   fixture: string;
@@ -1069,6 +1180,19 @@ export const foundationApi = {
   // win_forecast is a Phase A Foundation engine — lives here per architecture rule
   getWinForecast: (date: string): Promise<AxiosResponse<WinForecastPick[]>> =>
     api.get(`/api/win/forecast/${date}`),
+};
+
+// DNA Engine V2 — fully separate from foundationApi.getDNA (v1). All DNA
+// comparison math (factor counts, style clashes) is computed server-side;
+// this client only fetches and the UI only renders.
+export const dnaV2Api = {
+  get: (date: string): Promise<AxiosResponse<DnaV2Response>> =>
+    api.get(`/api/dna/v2/${date}`),
+
+  // Disk-only fast read — no engine recompute. Preferred for fixture-list
+  // DNA counts and for the DNA Analysis page so opening it feels instant.
+  getLatest: (): Promise<AxiosResponse<DnaV2Response>> =>
+    api.get(`/api/dna/v2/latest`),
 };
 
 export const underdogApi = {

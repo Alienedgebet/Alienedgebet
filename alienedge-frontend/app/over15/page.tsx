@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { Flame } from "lucide-react";
 import {
   over15Api,
@@ -8,6 +9,8 @@ import {
   type Over15Stage3Pick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_O15_APEX, MOCK_O15_PSYCH, MOCK_O15_S3 } from "@/lib/mock-chains";
 
@@ -68,6 +71,20 @@ const stage3Columns: PredictionColumn<Over15Stage3Pick>[] = [
 
 export default function Over15Page() {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
+
+  const apexColumnsWithDna = useMemo(
+    () => [
+      createDnaColumnByLabel<Over15ApexPick>(
+        dnaV2?.market_factors,
+        "over15",
+        date,
+        (r) => r.Fixture
+      ),
+      ...apexColumns,
+    ],
+    [dnaV2, date]
+  );
 
   return (
     <div
@@ -92,7 +109,7 @@ export default function Over15Page() {
           description="Elite output"
           fetcher={() => over15Api.getApex(date)}
           deps={[date]}
-          columns={apexColumns}
+          columns={apexColumnsWithDna}
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No apex picks for this date."
           fallbackData={MOCK_O15_APEX}

@@ -7,13 +7,11 @@ from datetime import datetime
 
 # ==============================================================================
 # 1. THE HIJACK (GLOBAL TRAFFIC WARDEN - FULL UNLOCKED MODE)
-# Intercepts requests.get globally to safely manage Sportmonks rate limits.
 # ==============================================================================
 GLOBAL_API_CACHE = {}
 original_get = requests.get
 
 class CachedResponseWrapper:
-    """A simulated API Response container that safely delivers memory-cached data."""
     def __init__(self, json_data, status_code=200):
         self._json_data = json_data
         self.status_code = status_code
@@ -25,17 +23,14 @@ class CachedResponseWrapper:
         pass
 
 def smart_get(url, params=None, **kwargs):
-    """Intercepts all requests.get calls globally with caching."""
     safe_params = dict(params) if params else {}
     param_string = "&".join([f"{k}={v}" for k, v in sorted(safe_params.items()) if k != "api_token"])
     cache_key = f"{url}?{param_string}"
 
-    # 1. INSTANT MEMORY HIT
     if cache_key in GLOBAL_API_CACHE:
-        print("🟨", end="", flush=True)  # Loaded from memory cache
+        print("🟨", end="", flush=True)
         return CachedResponseWrapper(GLOBAL_API_CACHE[cache_key])
 
-    # 2. FETCH FROM SPORTMONKS (With 429 backoff handling)
     backoff = 2.0
     for attempt in range(5):
         try:
@@ -43,10 +38,9 @@ def smart_get(url, params=None, **kwargs):
             if resp.status_code == 200:
                 data = resp.json()
                 GLOBAL_API_CACHE[cache_key] = data
-                print("🟩", end="", flush=True)  # Fresh download
+                print("🟩", end="", flush=True)
                 time.sleep(0.15)
                 return CachedResponseWrapper(data, 200)
-
             elif resp.status_code == 429:
                 print(f"[API LIMIT: Pausing {backoff}s] ", end="", flush=True)
                 time.sleep(backoff)
@@ -60,9 +54,9 @@ def smart_get(url, params=None, **kwargs):
 
     return original_get(url, params=params, **kwargs)
 
-# ACTIVATE THE HIJACK GLOBALLY
 requests.get = smart_get
 print("✅ TRAFFIC WARDEN ACTIVE: Global API Hijack & Memory Cache Successful.")
+
 
 # ==============================================================================
 # 2. PIPELINE IMPORTS (STRICT ARCHITECTURAL ROUTING)
@@ -70,13 +64,19 @@ print("✅ TRAFFIC WARDEN ACTIVE: Global API Hijack & Memory Cache Successful.")
 
 # --- PHASE A: CORE BRAIN & FOUNDATION ENGINES ---
 from CORE.dna_profiler import run_dna_profiler
+
+# ✅ NEW: DNA Engine V2 — fully independent, parallel DNA provider.
+# Does not replace or touch run_dna_profiler / team_dna_profiles.json.
+from CORE.dna_engine_v2 import run_dna_engine_v2
+from CORE.dna_v2_market_factors import build_market_factor_counts
+
 from Engine.underdog_engine import run_underdog_engine
 from Engine.master_underdog_audit import run_underdog_master_engine
 from CORE.handshake_logic import run_total_visibility_merger
 from Engine.win_forecast import run_win_forecast_engine
 from Engine.sh_gg_winner import run_sh_gg_winner_engine
 
-# --- PHASE B: THE PSYCHOLOGY LAYER (TACTICAL ENGINES) ---
+# --- PHASE B: THE PSYCHOLOGY LAYER ---
 from PSYCHOLOGY.corner_psychology import run_corner3_psychology_engine
 from PSYCHOLOGY.gg_psychology import run_gg_psychology_engine
 from PSYCHOLOGY.over25_psychology import run_o25_psychology_engine
@@ -89,40 +89,62 @@ from Engine.corner_refiner import run_corner_engine_stage2
 from Engine.corner_catalyst import run_catalyst_corner_engine
 from AGGREGATOR.corner4_aggregator import run_corner4_aggregator_engine
 
-# --- PHASE D: THE GG EMPIRE (Replaced Stage 1 & 2 with Unified GG/O1.5 Head) ---
-from Engine.gg_precision_engine import run_gg_o15_engine           # 🆕 UNIFIED GG & OVER 1.5 PRECISION ENGINE
-from AGGREGATOR.gg_forensics_audit import run_gg_forensic_aggregator  # Updated GG Handshake
+# --- PHASE D: THE GG EMPIRE ---
+from Engine.gg_precision_engine import run_gg_o15_engine
+from AGGREGATOR.gg_forensics_audit import run_gg_forensic_aggregator
 from AGGREGATOR.gg_supreme_vip import run_supreme_gg_aggregator
 from FILTER.gg_precision_filter import run_gg_precision_filter
+
+# ✅ NEW: Standalone GG weekly filter engine
+from Engine.gg_engine_weekly import (
+    run_gg_filter_service,
+    run_gg_weekly_filter,
+)
 
 # --- PHASE E: THE OVER 2.5 EMPIRE ---
 from Engine.over25_probabilistic import run_over25_stage1
 from Engine.over25_council import run_over25_stage2
-from AGGREGATOR.over25_killswitch import run_over25_stage3             # Over 2.5 Handshake
+from AGGREGATOR.over25_killswitch import run_over25_stage3
 from Engine.gold_over25 import run_gold_over_25_engine
 from AGGREGATOR.over25_apex import run_over25_aggregator
 from Engine.over25_forecast import run_over25_forecast_engine
 
-# --- PHASE F: THE NEW DUPLICATED OVER 1.5 EMPIRE ---
-from Engine.over15_stage3 import run_over15_stage3                 # 🆕 Over 1.5 Handshake (Reads Head Output)
-from PSYCHOLOGY.over15_psychology import run_o15_psychology_engine  # 🆕 Over 1.5 Psychology
-from AGGREGATOR.over15_apex import run_o15_apex_engine            # 🆕 Over 1.5 Apex Aggregator
+# ✅ NEW: Over 2.5 weekly filter engine
+from Engine.over25_engine_weekly import (
+    run_over25_filter_service,
+    run_over25_weekly_filter,
+)
 
-# --- PHASE G: THE NEW REGIONAL PRECISION ENGINES ---
-from Engine.draw_engine import run_draw_engine                     # 🆕 DRAW ENGINE
-from Engine.unders_engine import run_unders_engine                 # 🆕 DEFENSIVE UNDER 3.5 & 2.5 ENGINE
-from Engine.sot_engine import run_sot_engine                       # 🆕 CERBERUS S.O.T. ENGINE
-from Engine.fhvi_engine import run_fhvi_engine                     # 🆕 FHVI STREAK MINER
-from Engine.shvi_engine import run_shvi_engine                     # 🆕 SHVI STREAK MINER
+# --- PHASE F: THE OVER 1.5 EMPIRE ---
+from Engine.over15_stage3 import run_over15_stage3
+from PSYCHOLOGY.over15_psychology import run_o15_psychology_engine
+from AGGREGATOR.over15_apex import run_o15_apex_engine
 
-# --- PHASE H: WINS, UNDERDOGS, & SH MASTER ---
+# --- PHASE G: REGIONAL PRECISION ENGINES ---
+from Engine.draw_engine import run_draw_engine
+from Engine.unders_engine import run_unders_engine
+from Engine.sot_engine import run_sot_engine
+from Engine.fhvi_engine import run_fhvi_engine
+from Engine.shvi_engine import run_shvi_engine
+
+# --- PHASE H: WINS, UNDERDOGS & SH MASTER ---
 from AGGREGATOR.win_apex_aggregator import run_win_apex_aggregator
 from Engine.sh_master_vortex import run_sh_master_vortex
 from AGGREGATOR.sh_8goal_aggregator import run_sh_gg_8goal_aggregator
 from AGGREGATOR.apex_ud_aggregator import run_apex_underdog_aggregator
 from Engine.win_raw_engine import run_win_raw_engine
 
-# --- PHASE I: THE LIVE FORENSIC SEQUENCE (1-6) ---
+# ✅ NEW: Win weekly filter engine + precision command
+from Engine.win_engine_weekly import (
+    run_win_filter_service,
+    run_win_weekly_filter,
+)
+from FILTER.win_precision_filter import (
+    run_win_precision_filter,
+    run_win_weekly_precision,
+)
+
+# --- PHASE I: LIVE FORENSIC SEQUENCE ---
 from LIVE_SCANNER.live_stage1_prematch import run_prematch_engine
 from LIVE_SCANNER.live_stage3_incoming import run_incoming_forensic_engine
 from LIVE_SCANNER.live_stage4_danger import run_danger_forensic_aggregator
@@ -130,36 +152,37 @@ from LIVE_SCANNER.live_stage5_aggregator import run_master_aggregator
 from LIVE_SCANNER.live_stage2_verification import run_live_validator_engine
 from LIVE_SCANNER.live_stage6_alerts import SupremeOrchestrator
 
+
 # ==============================================================================
 # 3. THE SUPREME MASTER PIPELINE SEQUENCE
 # ==============================================================================
 def alienedge_master_system():
     print("\n" + "█"*115)
-    print(f"{'🚀 ALIENEDGE SUPER-MATRIX COMMAND CENTER v10.0':^115}")
+    print(f"{'🚀 ALIENEDGE SUPER-MATRIX COMMAND CENTER v11.0':^115}")
     print(f"{'THE TOTAL FORENSIC & PSYCHOLOGICAL BETTING MACHINE':^115}")
     print("█"*115)
 
-    # --- STEP 1: INITIALIZATION ---
+    # --- INITIALIZATION ---
     target_date = input("\n📅 Enter Target Date (YYYY-MM-DD) or [Enter] for Today: ").strip()
     if not target_date:
         target_date = datetime.now().strftime("%Y-%m-%d")
 
-    # ==========================================================================
-    # STEP 2: THE FOUNDATION SEQUENCE
-    # ==========================================================================
+    # ── PHASE 1: FOUNDATION ──────────────────────────────────────────────────
     print("\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH...")
-    run_dna_profiler(target_date)                  # 1. DNA Runs First
-    run_underdog_engine(target_date)               # 2. Base Underdog (Calculates Parity)
-    run_underdog_master_engine(target_date)        # 3. Master Underdog Audit (Calculates Gaps)
-    run_total_visibility_merger(target_date)       # 4. Handshake Logic
+    run_dna_profiler(target_date)
 
-    print("\n[PHASE 1 - UNDERDOG CSV] Writing underdog CSV early for corner4 aggregator...")
-    run_apex_underdog_aggregator(target_date)      # 5. Underdog Aggregator
+    # ✅ NEW: DNA Engine V2 — runs alongside v1, writes its own separate files.
+    run_dna_engine_v2(target_date)
+    build_market_factor_counts(target_date)
 
-    run_win_forecast_engine(target_date)           # 6. Win Engine
-    run_sh_gg_winner_engine(target_date)           # 7. SH GG Winner
+    run_underdog_engine(target_date)
+    run_underdog_master_engine(target_date)
+    run_total_visibility_merger(target_date)
+    run_apex_underdog_aggregator(target_date)
+    run_win_forecast_engine(target_date)
+    run_sh_gg_winner_engine(target_date)
 
-    # --- STEP 3: SECTIONAL HARVESTS ---
+    # ── PHASE 2: SECTIONAL HARVESTS ─────────────────────────────────────────
     print("\n" + "="*115)
     print(f"{'🧠 INITIATING SUPER-MATRIX: SECTIONAL HARVESTS':^115}")
     print("="*115)
@@ -172,34 +195,46 @@ def alienedge_master_system():
     run_catalyst_corner_engine(target_date)
     run_corner4_aggregator_engine(target_date)
 
-    # 2. GG & Over 1.5 Precision Engine (The Unified Input Head)
+    # 2. GG & Over 1.5 Unified Head
     print("\n> ⚽ Running Unified GG & Over 1.5 Precision Head Engine...")
-    run_gg_o15_engine(target_date, verbose=False)  # Generates unified picks for GG and Over 1.5
+    run_gg_o15_engine(target_date, verbose=False)
 
-    # 3. GG Forensic Pipeline (Reads from Unified GG Head)
+    # 3. GG Forensic Pipeline
     print("\n> ⚽ Processing Downstream GG Forensics...")
-    run_gg_forensic_aggregator(target_date)        # GG Handshake
+    run_gg_forensic_aggregator(target_date)
     run_gg_psychology_engine(target_date)
     run_supreme_gg_aggregator(target_date)
     run_gg_precision_filter()
 
-    # 4. Over 2.5 Goals Pipeline
+    # ✅ NEW: GG standalone filter engine (single date, all 4 modes)
+    print("\n> ⚽ Running GG Standalone Filter Engine...")
+    run_gg_filter_service(target_date, mode="public",   risk_level="balanced")
+    run_gg_filter_service(target_date, mode="public",   risk_level="banker")
+    run_gg_filter_service(target_date, mode="advanced")
+
+    # 4. Over 2.5 Pipeline
     print("\n> 🔥 Processing Over 2.5 Goals Pipeline...")
     run_over25_stage1(target_date)
     run_over25_stage2(target_date)
-    run_over25_stage3(target_date)                 # Over 2.5 Handshake
+    run_over25_stage3(target_date)
     run_o25_psychology_engine(target_date)
     run_gold_over_25_engine(target_date)
     run_over25_aggregator(target_date)
     run_over25_forecast_engine(target_date)
 
-    # 5. Over 1.5 Goals Pipeline (Reads from Unified Over 1.5 Head)
-    print("\n> ⚡ Processing Duplicated Over 1.5 Goals Pipeline...")
-    run_over15_stage3(target_date)                 # Over 1.5 Handshake
-    run_o15_psychology_engine(target_date)         # Over 1.5 Psychology
-    run_o15_apex_engine(target_date)             # Over 1.5 Apex Aggregator
+    # ✅ NEW: Over 2.5 standalone filter engine (single date, all 3 modes)
+    print("\n> 🔥 Running Over 2.5 Standalone Filter Engine...")
+    run_over25_filter_service(target_date, mode="public",   risk_level="balanced")
+    run_over25_filter_service(target_date, mode="public",   risk_level="banker")
+    run_over25_filter_service(target_date, mode="tipster",  min_poisson=65, min_votes=7)
 
-    # 6. Under 3.5 & Under 2.5 Defensive Engine
+    # 5. Over 1.5 Pipeline
+    print("\n> ⚡ Processing Over 1.5 Goals Pipeline...")
+    run_over15_stage3(target_date)
+    run_o15_psychology_engine(target_date)
+    run_o15_apex_engine(target_date)
+
+    # 6. Defensive Under Empire
     print("\n> 🛡️ Processing Defensive Under Empire...")
     run_unders_engine(target_date, verbose=False)
 
@@ -207,16 +242,16 @@ def alienedge_master_system():
     print("\n> ⚖️ Processing Draw Magnet Index...")
     run_draw_engine(target_date, verbose=False)
 
-    # 8. SOT (Shots On Target) Cerberus Engine
+    # 8. SOT Cerberus Engine
     print("\n> 🎯 Processing Cerberus S.O.T. Engine...")
     run_sot_engine(target_date, verbose=False)
 
-    # 9. First Half (FHVI) & Second Half (SHVI) Streak Miners
+    # 9. Half-Time Streak Miners
     print("\n> ⛏️ Processing Half-Time Streak Miners...")
     run_fhvi_engine(target_date, verbose=False)
     run_shvi_engine(target_date, verbose=False)
 
-    # 10. Wins, Underdogs, & SH Master
+    # 10. Wins, U2S & SH Master
     print("\n> 🏆 Processing Win, U2S, & SH Elite Aggregation...")
     run_u2s_psychology_engine(target_date)
     run_win_psychology_engine(target_date)
@@ -225,7 +260,18 @@ def alienedge_master_system():
     run_sh_gg_8goal_aggregator(target_date)
     run_win_raw_engine(target_date)
 
-    # --- STEP 4: LIVE DASHBOARD PREP ---
+    # ✅ NEW: Win standalone filter engine (single date, all 3 modes)
+    print("\n> 🏆 Running Win Standalone Filter Engine...")
+    run_win_filter_service(target_date, mode="public",  risk_level="balanced")
+    run_win_filter_service(target_date, mode="public",  risk_level="safe")
+    run_win_filter_service(target_date, mode="tipster",
+                           min_parity_gap=10, min_overall_wins=3, strict_mode=True)
+
+    # ✅ NEW: Win precision command (single date)
+    print("\n> 🏆 Running Win Precision Command...")
+    run_win_precision_filter(target_date)
+
+    # ── PHASE 3: LIVE DASHBOARD PREP ────────────────────────────────────────
     print("\n" + "="*115)
     print(f"{'📡 PREPARING LIVE FORENSIC DASHBOARD':^115}")
     print("="*115)
@@ -234,16 +280,44 @@ def alienedge_master_system():
     run_danger_forensic_aggregator()
     run_master_aggregator()
 
-    # --- STEP 5: START LIVE EXECUTION ---
+    # ── PHASE 4: WEEKLY FILTER OPTION ───────────────────────────────────────
+    print("\n" + "="*115)
+    run_weekly = input(
+        "\n📅 Run Weekly Filter Scans for full week? (y/n): "
+    ).strip().lower()
+
+    if run_weekly == "y":
+        print("\n> 📅 Running Weekly Scans for all 3 filter engines...")
+
+        print("\n  → GG Weekly Filter (public balanced)...")
+        run_gg_weekly_filter(anchor_date=target_date, mode="public",
+                             risk_level="balanced")
+
+        print("\n  → Over 2.5 Weekly Filter (public balanced)...")
+        run_over25_weekly_filter(anchor_date=target_date, mode="public",
+                                 risk_level="balanced")
+
+        print("\n  → Win Weekly Filter (public balanced)...")
+        run_win_weekly_filter(anchor_date=target_date, mode="public",
+                              risk_level="balanced")
+
+        print("\n  → Win Weekly Precision Cross-Verification...")
+        run_win_weekly_precision(anchor_date=target_date)
+
+        print("\n✅ All Weekly Scans Complete.")
+
+    # ── PHASE 5: LIVE EXECUTION ──────────────────────────────────────────────
     print("\n" + "█"*115)
     print(f"{'✅ ALL PRE-MATCH SUPER-MATRIX HARVESTS COMPLETE':^115}")
     print("█"*115)
 
-    start_live = input("\n📡 Ready for the field. Start LIVE 30' Verification & Alerts? (y/n): ").strip().lower()
-    if start_live == 'y':
+    start_live = input(
+        "\n📡 Ready for the field. Start LIVE 30' Verification & Alerts? (y/n): "
+    ).strip().lower()
+
+    if start_live == "y":
         print("\n🚀 [LIVE MODE ACTIVE] Monitoring 30' Exploitations & Supreme Alerts...")
         try:
-            # 1. Background Thread for 60-second Validator
             def validator_loop():
                 while True:
                     try:
@@ -255,14 +329,14 @@ def alienedge_master_system():
             validator_thread = threading.Thread(target=validator_loop, daemon=True)
             validator_thread.start()
 
-            # 2. Main Thread for the Supreme Orchestrator
             orchestrator = SupremeOrchestrator()
             orchestrator.run()
 
         except KeyboardInterrupt:
             print("\n🛑 Shutting down Super-Matrix Command Center.")
     else:
-        print("\nPipeline Finished. VIP locks are ready and waiting in your Output & Master directories.")
+        print("\nPipeline Finished. VIP locks are ready in your Output & Master directories.")
+
 
 if __name__ == "__main__":
     alienedge_master_system()

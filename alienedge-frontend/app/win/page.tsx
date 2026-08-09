@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { Trophy } from "lucide-react";
 import {
   foundationApi,
@@ -12,6 +13,8 @@ import {
   type WinU2SPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import {
   ChainStage,
   ProbCell,
@@ -500,6 +503,15 @@ const dnaColumns: PredictionColumn<DnaProfile>[] = [
 
 export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
+  const { data: dnaV2 } = useDnaV2();
+
+  const apexColumnsWithDna = useMemo(
+    () => [
+      createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date),
+      ...apexColumns,
+    ],
+    [dnaV2, date]
+  );
 
   return (
     <div
@@ -526,7 +538,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         description="Top-of-chain picks after full 3-stage audit"
         fetcher={() => winApi.getApex(date)}
         deps={[date]}
-        columns={apexColumns}
+        columns={apexColumnsWithDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No apex picks for this date."
         fallbackData={MOCK_WIN_APEX}

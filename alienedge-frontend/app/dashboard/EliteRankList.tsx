@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { TierBadge } from "@/components/predictions/TierBadge";
 import { getTrafficLightDot } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { DnaCountBadge } from "@/components/dna/DnaCountBadge";
+import type { DnaV2FixtureFactors, DnaV2MarketKey } from "@/lib/api";
 
 export interface EliteRankItem {
   key: string;
@@ -16,6 +18,8 @@ export interface EliteRankItem {
   value: number;
   suffix: string;
   isMock: boolean;
+  /** Present only for the 7 markets the DNA v2 engine covers (win/gg/over25/over15/unders/draw/corners). */
+  dnaMarketKey?: DnaV2MarketKey;
 }
 
 const RANK_ACCENT: Record<number, string> = {
@@ -30,9 +34,13 @@ const RANK_ACCENT: Record<number, string> = {
 export function EliteRankList({
   items,
   emptyMessage,
+  marketFactors,
+  date,
 }: {
   items: EliteRankItem[];
   emptyMessage: string;
+  marketFactors?: Record<string, DnaV2FixtureFactors>;
+  date: string;
 }) {
   return (
     <div className="glass flex h-full flex-col overflow-hidden rounded-lg shadow-panel">
@@ -52,55 +60,73 @@ export function EliteRankList({
       ) : (
         <div className="divide-y divide-border/60">
           {items.map((item) => (
-            <Link
+            <div
               key={item.key}
-              href={item.href}
-              prefetch
               className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-bg-elevated/40"
             >
-              <span
-                className={cn(
-                  "flex h-6 w-6 shrink-0 items-center justify-center rounded font-mono text-xs font-bold",
-                  RANK_ACCENT[item.rank]
-                    ? cn("border", RANK_ACCENT[item.rank])
-                    : "bg-bg-elevated text-text-muted"
-                )}
+              {/* DNA count — first element, separate clickable target so it
+                  doesn't nest inside the fixture Link below. */}
+              {item.dnaMarketKey ? (
+                <DnaCountBadge
+                  marketFactors={marketFactors}
+                  fixtureLabel={item.fixture}
+                  market={item.dnaMarketKey}
+                  date={date}
+                  className="shrink-0"
+                />
+              ) : (
+                <span className="w-[38px] shrink-0" />
+              )}
+
+              <Link
+                href={item.href}
+                prefetch
+                className="flex min-w-0 flex-1 items-center gap-3"
               >
-                {item.rank}
-              </span>
-
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-xs font-semibold text-text-primary">
-                    {item.fixture}
-                  </span>
-                  {item.isMock && (
-                    <Badge
-                      variant="outline"
-                      className="h-4 shrink-0 border-accent-amber/30 px-1 text-[0.6rem] text-accent-amber"
-                    >
-                      Demo
-                    </Badge>
-                  )}
-                </div>
-                <span className="text-2xs text-text-dim">{item.market}</span>
-              </div>
-
-              <TierBadge tier={item.tier} pulse={false} />
-
-              <div className="flex w-16 shrink-0 items-center justify-end gap-1.5 font-mono text-sm font-bold tabular-nums text-text-primary">
                 <span
                   className={cn(
-                    "h-1.5 w-1.5 shrink-0 rounded-full",
-                    getTrafficLightDot(item.value)
+                    "flex h-6 w-6 shrink-0 items-center justify-center rounded font-mono text-xs font-bold",
+                    RANK_ACCENT[item.rank]
+                      ? cn("border", RANK_ACCENT[item.rank])
+                      : "bg-bg-elevated text-text-muted"
                   )}
-                />
-                {item.value.toFixed(1)}
-                <span className="text-2xs font-medium text-text-muted">
-                  {item.suffix}
+                >
+                  {item.rank}
                 </span>
-              </div>
-            </Link>
+
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-xs font-semibold text-text-primary">
+                      {item.fixture}
+                    </span>
+                    {item.isMock && (
+                      <Badge
+                        variant="outline"
+                        className="h-4 shrink-0 border-accent-amber/30 px-1 text-[0.6rem] text-accent-amber"
+                      >
+                        Demo
+                      </Badge>
+                    )}
+                  </div>
+                  <span className="text-2xs text-text-dim">{item.market}</span>
+                </div>
+
+                <TierBadge tier={item.tier} pulse={false} />
+
+                <div className="flex w-16 shrink-0 items-center justify-end gap-1.5 font-mono text-sm font-bold tabular-nums text-text-primary">
+                  <span
+                    className={cn(
+                      "h-1.5 w-1.5 shrink-0 rounded-full",
+                      getTrafficLightDot(item.value)
+                    )}
+                  />
+                  {item.value.toFixed(1)}
+                  <span className="text-2xs font-medium text-text-muted">
+                    {item.suffix}
+                  </span>
+                </div>
+              </Link>
+            </div>
           ))}
         </div>
       )}

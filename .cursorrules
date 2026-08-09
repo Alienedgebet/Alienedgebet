@@ -1,0 +1,53 @@
+# AlienEdge — Agent Rules (short)
+
+Full reference: `docs/README.md` → `BLUEPRINT.md`, `API.md`, `PHASES.md`.
+
+## Identity
+
+AlienEdge is an institutional-grade **football intelligence platform** — not a betting app,
+wallet, or financial product. Prediction quality over UI polish.
+
+## Source of truth
+
+| Topic | File |
+|-------|------|
+| REST API paths | `api/main.py` → `docs/API.md` |
+| CLI pipeline engines | `main.py` |
+| Frontend API client | `alienedge-frontend/lib/api.ts` (must match `api/main.py`) |
+| Design tokens | `alienedge-frontend/tailwind.config.ts` + `app/globals.css` |
+
+## Critical architecture (never override)
+
+1. `gg_precision_engine` outputs **both** GG and Over 1.5 — single head engine
+2. `unders_engine` handles U2.5 **and** U3.5 in one run
+3. `win_forecast` runs in foundation phase (Phase A)
+4. Weekly filter engines are **separate** from pick chains — own page (`app/weekly`)
+5. `live_stage7_dashboard` is standalone — not in `main.py` pipeline
+
+## Frontend rules
+
+- All HTTP via `lib/api.ts` only — no raw `axios` in components
+- Strict TypeScript — no `any`
+- Tailwind tokens only — do not edit `tailwind.config.ts` or `globals.css` unless asked
+- Keep `components/ui/*` — shadcn primitives
+- Mock data typed to `api.ts` interfaces when backend unavailable
+
+## Session workflow
+
+1. Read `docs/PHASES.md` — confirm current phase
+2. **One task, one PR-sized diff** (layout OR one page OR API audit)
+3. Backend contract first: `api/main.py` before `lib/api.ts`
+4. Verify: run dev server, `GET /health` → 200
+5. End prompt with explicit **out of scope**
+
+## Social v3 (launch scope only)
+
+Exactly three features: Global War Room (gated), Match Comments (open), Leaderboard.
+No feeds, syndicates, notebooks, Kelly/Paroli, per-fixture rooms.
+
+## Never
+
+- Invent engine math or API responses
+- Use legacy `gg_stage1.py` / `gg_stage2.py`
+- Put weekly filter UI on pick chain pages
+- Add wallet/coin/bankroll vocabulary or features
