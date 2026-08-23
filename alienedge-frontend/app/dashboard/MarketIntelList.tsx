@@ -34,11 +34,11 @@ const ACCENTS = [
 export function MarketIntelList({ rows }: { rows: MarketRow[] }) {
   return (
     <div className="glass overflow-hidden rounded-lg shadow-panel">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h2 className="text-sm font-semibold text-text-primary">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
+        <h2 className="min-w-0 truncate text-sm font-semibold text-text-primary">
           Market Intelligence
         </h2>
-        <span className="font-mono text-2xs text-text-dim">
+        <span className="shrink-0 font-mono text-2xs text-text-dim">
           {rows.length} markets
         </span>
       </div>
@@ -51,13 +51,8 @@ export function MarketIntelList({ rows }: { rows: MarketRow[] }) {
           const count = data.length;
 
           return (
-            <Link
-              key={config.key}
-              href={config.href}
-              prefetch
-              className="block"
-            >
-              <div className="group flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-bg-elevated/40">
+            <Link key={config.key} href={config.href} prefetch className="block w-full">
+              <div className="group flex w-full flex-wrap items-center gap-3 px-4 py-3 transition-colors hover:bg-bg-elevated/40">
                 <div
                   className={cn(
                     "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
@@ -67,52 +62,50 @@ export function MarketIntelList({ rows }: { rows: MarketRow[] }) {
                   <Icon className={cn("h-4 w-4", accent.text)} />
                 </div>
 
+                {/* Left side — market title + badges on top, match name below */}
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-semibold text-text-primary">
                       {config.label}
                     </span>
+                    {top?.tier && <TierBadge tier={top.tier} pulse={false} className="shrink-0" />}
                     {isMock && (
                       <Badge
                         variant="outline"
-                        className="h-4 border-accent-amber/30 px-1 text-[0.6rem] text-accent-amber"
+                        className="h-4 shrink-0 border-accent-amber/30 px-1 text-[0.6rem] text-accent-amber"
                       >
                         Demo
                       </Badge>
                     )}
                   </div>
                   {top ? (
-                    <span className="truncate text-2xs text-text-secondary">
-                      {top.fixture}
-                    </span>
+                    <p className="mt-1 truncate text-xs text-text-secondary">{top.fixture}</p>
                   ) : (
-                    <span className="text-2xs text-text-dim">No picks today</span>
+                    <p className="mt-1 text-xs text-text-dim">No picks today</p>
                   )}
                 </div>
 
-                {!top ? (
-                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-text-dim" />
-                ) : (
-                  <div className="flex shrink-0 items-center gap-3">
-                    {top.tier && <TierBadge tier={top.tier} pulse={false} />}
-                    {top.prob != null ? (
-                      <div className="flex items-center gap-1.5">
-                        <ProbCell value={top.prob} showBar={false} />
-                        {top.odds != null && top.odds > 0 && (
-                          <span className="rounded bg-accent-indigo/15 px-1 py-0.5 font-mono text-2xs font-semibold text-accent-cyan">
-                            @{top.odds.toFixed(2)}
-                          </span>
-                        )}
-                      </div>
-                    ) : top.score != null ? (
-                      <div className="w-16">
-                        <ScoreBar score={top.score} showValue />
-                      </div>
-                    ) : null}
-                  </div>
-                )}
+                {/* Right side — probability + bookmaker odds, right-aligned, no overlap */}
+                <div className="flex shrink-0 items-center gap-2">
+                  {!top ? (
+                    <AlertTriangle className="h-3.5 w-3.5 text-text-dim" />
+                  ) : top.prob != null ? (
+                    <>
+                      <ProbCell value={top.prob} showBar={false} />
+                      {top.odds != null && top.odds > 0 && (
+                        <span className="rounded bg-accent-indigo/15 px-1 py-0.5 font-mono text-2xs font-semibold text-accent-cyan">
+                          @{top.odds.toFixed(2)}
+                        </span>
+                      )}
+                    </>
+                  ) : top.score != null ? (
+                    <div className="w-16">
+                      <ScoreBar score={top.score} showValue />
+                    </div>
+                  ) : null}
+                </div>
 
-                <span className="w-14 shrink-0 text-right font-mono text-2xs text-text-dim">
+                <span className="hidden w-14 shrink-0 text-right font-mono text-2xs text-text-dim sm:block">
                   {count} picks
                 </span>
 

@@ -208,7 +208,7 @@ function DashboardOverview() {
   const enginesOnline = rawResults.filter((r) => r.error === null).length;
 
   return (
-    <div className="relative flex flex-col gap-4 p-6">
+    <div className="relative flex w-full flex-col gap-4 overflow-x-hidden p-4 sm:p-6">
       <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow" />
 
       <EngineFeedBar
@@ -237,9 +237,9 @@ function DashboardOverview() {
         </div>
 
         <div className="flex flex-col gap-4">
-          <div className="glass flex items-center justify-center gap-4 rounded-lg p-4 shadow-panel">
+          <div className="glass flex w-full flex-col items-center gap-4 rounded-lg p-4 text-center shadow-panel sm:flex-row sm:justify-center sm:text-left">
             <RadialGauge value={peakConfidence} label="Peak Confidence" />
-            <div className="flex flex-col gap-1 text-2xs text-text-muted">
+            <div className="flex min-w-0 flex-col gap-1 text-2xs text-text-muted">
               <p>
                 Strongest signal across every market today, drawn live from each
                 engine&apos;s top-of-chain output.

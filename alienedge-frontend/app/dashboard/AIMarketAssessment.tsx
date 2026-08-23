@@ -113,7 +113,7 @@ export function AIMarketAssessment() {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between px-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1">
         <div className="flex items-center gap-2">
           <Sparkles className="h-3.5 w-3.5 text-accent-indigo" />
           <h2 className="text-sm font-semibold text-text-primary">AI Market Assessment</h2>
