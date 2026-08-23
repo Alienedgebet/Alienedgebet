@@ -137,8 +137,8 @@ export const OVER25_FILTER_CONFIG: MarketFilterConfig = {
   ],
   // Order matches Engine/over25_engine_weekly.py display_cols printout
   priorityKeys: [
-    "match_date", "fixture", "o25_odds",
-    "poisson_over_prob_num", "council_votes",
+    "match_date", "fixture", "poisson_over_prob_num",
+    "o25_odds", "council_votes",
     "kill_switch_pass", "pos_gap", "h2h_overs_last_5",
   ],
 };

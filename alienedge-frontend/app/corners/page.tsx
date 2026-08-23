@@ -162,13 +162,13 @@ const stage1Columns: PredictionColumn<CornerStage1Pick>[] = [
     header: "Prob-Like %",
     render: (r) => <ProbCell value={r.team_more_corners_probability_like} showBar={false} />,
   },
-  { key: "confidence", header: "Avg Confidence", align: "right", render: (r) => r.avg_confidence },
   {
     key: "odds",
     header: "Odds (Win/O2.5)",
     align: "right",
     render: (r) => `${r.home_win_odds.toFixed(2)} / ${r.over_2_5_odds.toFixed(2)}`,
   },
+  { key: "confidence", header: "Avg Confidence", align: "right", render: (r) => r.avg_confidence },
 ];
 
 export default function CornersPage() {

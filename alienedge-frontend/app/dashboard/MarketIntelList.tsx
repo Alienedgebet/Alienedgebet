@@ -96,7 +96,14 @@ export function MarketIntelList({ rows }: { rows: MarketRow[] }) {
                   <div className="flex shrink-0 items-center gap-3">
                     {top.tier && <TierBadge tier={top.tier} pulse={false} />}
                     {top.prob != null ? (
-                      <ProbCell value={top.prob} showBar={false} />
+                      <div className="flex items-center gap-1.5">
+                        <ProbCell value={top.prob} showBar={false} />
+                        {top.odds != null && top.odds > 0 && (
+                          <span className="rounded bg-accent-indigo/15 px-1 py-0.5 font-mono text-2xs font-semibold text-accent-cyan">
+                            @{top.odds.toFixed(2)}
+                          </span>
+                        )}
+                      </div>
                     ) : top.score != null ? (
                       <div className="w-16">
                         <ScoreBar score={top.score} showValue />

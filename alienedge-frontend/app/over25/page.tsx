@@ -99,7 +99,6 @@ const forecastColumns: PredictionColumn<Over25ForecastPick>[] = [
     render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
   },
   { key: "league", header: "League", render: (r) => r.league },
-  { key: "odds", header: "O2.5 Odds", align: "right", render: (r) => r.o25_odds.toFixed(2) },
   {
     key: "kill",
     header: "Kill Switch",
@@ -114,6 +113,7 @@ const forecastColumns: PredictionColumn<Over25ForecastPick>[] = [
     header: "Poisson Over %",
     render: (r) => <ProbCell value={r.poisson_over_prob_num} showBar={false} />,
   },
+  { key: "odds", header: "O2.5 Odds", align: "right", render: (r) => r.o25_odds.toFixed(2) },
   { key: "votes", header: "Council Votes", render: (r) => r.council_votes },
   { key: "pos_gap", header: "Pos Gap", align: "right", render: (r) => r.pos_gap },
   { key: "h2h_overs", header: "H2H Overs /5", align: "right", render: (r) => r.h2h_overs_last_5 },
@@ -125,8 +125,8 @@ const stage3Columns: PredictionColumn<Over25Stage3Pick>[] = [
     header: "Match",
     render: (r) => <span className="font-medium text-text-primary">{r.Match}</span>,
   },
-  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
   { key: "poisson", header: "Poisson %", render: (r) => <ProbCell value={r["Poisson%"]} showBar={false} /> },
+  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
   { key: "grade", header: "Grade", render: (r) => <TierBadge tier={r.Grade} /> },
   { key: "h2h", header: "H2H Record", render: (r) => r.H2H_Record },
   { key: "picked", header: "Picked By", render: (r) => r.PickedBy },
@@ -181,8 +181,8 @@ const stage1Columns: PredictionColumn<Over25Stage1Pick>[] = [
     render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
   },
   { key: "time", header: "Time", render: (r) => r.Time },
-  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
   { key: "confidence", header: "Confidence", render: (r) => r.Confidence },
+  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
   { key: "algo", header: "Algorithm", render: (r) => r.Algorithm },
 ];
 
