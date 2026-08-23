@@ -1,0 +1,28 @@
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ── Runtime data & engine artifacts (never version-controlled) ──
+data/
+output/
+master_aggregator/
+
+# ── Environment ─────────────────────────────────────────────
+.env
+
+# ── Logs / scratch / verification artifacts ─────────────────
+*.log
+verify_*
+uvicorn_*
+*.pid.txt
+fe_build.log
+fe_typecheck.log
+push_result.txt
+commit_summary.txt
+compile_check.txt
+fs*.txt
+
+# ── OS / editor ─────────────────────────────────────────────
+Thumbs.db
+.vscode/
