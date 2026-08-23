@@ -52,6 +52,8 @@ export interface MarketPick {
   tier?: string;
   prob?: number;
   score?: number;
+  /** Bookmaker odds for this pick — surfaced next to the probability when available. */
+  odds?: number;
 }
 
 export interface MarketConfig {
@@ -178,6 +180,7 @@ export const DRAW_MARKET: MarketConfig = {
         tier: p.tier,
         prob: p.mc_draw_prob * 100,
         score: p.composite_draw_score,
+        odds: p.draw_odds,
       }))
     ),
 };

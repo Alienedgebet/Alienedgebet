@@ -28,9 +28,9 @@ const drawColumns: PredictionColumn<DrawPick>[] = [
     align: "right",
     render: (r) => <span className="font-mono text-text-muted">{(r.poisson_draw_prob * 100).toFixed(1)}%</span>,
   },
+  { key: "odds", header: "Draw Odds", align: "right", render: (r) => r.draw_odds.toFixed(2) },
   { key: "dmi", header: "DMI", align: "right", render: (r) => r.dmi },
   { key: "parity", header: "Parity", align: "right", render: (r) => r.parity },
-  { key: "odds", header: "Draw Odds", align: "right", render: (r) => r.draw_odds.toFixed(2) },
   { key: "value", header: "Value Edge", align: "right", render: (r) => r.value_edge },
   {
     key: "likely",

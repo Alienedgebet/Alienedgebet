@@ -71,12 +71,12 @@ const baseColumns: PredictionColumn<UnderdogBasePick>[] = [
   },
   { key: "league", header: "League", render: (r) => r.league },
   { key: "underdog", header: "Underdog", render: (r) => r.underdog_team },
-  { key: "odds", header: "Dog Odds", align: "right", render: (r) => r.dog_odds.toFixed(2) },
   {
     key: "score_prob",
     header: "Dog Score Prob",
     render: (r) => <ProbCell value={r.dog_score_prob} showBar={false} />,
   },
+  { key: "odds", header: "Dog Odds", align: "right", render: (r) => r.dog_odds.toFixed(2) },
   { key: "parity", header: "Parity Gap", align: "right", render: (r) => r.parity_gap },
   { key: "att", header: "Dog Att Strength", align: "right", render: (r) => r.dog_att_strength },
   { key: "def", header: "Fav Def Weakness", align: "right", render: (r) => r.fav_def_weakness },

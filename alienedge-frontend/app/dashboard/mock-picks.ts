@@ -15,27 +15,27 @@ import type { MarketPick } from "./market-config";
 
 export const MOCK_PICKS: Record<string, MarketPick[]> = {
   win: [
-    { fixture: "Real Madrid vs Alaves", tier: "Category 1", prob: 81.6 },
-    { fixture: "Inter vs Salernitana", tier: "Category 1", prob: 76.3 },
-    { fixture: "PSG vs Le Havre", tier: "Category 2", prob: 67.9 },
+    { fixture: "Real Madrid vs Alaves", tier: "Category 1", prob: 81.6, odds: 1.35 },
+    { fixture: "Inter vs Salernitana", tier: "Category 1", prob: 76.3, odds: 1.42 },
+    { fixture: "PSG vs Le Havre", tier: "Category 2", prob: 67.9, odds: 1.55 },
   ],
   gg: [
-    { fixture: "Man City vs Arsenal", tier: "Category 1", prob: 78.4 },
-    { fixture: "Bayern Munich vs Dortmund", tier: "Category 2", prob: 69.1 },
-    { fixture: "Ajax vs PSV", tier: "Category 3", prob: 58.2 },
+    { fixture: "Man City vs Arsenal", tier: "Category 1", prob: 78.4, odds: 1.62 },
+    { fixture: "Bayern Munich vs Dortmund", tier: "Category 2", prob: 69.1, odds: 1.75 },
+    { fixture: "Ajax vs PSV", tier: "Category 3", prob: 58.2, odds: 1.95 },
   ],
   over25: [
-    { fixture: "Leverkusen vs Union Berlin", tier: "Category 1", prob: 74.8 },
-    { fixture: "Atletico vs Sevilla", tier: "Category 2", prob: 64.5 },
-    { fixture: "Benfica vs Porto", tier: "Category 3", prob: 55.1 },
+    { fixture: "Leverkusen vs Union Berlin", tier: "Category 1", prob: 74.8, odds: 1.65 },
+    { fixture: "Atletico vs Sevilla", tier: "Category 2", prob: 64.5, odds: 1.85 },
+    { fixture: "Benfica vs Porto", tier: "Category 3", prob: 55.1, odds: 2.05 },
   ],
   over15: [
-    { fixture: "Napoli vs Roma", tier: "Tier 1", prob: 88.2, score: 91 },
-    { fixture: "Marseille vs Lyon", tier: "Tier 2", prob: 79.4, score: 82 },
+    { fixture: "Napoli vs Roma", tier: "Tier 1", prob: 88.2, score: 91, odds: 1.28 },
+    { fixture: "Marseille vs Lyon", tier: "Tier 2", prob: 79.4, score: 82, odds: 1.45 },
   ],
   draw: [
-    { fixture: "Juventus vs Milan", tier: "Diamond Lock", prob: 34.2, score: 79 },
-    { fixture: "Fenerbahce vs Galatasaray", tier: "Fire Pick", prob: 29.8, score: 71 },
+    { fixture: "Juventus vs Milan", tier: "Diamond Lock", prob: 34.2, score: 79, odds: 3.2 },
+    { fixture: "Fenerbahce vs Galatasaray", tier: "Fire Pick", prob: 29.8, score: 71, odds: 3.4 },
   ],
   unders: [
     { fixture: "Getafe vs Cadiz", tier: "Solid Lean", prob: 71.5, score: 68 },
@@ -58,7 +58,7 @@ export const MOCK_PICKS: Record<string, MarketPick[]> = {
     { fixture: "Celtic vs Rangers", tier: "⚡ Good SH match", score: 9 },
   ],
   underdog: [
-    { fixture: "Brighton vs Fulham", tier: "Rank 1", prob: 68.5 },
-    { fixture: "Valencia vs Alaves", tier: "Rank 2", prob: 54.2 },
+    { fixture: "Brighton vs Fulham", tier: "Rank 1", prob: 68.5, odds: 3.75 },
+    { fixture: "Valencia vs Alaves", tier: "Rank 2", prob: 54.2, odds: 4.2 },
   ],
 };

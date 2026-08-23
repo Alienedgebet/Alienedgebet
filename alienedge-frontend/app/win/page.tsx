@@ -280,15 +280,15 @@ const forecastColumns: PredictionColumn<WinForecastPick>[] = [
   { key: "side", header: "side", render: (r) => r.side },
   { key: "team_name", header: "team_name", render: (r) => r.team_name },
   {
+    key: "poisson_win_prob",
+    header: "poisson_win_prob",
+    render: (r) => <ProbCell value={r.poisson_win_prob} showBar={false} />,
+  },
+  {
     key: "win_odds",
     header: "win_odds",
     align: "right",
     render: (r) => Number(r.win_odds).toFixed(2),
-  },
-  {
-    key: "poisson_win_prob",
-    header: "poisson_win_prob",
-    render: (r) => <ProbCell value={r.poisson_win_prob} showBar={false} />,
   },
   {
     key: "poisson_draw_prob",
