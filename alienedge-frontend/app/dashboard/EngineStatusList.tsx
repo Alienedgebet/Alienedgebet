@@ -100,7 +100,7 @@ export function EngineStatusList({ rows }: EngineStatusListProps) {
               key={config.key}
               href={config.href}
               prefetch
-              className="flex items-center justify-between gap-2 px-4 py-2 text-xs transition-colors hover:bg-bg-elevated/50"
+              className="flex items-center justify-between gap-2 px-4 py-2.5 text-xs transition-colors hover:bg-bg-elevated/50"
             >
               <span className="flex min-w-0 flex-col">
                 <span className="truncate text-text-secondary">{config.label}</span>

@@ -15,7 +15,7 @@ export function AppShell({ children }: AppShellProps) {
       <Sidebar />
       <TopBar />
       <RightPanelLazy />
-      <main className="mt-topbar min-h-[calc(100vh-56px)] bg-bg-primary md:ml-sidebar md:mr-[320px]">
+      <main className="mt-topbar min-h-[calc(100vh-56px)] w-full overflow-x-hidden bg-bg-primary md:ml-sidebar md:mr-[320px]">
         {children}
       </main>
     </>

@@ -83,7 +83,7 @@ export function HeroCarousel({ peakConfidence, scrollTargetId }: HeroCarouselPro
     <section
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
-      className="relative h-[400px] w-full overflow-hidden rounded-2xl bg-nebula shadow-elevated"
+      className="relative h-auto min-h-[400px] w-full overflow-hidden rounded-2xl bg-nebula shadow-elevated"
     >
       {/* ---------- Layer 1: static background — never re-renders on slide change ---------- */}
       {/* Decorative "planet ring" glows — pure CSS, echoes the circular portal shapes in the reference art. Purple/indigo only, no diffuse blue wash. */}
@@ -116,7 +116,7 @@ export function HeroCarousel({ peakConfidence, scrollTargetId }: HeroCarouselPro
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-bg-primary via-bg-primary/70 to-transparent" />
 
       {/* ---------- Layer 2: animated foreground — only this swaps every 5s ---------- */}
-      <div className="relative z-10 flex h-full items-center px-8 md:px-14">
+      <div className="relative z-10 flex min-h-[400px] items-center px-6 py-14 sm:px-8 md:px-14">
           <div key={`text-${index}`} className="flex max-w-md flex-col gap-4">
             <h1 className="font-sans text-4xl font-extrabold leading-[1.05] text-text-primary drop-shadow-[0_0_22px_rgba(99,102,241,0.5)] sm:text-5xl">
               {slide.lines.map((line, i) => (
