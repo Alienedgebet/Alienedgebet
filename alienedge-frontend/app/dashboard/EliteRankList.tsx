@@ -18,6 +18,8 @@ export interface EliteRankItem {
   value: number;
   suffix: string;
   isMock: boolean;
+  /** Bookmaker odds for this pick — displayed next to probability when available. */
+  odds?: number;
   /** Present only for the 7 markets the DNA v2 engine covers (win/gg/over25/over15/unders/draw/corners). */
   dnaMarketKey?: DnaV2MarketKey;
 }
@@ -44,14 +46,36 @@ export function EliteRankList({
 }) {
   return (
     <div className="glass flex h-full flex-col overflow-hidden rounded-lg shadow-panel">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h2 className="text-sm font-semibold text-text-primary">
-          Today&apos;s Elite Picks
+      <div className="relative flex items-center justify-center border-b border-border px-4 py-3">
+        <h2 className="text-center text-sm font-bold text-text-primary">
+          Today's Elite Picks
         </h2>
-        <span className="font-mono text-2xs text-text-dim">
+        <span className="absolute right-4 font-mono text-2xs text-text-dim">
           {items.length} total
         </span>
       </div>
+
+      {items.length > 0 && (
+        <div className="flex items-center gap-3 border-b border-border/60 px-4 py-2">
+          <span className="w-[38px] shrink-0 text-center font-mono text-2xs font-semibold uppercase tracking-wider text-text-secondary">
+            DNA
+          </span>
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <span className="h-6 w-6 shrink-0 text-center font-mono text-2xs font-semibold uppercase tracking-wider text-text-secondary">
+              #
+            </span>
+            <span className="min-w-0 flex-1 font-mono text-2xs font-semibold uppercase tracking-wider text-text-secondary">
+              Fixture
+            </span>
+            <span className="w-20 shrink-0 text-center font-mono text-2xs font-semibold uppercase tracking-wider text-text-secondary">
+              Tier
+            </span>
+            <span className="w-24 shrink-0 text-right font-mono text-2xs font-semibold uppercase tracking-wider text-text-secondary">
+              Prob / Odds
+            </span>
+          </div>
+        </div>
+      )}
 
       {items.length === 0 ? (
         <div className="flex flex-1 items-center justify-center py-10 text-center text-xs text-text-dim">
@@ -113,7 +137,7 @@ export function EliteRankList({
 
                 <TierBadge tier={item.tier} pulse={false} />
 
-                <div className="flex w-16 shrink-0 items-center justify-end gap-1.5 font-mono text-sm font-bold tabular-nums text-text-primary">
+                <div className="flex w-24 shrink-0 items-center justify-end gap-1.5 font-mono text-sm font-bold tabular-nums text-text-primary">
                   <span
                     className={cn(
                       "h-1.5 w-1.5 shrink-0 rounded-full",
@@ -124,9 +148,14 @@ export function EliteRankList({
                   <span className="text-2xs font-medium text-text-muted">
                     {item.suffix}
                   </span>
+                  {item.odds != null && item.odds > 0 && (
+                    <span className="ml-1 rounded bg-accent-indigo/15 px-1 py-0.5 text-2xs font-semibold text-accent-cyan">
+                      @{item.odds.toFixed(2)}
+                    </span>
+                  )}
                 </div>
               </Link>
-            </div>
+             </div>
           ))}
         </div>
       )}
