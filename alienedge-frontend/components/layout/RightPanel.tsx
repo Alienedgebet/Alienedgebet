@@ -142,7 +142,7 @@ export function RightPanel() {
 
       <aside
         className={cn(
-          "fixed inset-y-0 right-0 top-[56px] z-[55] flex h-[calc(100vh-56px)] w-[85vw] max-w-[320px] flex-col border-l border-border bg-bg-primary",
+          "fixed inset-y-0 right-0 top-[80px] z-[55] flex h-[calc(100vh-80px)] w-[85vw] max-w-[320px] flex-col border-l border-border bg-bg-primary",
           "transition-transform duration-200 ease-ae-ease",
           mobileOpen ? "translate-x-0" : "translate-x-full",
           "md:w-[320px] md:translate-x-0"

@@ -143,36 +143,92 @@ const validationAlertColumns: PredictionColumn<LiveValidationPick>[] = [
   },
 ];
 
+type MetricTooltipKey = "kmv" | "rv" | "gk" | "miss" | "odds" | null;
+
 function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
+  const [activeTooltip, setActiveTooltip] = useState<MetricTooltipKey>(null);
+
+  const getExplanation = (key: MetricTooltipKey) => {
+    switch (key) {
+      case "kmv":
+        return "KMV (Key Missing Vulnerability / Kinetic Momentum): The cumulative historical importance percentage of missing starters from the core eleven.";
+      case "rv":
+        return "RV (Replacement Vulnerability / The Doom): Measures squad depth penalty and quality drop-off when bench/replacement players fill in for missing regulars.";
+      case "gk":
+        return "GK Status: Active regular starting goalkeeper confirmed (GK OK) or backup/vulnerable goalkeeper starting (GK LIABILITY / Out).";
+      case "miss":
+        return "Missing Count: Number of essential squad regulars absent from the starting line-up for this match.";
+      case "odds":
+        return "Odds Scan: Scanned live/pre-match bookmaker market consensus pricing for 1X2 and Over/Under thresholds used for probability calibration.";
+      default:
+        return null;
+    }
+  };
+
   return (
-    <div className="rounded-lg border border-border/70 bg-bg-elevated/30">
+    <div className="rounded-lg border border-border/70 bg-bg-elevated/30 relative">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
         <div>
           <p className="text-2xs uppercase tracking-wide text-text-dim">{team.loc}</p>
           <p className="text-sm font-semibold text-text-primary">{team.team_name}</p>
         </div>
         <div className="flex flex-wrap gap-1.5 font-mono text-2xs">
-          <span className="rounded border border-border-bright px-1.5 py-0.5 text-text-secondary">
+          <button
+            type="button"
+            onClick={() => setActiveTooltip(activeTooltip === "miss" ? null : "miss")}
+            className="rounded border border-border-bright px-1.5 py-0.5 text-text-secondary transition-colors hover:border-accent-indigo"
+            title="Tap to reveal definition"
+          >
             miss {team.miss}
-          </span>
-          <span className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1.5 py-0.5 text-accent-amber">
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTooltip(activeTooltip === "kmv" ? null : "kmv")}
+            className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1.5 py-0.5 text-accent-amber transition-colors hover:bg-accent-amber/20"
+            title="Tap to reveal definition"
+          >
             KMV {team.kmv.toFixed(1)}%
-          </span>
-          <span className="rounded border border-accent-red/30 bg-accent-red/10 px-1.5 py-0.5 text-accent-red">
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTooltip(activeTooltip === "rv" ? null : "rv")}
+            className="rounded border border-accent-red/30 bg-accent-red/10 px-1.5 py-0.5 text-accent-red transition-colors hover:bg-accent-red/20"
+            title="Tap to reveal definition"
+          >
             RV {team.rv.toFixed(1)}%
-          </span>
-          <span
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTooltip(activeTooltip === "gk" ? null : "gk")}
             className={cn(
-              "rounded border px-1.5 py-0.5",
+              "rounded border px-1.5 py-0.5 transition-colors",
               team.gk_out
-                ? "border-accent-red/40 bg-accent-red/10 text-accent-red"
-                : "border-accent-green/30 bg-accent-green/10 text-accent-green"
+                ? "border-accent-red/40 bg-accent-red/10 text-accent-red hover:bg-accent-red/20"
+                : "border-accent-green/30 bg-accent-green/10 text-accent-green hover:bg-accent-green/20"
             )}
+            title="Tap to reveal definition"
           >
             GK {team.gk_out ? "LIABILITY" : "OK"}
-          </span>
+          </button>
         </div>
       </div>
+
+      {activeTooltip && (
+        <div className="bg-bg-elevated border-b border-accent-indigo/40 px-3 py-2 text-2xs text-accent-cyan flex items-start gap-2 animate-fade-in">
+          <Info className="h-3.5 w-3.5 shrink-0 mt-0.5 text-accent-indigo" />
+          <div className="flex-1">
+            <p className="font-semibold text-text-primary">Metric Explanation:</p>
+            <p className="mt-0.5 leading-relaxed">{getExplanation(activeTooltip)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveTooltip(null)}
+            className="text-text-dim hover:text-text-primary"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       <p className="border-b border-border/50 px-3 py-1.5 text-2xs text-text-secondary">
         GK status: {team.gk_status} · Def {team.def_miss} · Mid {team.mid_miss} · Att{" "}
         {team.att_miss}
@@ -226,14 +282,28 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
   );
 }
 
-function PrematchAuditCard({ row }: { row: LivePrematchAudit }) {
+function PrematchAuditCard({
+  row,
+  onOpenDetails,
+}: {
+  row: LivePrematchAudit;
+  onOpenDetails: (row: LivePrematchAudit) => void;
+}) {
   return (
-    <article className="glass overflow-hidden rounded-xl shadow-panel">
-      <div className="border-b border-border/70 px-4 py-3">
+    <article
+      onClick={() => onOpenDetails(row)}
+      className="glass overflow-hidden rounded-xl shadow-panel cursor-pointer transition-all hover:border-accent-indigo/50 hover:shadow-glow group relative"
+    >
+      <div className="absolute top-3 right-3 flex items-center gap-1 font-mono text-2xs text-accent-cyan opacity-80 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all">
+        <span>View Code 2 &amp; 3 Details</span>
+        <ChevronRight className="h-4 w-4" />
+      </div>
+
+      <div className="border-b border-border/70 px-4 py-3 pr-36">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="mb-1 text-2xs font-bold uppercase tracking-widest text-accent-indigo">
-              Stage 1 · Strategic Audit
+              Stage 1 · Strategic Audit (Tap to open Code 2 &amp; 3)
             </p>
             <h3 className="text-sm font-semibold text-text-primary">
               MATCH: {row.fixture}
@@ -252,7 +322,7 @@ function PrematchAuditCard({ row }: { row: LivePrematchAudit }) {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-2" onClick={(e) => e.stopPropagation()}>
         <TeamAuditPanel team={row.home} />
         <TeamAuditPanel team={row.away} />
       </div>
@@ -363,6 +433,24 @@ export default function LivePage() {
 
   const anyMock = prematch.isMock || validation.isMock;
 
+  const matchedValidationMatches = selectedAudit
+    ? board.matches.filter(
+        (m) =>
+          String(m.id) === String(selectedAudit.fixture_id) ||
+          m.name.toLowerCase().includes(selectedAudit.home.team_name.toLowerCase()) ||
+          m.name.toLowerCase().includes(selectedAudit.away.team_name.toLowerCase())
+      )
+    : board.matches;
+
+  const matchedAlerts = selectedAudit
+    ? validationRows.filter(
+        (a) =>
+          String(a.fixture_id) === String(selectedAudit.fixture_id) ||
+          a.match_name.toLowerCase().includes(selectedAudit.home.team_name.toLowerCase()) ||
+          a.match_name.toLowerCase().includes(selectedAudit.away.team_name.toLowerCase())
+      )
+    : validationRows;
+
   return (
     <div className="relative flex flex-col gap-5 p-6">
       <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow opacity-80" />
@@ -417,7 +505,7 @@ export default function LivePage() {
         </div>
       </section>
 
-      {/* ── Stage 1 first ─────────────────────────────────────────────────── */}
+      {/* ── Code 1 ONLY on Main Page ────────────────────────────────────── */}
       <section className="flex flex-col gap-3">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-indigo/15 text-accent-indigo">
@@ -428,8 +516,7 @@ export default function LivePage() {
               Code 1 — Prematch Strategic Audit
             </h2>
             <p className="text-2xs text-text-dim">
-              Console columns persisted · {stats.fixtures} fixtures · picks also written to
-              live_predictions.json for code 2
+              Console columns persisted · {stats.fixtures} fixtures · Tap any match card to open Code 2 &amp; 3 details
             </p>
           </div>
         </div>
@@ -439,52 +526,113 @@ export default function LivePage() {
             <Skeleton className="h-64 rounded-xl bg-bg-elevated" />
           </div>
         ) : (
-          auditRows.map((row) => <PrematchAuditCard key={row.fixture_id} row={row} />)
+          auditRows.map((row) => (
+            <PrematchAuditCard
+              key={row.fixture_id}
+              row={row}
+              onOpenDetails={(r) => setSelectedAudit(r)}
+            />
+          ))
         )}
       </section>
 
-      {/* ── Stage 2 — validation board then fired alerts ──────────────────── */}
-      <section className="flex flex-col gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-green/15 text-accent-green">
-            <ShieldCheck className="h-4 w-4" />
-          </div>
-          <div>
-            <h2 className="text-sm font-semibold text-text-primary">
-              Code 2 — Live Validation of Code 1 Predictions
-            </h2>
-            <p className="text-2xs text-text-dim">
-              VALIDATION BOARD · Cycle #{board.cycle || "—"} · Live {board.total_live} · Tracked{" "}
-              {board.total_tracked}
-            </p>
+      {/* ── Match Detail Modal / Sub-View for Code 2 and Code 3 ──────────── */}
+      {selectedAudit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-primary/80 backdrop-blur-md p-4 overflow-y-auto">
+          <div className="relative w-full max-w-4xl glass rounded-2xl border border-accent-indigo/30 bg-bg-secondary p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-border pb-4 mb-5">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-accent-indigo">
+                  Match Forensic &amp; Validation Details
+                </p>
+                <h2 className="text-lg font-bold text-text-primary">
+                  {selectedAudit.fixture} (ID: {selectedAudit.fixture_id})
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedAudit(null)}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-bg-elevated text-text-secondary hover:text-text-primary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-6">
+              {/* Code 2 Section */}
+              <section className="flex flex-col gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-green/15 text-accent-green">
+                    <ShieldCheck className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary">
+                      Code 2 — Live Validation of Code 1 Predictions
+                    </h3>
+                    <p className="text-2xs text-text-dim">
+                      Cycle #{board.cycle || "—"} · Live tracking board for this fixture
+                    </p>
+                  </div>
+                </div>
+
+                {matchedValidationMatches.length === 0 ? (
+                  <p className="text-xs text-text-dim italic p-3 bg-bg-elevated/40 rounded-lg">
+                    No active live validation tracking entries for this fixture yet.
+                  </p>
+                ) : (
+                  <div className="grid gap-3">
+                    {matchedValidationMatches.map((m) => (
+                      <ValidationMatchCard key={`${m.id}-${m.minute}`} entry={m} />
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              {/* Code 3 Section */}
+              <section className="flex flex-col gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-cyan/15 text-accent-cyan">
+                    <Radio className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary">
+                      Code 3 — Validated Alerts &amp; Supreme Confirmations
+                    </h3>
+                    <p className="text-2xs text-text-dim">
+                      In-play alerts confirmed at 45&apos; / 30&apos; handshake
+                    </p>
+                  </div>
+                </div>
+
+                <ChainBranch
+                  title="MATCH_VALIDATED_ALERTS"
+                  description="Confirmed forensic notes and stats triggers for this fixture"
+                  data={matchedAlerts}
+                  loading={validation.loading}
+                  error={validation.error}
+                  columns={validationAlertColumns}
+                  rowKey={(r, i) =>
+                    `${r.fixture_id}-${r.prediction_type}-${r.minute_triggered}-${i}`
+                  }
+                  emptyMessage="No supreme alerts fired for this fixture yet."
+                  isRefetching={validation.isRefetching}
+                  defaultOpen
+                />
+              </section>
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setSelectedAudit(null)}
+                className="rounded-lg bg-accent-indigo px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-accent-indigo/80"
+              >
+                Close Match Details
+              </button>
+            </div>
           </div>
         </div>
-
-        {validation.loading && board.matches.length === 0 ? (
-          <Skeleton className="h-40 rounded-xl bg-bg-elevated" />
-        ) : (
-          <div className="grid gap-3">
-            {board.matches.map((m) => (
-              <ValidationMatchCard key={`${m.id}-${m.minute}`} entry={m} />
-            ))}
-          </div>
-        )}
-
-        <ChainBranch
-          title="VALIDATED_ALERTS — 45' supreme confirmations"
-          description="In-play alerts confirmed at 45' — forensic note, stats note, minute triggered"
-          data={validationRows}
-          loading={validation.loading}
-          error={validation.error}
-          columns={validationAlertColumns}
-          rowKey={(r, i) =>
-            `${r.fixture_id}-${r.prediction_type}-${r.minute_triggered}-${i}`
-          }
-          emptyMessage="No supreme alerts yet — code 2 validates code 1 picks once matches go live."
-          isRefetching={validation.isRefetching}
-          defaultOpen
-        />
-      </section>
+      )}
     </div>
   );
 }

@@ -12,7 +12,7 @@ export const RightPanelLazy = dynamic(
   {
     ssr: false,
     loading: () => (
-      <aside className="fixed inset-y-0 right-0 top-[56px] z-[55] hidden h-[calc(100vh-56px)] w-[320px] border-l border-border bg-bg-primary md:block" />
+      <aside className="fixed inset-y-0 right-0 top-[80px] z-[55] hidden h-[calc(100vh-80px)] w-[320px] border-l border-border bg-bg-primary md:block" />
     ),
   }
 );
