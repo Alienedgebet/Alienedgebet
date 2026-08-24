@@ -86,7 +86,7 @@ const config: Config = {
       },
       spacing: {
         sidebar: "240px",
-        topbar:  "56px",
+        topbar:  "80px",
       },
       borderRadius: {
         sm:   "4px",
