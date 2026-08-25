@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo } from "react";
-import { Radio, Shield, ShieldCheck } from "lucide-react";
+import { useState, useMemo } from "react";
+import { Radio, Shield, ShieldCheck, Info, X, ChevronRight } from "lucide-react";
 import {
   liveApi,
   type LivePrematchAudit,
@@ -397,7 +397,26 @@ function ValidationMatchCard({ entry }: { entry: LiveValidationMatch }) {
   );
 }
 
+function FeedStat({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent?: string;
+}) {
+  return (
+    <div className="border-l border-border/60 pl-4 first:border-l-0 first:pl-0">
+      <p className="text-2xs uppercase tracking-wide text-text-dim">{label}</p>
+      <p className={cn("font-bold tabular-nums", accent ?? "text-text-primary")}>{value}</p>
+    </div>
+  );
+}
+
 export default function LivePage() {
+  const [selectedAudit, setSelectedAudit] = useState<LivePrematchAudit | null>(null);
+
   const prematch = useApi(() => liveApi.getPrematch(), [], {
     fallback: MOCK_LIVE_PREMATCH_AUDIT,
     cacheKey: "live-edges-prematch",
@@ -633,23 +652,6 @@ export default function LivePage() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function FeedStat({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: string;
-}) {
-  return (
-    <div className="border-l border-border/60 pl-4 first:border-l-0 first:pl-0">
-      <p className="text-2xs uppercase tracking-wide text-text-dim">{label}</p>
-      <p className={cn("font-bold tabular-nums", accent ?? "text-text-primary")}>{value}</p>
     </div>
   );
 }
