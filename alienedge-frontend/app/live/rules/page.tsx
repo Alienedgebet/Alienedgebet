@@ -38,19 +38,25 @@ function buildLive(type: LiveType, side: Side, minValue: number): UserRuleLive {
 }
 
 function describeRule(rule: UserRuleDef): { pre: string; live: string } {
-  const pre =
-    rule.prematch.type === "none"
-      ? "Any prematch state"
-      : rule.prematch.type === "flag"
-        ? (PREMATCH_FLAG_OPTIONS.find((o) => o.value === rule.prematch.flag)?.label ?? rule.prematch.flag)
-        : `${PREMATCH_RATE_OPTIONS.find((o) => o.value === rule.prematch.metric)?.label ?? rule.prematch.metric} ≥ ${rule.prematch.min_value}%`;
+  let pre = "Any prematch state";
+  const prematch = rule.prematch as any;
 
-  const live =
-    rule.live.type === "snapshot"
-      ? "Every live update"
-      : rule.live.type === "pressure_share"
-        ? `${rule.live.side === "any" ? "Either side" : rule.live.side === "home" ? "Home" : "Away"} pressure ≥ ${rule.live.min_value}%`
-        : `Chaos index ≥ ${rule.live.min_value}`;
+  if (prematch?.type === "flag") {
+    pre = PREMATCH_FLAG_OPTIONS.find((o) => o.value === prematch.flag)?.label ?? prematch.flag;
+  } else if (prematch?.type === "rate") {
+    const label = PREMATCH_RATE_OPTIONS.find((o) => o.value === prematch.metric)?.label ?? prematch.metric;
+    pre = `${label} ≥ ${prematch.min_value}%`;
+  }
+
+  let live = "Every live update";
+  const liveCond = rule.live as any;
+
+  if (liveCond?.type === "pressure_share") {
+    const sideLabel = liveCond.side === "any" ? "Either side" : liveCond.side === "home" ? "Home" : "Away";
+    live = `${sideLabel} pressure ≥ ${liveCond.min_value}%`;
+  } else if (liveCond?.type === "chaos_index") {
+    live = `Chaos index ≥ ${liveCond.min_value}`;
+  }
 
   return { pre, live };
 }
