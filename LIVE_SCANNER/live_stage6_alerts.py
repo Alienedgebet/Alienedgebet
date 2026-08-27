@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import time
 import json
 import requests
@@ -10,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from dotenv import load_dotenv
+
+from user_rules_store import list_rules, evaluate_rule_for_match
 
 # --- 1. HOSTING & ENVIRONMENT SETUP ---
 load_dotenv()
@@ -401,9 +404,15 @@ class StructuralDetective:
 # 🎯 MODULE 3: USER-RULE EVALUATOR
 # ==============================================================================
 class UserRuleEvaluator:
-    def evaluate(self, f_id, intel, structural, pre, configs):
+    """
+    Loads every ACTIVE rule saved by every user (user_rules_store.py) and
+    checks each one against this match. Each firing rule becomes its own
+    alert, tagged with the user_id/rule_id that triggered it, so the
+    frontend can show each user only their own alerts.
+    """
+    def evaluate(self, f_id, intel, structural, pre, all_rules):
         triggered = []
-        conf      = intel['match']['confidence_score']
+        conf = intel['match']['confidence_score']
 
         if conf >= CONFIDENCE_PREMIUM_THRESHOLD:
             tier = "🔥 PREMIUM"
@@ -412,62 +421,19 @@ class UserRuleEvaluator:
         else:
             tier = "📊 MONITOR"
 
-        for cfg in configs:
-            if cfg['type'] == "PRESSURE_SHARE":
-                target = cfg['side']
-                if 'require_prematch_flag' in cfg:
-                    flags = safe_get(pre, 'flags') or {}
-                    if not flags.get(cfg['require_prematch_flag']): continue
-
-                share = intel['match'][f'{target[0]}_pressure_share']
-                if share >= cfg.get('min_pct', PRESSURE_SHARE_THRESHOLD):
-                    alert_msg = (
-                        f"{target.upper()} dominating Pressure Share "
-                        f"({share}%) | xG: {intel[target]['live_xg']} "
-                        f"| SOT: {intel[target]['sot']} "
-                        f"| DA: {intel[target]['da']}"
-                    )
-                    triggered.append({
-                        "id":   f"{f_id}_USER_PRESSURE_{target.upper()}",
-                        "msg":  alert_msg,
-                        "tier": tier,
-                        "conf": conf
-                    })
-
-            if cfg['type'] == "FUSED_PREMATCH_LIVE":
-                req_label   = cfg.get('required_label')
-                min_chaos   = cfg.get('min_chaos', MIN_CHAOS_FOR_FUSED)
-                pick_labels = pre.get('pick_labels', [])
-                if (req_label in pick_labels and
-                        intel['match']['chaos_index'] >= min_chaos):
-                    alert_msg = (
-                        f"Pre-match '{req_label}' fused with live chaos "
-                        f"({intel['match']['chaos_index']:.1f}) "
-                        f"| Conf: {conf}%"
-                    )
-                    triggered.append({
-                        "id":   f"{f_id}_USER_FUSED",
-                        "msg":  alert_msg,
-                        "tier": tier,
-                        "conf": conf
-                    })
-
-            # Live Snapshot — fires every cycle for all live matches
-            if cfg['type'] == "LIVE_SNAPSHOT":
-                alert_msg = (
-                    f"Live Snapshot | Conf: {conf}% | "
-                    f"H-Pressure: {intel['match']['h_pressure_share']}% | "
-                    f"A-Pressure: {intel['match']['a_pressure_share']}% | "
-                    f"Chaos: {intel['match']['chaos_index']:.1f} | "
-                    f"H-xG: {intel['home']['live_xg']} | "
-                    f"A-xG: {intel['away']['live_xg']}"
-                )
-                triggered.append({
-                    "id":   f"{f_id}_SNAPSHOT",
-                    "msg":  alert_msg,
-                    "tier": "📊 MONITOR",
-                    "conf": conf
-                })
+        for rule in all_rules:
+            hit = evaluate_rule_for_match(rule, intel, pre)
+            if hit is None:
+                continue
+            triggered.append({
+                "id":        f"{f_id}_{hit['rule_id']}",
+                "msg":       hit["note"],
+                "tier":      tier,
+                "conf":      conf,
+                "user_id":   hit["user_id"],
+                "rule_id":   hit["rule_id"],
+                "rule_label": hit["label"],
+            })
 
         return triggered
 
@@ -554,27 +520,10 @@ class SupremeOrchestrator:
 
                     fixture_name = fx.get('name', f_id)
 
-                    user_setup = [
-                        {"type": "LIVE_SNAPSHOT"},
-                        {
-                            "type":    "PRESSURE_SHARE",
-                            "side":    "home",
-                            "min_pct": PRESSURE_SHARE_THRESHOLD
-                        },
-                        {
-                            "type":    "PRESSURE_SHARE",
-                            "side":    "away",
-                            "min_pct": PRESSURE_SHARE_THRESHOLD
-                        },
-                        {
-                            "type":          "FUSED_PREMATCH_LIVE",
-                            "required_label": "🔥 BOTH 2H GOAL (100%)",
-                            "min_chaos":      MIN_CHAOS_FOR_FUSED
-                        }
-                    ]
+                    active_rules = list_rules(active_only=True)
 
                     user_alerts   = self.UserLogic.evaluate(
-                        f_id, intel, structural, pre, user_setup
+                        f_id, intel, structural, pre, active_rules
                     )
                     fired_this    = []
 
@@ -583,7 +532,10 @@ class SupremeOrchestrator:
                                 ua['id'] not in ALERT_HISTORY):
                             self.fire_alert(
                                 f_id, fixture_name,
-                                ua['tier'], ua['msg'], ua['conf'], minute
+                                ua['tier'], ua['msg'], ua['conf'], minute,
+                                user_id=ua.get('user_id'),
+                                rule_id=ua.get('rule_id'),
+                                rule_label=ua.get('rule_label'),
                             )
                             ALERT_HISTORY.add(ua['id'])
                             fired_this.append(ua)
@@ -716,7 +668,8 @@ class SupremeOrchestrator:
 
     # ── FIRE ALERT ────────────────────────────────────────────────────────
     def fire_alert(self, f_id, fixture_name,
-                   level, msg, confidence, minute):
+                   level, msg, confidence, minute,
+                   user_id=None, rule_id=None, rule_label=None):
         now    = datetime.now()
         banner = ("🔥" if "PREMIUM" in level
                   else ("✅" if "STANDARD" in level else "📊"))
@@ -727,11 +680,13 @@ class SupremeOrchestrator:
         print(f"  Minute   : {minute}'")
         print(f"  Message  : {msg}")
         print(f"  Conf     : {confidence}%")
+        if user_id:
+            print(f"  Rule     : {rule_label} (user {user_id})")
         print(f"{'━'*80}\n")
 
         logging.info(
             f"[{level}] {fixture_name} @ {minute}' | "
-            f"Conf:{confidence}% | {msg}"
+            f"Conf:{confidence}% | user={user_id or 'system'} | {msg}"
         )
 
         record = {
@@ -742,7 +697,10 @@ class SupremeOrchestrator:
             "level":      level,
             "confidence": confidence,
             "msg":        msg,
-            "session":    SESSION_ID
+            "session":    SESSION_ID,
+            "user_id":    user_id,
+            "rule_id":    rule_id,
+            "rule_label": rule_label,
         }
         SESSION_ALERTS.append(record)
 
@@ -957,9 +915,6 @@ class SupremeOrchestrator:
         )
         return GET(url).get('data', [])
 
-
-# Need re for _name_key
-import re
 
 # ==============================================================================
 # 🚀 MAIN ENTRY POINT
