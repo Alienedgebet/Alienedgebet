@@ -1050,6 +1050,10 @@ export interface LiveAlertPick {
   confidence: number;
   msg: string;
   session: string;
+  /** Present only on alerts fired by a user's own saved rule; null/absent = system alert. */
+  user_id?: string | null;
+  rule_id?: string | null;
+  rule_label?: string | null;
 }
 
 /** Stage 6 cycle_matches orchestrator board row. */
@@ -1085,6 +1089,56 @@ export interface LiveOrchestratorBoard {
   total_db: number;
   matches: LiveOrchestratorMatch[];
 }
+
+// ============================================================
+// USER-DEFINED LIVE ALERT RULES (Code 6 flexibility filter)
+// ============================================================
+export type PrematchFlagKey =
+  | "both_2h_goal_100_percent"
+  | "home_h2h_win_100"
+  | "away_h2h_win_100"
+  | "h2h_gg_100"
+  | "h2h_o25_100";
+
+export type PrematchRateMetric = "home_2h_rate" | "away_2h_rate";
+
+export type UserRulePrematch =
+  | { type: "none" }
+  | { type: "flag"; flag: PrematchFlagKey }
+  | { type: "rate"; metric: PrematchRateMetric; min_value: number };
+
+export type UserRuleLive =
+  | { type: "snapshot" }
+  | { type: "pressure_share"; side: "home" | "away" | "any"; min_value: number }
+  | { type: "chaos_index"; min_value: number };
+
+export interface UserRuleDef {
+  rule_id: string;
+  user_id: string;
+  label: string;
+  prematch: UserRulePrematch;
+  live: UserRuleLive;
+  active: boolean;
+  created_at?: string;
+}
+
+export type UserRuleCreate = Omit<UserRuleDef, "rule_id" | "created_at">;
+export type UserRulePatch = Partial<Pick<UserRuleDef, "label" | "prematch" | "live" | "active">>;
+
+/** Must match LIVE_SCANNER/user_rules_store.py VALID_PREMATCH_FLAGS exactly. */
+export const PREMATCH_FLAG_OPTIONS: { value: PrematchFlagKey; label: string }[] = [
+  { value: "both_2h_goal_100_percent", label: "Both 2H Goal (100%)" },
+  { value: "home_h2h_win_100", label: "Home H2H Win (100%)" },
+  { value: "away_h2h_win_100", label: "Away H2H Win (100%)" },
+  { value: "h2h_gg_100", label: "H2H GG (100%)" },
+  { value: "h2h_o25_100", label: "H2H Over 2.5 (100%)" },
+];
+
+/** Must match LIVE_SCANNER/user_rules_store.py VALID_PREMATCH_RATE_METRICS exactly. */
+export const PREMATCH_RATE_OPTIONS: { value: PrematchRateMetric; label: string }[] = [
+  { value: "home_2h_rate", label: "Home 2H Scoring Rate" },
+  { value: "away_2h_rate", label: "Away 2H Scoring Rate" },
+];
 
 // ============================================================
 // FILTER & PIPELINE TYPES
@@ -1345,6 +1399,24 @@ export const liveApi = {
 
   getDashboard: (): Promise<AxiosResponse<LiveDashboardResult[]>> =>
     api.get("/api/live/dashboard"),
+};
+
+export const userRulesApi = {
+  list: (userId: string): Promise<AxiosResponse<UserRuleDef[]>> =>
+    api.get("/api/live/user-rules", { params: { user_id: userId } }),
+
+  create: (rule: UserRuleCreate): Promise<AxiosResponse<UserRuleDef>> =>
+    api.post("/api/live/user-rules", rule),
+
+  update: (ruleId: string, patch: UserRulePatch): Promise<AxiosResponse<UserRuleDef>> =>
+    api.patch(`/api/live/user-rules/${ruleId}`, patch),
+
+  remove: (ruleId: string, userId: string): Promise<AxiosResponse<void>> =>
+    api.delete(`/api/live/user-rules/${ruleId}`, { params: { user_id: userId } }),
+
+  /** Alerts fired specifically from this user's own saved rules. */
+  getMyAlerts: (userId: string): Promise<AxiosResponse<LiveAlertPick[]>> =>
+    api.get("/api/live/alerts/mine", { params: { user_id: userId } }),
 };
 
 export const filterApi = {

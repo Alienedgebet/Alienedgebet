@@ -20,6 +20,7 @@ import {
   Radio,
   Scale,
   Shield,
+  SlidersHorizontal,
   Swords,
   TimerReset,
   TrendingDown,
@@ -46,6 +47,7 @@ const LIVE_CHILDREN: NavItem[] = [
   { label: "Live Match Edges", href: "/live/edges", icon: Shield },
   { label: "Incoming Live Matches", href: "/live/incoming", icon: Inbox },
   { label: "Live Alert Scanner", href: "/live/alerts", icon: Bell },
+  { label: "Build My Alert", href: "/live/rules", icon: SlidersHorizontal },
 ];
 
 const NAV: NavSection[] = [

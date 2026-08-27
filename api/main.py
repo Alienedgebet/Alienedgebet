@@ -1,9 +1,9 @@
+import os
+import sys
+import traceback
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-import traceback
-import sys
-import os
 
 # ── PATH BOOTSTRAP ────────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +24,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── ROUTERS ───────────────────────────────────────────────────────────────────
+from api.user_rules_router import router as user_rules_router
+app.include_router(user_rules_router)
+
 
 # ── SHARED HELPER ─────────────────────────────────────────────────────────────
 def _run(fn, *args, **kwargs):
