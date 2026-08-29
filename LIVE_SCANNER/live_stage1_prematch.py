@@ -17,6 +17,11 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 PREDICTIONS_FILE = os.path.join(DATA_DIR, "live_predictions.json")
 CACHE_FILE = os.path.join(DATA_DIR, "squad_cache.json")
+# NEW: persists the GK liability + missing-key-player audit that was
+# previously only printed to console. Additive-only — does not change
+# PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED, or anything Live Match Edges
+# already reads.
+PREMATCH_TEAM_AUDIT_FILE = os.path.join(DATA_DIR, "prematch_team_audit.json")
 
 # ==============================================================================
 # CONFIGURATION & WORLD STANDARDS (100% UNTOUCHED)
@@ -255,6 +260,10 @@ def run_prematch_engine():
 
     load_cache()
     FINAL_PREDICTIONS_FEED = {} 
+    # NEW: separate feed for the GK liability + missing-player audit, keyed
+    # the same way as FINAL_PREDICTIONS_FEED. Populated alongside it, saved
+    # to its own file, never merged into it.
+    TEAM_AUDIT_FEED = {}
     
     now_aware = datetime.now(timezone.utc)
     dates_to_check =[
@@ -298,6 +307,10 @@ def run_prematch_engine():
                 print(f"ODDS SCAN > Home: {odds_data['home_win']} | Away: {odds_data['away_win']} | O2.5: {odds_data['o25']}")
 
                 m_stats =[]
+                # NEW: captures the GK status text per team_id, purely for
+                # the new audit file. Reset per fixture, read after the
+                # team loop, never touches m_stats or the print board.
+                team_gk_notes = {}
                 for team in fx.get("participants",[]):
                     tid, loc = team['id'], team.get('meta', {}).get('location')
                     squad_map = get_squad_data_standardized(tid)
@@ -309,6 +322,7 @@ def run_prematch_engine():
                     today_team_ids =[str(l.get('player_id')) for l in official_lineups if str(l.get('team_id')) == str(tid)]
 
                     gk_p, gk_m, gk_n = calculate_gk_vulnerability_pro(master_gk, today_team_ids, lineups_raw, squad_map)
+                    team_gk_notes[str(tid)] = {"gk_vuln_score": gk_p, "gk_out": gk_m, "gk_status": gk_n}
                     
                     print(f"\n--- {team['name'].upper()} ({loc.upper()}) ---\n{'Player Name':<28} | {'Pos':<12} | {'Apps':<4} | {'Mins':<6} | {'Rating':<6} | {'Status'}\n" + "-"*115)
                     km_w = tot_w = m_c = w_l = def_miss = mid_miss = att_miss = 0; l_w_m = r_w_m = False
@@ -349,6 +363,42 @@ def run_prematch_engine():
 
                 if len(m_stats) == 2:
                     h, a = (m_stats[0], m_stats[1]) if m_stats[0]['loc'] == 'home' else (m_stats[1], m_stats[0])
+                    # NEW: build the persisted team audit entry for this
+                    # fixture using data already computed above (m_stats +
+                    # team_gk_notes). Purely additive — does not affect h/a
+                    # objects used below for match_picks/killer rules.
+                    TEAM_AUDIT_FEED[f_id] = {
+                        "fixture": fx.get('name'),
+                        "kickoff_utc": start_dt.strftime('%H:%M'),
+                        "status_text": status_text,
+                        "home": {
+                            "team_id": str(h['id']),
+                            "team_name": h['name'],
+                            "gk_out": h['gk_out'],
+                            "gk_status": team_gk_notes.get(str(h['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(h['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": h['miss'],
+                            "def_miss": h['def_miss'],
+                            "mid_miss": h['mid_miss'],
+                            "att_miss": h['att_miss'],
+                            "kmv": h['kmv'],
+                            "rv": h['rv'],
+                        },
+                        "away": {
+                            "team_id": str(a['id']),
+                            "team_name": a['name'],
+                            "gk_out": a['gk_out'],
+                            "gk_status": team_gk_notes.get(str(a['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(a['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": a['miss'],
+                            "def_miss": a['def_miss'],
+                            "mid_miss": a['mid_miss'],
+                            "att_miss": a['att_miss'],
+                            "kmv": a['kmv'],
+                            "rv": a['rv'],
+                        },
+                    }
+
                     match_picks =[]
                     print(f"\n[PRE-MATCH STRATEGIC PREDICTIONS]")
                     
@@ -384,7 +434,13 @@ def run_prematch_engine():
 
     with open(PREDICTIONS_FILE, 'w') as f: 
         json.dump(FINAL_PREDICTIONS_FEED, f)
-        
+
+    # NEW: save the GK liability + missing-player audit to its own file.
+    # PREDICTIONS_FILE above is untouched — this is a second, independent
+    # write, for Code 6 to read.
+    with open(PREMATCH_TEAM_AUDIT_FILE, 'w') as f:
+        json.dump(TEAM_AUDIT_FEED, f)
+
     save_cache()
     print(f"\n--- SCAN COMPLETE: {len(FINAL_PREDICTIONS_FEED)} FEED SYNCED IN DATA DIR ---")
     return FINAL_PREDICTIONS_FEED

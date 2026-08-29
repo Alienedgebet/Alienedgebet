@@ -1,236 +1,105 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Filter } from "lucide-react";
+import { Filter, Layers, Target, ShieldCheck, Zap } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Button } from "@/components/ui/button";
-import { DynamicTable, TableSkeleton, ErrorState } from "@/components/predictions";
-import { filterApi, getTodayDate } from "@/lib/api";
-import { MOCK_FILTER_ROWS } from "@/lib/mock-chains";
+import { filterApi } from "@/lib/api";
 import { FilterTab } from "./FilterTab";
 import { GG_FILTER_CONFIG, WIN_FILTER_CONFIG, OVER25_FILTER_CONFIG } from "./filter-config";
 
-/**
- * Win Precision has a different shape than the other 3 filters — no
- * mode/risk params, just a cross-verification run against a single date
- * or a weekly anchor + range, so it gets its own small panel instead of
- * reusing <FilterTab>'s generic field grid.
- */
-function WinPrecisionPanel() {
-  const [scope, setScope] = useState<"single" | "weekly">("single");
-  const [date, setDate] = useState(getTodayDate());
-  const [anchorDate, setAnchorDate] = useState(getTodayDate());
-  const [startDate, setStartDate] = useState(getTodayDate());
-  const [endDate, setEndDate] = useState(getTodayDate());
-  const [submitted, setSubmitted] = useState({ tick: 0 });
-  // Seed demo rows so Win Precision is never blank offline (dashboard parity).
-  const [rows, setRows] = useState<Record<string, unknown>[]>(MOCK_FILTER_ROWS);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (submitted.tick === 0) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-
-    const promise =
-      scope === "single"
-        ? filterApi.getWinPrecision(date)
-        : filterApi.getWinPrecisionWeekly({ anchor_date: anchorDate, start_date: startDate, end_date: endDate });
-
-    promise
-      .then((res) => {
-        if (cancelled) return;
-        const data = res.data;
-        const list = Array.isArray(data)
-          ? data
-          : ((data as { results?: unknown[] })?.results ?? []);
-        if (list.length === 0) {
-          setRows(MOCK_FILTER_ROWS);
-          setError(null);
-        } else {
-          setRows(list as Record<string, unknown>[]);
-          setError(null);
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setRows(MOCK_FILTER_ROWS);
-        setError(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [submitted.tick]);
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="glass rounded-lg p-4 shadow-panel">
-        <div className="mb-3 flex items-center gap-2">
-          <Button size="sm" variant={scope === "single" ? "default" : "outline"} onClick={() => setScope("single")}>
-            Single Date
-          </Button>
-          <Button size="sm" variant={scope === "weekly" ? "default" : "outline"} onClick={() => setScope("weekly")}>
-            Weekly Cross-Verify
-          </Button>
-        </div>
-
-        {scope === "single" ? (
-          <div className="mb-3 flex flex-col gap-1">
-            <label className="text-2xs text-text-muted">Date</label>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="w-40 rounded border border-border bg-bg-elevated px-2 py-1 text-xs text-text-primary outline-none focus:border-accent-indigo"
-            />
-          </div>
-        ) : (
-          <div className="mb-3 flex flex-wrap gap-3">
-            <div className="flex flex-col gap-1">
-              <label className="text-2xs text-text-muted">Anchor Date</label>
-              <input
-                type="date"
-                value={anchorDate}
-                onChange={(e) => setAnchorDate(e.target.value)}
-                className="w-40 rounded border border-border bg-bg-elevated px-2 py-1 text-xs text-text-primary outline-none focus:border-accent-indigo"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-2xs text-text-muted">Start Date</label>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
-                className="w-40 rounded border border-border bg-bg-elevated px-2 py-1 text-xs text-text-primary outline-none focus:border-accent-indigo"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-2xs text-text-muted">End Date</label>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
-                className="w-40 rounded border border-border bg-bg-elevated px-2 py-1 text-xs text-text-primary outline-none focus:border-accent-indigo"
-              />
-            </div>
-          </div>
-        )}
-
-        <div className="mt-2">
-          <Button onClick={() => setSubmitted((s) => ({ tick: s.tick + 1 }))} disabled={loading}>
-            {loading ? "Running…" : "Run Precision Check"}
-          </Button>
-        </div>
-      </div>
-
-      <div className="glass rounded-lg p-3 shadow-panel">
-        {loading && rows.length === 0 ? (
-          <TableSkeleton />
-        ) : rows.length > 0 ? (
-          <DynamicTable
-            rows={rows}
-            priorityKeys={
-              scope === "weekly"
-                ? [
-                    "fixture", "side", "team_name", "win_odds",
-                    "parity_score", "h2h_wins_last_5",
-                    "last_5_wins_overall", "verification_days",
-                  ]
-                : [
-                    "fixture", "side", "team_name", "win_odds",
-                    "parity_score", "last_5_wins_overall",
-                    "last_5_wins_at_venue", "h2h_wins_last_5",
-                    "opp_last_5_conceded_raw", "last_3_no_draw_BOTH",
-                  ]
-            }
-            emptyMessage="No rows matched this precision check."
-          />
-        ) : error ? (
-          <ErrorState message={error} />
-        ) : (
-          <DynamicTable
-            rows={rows}
-            priorityKeys={
-              scope === "weekly"
-                ? [
-                    "fixture", "side", "team_name", "win_odds",
-                    "parity_score", "h2h_wins_last_5",
-                    "last_5_wins_overall", "verification_days",
-                  ]
-                : [
-                    "fixture", "side", "team_name", "win_odds",
-                    "parity_score", "last_5_wins_overall",
-                    "last_5_wins_at_venue", "h2h_wins_last_5",
-                    "opp_last_5_conceded_raw", "last_3_no_draw_BOTH",
-                  ]
-            }
-            emptyMessage={
-              submitted.tick === 0
-                ? "Set a date above and click Run Precision Check."
-                : "No rows matched this precision check."
-            }
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
 export default function WeeklyPage() {
   return (
-    <div
-      className="flex flex-col gap-4 p-6"
-    >
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-indigo/15">
-          <Filter className="h-5 w-5 text-accent-indigo" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">Weekly Forecast Filter</h1>
-          <p className="text-xs text-text-secondary">
-            Separate from pick-chain pages. GG, Win, and Over 2.5 filter engines — same columns
-            as each engine&apos;s printout — plus Win Precision cross-check.
-          </p>
+    <div className="flex flex-col gap-6 p-4 md:p-8 max-w-7xl mx-auto w-full">
+      
+      {/* ── TOP BANNER ────────────────────────────────────────────── */}
+      <div className="glass relative overflow-hidden rounded-2xl border border-cyan-500/20 bg-gradient-to-r from-[#071322] via-[#0c1f36] to-[#071322] p-5 shadow-[0_0_30px_rgba(6,182,212,0.1)]">
+        <div className="flex items-center gap-3.5">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 shadow-[0_0_15px_rgba(6,182,212,0.4)]">
+            <Filter className="h-5 w-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-lg font-black uppercase tracking-wider text-white flex items-center gap-2">
+              Weekly Forensic Aggregators
+            </h1>
+            <p className="text-xs text-cyan-200/70">
+              Institutional precision filters across 7-day cross-verification, parity score gates (Safe ≥ 15), and AI council votes.
+            </p>
+          </div>
         </div>
       </div>
 
-      <div>
-        <Tabs defaultValue="gg">
-          <TabsList>
-            <TabsTrigger value="gg">GG Filter</TabsTrigger>
-            <TabsTrigger value="win">Win Filter</TabsTrigger>
-            <TabsTrigger value="over25">Over 2.5 Filter</TabsTrigger>
-            <TabsTrigger value="win_precision">Win Precision</TabsTrigger>
-          </TabsList>
+      {/* ── TABS NAVIGATION ───────────────────────────────────────── */}
+      <Tabs defaultValue="gg" className="w-full">
+        <TabsList className="grid grid-cols-2 md:grid-cols-4 gap-2 bg-[#090e1a]/80 p-1.5 rounded-xl border border-white/10 h-auto">
+          <TabsTrigger
+            value="gg"
+            className="flex items-center gap-2 py-2.5 text-xs font-bold data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500 data-[state=active]:to-blue-600 data-[state=active]:text-white rounded-lg transition-all"
+          >
+            <Target className="h-3.5 w-3.5" />
+            GG Precision (Parity ≤ 4)
+          </TabsTrigger>
 
-          <TabsContent value="gg" className="mt-4">
-            <FilterTab config={GG_FILTER_CONFIG} fetchSingle={filterApi.getGGFilter} fetchWeekly={filterApi.getGGWeekly} />
-          </TabsContent>
+          <TabsTrigger
+            value="over25"
+            className="flex items-center gap-2 py-2.5 text-xs font-bold data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500 data-[state=active]:to-blue-600 data-[state=active]:text-white rounded-lg transition-all"
+          >
+            <Layers className="h-3.5 w-3.5" />
+            Over 2.5 Stage 3
+          </TabsTrigger>
 
-          <TabsContent value="win" className="mt-4">
-            <FilterTab config={WIN_FILTER_CONFIG} fetchSingle={filterApi.getWinFilter} fetchWeekly={filterApi.getWinWeekly} />
-          </TabsContent>
+          <TabsTrigger
+            value="win"
+            className="flex items-center gap-2 py-2.5 text-xs font-bold data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500 data-[state=active]:to-blue-600 data-[state=active]:text-white rounded-lg transition-all"
+          >
+            <ShieldCheck className="h-3.5 w-3.5" />
+            Win Poisson (Safe ≥ 15)
+          </TabsTrigger>
 
-          <TabsContent value="over25" className="mt-4">
-            <FilterTab
-              config={OVER25_FILTER_CONFIG}
-              fetchSingle={filterApi.getOver25Filter}
-              fetchWeekly={filterApi.getOver25Weekly}
-            />
-          </TabsContent>
+          <TabsTrigger
+            value="win_precision"
+            className="flex items-center gap-2 py-2.5 text-xs font-bold data-[state=active]:bg-gradient-to-r data-[state=active]:from-cyan-500 data-[state=active]:to-blue-600 data-[state=active]:text-white rounded-lg transition-all"
+          >
+            <Zap className="h-3.5 w-3.5" />
+            Win Cross-Check
+          </TabsTrigger>
+        </TabsList>
 
-          <TabsContent value="win_precision" className="mt-4">
-            <WinPrecisionPanel />
-          </TabsContent>
-        </Tabs>
-      </div>
+        {/* ── TAB 1: GG FILTER ────────────────────────────────────── */}
+        <TabsContent value="gg" className="mt-6">
+          <FilterTab
+            config={GG_FILTER_CONFIG}
+            fetchSingle={(date, params) => filterApi.getGGFilter(date, params)}
+            fetchWeekly={(params) => filterApi.getGGWeekly(params)}
+          />
+        </TabsContent>
+
+        {/* ── TAB 2: OVER 2.5 FILTER ──────────────────────────────── */}
+        <TabsContent value="over25" className="mt-6">
+          <FilterTab
+            config={OVER25_FILTER_CONFIG}
+            fetchSingle={(date, params) => filterApi.getOver25Filter(date, params)}
+            fetchWeekly={(params) => filterApi.getOver25Weekly(params)}
+          />
+        </TabsContent>
+
+        {/* ── TAB 3: WIN FILTER ───────────────────────────────────── */}
+        <TabsContent value="win" className="mt-6">
+          <FilterTab
+            config={WIN_FILTER_CONFIG}
+            fetchSingle={(date, params) => filterApi.getWinFilter(date, params)}
+            fetchWeekly={(params) => filterApi.getWinWeekly(params)}
+          />
+        </TabsContent>
+
+        {/* ── TAB 4: WIN PRECISION CROSS-CHECK ────────────────────── */}
+        <TabsContent value="win_precision" className="mt-6">
+          <FilterTab
+            config={WIN_FILTER_CONFIG}
+            fetchSingle={(date) => filterApi.getWinPrecision(date)}
+            fetchWeekly={(params) => filterApi.getWinPrecisionWeekly(params as any)}
+          />
+        </TabsContent>
+      </Tabs>
+
     </div>
   );
 }

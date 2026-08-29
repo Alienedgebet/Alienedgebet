@@ -25,11 +25,15 @@ DATA_DIR   = os.path.join(BASE_DIR, "data")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(DATA_DIR,   exist_ok=True)
 
-AGGREGATOR_REPORT_FILE = os.path.join(DATA_DIR,   "aggregator_report.json")
-SH_GG_WINNER_FILE      = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json")
-CACHE_FILE             = os.path.join(DATA_DIR,   "squad_cache.json")
-OUTPUT_ALERTS_FILE     = os.path.join(OUTPUT_DIR, "ready_to_push.json")
-LOG_FILE               = os.path.join(OUTPUT_DIR, "system.log")
+AGGREGATOR_REPORT_FILE   = os.path.join(DATA_DIR,   "aggregator_report.json")
+SH_GG_WINNER_FILE        = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json")
+# NEW: Stage 1's GK liability + missing-key-player audit, written by the
+# additive patch to live_stage1_prematch.py. Third prematch source, merged
+# into the same `db` dict as the other two — never overwrites their fields.
+PREMATCH_TEAM_AUDIT_FILE  = os.path.join(DATA_DIR,   "prematch_team_audit.json")
+CACHE_FILE                = os.path.join(DATA_DIR,   "squad_cache.json")
+OUTPUT_ALERTS_FILE        = os.path.join(OUTPUT_DIR, "ready_to_push.json")
+LOG_FILE                  = os.path.join(OUTPUT_DIR, "system.log")
 
 SESSION_ID       = datetime.now().strftime("%Y%m%d_%H%M%S")
 SESSION_LOG_FILE = os.path.join(OUTPUT_DIR, f"alerts_{SESSION_ID}.json")
@@ -66,6 +70,10 @@ VALIDATION_STATE   = {}
 MARKET_SETTLEMENT  = {}
 ALERT_HISTORY      = set()
 SESSION_ALERTS     = []
+# NEW: per-fixture key-11 id sets + live loss counters, mirrors the pattern
+# already proven in live_stage2_verification.py's MATCH_CONTEXT_CACHE, but
+# scoped to Code 6 so it doesn't depend on Stage 2 running.
+KEY_PLAYER_TRACKING = {}
 
 cache_lock    = threading.Lock()
 alert_lock    = threading.Lock()
@@ -400,6 +408,38 @@ class StructuralDetective:
             "a_gk":     ctx['impact']['away']['gk_risk'],
         }
 
+    # ── NEW: KEY-11 IDENTIFICATION (mirrors live_stage2_verification.py's
+    # get_k() helper) ────────────────────────────────────────────────────
+    def build_key_ids(self, team_id):
+        """
+        Returns the set of player ids considered 'key' for this team: the
+        top-worth goalkeeper plus the top-10-worth outfield players, using
+        the exact same SQUAD_VAULT worth data already computed for doom
+        scoring. Used only to detect a REAL key player being subbed off
+        during a live match — separate from Stage 1's prematch missing-count.
+        """
+        squad = self.get_squad_data(team_id)
+        if not squad:
+            return set()
+        players = list(squad.values())
+        gks = sorted(
+            [p for p in players if str(p.get('pos')) == "Goalkeeper"],
+            key=lambda x: x.get('worth', 0), reverse=True
+        )
+        outfield = sorted(
+            [p for p in players if str(p.get('pos')) != "Goalkeeper"],
+            key=lambda x: x.get('worth', 0), reverse=True
+        )
+        key_players = (gks[:1] + outfield[:10])
+        # NOTE: SQUAD_VAULT entries don't carry their own pid as a key here
+        # (StructuralDetective.get_squad_data indexes by pid already), so
+        # ids must be pulled from the dict keys, not values.
+        key_ids = set()
+        for pid, p in squad.items():
+            if p in key_players:
+                key_ids.add(pid)
+        return key_ids
+
 # ==============================================================================
 # 🎯 MODULE 3: USER-RULE EVALUATOR
 # ==============================================================================
@@ -410,7 +450,7 @@ class UserRuleEvaluator:
     alert, tagged with the user_id/rule_id that triggered it, so the
     frontend can show each user only their own alerts.
     """
-    def evaluate(self, f_id, intel, structural, pre, all_rules):
+    def evaluate(self, f_id, intel, structural, pre, minute, key_loss, all_rules):
         triggered = []
         conf = intel['match']['confidence_score']
 
@@ -422,7 +462,7 @@ class UserRuleEvaluator:
             tier = "📊 MONITOR"
 
         for rule in all_rules:
-            hit = evaluate_rule_for_match(rule, intel, pre)
+            hit = evaluate_rule_for_match(rule, intel, pre, minute, key_loss)
             if hit is None:
                 continue
             triggered.append({
@@ -518,12 +558,20 @@ class SupremeOrchestrator:
                     ctx        = self.extract_impact_context(fx)
                     structural = self.Detective.investigate(ctx, pre)
 
+                    # NEW: real live key-player-lost tracking, ported from
+                    # the same idea as live_stage2_verification.py — but
+                    # self-contained here so Code 6 doesn't depend on Stage
+                    # 2 running. Key-11 sets are built lazily once both
+                    # squads are cached, then substitution events are
+                    # checked against those sets every cycle.
+                    key_loss = self._track_key_player_loss(f_id, ctx, fx)
+
                     fixture_name = fx.get('name', f_id)
 
                     active_rules = list_rules(active_only=True)
 
                     user_alerts   = self.UserLogic.evaluate(
-                        f_id, intel, structural, pre, active_rules
+                        f_id, intel, structural, pre, minute, key_loss, active_rules
                     )
                     fired_this    = []
 
@@ -560,6 +608,7 @@ class SupremeOrchestrator:
                         "h_sot":      intel['home']['sot'],
                         "a_sot":      intel['away']['sot'],
                         "structural": structural.get('status','OK'),
+                        "key_loss":   key_loss,
                         "alerts":     fired_this,
                         "in_db":      bool(pre)
                     })
@@ -579,6 +628,52 @@ class SupremeOrchestrator:
         n = str(name).lower()
         n = re.sub(r'[^a-z0-9]', '', n)
         return n
+
+    # ── NEW: KEY-PLAYER LOSS TRACKER ────────────────────────────────────
+    def _track_key_player_loss(self, f_id, ctx, fx):
+        """
+        Lazily builds each side's key-11 id set (once both squads are
+        cached by maintenance_thread), then checks this cycle's
+        substitution events against those sets. Returns a small dict the
+        rule evaluator can check for a genuinely LIVE "key player lost
+        mid-match" condition — distinct from Stage 1's prematch missing
+        count, which only knows who never started at all.
+        """
+        h_id = ctx.get('home', {}).get('id')
+        a_id = ctx.get('away', {}).get('id')
+
+        if f_id not in KEY_PLAYER_TRACKING:
+            KEY_PLAYER_TRACKING[f_id] = {
+                "h_key": None, "a_key": None,
+                "h_lost": 0, "a_lost": 0,
+                "seen_events": set(),
+            }
+        track = KEY_PLAYER_TRACKING[f_id]
+
+        if track["h_key"] is None and h_id and str(h_id) in SQUAD_VAULT:
+            track["h_key"] = self.Detective.build_key_ids(h_id)
+        if track["a_key"] is None and a_id and str(a_id) in SQUAD_VAULT:
+            track["a_key"] = self.Detective.build_key_ids(a_id)
+
+        for e in fx.get('events', []):
+            code = safe_get(e, "type", "code")
+            if code != "substitution":
+                continue
+            ev_key = f"{e.get('id')}_{e.get('player_id')}_{e.get('minute')}"
+            if ev_key in track["seen_events"]:
+                continue
+
+            pid = str(e.get("player_id"))
+            side_id = str(e.get("participant_id"))
+
+            if side_id == str(h_id) and track["h_key"] and pid in track["h_key"]:
+                track["h_lost"] += 1
+                track["seen_events"].add(ev_key)
+            elif side_id == str(a_id) and track["a_key"] and pid in track["a_key"]:
+                track["a_lost"] += 1
+                track["seen_events"].add(ev_key)
+
+        return {"h_lost": track["h_lost"], "a_lost": track["a_lost"]}
 
     # ── ORCHESTRATOR BOARD ────────────────────────────────────────────────
     def print_orchestrator_board(self, cycle_matches, total_live, total_db):
@@ -608,7 +703,8 @@ class SupremeOrchestrator:
                     f"A-Pressure {m['a_pressure']}% | "
                     f"Chaos {m['chaos']:.1f} | "
                     f"H-xG {m['h_xg']} | A-xG {m['a_xg']} | "
-                    f"H-SOT {m['h_sot']} | A-SOT {m['a_sot']}"
+                    f"H-SOT {m['h_sot']} | A-SOT {m['a_sot']} | "
+                    f"Key Lost H:{m['key_loss']['h_lost']} A:{m['key_loss']['a_lost']}"
                 )
                 struct = m.get('structural','OK')
                 if struct not in ['OK','']:
@@ -682,6 +778,8 @@ class SupremeOrchestrator:
         print(f"  Conf     : {confidence}%")
         if user_id:
             print(f"  Rule     : {rule_label} (user {user_id})")
+        else:
+            print(f"  Source   : System Verdict")
         print(f"{'━'*80}\n")
 
         logging.info(
@@ -760,6 +858,25 @@ class SupremeOrchestrator:
             except Exception as e:
                 logging.warning(f"SH-GG file error: {e}")
 
+        # NEW: Stage 1's GK liability + missing-key-player audit — third
+        # prematch source. Keyed by fixture_id like the other two. Uses
+        # dict.update() so it never overwrites flags/chemistry already
+        # merged in above; it only adds the "home"/"away" audit block.
+        if os.path.exists(PREMATCH_TEAM_AUDIT_FILE):
+            try:
+                with open(PREMATCH_TEAM_AUDIT_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for fid, item in data.items():
+                        fid = str(fid)
+                        if fid not in db:
+                            db[fid] = {}
+                        db[fid]['team_audit'] = item
+                        if 'h_id' not in db[fid] and 'home' in item:
+                            db[fid]['h_id'] = str(item['home'].get('team_id', ''))
+                            db[fid]['a_id'] = str(item['away'].get('team_id', ''))
+            except Exception as e:
+                logging.warning(f"Prematch team audit file error: {e}")
+
         return db
 
     # ── STALE MEMORY CLEANUP ──────────────────────────────────────────────
@@ -768,6 +885,10 @@ class SupremeOrchestrator:
                  if fid not in live_ids]
         for fid in stale:
             del LIVE_METRICS_VAULT[fid]
+        # NEW: keep key-player tracking cache aligned with live matches too
+        stale_key = [fid for fid in KEY_PLAYER_TRACKING if fid not in live_ids]
+        for fid in stale_key:
+            del KEY_PLAYER_TRACKING[fid]
 
     # ── SQUAD PREFETCH (thread-safe) ──────────────────────────────────────
     def _fetch_and_store_squad(self, tid):
