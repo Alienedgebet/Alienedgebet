@@ -1013,11 +1013,13 @@ export interface LiveStage6Intel {
     live_xg?: number;
     sot?: number;
     da?: number;
+    corn?: number;
   };
   away?: {
     live_xg?: number;
     sot?: number;
     da?: number;
+    corn?: number;
   };
   match?: {
     confidence_score?: number;
@@ -1038,6 +1040,12 @@ export interface LiveStage6Forensics {
   a_gk?: boolean;
   h_triple?: boolean;
   a_triple?: boolean;
+}
+
+/** Stage 6 live key-player-lost tracker (real, in-play, distinct from Stage 1's prematch missing count). */
+export interface LiveKeyLoss {
+  h_lost: number;
+  a_lost: number;
 }
 
 /** Stage 6 fire_alert record — VIP + free LIVE orchestrator. */
@@ -1076,6 +1084,8 @@ export interface LiveOrchestratorMatch {
   intel?: LiveStage6Intel;
   /** Nested structural forensics (optional). */
   forensics?: LiveStage6Forensics;
+  /** Live key-player-lost counts (optional — older boards may omit). */
+  key_loss?: LiveKeyLoss;
   /** VALID_30 | SUPREME_45 | null */
   validation?: string | null;
   /** Settled markets e.g. ["GG","O2.5"] */
@@ -1092,6 +1102,11 @@ export interface LiveOrchestratorBoard {
 
 // ============================================================
 // USER-DEFINED LIVE ALERT RULES (Code 6 flexibility filter)
+// Every type below mirrors LIVE_SCANNER/user_rules_store.py exactly —
+// three real prematch sources (SH-GG Winner flags/rates, Stage 1 team
+// audit, Aggregator chemistry/breach) and eight real live conditions
+// (snapshot, pressure, chaos, xG, SOT, corners, DA, key player lost),
+// plus an optional minute window.
 // ============================================================
 export type PrematchFlagKey =
   | "both_2h_goal_100_percent"
@@ -1102,15 +1117,58 @@ export type PrematchFlagKey =
 
 export type PrematchRateMetric = "home_2h_rate" | "away_2h_rate";
 
+export type ChemistryMarket =
+  | "Gg"
+  | "Corner"
+  | "Home Win"
+  | "Away Win"
+  | "Over2.5"
+  | "Under3.5"
+  | "Over1.5";
+
+export type ChemistryLevel =
+  | "excellent"
+  | "elite"
+  | "very strong"
+  | "strong"
+  | "weak"
+  | "very weak";
+
+export type RuleSide = "home" | "away" | "any";
+
 export type UserRulePrematch =
   | { type: "none" }
   | { type: "flag"; flag: PrematchFlagKey }
-  | { type: "rate"; metric: PrematchRateMetric; min_value: number };
+  | { type: "rate"; metric: PrematchRateMetric; min_value: number }
+  | { type: "gk_liability"; side: RuleSide }
+  | { type: "key_missing"; side: RuleSide; min_count: number }
+  | { type: "aggregator_chemistry"; market: ChemistryMarket; level: ChemistryLevel }
+  | { type: "aggregator_breach"; side: RuleSide };
+
+export type LiveConditionType =
+  | "snapshot"
+  | "pressure_share"
+  | "chaos_index"
+  | "xg"
+  | "sot"
+  | "corners"
+  | "da"
+  | "key_player_lost";
 
 export type UserRuleLive =
   | { type: "snapshot" }
-  | { type: "pressure_share"; side: "home" | "away" | "any"; min_value: number }
-  | { type: "chaos_index"; min_value: number };
+  | { type: "pressure_share"; side: RuleSide; min_value: number }
+  | { type: "chaos_index"; min_value: number }
+  | { type: "xg"; side: RuleSide; min_value: number }
+  | { type: "sot"; side: RuleSide; min_value: number }
+  | { type: "corners"; side: RuleSide; min_value: number }
+  | { type: "da"; side: RuleSide; min_value: number }
+  | { type: "key_player_lost"; side: RuleSide; min_count: number };
+
+export interface UserRuleMinuteWindow {
+  start: number;
+  end: number;
+}
 
 export interface UserRuleDef {
   rule_id: string;
@@ -1118,12 +1176,15 @@ export interface UserRuleDef {
   label: string;
   prematch: UserRulePrematch;
   live: UserRuleLive;
+  minute_window?: UserRuleMinuteWindow;
   active: boolean;
   created_at?: string;
 }
 
 export type UserRuleCreate = Omit<UserRuleDef, "rule_id" | "created_at">;
-export type UserRulePatch = Partial<Pick<UserRuleDef, "label" | "prematch" | "live" | "active">>;
+export type UserRulePatch = Partial
+  Pick<UserRuleDef, "label" | "prematch" | "live" | "minute_window" | "active">
+>;
 
 /** Must match LIVE_SCANNER/user_rules_store.py VALID_PREMATCH_FLAGS exactly. */
 export const PREMATCH_FLAG_OPTIONS: { value: PrematchFlagKey; label: string }[] = [
@@ -1138,6 +1199,37 @@ export const PREMATCH_FLAG_OPTIONS: { value: PrematchFlagKey; label: string }[] 
 export const PREMATCH_RATE_OPTIONS: { value: PrematchRateMetric; label: string }[] = [
   { value: "home_2h_rate", label: "Home 2H Scoring Rate" },
   { value: "away_2h_rate", label: "Away 2H Scoring Rate" },
+];
+
+/** Must match LIVE_SCANNER/user_rules_store.py VALID_CHEMISTRY_MARKETS exactly. */
+export const CHEMISTRY_MARKET_OPTIONS: { value: ChemistryMarket; label: string }[] = [
+  { value: "Gg", label: "GG / BTTS" },
+  { value: "Corner", label: "Corners" },
+  { value: "Home Win", label: "Home Win" },
+  { value: "Away Win", label: "Away Win" },
+  { value: "Over2.5", label: "Over 2.5" },
+  { value: "Under3.5", label: "Under 3.5" },
+  { value: "Over1.5", label: "Over 1.5" },
+];
+
+/** Must match LIVE_SCANNER/user_rules_store.py VALID_CHEMISTRY_LEVELS exactly. */
+export const CHEMISTRY_LEVEL_OPTIONS: { value: ChemistryLevel; label: string }[] = [
+  { value: "excellent", label: "Excellent" },
+  { value: "elite", label: "Elite" },
+  { value: "very strong", label: "Very Strong" },
+  { value: "strong", label: "Strong" },
+  { value: "weak", label: "Weak" },
+  { value: "very weak", label: "Very Weak" },
+];
+
+/** Live condition types offering a per-side selector (home/away/any). */
+export const LIVE_SIDED_TYPES: LiveConditionType[] = [
+  "pressure_share",
+  "xg",
+  "sot",
+  "corners",
+  "da",
+  "key_player_lost",
 ];
 
 // ============================================================

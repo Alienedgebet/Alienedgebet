@@ -1,565 +1,699 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { Bell, Flame, Radio, ShieldCheck, SlidersHorizontal, UserCheck } from "lucide-react";
-import {
-  liveApi,
-  userRulesApi,
-  type LiveAlertPick,
-  type LiveOrchestratorBoard,
-  type LiveOrchestratorMatch,
-  type UserRuleDef,
-} from "@/lib/api";
-import { useApi } from "@/lib/use-api";
-import { useLocalUserId } from "@/lib/use-local-user";
-import { MOCK_LIVE_ALERTS, MOCK_LIVE_ORCHESTRATOR } from "@/lib/mock-chains";
-import { RadialGauge } from "@/components/predictions";
-import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
+import { useCallback, useEffect, useState } from "react";
+import { SlidersHorizontal, Trash2, Loader2, Clock } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useLocalUserId } from "@/lib/use-local-user";
+import {
+  userRulesApi,
+  PREMATCH_FLAG_OPTIONS,
+  PREMATCH_RATE_OPTIONS,
+  CHEMISTRY_MARKET_OPTIONS,
+  CHEMISTRY_LEVEL_OPTIONS,
+  LIVE_SIDED_TYPES,
+  type UserRuleDef,
+  type UserRulePrematch,
+  type UserRuleLive,
+  type PrematchFlagKey,
+  type PrematchRateMetric,
+  type ChemistryMarket,
+  type ChemistryLevel,
+  type RuleSide,
+  type LiveConditionType,
+} from "@/lib/api";
 
-/**
- * Page 6 — Live Module 6 Validator & Scanner.
- *
- * The old "Scanner rule customizer" here used to filter cards already on
- * screen — it never told the backend anything. It's been replaced with
- * "Your Active Rules" (real rules saved via /live/rules, actually
- * evaluated by the orchestrator every cycle) and "Your Alerts" (alerts
- * the backend fired specifically because one of YOUR rules matched).
- */
+type PrematchType =
+  | "none"
+  | "flag"
+  | "rate"
+  | "gk_liability"
+  | "key_missing"
+  | "aggregator_chemistry"
+  | "aggregator_breach";
 
-function boardFrom(data: LiveOrchestratorBoard | null, loading: boolean): LiveOrchestratorBoard {
-  if (loading && (!data || !data.matches?.length)) return MOCK_LIVE_ORCHESTRATOR;
-  if (data && Array.isArray(data.matches) && data.matches.length > 0) return data;
-  return MOCK_LIVE_ORCHESTRATOR;
-}
+const PREMATCH_TYPE_LABELS: Record<PrematchType, string> = {
+  none: "Any / Skip",
+  flag: "100% Flag (SH-GG)",
+  rate: "Rate Threshold (SH-GG)",
+  gk_liability: "GK Liability (Lineup)",
+  key_missing: "Key Players Missing (Lineup)",
+  aggregator_chemistry: "Market Chemistry (Aggregator)",
+  aggregator_breach: "Danger Breach (Aggregator)",
+};
 
-function alertRows(data: LiveAlertPick[] | null, loading: boolean): LiveAlertPick[] {
-  if (loading && (!data || data.length === 0)) return MOCK_LIVE_ALERTS;
-  if (data && data.length > 0) return data;
-  return MOCK_LIVE_ALERTS;
-}
+const LIVE_TYPE_LABELS: Record<LiveConditionType, string> = {
+  snapshot: "Every Update",
+  pressure_share: "Pressure Share",
+  chaos_index: "Chaos Index",
+  xg: "Live xG",
+  sot: "Shots on Target",
+  corners: "Corners",
+  da: "Dangerous Attacks",
+  key_player_lost: "Key Player Lost (Live)",
+};
 
-function confidenceOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.match?.confidence_score ?? m.conf ?? 0;
-}
-function chaosOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.match?.chaos_index ?? m.chaos ?? 0;
-}
-function hPressureOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.match?.h_pressure_share ?? m.h_pressure ?? 0;
-}
-function aPressureOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.match?.a_pressure_share ?? m.a_pressure ?? 0;
-}
-function hXgOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.home?.live_xg ?? m.h_xg ?? 0;
-}
-function aXgOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.away?.live_xg ?? m.a_xg ?? 0;
-}
-function hSotOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.home?.sot ?? m.h_sot ?? 0;
-}
-function aSotOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.away?.sot ?? m.a_sot ?? 0;
-}
-function hDaOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.home?.da ?? 0;
-}
-function aDaOf(m: LiveOrchestratorMatch): number {
-  return m.intel?.away?.da ?? 0;
-}
-
-function alertTone(level: string, conf: number): "premium" | "standard" | "monitor" {
-  const u = (level ?? "").toUpperCase();
-  if (u.includes("PREMIUM") || conf >= 50) return "premium";
-  if (u.includes("STANDARD") || conf >= 30) return "standard";
-  return "monitor";
-}
-
-function formatClock(iso: string): string {
-  if (!iso) return "—";
-  return iso.replace("T", " ").slice(0, 19);
-}
-
-function settlementLabel(market: string): string {
-  const m = market.toUpperCase();
-  if (m === "GG" || m.includes("GG")) return "GG SETTLED";
-  if (m.includes("O2.5") || m.includes("OVER 2.5") || m === "O25") return "O2.5 SETTLED";
-  return `${m} SETTLED`;
-}
-
-function describeRuleShort(rule: UserRuleDef): string {
-  const pre = rule.prematch.type === "none" ? "any prematch" : rule.prematch.type === "flag" ? rule.prematch.flag.replace(/_/g, " ") : `${rule.prematch.metric?.replace(/_/g, " ")} ≥ ${rule.prematch.min_value}%`;
-  const live =
-    rule.live.type === "snapshot"
-      ? "every update"
-      : rule.live.type === "pressure_share"
-        ? `${rule.live.side} pressure ≥ ${rule.live.min_value}%`
-        : `chaos ≥ ${rule.live.min_value}`;
-  return `${pre} + ${live}`;
+function buildPrematch(
+  type: PrematchType,
+  flag: PrematchFlagKey,
+  metric: PrematchRateMetric,
+  rateMinValue: number,
+  gkSide: RuleSide,
+  keyMissingSide: RuleSide,
+  keyMissingCount: number,
+  chemMarket: ChemistryMarket,
+  chemLevel: ChemistryLevel,
+  breachSide: RuleSide
+): UserRulePrematch {
+  switch (type) {
+    case "flag":
+      return { type: "flag", flag };
+    case "rate":
+      return { type: "rate", metric, min_value: rateMinValue };
+    case "gk_liability":
+      return { type: "gk_liability", side: gkSide };
+    case "key_missing":
+      return { type: "key_missing", side: keyMissingSide, min_count: keyMissingCount };
+    case "aggregator_chemistry":
+      return { type: "aggregator_chemistry", market: chemMarket, level: chemLevel };
+    case "aggregator_breach":
+      return { type: "aggregator_breach", side: breachSide };
+    default:
+      return { type: "none" };
+  }
 }
 
-export default function LiveAlertsPage() {
+function buildLive(
+  type: LiveConditionType,
+  side: RuleSide,
+  minValue: number,
+  keyLostSide: RuleSide,
+  keyLostCount: number
+): UserRuleLive {
+  switch (type) {
+    case "pressure_share":
+      return { type: "pressure_share", side, min_value: minValue };
+    case "chaos_index":
+      return { type: "chaos_index", min_value: minValue };
+    case "xg":
+      return { type: "xg", side, min_value: minValue };
+    case "sot":
+      return { type: "sot", side, min_value: minValue };
+    case "corners":
+      return { type: "corners", side, min_value: minValue };
+    case "da":
+      return { type: "da", side, min_value: minValue };
+    case "key_player_lost":
+      return { type: "key_player_lost", side: keyLostSide, min_count: keyLostCount };
+    default:
+      return { type: "snapshot" };
+  }
+}
+
+function describePrematch(p: UserRulePrematch): string {
+  switch (p.type) {
+    case "none":
+      return "Any prematch state";
+    case "flag":
+      return PREMATCH_FLAG_OPTIONS.find((o) => o.value === p.flag)?.label ?? p.flag;
+    case "rate":
+      return `${PREMATCH_RATE_OPTIONS.find((o) => o.value === p.metric)?.label ?? p.metric} ≥ ${p.min_value}%`;
+    case "gk_liability":
+      return `GK liability (${p.side})`;
+    case "key_missing":
+      return `${p.side} missing ≥ ${p.min_count} key players`;
+    case "aggregator_chemistry":
+      return `${p.market} chemistry = ${CHEMISTRY_LEVEL_OPTIONS.find((o) => o.value === p.level)?.label ?? p.level}`;
+    case "aggregator_breach":
+      return `Danger breach (${p.side})`;
+    default:
+      return "Unknown";
+  }
+}
+
+function describeLive(l: UserRuleLive): string {
+  switch (l.type) {
+    case "snapshot":
+      return "Every live update";
+    case "pressure_share":
+      return `${l.side} pressure ≥ ${l.min_value}%`;
+    case "chaos_index":
+      return `Chaos ≥ ${l.min_value}`;
+    case "xg":
+      return `${l.side} xG ≥ ${l.min_value}`;
+    case "sot":
+      return `${l.side} SOT ≥ ${l.min_value}`;
+    case "corners":
+      return `${l.side} corners ≥ ${l.min_value}`;
+    case "da":
+      return `${l.side} dangerous attacks ≥ ${l.min_value}`;
+    case "key_player_lost":
+      return `${l.side} lost ≥ ${l.min_count} key player(s)`;
+    default:
+      return "Unknown";
+  }
+}
+
+function describeRule(rule: UserRuleDef): { pre: string; live: string; window: string } {
+  return {
+    pre: describePrematch(rule.prematch),
+    live: describeLive(rule.live),
+    window: rule.minute_window
+      ? `${rule.minute_window.start}'–${rule.minute_window.end}'`
+      : "Full match",
+  };
+}
+
+export default function LiveRulesPage() {
   const userId = useLocalUserId();
 
-  const orchestrator = useApi(() => liveApi.getOrchestrator(), [], {
-    fallback: MOCK_LIVE_ORCHESTRATOR,
-    cacheKey: "live-alerts-orchestrator",
-  });
-  const alerts = useApi(() => liveApi.getAlerts(), [], {
-    fallback: MOCK_LIVE_ALERTS,
-    cacheKey: "live-alerts-alerts",
-  });
+  const [rules, setRules] = useState<UserRuleDef[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const board = boardFrom(orchestrator.data, orchestrator.loading);
-  const matches = useMemo(() => board.matches ?? [], [board.matches]);
-  const rows = alertRows(alerts.data, alerts.loading);
+  const [label, setLabel] = useState("");
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Prematch state
+  const [prematchType, setPrematchType] = useState<PrematchType>("flag");
+  const [prematchFlag, setPrematchFlag] = useState<PrematchFlagKey>(PREMATCH_FLAG_OPTIONS[0].value);
+  const [prematchMetric, setPrematchMetric] = useState<PrematchRateMetric>(PREMATCH_RATE_OPTIONS[0].value);
+  const [prematchRateMinValue, setPrematchRateMinValue] = useState(80);
+  const [gkSide, setGkSide] = useState<RuleSide>("any");
+  const [keyMissingSide, setKeyMissingSide] = useState<RuleSide>("any");
+  const [keyMissingCount, setKeyMissingCount] = useState(2);
+  const [chemMarket, setChemMarket] = useState<ChemistryMarket>(CHEMISTRY_MARKET_OPTIONS[0].value);
+  const [chemLevel, setChemLevel] = useState<ChemistryLevel>(CHEMISTRY_LEVEL_OPTIONS[0].value);
+  const [breachSide, setBreachSide] = useState<RuleSide>("any");
 
-  // ── Your saved rules ──
-  const [myRules, setMyRules] = useState<UserRuleDef[]>([]);
-  const [rulesLoading, setRulesLoading] = useState(true);
+  // Live state
+  const [liveType, setLiveType] = useState<LiveConditionType>("pressure_share");
+  const [liveSide, setLiveSide] = useState<RuleSide>("any");
+  const [liveMinValue, setLiveMinValue] = useState(55);
+  const [keyLostSide, setKeyLostSide] = useState<RuleSide>("any");
+  const [keyLostCount, setKeyLostCount] = useState(1);
 
-  // ── Your personal alerts (fired by YOUR rules specifically) ──
-  const [myAlerts, setMyAlerts] = useState<LiveAlertPick[]>([]);
-  const [myAlertsLoading, setMyAlertsLoading] = useState(true);
-  const [myAlertsError, setMyAlertsError] = useState(false);
+  // Minute window state
+  const [useWindow, setUseWindow] = useState(false);
+  const [windowStart, setWindowStart] = useState(0);
+  const [windowEnd, setWindowEnd] = useState(90);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     if (!userId) return;
-    setRulesLoading(true);
+    setLoading(true);
     userRulesApi
       .list(userId)
-      .then((res) => setMyRules(res.data))
-      .catch(() => setMyRules([]))
-      .finally(() => setRulesLoading(false));
-
-    setMyAlertsLoading(true);
-    userRulesApi
-      .getMyAlerts(userId)
-      .then((res) => {
-        setMyAlerts(res.data);
-        setMyAlertsError(false);
-      })
-      .catch(() => setMyAlertsError(true))
-      .finally(() => setMyAlertsLoading(false));
+      .then((res) => setRules(res.data))
+      .catch(() => setError("Could not load your saved rules — showing none for now."))
+      .finally(() => setLoading(false));
   }, [userId]);
 
-  const activeMatch = useMemo(() => {
-    if (!matches.length) return null;
-    if (selectedId) {
-      const hit = matches.find((m) => m.id === selectedId);
-      if (hit) return hit;
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  // Live value slider bounds/defaults per type — keeps the UI honest about
+  // what range each real stat actually moves in.
+  function liveSliderConfig(type: LiveConditionType): { min: number; max: number; step: number } {
+    switch (type) {
+      case "pressure_share":
+        return { min: 40, max: 80, step: 1 };
+      case "chaos_index":
+        return { min: 0, max: 12, step: 0.5 };
+      case "xg":
+        return { min: 0, max: 4, step: 0.1 };
+      case "sot":
+        return { min: 0, max: 12, step: 1 };
+      case "corners":
+        return { min: 0, max: 12, step: 1 };
+      case "da":
+        return { min: 0, max: 60, step: 1 };
+      default:
+        return { min: 0, max: 100, step: 1 };
     }
-    return [...matches].sort((a, b) => confidenceOf(b) - confidenceOf(a))[0] ?? null;
-  }, [matches, selectedId]);
+  }
 
-  const activeConf = confidenceOf(activeMatch ?? ({} as LiveOrchestratorMatch));
-  const activeChaos = chaosOf(activeMatch ?? ({} as LiveOrchestratorMatch));
-  const validation = activeMatch?.validation ?? null;
-  const settled = activeMatch?.settled ?? [];
+  async function handleSave() {
+    if (!userId) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const prematch = buildPrematch(
+        prematchType,
+        prematchFlag,
+        prematchMetric,
+        prematchRateMinValue,
+        gkSide,
+        keyMissingSide,
+        keyMissingCount,
+        chemMarket,
+        chemLevel,
+        breachSide
+      );
+      const live = buildLive(liveType, liveSide, liveMinValue, keyLostSide, keyLostCount);
 
-  const sortedAlerts = useMemo(
-    () => [...rows].sort((a, b) => String(b.time ?? "").localeCompare(String(a.time ?? ""))),
-    [rows]
-  );
+      await userRulesApi.create({
+        user_id: userId,
+        label: label.trim() || "Untitled Rule",
+        prematch,
+        live,
+        ...(useWindow ? { minute_window: { start: windowStart, end: windowEnd } } : {}),
+        active: true,
+      });
+      setLabel("");
+      reload();
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail || "Could not save this rule. Check your conditions and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  const anyMock = orchestrator.isMock || alerts.isMock;
-  const activeRuleCount = myRules.filter((r) => r.active).length;
+  async function handleToggle(rule: UserRuleDef) {
+    setRules((prev) => prev.map((r) => (r.rule_id === rule.rule_id ? { ...r, active: !r.active } : r)));
+    try {
+      await userRulesApi.update(rule.rule_id, { active: !rule.active });
+    } catch {
+      reload();
+    }
+  }
+
+  async function handleDelete(rule: UserRuleDef) {
+    if (!userId) return;
+    setRules((prev) => prev.filter((r) => r.rule_id !== rule.rule_id));
+    try {
+      await userRulesApi.remove(rule.rule_id, userId);
+    } catch {
+      reload();
+    }
+  }
+
+  const invalidCombo = prematchType === "none" && liveType === "snapshot";
+  const sliderCfg = liveSliderConfig(liveType);
+  const liveNeedsSide = LIVE_SIDED_TYPES.includes(liveType) && liveType !== "key_player_lost";
 
   return (
-    <div className="relative flex flex-col gap-5 p-6 lg:flex-row lg:items-start">
-      <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow opacity-70" />
-
-      <div className="flex min-w-0 flex-1 flex-col gap-5">
-        {/* ── 1. Top metrics header ── */}
-        <div className="glass flex flex-wrap items-center gap-5 rounded-xl px-5 py-4 shadow-panel">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-amber/20 shadow-glow-amber">
-              <Bell className="h-4 w-4 text-accent-amber" />
-            </div>
-            <div>
-              <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-text-primary">
-                Code 6 · Validator & Scanner
-                {anyMock && (
-                  <Badge variant="outline" className="h-4 border-accent-amber/30 px-1 text-[0.6rem] text-accent-amber">
-                    Demo
-                  </Badge>
-                )}
-              </p>
-              <p className="text-2xs text-text-dim">
-                Cycle #{board.cycle || "—"} · Live {board.total_live} · DB {board.total_db} ·{" "}
-                {board.session || "—"}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-4 sm:gap-6">
-            <RadialGauge value={activeConf} label="Confidence" size={88} strokeWidth={7} />
-
-            <div className="min-w-[7rem]">
-              <p className="text-2xs uppercase tracking-wide text-text-dim">Chaos Index</p>
-              <div className="mt-1 flex items-center gap-2">
-                <span
-                  className={cn(
-                    "font-mono text-2xl font-bold tabular-nums",
-                    activeChaos >= 5 ? "text-accent-amber" : "text-text-primary"
-                  )}
-                >
-                  {activeChaos.toFixed(1)}
-                </span>
-                {activeChaos >= 5.0 && (
-                  <Flame className="h-5 w-5 text-accent-amber drop-shadow-[0_0_8px_rgba(245,158,11,0.85)]" aria-label="High chaos" />
-                )}
-              </div>
-              <p className="mt-0.5 truncate text-2xs text-text-dim">{activeMatch?.name ?? "No active fixture"}</p>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <p className="text-2xs uppercase tracking-wide text-text-dim">Handshake gates</p>
-              <div className="flex flex-wrap gap-1.5">
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "font-mono text-2xs",
-                    validation === "VALID_30" || validation === "SUPREME_45"
-                      ? "border-accent-cyan/40 bg-accent-cyan/10 text-accent-cyan"
-                      : "border-border/60 text-text-dim"
-                  )}
-                >
-                  30&apos; · VALID_30
-                  {(validation === "VALID_30" || validation === "SUPREME_45") && " ✓"}
-                </Badge>
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "font-mono text-2xs",
-                    validation === "SUPREME_45"
-                      ? "border-accent-green/40 bg-accent-green/10 text-accent-green"
-                      : "border-border/60 text-text-dim"
-                  )}
-                >
-                  45&apos; · SUPREME_45
-                  {validation === "SUPREME_45" && " ✓"}
-                </Badge>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <p className="text-2xs uppercase tracking-wide text-text-dim">Settlement</p>
-              <div className="flex flex-wrap gap-1.5">
-                {settled.length === 0 ? (
-                  <span className="font-mono text-2xs text-text-dim">No markets settled</span>
-                ) : (
-                  settled.map((s) => (
-                    <span
-                      key={s}
-                      className="rounded border border-accent-green/40 bg-accent-green/10 px-2 py-0.5 font-mono text-2xs font-semibold text-accent-green"
-                    >
-                      [ {settlementLabel(s)} 🟢 ]
-                    </span>
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
+    <div className="flex flex-col gap-4 p-6">
+      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-indigo/15">
+          <SlidersHorizontal className="h-5 w-5 text-accent-indigo" />
         </div>
-
-        {/* ── 2. Your Active Rules (real, saved, server-evaluated) ── */}
-        <section className="rounded-xl border border-border/70 bg-bg-elevated/30 px-4 py-4 shadow-panel">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <SlidersHorizontal className="h-4 w-4 text-accent-indigo" />
-              <h2 className="text-sm font-semibold text-text-primary">Your active rules</h2>
-              <span className="rounded border border-border-bright bg-bg-elevated px-1.5 py-0.5 font-mono text-2xs text-text-muted">
-                {activeRuleCount} active
-              </span>
-            </div>
-            <Link
-              href="/live/rules"
-              className="rounded-lg border border-accent-indigo/40 bg-accent-indigo/10 px-3 py-1.5 text-2xs font-semibold text-accent-indigo transition-colors hover:bg-accent-indigo/20"
-            >
-              Manage rules →
-            </Link>
-          </div>
-
-          {rulesLoading ? (
-            <Skeleton className="h-10 rounded-lg bg-bg-deep" />
-          ) : myRules.length === 0 ? (
-            <p className="text-xs text-text-dim">
-              You haven&apos;t built an alert yet. Combine a prematch signal with a live condition
-              on the <Link href="/live/rules" className="text-accent-indigo hover:underline">Build My Alert</Link> screen.
-            </p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {myRules.map((rule) => (
-                <span
-                  key={rule.rule_id}
-                  className={cn(
-                    "rounded-lg border px-2.5 py-1.5 text-2xs",
-                    rule.active
-                      ? "border-accent-green/30 bg-accent-green/5 text-text-secondary"
-                      : "border-border/50 bg-bg-elevated/40 text-text-dim"
-                  )}
-                >
-                  <span className="font-semibold text-text-primary">{rule.label}</span>
-                  <span className="ml-1.5 font-mono">· {describeRuleShort(rule)}</span>
-                  {!rule.active && <span className="ml-1.5 italic">(paused)</span>}
-                </span>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* ── 3. Live match telemetry ── */}
-        <section className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-amber/15 text-accent-amber">
-              <Radio className="h-4 w-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-semibold text-text-primary">Live match telemetry</h2>
-              <p className="text-2xs text-text-dim">
-                Pressure share · xG / SOT / DA · structural forensics (doom / red / GK) · {matches.length} fixtures
-              </p>
-            </div>
-          </div>
-
-          {orchestrator.loading && matches.length === 0 ? (
-            <Skeleton className="h-48 rounded-xl bg-bg-elevated" />
-          ) : matches.length === 0 ? (
-            <p className="rounded-xl border border-border/60 bg-bg-elevated/20 px-4 py-8 text-center text-sm text-text-dim">
-              No live fixtures right now.
-            </p>
-          ) : (
-            <div className="grid gap-3">
-              {matches.map((m) => (
-                <TelemetryCard
-                  key={`${m.id}-${m.minute}`}
-                  m={m}
-                  selected={activeMatch?.id === m.id}
-                  onSelect={() => setSelectedId(m.id)}
-                />
-              ))}
-            </div>
-          )}
-        </section>
+        <div>
+          <h1 className="text-base font-bold text-text-primary">Build My Alert</h1>
+          <p className="text-xs text-text-secondary">
+            Combine a real prematch signal — from the SH-GG Winner engine, the lineup audit, or
+            aggregator chemistry — with a real live condition and an optional minute window.
+            Saved rules run against every live fixture, every cycle, on the server.
+          </p>
+        </div>
       </div>
 
-      {/* ── 4. Sidebar: Your Alerts + System Alerts ── */}
-      <aside className="flex w-full shrink-0 flex-col gap-4 lg:sticky lg:top-4 lg:w-[340px]">
-        <div className="rounded-xl border border-border/70 bg-bg-elevated/40 shadow-panel">
-          <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
-            <UserCheck className="h-4 w-4 text-accent-indigo" />
-            <div>
-              <h2 className="text-sm font-semibold text-text-primary">Your alerts</h2>
-              <p className="text-2xs text-text-dim">Fired by your own saved rules</p>
-            </div>
-          </div>
-          <div className="max-h-[40vh] space-y-2 overflow-y-auto p-3">
-            {myAlertsLoading ? (
-              <Skeleton className="h-24 rounded-lg bg-bg-deep" />
-            ) : myAlertsError ? (
-              <p className="px-2 py-6 text-center text-2xs text-text-dim">
-                Couldn&apos;t reach your alert feed — try again shortly.
-              </p>
-            ) : myAlerts.length === 0 ? (
-              <p className="px-2 py-6 text-center text-2xs text-text-dim">
-                No alerts fired from your rules yet. Build one on{" "}
-                <Link href="/live/rules" className="text-accent-indigo hover:underline">
-                  Build My Alert
-                </Link>
-                .
-              </p>
-            ) : (
-              myAlerts.map((r, i) => <AlertFeedCard key={`mine-${r.f_id}-${r.time}-${i}`} alert={r} />)
-            )}
-          </div>
+      <div className="glass flex flex-col gap-5 rounded-lg p-4 shadow-panel">
+        <div className="flex flex-col gap-1.5">
+          <label className="text-2xs text-text-muted">Rule name</label>
+          <input
+            type="text"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="e.g. Home BTTS second-half special"
+            className="w-full max-w-md rounded border border-border bg-bg-elevated px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-indigo"
+          />
         </div>
 
-        <div className="rounded-xl border border-border/70 bg-bg-elevated/40 shadow-panel">
-          <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
-            <ShieldCheck className="h-4 w-4 text-accent-green" />
-            <div>
-              <h2 className="text-sm font-semibold text-text-primary">System alerts</h2>
-              <p className="text-2xs text-text-dim">SESSION_ALERTS · ready_to_push</p>
+        {/* ── STEP 1: PREMATCH ── */}
+        <div className="rounded-lg border border-border/70 bg-bg-elevated/30 p-3">
+          <p className="mb-2 text-2xs font-semibold uppercase tracking-wide text-text-muted">
+            Step 1 — Prematch condition
+          </p>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {(Object.keys(PREMATCH_TYPE_LABELS) as PrematchType[]).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setPrematchType(t)}
+                className={cn(
+                  "rounded border px-2.5 py-1 text-2xs font-semibold uppercase tracking-wide transition-colors",
+                  prematchType === t
+                    ? "border-accent-indigo/50 bg-accent-indigo/15 text-accent-indigo"
+                    : "border-border/60 text-text-dim hover:border-border"
+                )}
+              >
+                {PREMATCH_TYPE_LABELS[t]}
+              </button>
+            ))}
+          </div>
+
+          {prematchType === "flag" && (
+            <select
+              value={prematchFlag}
+              onChange={(e) => setPrematchFlag(e.target.value as PrematchFlagKey)}
+              className="w-full max-w-sm rounded border border-border bg-bg-elevated px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-indigo"
+            >
+              {PREMATCH_FLAG_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {prematchType === "rate" && (
+            <div className="flex flex-col gap-3">
+              <select
+                value={prematchMetric}
+                onChange={(e) => setPrematchMetric(e.target.value as PrematchRateMetric)}
+                className="w-full max-w-sm rounded border border-border bg-bg-elevated px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-indigo"
+              >
+                {PREMATCH_RATE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
+                Minimum rate · {prematchRateMinValue}%
+                <input
+                  type="range"
+                  min={50}
+                  max={100}
+                  step={1}
+                  value={prematchRateMinValue}
+                  onChange={(e) => setPrematchRateMinValue(Number(e.target.value))}
+                  className="accent-accent-indigo"
+                />
+              </label>
             </div>
-            {alerts.isRefetching && <span className="ml-auto font-mono text-2xs text-text-dim">sync…</span>}
-          </div>
-          <div className="max-h-[40vh] space-y-2 overflow-y-auto p-3">
-            {alerts.loading && sortedAlerts.length === 0 ? (
-              <Skeleton className="h-24 rounded-lg bg-bg-deep" />
-            ) : sortedAlerts.length === 0 ? (
-              <p className="px-2 py-6 text-center text-2xs text-text-dim">No alerts this session.</p>
-            ) : (
-              sortedAlerts.map((r, i) => <AlertFeedCard key={`sys-${r.f_id}-${r.time}-${i}`} alert={r} />)
-            )}
-          </div>
+          )}
+
+          {prematchType === "gk_liability" && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-2xs text-text-dim">
+                Locked in at lineup announcement — the starting keeper's vulnerability doesn't
+                change once kickoff happens.
+              </p>
+              <SideSelector value={gkSide} onChange={setGkSide} accent="indigo" />
+            </div>
+          )}
+
+          {prematchType === "key_missing" && (
+            <div className="flex flex-col gap-3">
+              <SideSelector value={keyMissingSide} onChange={setKeyMissingSide} accent="indigo" />
+              <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
+                Minimum key players missing · {keyMissingCount}
+                <input
+                  type="range"
+                  min={1}
+                  max={6}
+                  step={1}
+                  value={keyMissingCount}
+                  onChange={(e) => setKeyMissingCount(Number(e.target.value))}
+                  className="accent-accent-indigo"
+                />
+              </label>
+            </div>
+          )}
+
+          {prematchType === "aggregator_chemistry" && (
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <select
+                value={chemMarket}
+                onChange={(e) => setChemMarket(e.target.value as ChemistryMarket)}
+                className="w-full max-w-xs rounded border border-border bg-bg-elevated px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-indigo"
+              >
+                {CHEMISTRY_MARKET_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={chemLevel}
+                onChange={(e) => setChemLevel(e.target.value as ChemistryLevel)}
+                className="w-full max-w-xs rounded border border-border bg-bg-elevated px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-indigo"
+              >
+                {CHEMISTRY_LEVEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {prematchType === "aggregator_breach" && (
+            <SideSelector value={breachSide} onChange={setBreachSide} accent="indigo" />
+          )}
+
+          {prematchType === "none" && (
+            <p className="text-2xs text-text-dim">
+              No prematch filter — this rule checks live conditions only, on every fixture.
+            </p>
+          )}
         </div>
-      </aside>
-    </div>
-  );
-}
 
-function TelemetryCard({
-  m,
-  selected,
-  onSelect,
-}: {
-  m: LiveOrchestratorMatch;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const conf = confidenceOf(m);
-  const chaos = chaosOf(m);
-  const hp = hPressureOf(m);
-  const ap = aPressureOf(m);
-  const totalP = hp + ap || 100;
-  const hPct = (hp / totalP) * 100;
-  const aPct = (ap / totalP) * 100;
-  const f = m.forensics;
-  const structOk = (f?.status ?? m.structural) === "OK";
+        {/* ── STEP 2: LIVE ── */}
+        <div className="rounded-lg border border-border/70 bg-bg-elevated/30 p-3">
+          <p className="mb-2 text-2xs font-semibold uppercase tracking-wide text-text-muted">
+            Step 2 — Live condition
+          </p>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {(Object.keys(LIVE_TYPE_LABELS) as LiveConditionType[]).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setLiveType(t)}
+                className={cn(
+                  "rounded border px-2.5 py-1 text-2xs font-semibold uppercase tracking-wide transition-colors",
+                  liveType === t
+                    ? "border-accent-cyan/50 bg-accent-cyan/15 text-accent-cyan"
+                    : "border-border/60 text-text-dim hover:border-border"
+                )}
+              >
+                {LIVE_TYPE_LABELS[t]}
+              </button>
+            ))}
+          </div>
 
-  return (
-    <article
-      role="button"
-      tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
-      className={cn(
-        "cursor-pointer rounded-xl border bg-bg-elevated/25 shadow-panel transition-colors",
-        selected ? "border-accent-amber/50 ring-1 ring-accent-amber/30" : "border-border/70 hover:border-border"
-      )}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border/60 px-4 py-3">
-        <div>
-          <div className="mb-1 flex flex-wrap items-center gap-1.5">
-            <span
+          {liveType === "snapshot" && (
+            <p className="text-2xs text-text-dim">
+              Fires on every live cycle once the prematch condition is met — use this for a
+              running feed rather than a spike alert.
+            </p>
+          )}
+
+          {liveNeedsSide && (
+            <div className="flex flex-col gap-3">
+              <SideSelector value={liveSide} onChange={setLiveSide} accent="cyan" />
+              <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
+                Minimum {LIVE_TYPE_LABELS[liveType].toLowerCase()} · {liveMinValue}
+                <input
+                  type="range"
+                  min={sliderCfg.min}
+                  max={sliderCfg.max}
+                  step={sliderCfg.step}
+                  value={liveMinValue}
+                  onChange={(e) => setLiveMinValue(Number(e.target.value))}
+                  className="accent-accent-cyan"
+                />
+              </label>
+            </div>
+          )}
+
+          {liveType === "chaos_index" && (
+            <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
+              Minimum chaos index · {liveMinValue}
+              <input
+                type="range"
+                min={sliderCfg.min}
+                max={sliderCfg.max}
+                step={sliderCfg.step}
+                value={liveMinValue}
+                onChange={(e) => setLiveMinValue(Number(e.target.value))}
+                className="accent-accent-amber"
+              />
+            </label>
+          )}
+
+          {liveType === "key_player_lost" && (
+            <div className="flex flex-col gap-3">
+              <p className="text-2xs text-text-dim">
+                Genuinely live — fires only when a starting key player (top-11 by squad worth) is
+                actually substituted off during the match, tracked in real time.
+              </p>
+              <SideSelector value={keyLostSide} onChange={setKeyLostSide} accent="cyan" />
+              <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
+                Minimum key players lost · {keyLostCount}
+                <input
+                  type="range"
+                  min={1}
+                  max={3}
+                  step={1}
+                  value={keyLostCount}
+                  onChange={(e) => setKeyLostCount(Number(e.target.value))}
+                  className="accent-accent-cyan"
+                />
+              </label>
+            </div>
+          )}
+        </div>
+
+        {/* ── STEP 3: MINUTE WINDOW ── */}
+        <div className="rounded-lg border border-border/70 bg-bg-elevated/30 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wide text-text-muted">
+              <Clock className="h-3.5 w-3.5" />
+              Step 3 — Minute window (optional)
+            </p>
+            <button
+              type="button"
+              onClick={() => setUseWindow((v) => !v)}
               className={cn(
-                "rounded border px-1.5 py-0.5 font-mono text-2xs font-semibold",
-                m.in_db
-                  ? "border-accent-indigo/40 bg-accent-indigo/10 text-accent-indigo"
-                  : "border-accent-red/40 bg-accent-red/10 text-accent-red"
+                "rounded border px-2.5 py-1 text-2xs font-semibold uppercase tracking-wide transition-colors",
+                useWindow
+                  ? "border-accent-amber/50 bg-accent-amber/15 text-accent-amber"
+                  : "border-border/60 text-text-dim hover:border-border"
               )}
             >
-              {m.in_db ? "🎯 VIP" : "👁️ LIVE"}
-            </span>
-            <span className="font-mono text-2xs text-text-dim">ID {m.id}</span>
-            <span className="font-mono text-2xs text-text-secondary">{m.minute}&apos;</span>
-            {chaos >= 5.0 && <Flame className="h-3.5 w-3.5 text-accent-amber drop-shadow-[0_0_6px_rgba(245,158,11,0.8)]" />}
+              {useWindow ? "Enabled" : "Full Match"}
+            </button>
           </div>
-          <h3 className="text-sm font-semibold text-text-primary">{m.name}</h3>
-          <p className="mt-0.5 font-mono text-2xs text-text-dim">Conf {conf.toFixed(0)}%</p>
-        </div>
-        <span
-          className={cn(
-            "rounded border px-1.5 py-0.5 font-mono text-2xs",
-            structOk
-              ? "border-accent-green/30 bg-accent-green/10 text-accent-green"
-              : "border-accent-amber/30 bg-accent-amber/10 text-accent-amber"
+
+          {useWindow ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex flex-col gap-1 text-2xs text-text-dim">
+                From
+                <input
+                  type="number"
+                  min={0}
+                  max={120}
+                  value={windowStart}
+                  onChange={(e) => setWindowStart(Number(e.target.value))}
+                  className="w-20 rounded border border-border bg-bg-elevated px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent-amber"
+                />
+              </label>
+              <span className="mt-4 text-text-dim">–</span>
+              <label className="flex flex-col gap-1 text-2xs text-text-dim">
+                To
+                <input
+                  type="number"
+                  min={0}
+                  max={120}
+                  value={windowEnd}
+                  onChange={(e) => setWindowEnd(Number(e.target.value))}
+                  className="w-20 rounded border border-border bg-bg-elevated px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent-amber"
+                />
+              </label>
+              <span className="mt-4 text-2xs text-text-dim">minutes</span>
+            </div>
+          ) : (
+            <p className="text-2xs text-text-dim">This rule checks every minute of the match.</p>
           )}
-        >
-          {structOk ? "Structural OK" : `⚠️ ${f?.status ?? m.structural}`}
-        </span>
-      </div>
-
-      <div className="px-4 pt-3">
-        <div className="mb-1 flex justify-between font-mono text-2xs text-text-secondary">
-          <span>H {hp.toFixed(1)}%</span>
-          <span className="text-text-dim">Pressure share</span>
-          <span>A {ap.toFixed(1)}%</span>
         </div>
-        <div className="flex h-2.5 overflow-hidden rounded-full bg-bg-deep">
-          <div className="bg-accent-cyan transition-[width]" style={{ width: `${hPct}%` }} title={`Home ${hp.toFixed(1)}%`} />
-          <div className="bg-accent-amber transition-[width]" style={{ width: `${aPct}%` }} title={`Away ${ap.toFixed(1)}%`} />
+
+        {invalidCombo && (
+          <p className="text-2xs text-accent-red">
+            A rule needs at least one real condition — pick a prematch condition, or a live
+            threshold beyond &quot;Every Update&quot;.
+          </p>
+        )}
+        {error && <p className="text-2xs text-accent-red">{error}</p>}
+
+        <Button onClick={handleSave} disabled={saving || invalidCombo || !userId}>
+          {saving ? "Saving…" : "Save Rule"}
+        </Button>
+      </div>
+
+      <div className="glass flex flex-col gap-2 rounded-lg p-4 shadow-panel">
+        <div className="mb-1 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-text-primary">Your saved rules</h2>
+          <span className="font-mono text-2xs text-text-dim">{rules.length} total</span>
         </div>
-      </div>
 
-      <div className="grid grid-cols-3 gap-2 px-4 py-3 font-mono text-2xs">
-        <StatPair label="xG" home={hXgOf(m).toFixed(2)} away={aXgOf(m).toFixed(2)} />
-        <StatPair label="SOT" home={String(hSotOf(m))} away={String(aSotOf(m))} />
-        <StatPair label="DA" home={String(hDaOf(m))} away={String(aDaOf(m))} />
-      </div>
-
-      <div className="flex flex-wrap gap-1.5 border-t border-border/50 px-4 py-2.5">
-        <span className="rounded border border-border/60 bg-bg-deep/60 px-1.5 py-0.5 font-mono text-2xs text-text-secondary">
-          Doom {Number(f?.h_doom ?? 0).toFixed(2)} / {Number(f?.a_doom ?? 0).toFixed(2)}
-        </span>
-        {(f?.h_red || f?.a_red) && (
-          <span className="rounded border border-accent-red/40 bg-accent-red/10 px-1.5 py-0.5 font-mono text-2xs text-accent-red">
-            Red {f?.h_red ? "H" : ""}
-            {f?.h_red && f?.a_red ? "+" : ""}
-            {f?.a_red ? "A" : ""}
-          </span>
+        {loading ? (
+          <div className="flex items-center gap-2 py-6 text-xs text-text-dim">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading your rules…
+          </div>
+        ) : rules.length === 0 ? (
+          <p className="py-6 text-center text-xs text-text-dim">
+            No rules saved yet — build one above to start getting personalized alerts.
+          </p>
+        ) : (
+          <div className="divide-y divide-border/60">
+            {rules.map((rule) => {
+              const { pre, live, window } = describeRule(rule);
+              return (
+                <div key={rule.rule_id} className="flex items-center justify-between gap-3 py-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-semibold text-text-primary">{rule.label}</p>
+                    <p className="mt-0.5 text-2xs text-text-dim">
+                      {pre} <span className="text-text-muted">AND</span> {live}
+                      <span className="ml-2 rounded border border-border/50 px-1 py-0.5 text-[0.6rem] text-text-dim">
+                        {window}
+                      </span>
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleToggle(rule)}
+                      className={cn(
+                        "rounded border px-2 py-1 text-2xs font-semibold uppercase tracking-wide transition-colors",
+                        rule.active
+                          ? "border-accent-green/40 bg-accent-green/10 text-accent-green"
+                          : "border-border/60 text-text-dim"
+                      )}
+                    >
+                      {rule.active ? "Active" : "Paused"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(rule)}
+                      aria-label="Delete rule"
+                      className="flex h-7 w-7 items-center justify-center rounded border border-border/60 text-text-dim transition-colors hover:border-accent-red/40 hover:text-accent-red"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
-        {(f?.h_gk || f?.a_gk) && (
-          <span className="rounded border border-accent-amber/40 bg-accent-amber/10 px-1.5 py-0.5 font-mono text-2xs text-accent-amber">
-            GK risk {f?.h_gk ? "H" : ""}
-            {f?.h_gk && f?.a_gk ? "+" : ""}
-            {f?.a_gk ? "A" : ""}
-          </span>
-        )}
-        {!f?.h_red && !f?.a_red && !f?.h_gk && !f?.a_gk && <span className="font-mono text-2xs text-text-dim">No red / GK flags</span>}
       </div>
-    </article>
-  );
-}
-
-function StatPair({ label, home, away }: { label: string; home: string; away: string }) {
-  return (
-    <div className="rounded-lg border border-border/50 bg-bg-deep/40 px-2 py-1.5 text-center">
-      <p className="text-[0.6rem] uppercase tracking-wide text-text-dim">{label}</p>
-      <p className="mt-0.5 text-text-primary">
-        <span className="text-accent-cyan">{home}</span>
-        <span className="mx-1 text-text-dim">·</span>
-        <span className="text-accent-amber">{away}</span>
-      </p>
     </div>
   );
 }
 
-function AlertFeedCard({ alert }: { alert: LiveAlertPick }) {
-  const conf = alert.confidence ?? 0;
-  const tone = alertTone(alert.level ?? "", conf);
+function SideSelector({
+  value,
+  onChange,
+  accent,
+}: {
+  value: RuleSide;
+  onChange: (v: RuleSide) => void;
+  accent: "indigo" | "cyan";
+}) {
+  const accentClass =
+    accent === "indigo"
+      ? "border-accent-indigo/50 bg-accent-indigo/15 text-accent-indigo"
+      : "border-accent-cyan/50 bg-accent-cyan/15 text-accent-cyan";
 
   return (
-    <article
-      className={cn(
-        "rounded-lg border px-3 py-2.5",
-        tone === "premium" && "border-accent-amber/50 bg-accent-amber/5 shadow-[0_0_12px_rgba(245,158,11,0.18)]",
-        tone === "standard" && "border-accent-green/45 bg-accent-green/5",
-        tone === "monitor" && "border-border/50 bg-bg-deep/50"
-      )}
-    >
-      <div className="mb-1 flex flex-wrap items-center gap-1.5">
-        <span
+    <fieldset className="flex gap-1.5">
+      {(["home", "away", "any"] as RuleSide[]).map((s) => (
+        <button
+          key={s}
+          type="button"
+          onClick={() => onChange(s)}
           className={cn(
-            "font-mono text-2xs font-semibold",
-            tone === "premium" && "text-accent-amber",
-            tone === "standard" && "text-accent-green",
-            tone === "monitor" && "text-text-dim"
+            "rounded border px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide transition-colors",
+            value === s ? accentClass : "border-border/60 text-text-dim hover:border-border"
           )}
         >
-          {alert.level || (tone === "premium" ? "🔥 PREMIUM" : tone === "standard" ? "✅ STANDARD" : "📊 MONITOR")}
-        </span>
-        <span className="font-mono text-2xs text-text-dim">{alert.minute}&apos;</span>
-        <span className="ml-auto font-mono text-2xs tabular-nums text-text-secondary">{conf.toFixed(0)}%</span>
-      </div>
-      <p className="text-xs font-medium text-text-primary">{alert.fixture}</p>
-      {alert.rule_label && (
-        <p className="mt-0.5 font-mono text-2xs text-accent-indigo">via &quot;{alert.rule_label}&quot;</p>
-      )}
-      <p className="mt-1 line-clamp-3 text-2xs leading-relaxed text-text-secondary">{alert.msg}</p>
-      <p className="mt-1.5 font-mono text-[0.6rem] text-text-dim">{formatClock(alert.time)}</p>
-    </article>
+          {s}
+        </button>
+      ))}
+    </fieldset>
   );
 }
