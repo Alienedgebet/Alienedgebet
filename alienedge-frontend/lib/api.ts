@@ -1182,7 +1182,7 @@ export interface UserRuleDef {
 }
 
 export type UserRuleCreate = Omit<UserRuleDef, "rule_id" | "created_at">;
-export type UserRulePatch = Partial
+export type UserRulePatch = Partial<
   Pick<UserRuleDef, "label" | "prematch" | "live" | "minute_window" | "active">
 >;
 
