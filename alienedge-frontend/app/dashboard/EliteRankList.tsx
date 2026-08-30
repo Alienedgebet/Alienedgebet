@@ -6,6 +6,7 @@ import { TierBadge } from "@/components/predictions/TierBadge";
 import { getTrafficLightDot } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { DnaCountBadge } from "@/components/dna/DnaCountBadge";
+import { VerifyCell, type VerificationData } from "@/components/predictions/VerifyCell";
 import type { DnaV2FixtureFactors, DnaV2MarketKey } from "@/lib/api";
 
 export interface EliteRankItem {
@@ -18,10 +19,9 @@ export interface EliteRankItem {
   value: number;
   suffix: string;
   isMock: boolean;
-  /** Bookmaker odds for this pick — displayed next to probability when available. */
   odds?: number;
-  /** Present only for the 7 markets the DNA v2 engine covers (win/gg/over25/over15/unders/draw/corners). */
   dnaMarketKey?: DnaV2MarketKey;
+  verification?: VerificationData; // ◄── Verification state
 }
 
 const RANK_ACCENT: Record<number, string> = {
@@ -59,14 +59,16 @@ export function EliteRankList({
         </p>
       </div>
 
-      {/* ── 2. SCROLLABLE / MOVABLE TABLE CONTAINER ────────────── */}
+      {/* ── 2. SCROLLABLE TABLE CONTAINER ──────────────────────── */}
       <div className="w-full overflow-x-auto scrollbar-none [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <div className="min-w-[560px]">
+        <div className="min-w-[620px]">
           
-          {/* Table Column Titles */}
+          {/* Table Column Headers */}
           {items.length > 0 && (
             <div className="flex items-center border-b border-border/60 bg-bg-elevated/30 px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-text-secondary">
-              <div className="w-24 shrink-0 font-mono">DNA / #</div>
+              <div className="w-12 shrink-0 font-mono text-center">#</div>
+              <div className="w-20 shrink-0 font-mono text-center">Verify</div>
+              <div className="w-16 shrink-0 font-mono text-center">DNA</div>
               <div className="flex-1 min-w-[200px] font-mono">Match &amp; Market</div>
               <div className="w-64 shrink-0 text-right font-mono pr-2">Badges &amp; Odds</div>
             </div>
@@ -85,8 +87,8 @@ export function EliteRankList({
                   key={item.key}
                   className="flex items-center px-4 py-3 transition-colors hover:bg-bg-elevated/60"
                 >
-                  {/* Column 1: DNA & Rank Number */}
-                  <div className="flex w-24 shrink-0 items-center gap-2.5">
+                  {/* Column 1: Rank Number */}
+                  <div className="flex w-12 shrink-0 items-center justify-center">
                     <span
                       className={cn(
                         "flex h-6 w-6 shrink-0 items-center justify-center rounded font-mono text-xs font-bold shadow-sm",
@@ -97,23 +99,29 @@ export function EliteRankList({
                     >
                       {item.rank}
                     </span>
-
-                    <div className="flex flex-col">
-                      {item.dnaMarketKey ? (
-                        <DnaCountBadge
-                          marketFactors={marketFactors}
-                          fixtureLabel={item.fixture}
-                          market={item.dnaMarketKey}
-                          date={date}
-                          className="shrink-0"
-                        />
-                      ) : (
-                        <span className="font-mono text-2xs text-text-dim">–</span>
-                      )}
-                    </div>
                   </div>
 
-                  {/* Column 2: Match & Market (Ample room, no clipping) */}
+                  {/* Column 2: VERIFY CELL (Right before DNA) */}
+                  <div className="flex w-20 shrink-0 items-center justify-center">
+                    <VerifyCell data={item.verification} />
+                  </div>
+
+                  {/* Column 3: DNA Badge */}
+                  <div className="flex w-16 shrink-0 items-center justify-center">
+                    {item.dnaMarketKey ? (
+                      <DnaCountBadge
+                        marketFactors={marketFactors}
+                        fixtureLabel={item.fixture}
+                        market={item.dnaMarketKey}
+                        date={date}
+                        className="shrink-0"
+                      />
+                    ) : (
+                      <span className="font-mono text-2xs text-text-dim">–</span>
+                    )}
+                  </div>
+
+                  {/* Column 4: Match & Market */}
                   <div className="flex-1 min-w-[200px] pr-4">
                     <Link
                       href={item.href}
@@ -139,14 +147,12 @@ export function EliteRankList({
                     </Link>
                   </div>
 
-                  {/* Column 3: Badges, Confidence & Odds (Dedicated spacious width) */}
+                  {/* Column 5: Badges & Odds */}
                   <div className="flex w-64 shrink-0 items-center justify-end gap-2.5">
-                    {/* Badge */}
                     <div className="flex shrink-0">
                       <TierBadge tier={item.tier} pulse={false} />
                     </div>
 
-                    {/* Confidence % */}
                     <div className="flex items-center gap-1.5 whitespace-nowrap font-mono text-xs font-bold tabular-nums text-white">
                       <span
                         className={cn(
@@ -162,7 +168,6 @@ export function EliteRankList({
                       </span>
                     </div>
 
-                    {/* Odds */}
                     {item.odds != null && item.odds > 0 && (
                       <span className="shrink-0 rounded-md border border-cyan-500/30 bg-cyan-950/40 px-1.5 py-0.5 font-mono text-2xs font-bold text-cyan-300 shadow-sm">
                         @{item.odds.toFixed(2)}
