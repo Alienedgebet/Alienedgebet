@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { AlertTriangle, Handshake, Inbox, Radio } from "lucide-react";
+import { AlertTriangle, Handshake, Radio } from "lucide-react";
 import {
   getChemistryColor,
   liveApi,
@@ -24,7 +24,6 @@ import {
   ChainBranch,
   type PredictionColumn,
 } from "@/components/predictions";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -254,51 +253,16 @@ export default function LiveIncomingPage() {
     };
   }, [aggRows.length, dangerRows, incomingRows]);
 
-  const anyMock = incoming.isMock || danger.isMock || aggregator.isMock;
-
   return (
     <div className="relative flex flex-col gap-5 p-6">
       <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow opacity-70" />
 
-      <div className="glass flex flex-wrap items-center gap-x-7 gap-y-3 rounded-xl px-5 py-3.5 shadow-panel">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-cyan/20 shadow-glow">
-            <Inbox className="h-4 w-4 text-accent-cyan" />
-          </div>
-          <div>
-            <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-text-primary">
-              Incoming Live Matches
-              {anyMock && (
-                <Badge
-                  variant="outline"
-                  className="h-4 border-accent-amber/30 px-1 text-[0.6rem] text-accent-amber"
-                >
-                  Demo
-                </Badge>
-              )}
-            </p>
-            <p className="text-2xs text-text-dim">
-              Code 3 forensics → Code 4 danger → Code 5 handshake
-            </p>
-          </div>
-        </div>
-        <div className="ml-auto flex flex-wrap gap-x-6 font-mono text-sm">
-          <Stat label="Fixtures" value={String(stats.fixtures)} />
-          <Stat label="Picks" value={String(stats.picks)} accent="text-accent-cyan" />
-          <Stat label="Breaches" value={String(stats.breaches)} accent="text-accent-red" />
-          <Stat label="Handshake" value={String(stats.handshakes)} accent="text-accent-green" />
-        </div>
-      </div>
-
       <section className="relative overflow-hidden rounded-2xl border border-accent-cyan/20 bg-nebula shadow-elevated">
-        <div className="relative z-10 px-6 py-7 md:px-8">
-          <p className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-accent-cyan/40 bg-accent-cyan/10 px-2.5 py-1 text-2xs font-bold uppercase tracking-[0.14em] text-accent-cyan">
-            Codes 3–5 · Incoming pipeline
-          </p>
-          <h1 className="text-3xl font-extrabold tracking-tight text-text-primary sm:text-4xl">
+        <div className="relative z-10 px-5 py-3.5 md:px-6">
+          <h1 className="text-xl font-extrabold tracking-tight text-text-primary sm:text-2xl">
             Incoming Forensics
           </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-secondary">
+          <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-text-secondary">
             Structural pick stream from live lineups, squad danger audit (GK leak / missing stars),
             then master handshake chemistry across GG · Win · O2.5 · Corners · Unders.
           </p>
@@ -312,7 +276,7 @@ export default function LiveIncomingPage() {
           </div>
           <div>
             <h2 className="text-sm font-semibold text-text-primary">
-              Code 3 — Incoming Forensic Engine
+              Incoming Forensic Engine
             </h2>
             <p className="text-2xs text-text-dim">
               Rules 1–8 → incoming_predictions.json · {incomingRows.length} fixtures
@@ -385,23 +349,6 @@ export default function LiveIncomingPage() {
           </div>
         )}
       </section>
-    </div>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: string;
-}) {
-  return (
-    <div className="border-l border-border/60 pl-4 first:border-l-0 first:pl-0">
-      <p className="text-2xs uppercase tracking-wide text-text-dim">{label}</p>
-      <p className={cn("font-bold tabular-nums", accent ?? "text-text-primary")}>{value}</p>
     </div>
   );
 }
