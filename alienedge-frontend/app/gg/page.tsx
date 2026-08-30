@@ -15,6 +15,8 @@ import { useSelectedDate } from "@/lib/date-context";
 import { useApi } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import {
   ChainBranch,
   ChainStage,
@@ -29,15 +31,6 @@ import {
   MOCK_GG_PSYCH,
   MOCK_GG_SUPREME,
 } from "@/lib/mock-chains";
-
-// ============================================================
-// Columns = backend return / print board keys
-// Supreme   → AGGREGATOR/gg_supreme_vip.py
-// Forensics → AGGREGATOR/gg_forensics_audit.py
-// Psychology→ PSYCHOLOGY/gg_psychology.py board cols
-// Precision → Engine/gg_precision_engine.py gg_show_cols / o15_show_cols
-// Cross-verify → FILTER/gg_precision_filter.py
-// ============================================================
 
 const supremeColumns: PredictionColumn<GGSupremePick>[] = [
   {
@@ -205,7 +198,6 @@ const psychologyColumns: PredictionColumn<GGPsychologyPick>[] = [
   },
 ];
 
-/** Matches Engine/gg_precision_engine.py gg_show_cols (+ identity). */
 const ggColumns: PredictionColumn<GGPrecisionPick>[] = [
   {
     key: "fixture_id",
@@ -219,313 +211,64 @@ const ggColumns: PredictionColumn<GGPrecisionPick>[] = [
       <span className="font-medium text-text-primary">{r.fixture}</span>
     ),
   },
-  {
-    key: "home_team",
-    header: "home_team",
-    render: (r) => r.home_team,
-  },
-  {
-    key: "away_team",
-    header: "away_team",
-    render: (r) => r.away_team,
-  },
-  {
-    key: "gg_tier",
-    header: "gg_tier",
-    render: (r) => <TierBadge tier={r.gg_tier} />,
-  },
-  {
-    key: "gg_score",
-    header: "gg_score",
-    align: "right",
-    render: (r) => r.gg_score,
-  },
-  {
-    key: "gg_signals_fired",
-    header: "gg_signals_fired",
-    align: "right",
-    render: (r) => r.gg_signals_fired,
-  },
-  {
-    key: "mc_btts_prob",
-    header: "mc_btts_prob",
-    render: (r) => <ProbCell value={r.mc_btts_prob * 100} showBar={false} />,
-  },
-  {
-    key: "venue_btts_combined",
-    header: "venue_btts_combined",
-    align: "right",
-    render: (r) => r.venue_btts_combined,
-  },
-  {
-    key: "h2h_btts_rate",
-    header: "h2h_btts_rate",
-    align: "right",
-    render: (r) => r.h2h_btts_rate,
-  },
-  {
-    key: "home_gk_liable",
-    header: "Home GK Wall Liable",
-    render: (r) => (r.home_gk_liable ? "Yes" : "No"),
-  },
-  {
-    key: "away_gk_liable",
-    header: "Away GK Wall Liable",
-    render: (r) => (r.away_gk_liable ? "Yes" : "No"),
-  },
-  {
-    key: "home_gk_cpg",
-    header: "Home GK Wall",
-    align: "right",
-    render: (r) => r.home_gk_cpg.toFixed(2),
-  },
-  {
-    key: "away_gk_cpg",
-    header: "Away GK Wall",
-    align: "right",
-    render: (r) => r.away_gk_cpg.toFixed(2),
-  },
-  {
-    key: "sig1_mc_btts",
-    header: "sig1_mc_btts",
-    align: "right",
-    render: (r) => r.sig1_mc_btts,
-  },
-  {
-    key: "sig2_venue_btts",
-    header: "sig2_venue_btts",
-    align: "right",
-    render: (r) => r.sig2_venue_btts,
-  },
-  {
-    key: "sig3_gk_vuln",
-    header: "sig3_gk_vuln",
-    align: "right",
-    render: (r) => r.sig3_gk_vuln,
-  },
-  {
-    key: "sig4_h2h_btts",
-    header: "sig4_h2h_btts",
-    align: "right",
-    render: (r) => r.sig4_h2h_btts,
-  },
-  {
-    key: "sig5_directional",
-    header: "sig5_directional",
-    align: "right",
-    render: (r) => r.sig5_directional,
-  },
-  {
-    key: "home_gk_note",
-    header: "Home GK Note",
-    className: "max-w-[160px] truncate",
-    render: (r) => r.home_gk_note || "—",
-  },
-  {
-    key: "away_gk_note",
-    header: "Away GK Note",
-    className: "max-w-[160px] truncate",
-    render: (r) => r.away_gk_note || "—",
-  },
-  {
-    key: "lambda_home",
-    header: "lambda_home",
-    align: "right",
-    render: (r) => r.lambda_home,
-  },
-  {
-    key: "lambda_away",
-    header: "lambda_away",
-    align: "right",
-    render: (r) => r.lambda_away,
-  },
-  {
-    key: "fatigue_home",
-    header: "Home Fatigue",
-    align: "right",
-    render: (r) => r.fatigue_home.toFixed(2),
-  },
-  {
-    key: "fatigue_away",
-    header: "Away Fatigue",
-    align: "right",
-    render: (r) => r.fatigue_away.toFixed(2),
-  },
-  {
-    key: "league_weight",
-    header: "league_weight",
-    align: "right",
-    render: (r) => r.league_weight,
-  },
+  { key: "home_team", header: "home_team", render: (r) => r.home_team },
+  { key: "away_team", header: "away_team", render: (r) => r.away_team },
+  { key: "gg_tier", header: "gg_tier", render: (r) => <TierBadge tier={r.gg_tier} /> },
+  { key: "gg_score", header: "gg_score", align: "right", render: (r) => r.gg_score },
+  { key: "gg_signals_fired", header: "gg_signals_fired", align: "right", render: (r) => r.gg_signals_fired },
+  { key: "mc_btts_prob", header: "mc_btts_prob", render: (r) => <ProbCell value={r.mc_btts_prob * 100} showBar={false} /> },
+  { key: "venue_btts_combined", header: "venue_btts_combined", align: "right", render: (r) => r.venue_btts_combined },
+  { key: "h2h_btts_rate", header: "h2h_btts_rate", align: "right", render: (r) => r.h2h_btts_rate },
+  { key: "home_gk_liable", header: "Home GK Wall Liable", render: (r) => (r.home_gk_liable ? "Yes" : "No") },
+  { key: "away_gk_liable", header: "Away GK Wall Liable", render: (r) => (r.away_gk_liable ? "Yes" : "No") },
+  { key: "home_gk_cpg", header: "Home GK Wall", align: "right", render: (r) => r.home_gk_cpg.toFixed(2) },
+  { key: "away_gk_cpg", header: "Away GK Wall", align: "right", render: (r) => r.away_gk_cpg.toFixed(2) },
+  { key: "sig1_mc_btts", header: "sig1_mc_btts", align: "right", render: (r) => r.sig1_mc_btts },
+  { key: "sig2_venue_btts", header: "sig2_venue_btts", align: "right", render: (r) => r.sig2_venue_btts },
+  { key: "sig3_gk_vuln", header: "sig3_gk_vuln", align: "right", render: (r) => r.sig3_gk_vuln },
+  { key: "sig4_h2h_btts", header: "sig4_h2h_btts", align: "right", render: (r) => r.sig4_h2h_btts },
+  { key: "sig5_directional", header: "sig5_directional", align: "right", render: (r) => r.sig5_directional },
+  { key: "home_gk_note", header: "Home GK Note", className: "max-w-[160px] truncate", render: (r) => r.home_gk_note || "—" },
+  { key: "away_gk_note", header: "Away GK Note", className: "max-w-[160px] truncate", render: (r) => r.away_gk_note || "—" },
+  { key: "lambda_home", header: "lambda_home", align: "right", render: (r) => r.lambda_home },
+  { key: "lambda_away", header: "lambda_away", align: "right", render: (r) => r.lambda_away },
+  { key: "fatigue_home", header: "Home Fatigue", align: "right", render: (r) => r.fatigue_home.toFixed(2) },
+  { key: "fatigue_away", header: "Away Fatigue", align: "right", render: (r) => r.fatigue_away.toFixed(2) },
+  { key: "league_weight", header: "league_weight", align: "right", render: (r) => r.league_weight },
 ];
 
-/** Matches Engine/gg_precision_engine.py o15_show_cols (+ identity). */
 const o15Columns: PredictionColumn<GGO15Pick>[] = [
-  {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
-  {
-    key: "fixture",
-    header: "fixture",
-    render: (r) => (
-      <span className="font-medium text-text-primary">{r.fixture}</span>
-    ),
-  },
-  {
-    key: "home_team",
-    header: "home_team",
-    render: (r) => r.home_team,
-  },
-  {
-    key: "away_team",
-    header: "away_team",
-    render: (r) => r.away_team,
-  },
-  {
-    key: "o15_tier",
-    header: "o15_tier",
-    render: (r) => <TierBadge tier={r.o15_tier} />,
-  },
-  {
-    key: "o15_score",
-    header: "o15_score",
-    align: "right",
-    render: (r) => r.o15_score,
-  },
-  {
-    key: "combined_lambda",
-    header: "combined_lambda",
-    align: "right",
-    render: (r) => Number(r.combined_lambda).toFixed(2),
-  },
-  {
-    key: "mc_over15_prob",
-    header: "mc_over15_prob",
-    render: (r) => <ProbCell value={r.mc_over15_prob * 100} showBar={false} />,
-  },
-  {
-    key: "combined_venue_goals_avg",
-    header: "combined_venue_goals_avg",
-    align: "right",
-    render: (r) => Number(r.combined_venue_goals_avg).toFixed(2),
-  },
-  {
-    key: "venue_goals_avg_home",
-    header: "venue_goals_avg_home",
-    align: "right",
-    render: (r) => Number(r.venue_goals_avg_home).toFixed(2),
-  },
-  {
-    key: "venue_goals_avg_away",
-    header: "venue_goals_avg_away",
-    align: "right",
-    render: (r) => Number(r.venue_goals_avg_away).toFixed(2),
-  },
-  {
-    key: "league_weight",
-    header: "league_weight",
-    align: "right",
-    render: (r) => r.league_weight ?? "—",
-  },
-  {
-    key: "sig1_combined_lambda",
-    header: "sig1_combined_lambda",
-    align: "right",
-    render: (r) => r.sig1_combined_lambda,
-  },
-  {
-    key: "sig2_mc_over15",
-    header: "sig2_mc_over15",
-    align: "right",
-    render: (r) => r.sig2_mc_over15,
-  },
-  {
-    key: "sig3_venue_goals_avg",
-    header: "sig3_venue_goals_avg",
-    align: "right",
-    render: (r) => r.sig3_venue_goals_avg,
-  },
-  {
-    key: "sig4_league_weight",
-    header: "sig4_league_weight",
-    align: "right",
-    render: (r) => r.sig4_league_weight,
-  },
-  {
-    key: "sig5_fatigue_penalty",
-    header: "Fatigue Penalty",
-    align: "right",
-    render: (r) => r.sig5_fatigue_penalty,
-  },
-  {
-    key: "fatigue_home",
-    header: "Home Fatigue",
-    align: "right",
-    render: (r) => r.fatigue_home.toFixed(2),
-  },
-  {
-    key: "fatigue_away",
-    header: "Away Fatigue",
-    align: "right",
-    render: (r) => r.fatigue_away.toFixed(2),
-  },
+  { key: "fixture_id", header: "fixture_id", render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span> },
+  { key: "fixture", header: "fixture", render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span> },
+  { key: "home_team", header: "home_team", render: (r) => r.home_team },
+  { key: "away_team", header: "away_team", render: (r) => r.away_team },
+  { key: "o15_tier", header: "o15_tier", render: (r) => <TierBadge tier={r.o15_tier} /> },
+  { key: "o15_score", header: "o15_score", align: "right", render: (r) => r.o15_score },
+  { key: "combined_lambda", header: "combined_lambda", align: "right", render: (r) => Number(r.combined_lambda).toFixed(2) },
+  { key: "mc_over15_prob", header: "mc_over15_prob", render: (r) => <ProbCell value={r.mc_over15_prob * 100} showBar={false} /> },
+  { key: "combined_venue_goals_avg", header: "combined_venue_goals_avg", align: "right", render: (r) => Number(r.combined_venue_goals_avg).toFixed(2) },
+  { key: "venue_goals_avg_home", header: "venue_goals_avg_home", align: "right", render: (r) => Number(r.venue_goals_avg_home).toFixed(2) },
+  { key: "venue_goals_avg_away", header: "venue_goals_avg_away", align: "right", render: (r) => Number(r.venue_goals_avg_away).toFixed(2) },
+  { key: "league_weight", header: "league_weight", align: "right", render: (r) => r.league_weight ?? "—" },
+  { key: "sig1_combined_lambda", header: "sig1_combined_lambda", align: "right", render: (r) => r.sig1_combined_lambda },
+  { key: "sig2_mc_over15", header: "sig2_mc_over15", align: "right", render: (r) => r.sig2_mc_over15 },
+  { key: "sig3_venue_goals_avg", header: "sig3_venue_goals_avg", align: "right", render: (r) => r.sig3_venue_goals_avg },
+  { key: "sig4_league_weight", header: "sig4_league_weight", align: "right", render: (r) => r.sig4_league_weight },
+  { key: "sig5_fatigue_penalty", header: "Fatigue Penalty", align: "right", render: (r) => r.sig5_fatigue_penalty },
+  { key: "fatigue_home", header: "Home Fatigue", align: "right", render: (r) => r.fatigue_home.toFixed(2) },
+  { key: "fatigue_away", header: "Away Fatigue", align: "right", render: (r) => r.fatigue_away.toFixed(2) },
 ];
 
 const crossVerifyColumns: PredictionColumn<GGCrossVerifyPick>[] = [
-  {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
-  {
-    key: "league_id",
-    header: "league_id",
-    render: (r) => <span className="font-mono text-2xs">{r.league_id}</span>,
-  },
-  {
-    key: "home_team",
-    header: "home_team",
-    render: (r) => (
-      <span className="font-medium text-text-primary">{r.home_team}</span>
-    ),
-  },
-  {
-    key: "away_team",
-    header: "away_team",
-    render: (r) => (
-      <span className="font-medium text-text-primary">{r.away_team}</span>
-    ),
-  },
-  {
-    key: "gg_prob_pct",
-    header: "gg_prob_pct",
-    render: (r) => <ProbCell value={r.gg_prob_pct} showBar={false} />,
-  },
-  {
-    key: "tier",
-    header: "tier",
-    render: (r) => <TierBadge tier={r.tier} />,
-  },
-  {
-    key: "verification_days",
-    header: "verification_days",
-    align: "right",
-    render: (r) => r.verification_days,
-  },
-  {
-    key: "table_distance",
-    header: "table_distance",
-    align: "right",
-    render: (r) => r.table_distance,
-  },
-  {
-    key: "audit_timestamp",
-    header: "audit_timestamp",
-    className: "max-w-[160px] truncate",
-    render: (r) => r.audit_timestamp || "—",
-  },
+  { key: "fixture_id", header: "fixture_id", render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span> },
+  { key: "league_id", header: "league_id", render: (r) => <span className="font-mono text-2xs">{r.league_id}</span> },
+  { key: "home_team", header: "home_team", render: (r) => <span className="font-medium text-text-primary">{r.home_team}</span> },
+  { key: "away_team", header: "away_team", render: (r) => <span className="font-medium text-text-primary">{r.away_team}</span> },
+  { key: "gg_prob_pct", header: "gg_prob_pct", render: (r) => <ProbCell value={r.gg_prob_pct} showBar={false} /> },
+  { key: "tier", header: "tier", render: (r) => <TierBadge tier={r.tier} /> },
+  { key: "verification_days", header: "verification_days", align: "right", render: (r) => r.verification_days },
+  { key: "table_distance", header: "table_distance", align: "right", render: (r) => r.table_distance },
+  { key: "audit_timestamp", header: "audit_timestamp", className: "max-w-[160px] truncate", render: (r) => r.audit_timestamp || "—" },
 ];
 
 export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
@@ -536,23 +279,50 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
     cacheKey: `gg-precision:${date}`,
   });
 
-  const supremeColumnsWithDna = useMemo(
+  // 1. GG Supreme (Verify -> DNA -> Rest)
+  const supremeColumnsWithVerifyAndDna = useMemo(
     () => [
+      createVerifyColumn<GGSupremePick>(),
       createDnaColumn<GGSupremePick>(dnaV2?.market_factors, "gg", date),
       ...supremeColumns,
     ],
     [dnaV2, date]
   );
-  const o15ColumnsWithDna = useMemo(
+
+  // 2. Over 1.5 Precision (Verify -> DNA -> Rest)
+  const o15ColumnsWithVerifyAndDna = useMemo(
     () => [
+      createVerifyColumn<GGO15Pick>(),
       createDnaColumn<GGO15Pick>(dnaV2?.market_factors, "over15", date),
       ...o15Columns,
     ],
     [dnaV2, date]
   );
 
-  // Render-time fallback (dashboard parity): never blank the twin-head
-  // branches on Network Error when Sportmonks / API is offline.
+  // 3. GG Forensics (Verify -> Rest)
+  const forensicsColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<GGForensicPick>(), ...forensicsColumns],
+    []
+  );
+
+  // 4. GG Psychology (Verify -> Rest)
+  const psychologyColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<GGPsychologyPick>(), ...psychologyColumns],
+    []
+  );
+
+  // 5. GG Precision BTTS Head (Verify -> Rest)
+  const ggColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<GGPrecisionPick>(), ...ggColumns],
+    []
+  );
+
+  // 6. GG Cross-Verification (Verify -> Rest)
+  const crossVerifyColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<GGCrossVerifyPick>(), ...crossVerifyColumns],
+    []
+  );
+
   const live = precision.data;
   const liveHasRows =
     Boolean(live) &&
@@ -563,63 +333,71 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
   return (
     <div
       data-embedded={embedded || undefined}
-      className="flex flex-col gap-4 p-6"
+      className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
     >
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-cyan/15">
-          <Zap className="h-5 w-5 text-accent-cyan" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">
-            GG / BTTS Intelligence
-          </h1>
-          <p className="text-xs text-text-secondary">
-            Multi-stage BTTS engine — Supreme picks, forensic DNA audit,
-            psychology layer, precision twin-head (GG + O1.5), and 7-day
-            cross-verification filter.
-          </p>
+      {/* ── 1. COMPACT SLEEK TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-cyan/30 bg-accent-cyan/10 shadow-[0_0_12px_rgba(6,182,212,0.2)]">
+            <Zap className="h-4 w-4 text-accent-cyan" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              GG / BTTS Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Multi-stage BTTS engine — Supreme picks, forensic DNA audit &amp; precision twin-head
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. STAGE 1: GG Supreme ───────────────────────────────────── */}
       <div>
         <ChainStage
           title="GG Supreme — Final Aggregator"
           description="Top-of-chain picks after full 3-stage GG audit"
           fetcher={() => ggApi.getSupreme(date)}
           deps={[date]}
-          columns={supremeColumnsWithDna}
+          columns={supremeColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No supreme picks for this date."
           fallbackData={MOCK_GG_SUPREME}
         />
       </div>
 
+      {/* ── 4. STAGE 2: GG Forensics ─────────────────────────────────── */}
       <div>
         <ChainStage
           title="GG Forensics"
           description="DNA intelligence, Poisson%, H2H BTTS rates, forensic verdict"
           fetcher={() => ggApi.getForensics(date)}
           deps={[date]}
-          columns={forensicsColumns}
+          columns={forensicsColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No forensic picks for this date."
           fallbackData={MOCK_GG_FORENSICS}
         />
       </div>
 
+      {/* ── 5. STAGE 3: GG Psychology ────────────────────────────────── */}
       <div>
         <ChainStage
           title="GG Psychology"
           description="Monte Carlo rank, psychology score, spears and trigger signals"
           fetcher={() => ggApi.getPsychology(date)}
           deps={[date]}
-          columns={psychologyColumns}
+          columns={psychologyColumnsWithVerify}
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No psychology audits for this date."
           fallbackData={MOCK_GG_PSYCH}
         />
       </div>
 
+      {/* ── 6. STAGE 4: GG Precision BTTS Head ───────────────────────── */}
       <div>
         <ChainBranch
           title="GG Precision — BTTS Head"
@@ -631,12 +409,13 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
           data={precisionPayload.gg}
           loading={precision.loading}
           error={null}
-          columns={ggColumns}
+          columns={ggColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No GG precision picks for this date."
         />
       </div>
 
+      {/* ── 7. STAGE 5: Over 1.5 Precision Twin Head ─────────────────── */}
       <div>
         <ChainBranch
           title="Over 1.5 Precision — Twin Head"
@@ -648,19 +427,20 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
           data={precisionPayload.o15}
           loading={precision.loading}
           error={null}
-          columns={o15ColumnsWithDna}
+          columns={o15ColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Over 1.5 precision picks for this date."
         />
       </div>
 
+      {/* ── 8. STAGE 6: GG Cross-Verification ────────────────────────── */}
       <div>
         <ChainStage
           title="GG Cross-Verification"
           description="7-day rolling BTTS cross-verification — verified vs. live table distance"
           fetcher={() => ggApi.getCrossVerify()}
           deps={[]}
-          columns={crossVerifyColumns}
+          columns={crossVerifyColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No cross-verification data right now."
           fallbackData={MOCK_GG_CROSS}
