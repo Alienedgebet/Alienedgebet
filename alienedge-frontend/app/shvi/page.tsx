@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { TimerReset } from "lucide-react";
 import {
   specialsApi,
@@ -10,6 +11,8 @@ import {
   type SH8GoalPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SH_8GOAL, MOCK_SH_GG, MOCK_SH_MASTER, MOCK_SHVI } from "@/lib/mock-chains";
 
@@ -129,69 +132,104 @@ const sh8GoalColumns: PredictionColumn<SH8GoalPick>[] = [
 export default function SHVIPage() {
   const { date } = useSelectedDate();
 
+  // 1. SHVI Streak Miner (Verify -> Rest)
+  const shviColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<SHVIPick>(), ...shviColumns],
+    []
+  );
+
+  // 2. SH-GG Winner (Verify -> Rest)
+  const shGGWinnerColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<SHGGWinnerPick>(), ...shGGWinnerColumns],
+    []
+  );
+
+  // 3. SH Master Vortex (Verify -> Rest)
+  const shMasterColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<SHMasterPick>(), ...shMasterColumns],
+    []
+  );
+
+  // 4. SH 8-Goal Aggregator (Verify -> Rest)
+  const sh8GoalColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<SH8GoalPick>(), ...sh8GoalColumns],
+    []
+  );
+
   return (
     <div
-      className="flex flex-col gap-4 p-6"
+      className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
     >
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-cyan/15">
-          <TimerReset className="h-5 w-5 text-accent-cyan" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">Second Half Volatility Intelligence</h1>
-          <p className="text-xs text-text-secondary">
-            SHVI base stage plus the SH Master supplementary panels (SH-GG Winner, SH Master
-            Vortex, SH 8-Goal Aggregator) — surfaced here rather than as a dashboard market card.
-          </p>
+      {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-cyan/30 bg-accent-cyan/10 shadow-[0_0_12px_rgba(6,182,212,0.2)]">
+            <TimerReset className="h-4 w-4 text-accent-cyan" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              Second Half Volatility Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              SHVI streak miner plus SH Master supplementary panels (SH-GG, Vortex &amp; 8-Goal)
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. STAGE 1: SHVI Streak Miner ────────────────────────────── */}
       <div>
         <ChainStage
           title="SHVI Streak Miner"
           description="Foundation base"
           fetcher={() => specialsApi.getSHVI(date)}
           deps={[date]}
-          columns={shviColumns}
+          columns={shviColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture}-${i}`}
           emptyMessage="No SHVI picks for this date."
           fallbackData={MOCK_SHVI}
         />
       </div>
 
+      {/* ── 4. STAGE 2: SH-GG Winner ─────────────────────────────────── */}
       <div>
         <ChainStage
           title="SH-GG Winner"
           description="SH Master supplementary panel"
           fetcher={() => shMasterApi.getSHGGWinner(date)}
           deps={[date]}
-          columns={shGGWinnerColumns}
+          columns={shGGWinnerColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No SH-GG winner picks for this date."
           fallbackData={MOCK_SH_GG}
         />
       </div>
 
+      {/* ── 5. STAGE 3: SH Master Vortex ─────────────────────────────── */}
       <div>
         <ChainStage
           title="SH Master Vortex"
           description="SH Master supplementary panel"
           fetcher={() => shMasterApi.getSHMaster(date)}
           deps={[date]}
-          columns={shMasterColumns}
+          columns={shMasterColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture}-${i}`}
           emptyMessage="No SH Master picks for this date."
           fallbackData={MOCK_SH_MASTER}
         />
       </div>
 
+      {/* ── 6. STAGE 4: SH 8-Goal Aggregator ─────────────────────────── */}
       <div>
         <ChainStage
           title="SH 8-Goal Aggregator"
           description="SH Master supplementary panel"
           fetcher={() => shMasterApi.getSH8Goal(date)}
           deps={[date]}
-          columns={sh8GoalColumns}
+          columns={sh8GoalColumnsWithVerify}
           rowKey={(r, i) => `${r.Fixture_ID}-${i}`}
           emptyMessage="No SH 8-goal picks for this date."
           fallbackData={MOCK_SH_8GOAL}
