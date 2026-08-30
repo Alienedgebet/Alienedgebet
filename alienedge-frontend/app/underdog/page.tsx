@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { Swords } from "lucide-react";
 import {
   underdogApi,
@@ -8,6 +9,8 @@ import {
   type UnderdogBasePick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UD_APEX, MOCK_UD_AUDIT, MOCK_UD_BASE } from "@/lib/mock-chains";
 
@@ -96,56 +99,84 @@ const baseColumns: PredictionColumn<UnderdogBasePick>[] = [
 export default function UnderdogPage() {
   const { date } = useSelectedDate();
 
+  // 1. Apex (Verify -> Rest)
+  const apexColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<UnderdogApexPick>(), ...apexColumns],
+    []
+  );
+
+  // 2. Audit (Verify -> Rest)
+  const auditColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<UnderdogMasterPick>(), ...auditColumns],
+    []
+  );
+
+  // 3. Base (Verify -> Rest)
+  const baseColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<UnderdogBasePick>(), ...baseColumns],
+    []
+  );
+
   return (
     <div
-      className="flex flex-col gap-4 p-6"
+      className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
     >
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-red/15">
-          <Swords className="h-5 w-5 text-accent-red" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">Underdog to Score Intelligence</h1>
-          <p className="text-xs text-text-secondary">
-            Full engine chain, every stage visible — apex aggregation up top, the master audit
-            layer, and the foundation base underneath it.
-          </p>
+      {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-red/30 bg-accent-red/10 shadow-[0_0_12px_rgba(244,63,94,0.2)]">
+            <Swords className="h-4 w-4 text-accent-red" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              Underdog to Score Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Full 3-stage U2S engine — Apex picks, master audit &amp; foundation base
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. STAGE 1: Underdog Apex ────────────────────────────────── */}
       <div>
         <ChainStage
           title="Underdog Apex — Final Aggregator"
           description="Elite output"
           fetcher={() => underdogApi.getApex(date)}
           deps={[date]}
-          columns={apexColumns}
+          columns={apexColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No apex picks for this date."
           fallbackData={MOCK_UD_APEX}
         />
       </div>
 
+      {/* ── 4. STAGE 2: Underdog Master Audit ────────────────────────── */}
       <div>
         <ChainStage
           title="Underdog Master Audit"
           description="Audit layer"
           fetcher={() => underdogApi.getAudit(date)}
           deps={[date]}
-          columns={auditColumns}
+          columns={auditColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No audit picks for this date."
           fallbackData={MOCK_UD_AUDIT}
         />
       </div>
 
+      {/* ── 5. STAGE 3: Underdog Base Engine ─────────────────────────── */}
       <div>
         <ChainStage
           title="Underdog Base Engine"
           description="Foundation base"
           fetcher={() => underdogApi.getBase(date)}
           deps={[date]}
-          columns={baseColumns}
+          columns={baseColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No base picks for this date."
           fallbackData={MOCK_UD_BASE}
