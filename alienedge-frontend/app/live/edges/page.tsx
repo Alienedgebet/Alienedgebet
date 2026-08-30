@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { Radio, Shield, ShieldCheck, Info, X, ChevronRight } from "lucide-react";
+import { Radio, Shield, ShieldCheck, Info, X, ChevronRight, Activity, Flame, Zap } from "lucide-react";
 import {
   liveApi,
   type LivePrematchAudit,
@@ -19,13 +19,9 @@ import {
   ChainBranch,
   type PredictionColumn,
 } from "@/components/predictions";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-
-/**
- * Live Monitor — Stage 1 strategic audit first (console columns),
- * then Stage 2 validation board of those same stage-1 picks.
- */
 
 function asAuditList(data: unknown): LivePrematchAudit[] {
   if (Array.isArray(data)) return data as LivePrematchAudit[];
@@ -235,7 +231,7 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
           ` · Wings L${team.l_wing_miss ? "✗" : "✓"}/R${team.r_wing_miss ? "✗" : "✓"}`}
       </p>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[560px] text-left text-2xs">
+        <table className="w-full min-w-[520px] text-left text-2xs">
           <thead className="bg-bg-elevated/60 font-mono text-text-dim">
             <tr>
               <th className="px-3 py-1.5 font-medium">Player Name</th>
@@ -289,48 +285,58 @@ function PrematchAuditCard({
   onOpenDetails: (row: LivePrematchAudit) => void;
 }) {
   return (
-    <article
-      onClick={() => onOpenDetails(row)}
-      className="glass overflow-hidden rounded-xl shadow-panel cursor-pointer transition-all hover:border-accent-indigo/50 hover:shadow-glow group relative"
-    >
-      <div className="absolute top-3 right-3 flex items-center gap-1 font-mono text-2xs text-accent-cyan opacity-80 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all">
-        <span>View Code 2 &amp; 3 Details</span>
-        <ChevronRight className="h-4 w-4" />
-      </div>
-
-      <div className="border-b border-border/70 px-4 py-3 pr-36">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-text-primary">
+    <article className="glass overflow-hidden rounded-xl border border-white/10 shadow-panel transition-all hover:border-cyan-500/30">
+      {/* ── CARD HEADER: Match Name + Direct Arrow Button (No Overlap) ── */}
+      <div className="flex items-center justify-between border-b border-border/70 bg-bg-elevated/20 px-4 py-2.5">
+        <div className="flex flex-1 min-w-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onOpenDetails(row)}
+            className="group/btn flex items-center gap-1.5 text-left transition-colors"
+          >
+            <h3 className="text-sm font-bold text-text-primary group-hover/btn:text-cyan-400 transition-colors">
               MATCH: {row.fixture}
             </h3>
-            <p className="mt-0.5 font-mono text-2xs text-text-dim">
-              ID {row.fixture_id} · KICKOFF: {row.kickoff_utc} UTC ({row.status_text})
-            </p>
-          </div>
-          <span className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1.5 py-0.5 font-mono text-2xs text-accent-amber">
-            combined miss {row.combined_miss}
+          </button>
+          <span className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1.5 py-0.2 font-mono text-[10px] font-bold text-accent-amber shrink-0">
+            miss {row.combined_miss}
           </span>
         </div>
-        <p className="mt-2 font-mono text-2xs text-text-secondary">
-          ODDS SCAN &gt; Home: {row.odds_home_win ?? "—"} | Away: {row.odds_away_win ?? "—"} | O2.5:{" "}
-          {row.odds_o25 ?? "—"}
-        </p>
+
+        {/* Dedicated Chevron Arrow Button (Only this + Match Name navigates) */}
+        <button
+          type="button"
+          onClick={() => onOpenDetails(row)}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-cyan-500/30 bg-cyan-950/40 text-cyan-300 hover:bg-cyan-500/20 hover:scale-105 transition-all ml-2 shadow-sm"
+          title="Open Code 2 & 3 Details"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-2" onClick={(e) => e.stopPropagation()}>
+      {/* Subheader: ID, Kickoff, Odds scan */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 bg-bg-elevated/10 px-4 py-1.5 font-mono text-[11px] text-text-dim">
+        <span>ID {row.fixture_id} · KICKOFF: {row.kickoff_utc} UTC ({row.status_text})</span>
+        <span className="text-text-secondary">
+          ODDS SCAN &gt; Home: {row.odds_home_win ?? "—"} | Away: {row.odds_away_win ?? "—"} | O2.5: {row.odds_o25 ?? "—"}
+        </span>
+      </div>
+
+      {/* Lineup Panels (Clicking inside here stays interactive without navigating) */}
+      <div className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-2">
         <TeamAuditPanel team={row.home} />
         <TeamAuditPanel team={row.away} />
       </div>
 
-      <div className="space-y-3 border-t border-border/70 px-4 py-3">
+      {/* Predictions & Killer Rules */}
+      <div className="space-y-2.5 border-t border-border/70 px-4 py-3">
         <div>
-          <p className="mb-2 text-2xs font-semibold uppercase tracking-wide text-text-dim">
+          <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-text-dim">
             [PRE-MATCH STRATEGIC PREDICTIONS]
           </p>
           <ul className="space-y-1">
             {row.picks.map((p, i) => (
-              <li key={i} className="font-mono text-2xs text-accent-cyan">
+              <li key={i} className="font-mono text-2xs text-cyan-300">
                 - [PICK] {formatPick(p, row.home.team_name, row.away.team_name)}
                 {typeof p !== "string" && (
                   <span className="text-text-dim">: {pickReason(p, row)}</span>
@@ -378,10 +384,10 @@ function ValidationMatchCard({ entry }: { entry: LiveValidationMatch }) {
               key={i}
               className={cn(
                 "whitespace-pre-wrap text-text-secondary",
-                line.includes("SUPREME") && "text-accent-amber",
-                line.includes("SETTLED") && "text-accent-green",
-                line.includes("HANDSHAKE") && "text-accent-cyan",
-                line.includes("FINAL STRIKE") && "text-accent-indigo"
+                line.includes("SUPREME") && "text-accent-amber font-bold",
+                line.includes("SETTLED") && "text-accent-green font-bold",
+                line.includes("HANDSHAKE") && "text-cyan-300 font-semibold",
+                line.includes("FINAL STRIKE") && "text-accent-indigo font-bold"
               )}
             >
               {line.trimStart()}
@@ -448,37 +454,48 @@ export default function LivePage() {
     : validationRows;
 
   return (
-    <div className="relative flex flex-col gap-5 p-6">
-      <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow opacity-80" />
-
-      <section className="relative overflow-hidden rounded-2xl border border-accent-indigo/20 bg-nebula shadow-elevated">
-        <div className="relative z-10 px-5 py-3.5 md:px-6">
-          <h1 className="text-xl font-extrabold tracking-tight text-text-primary sm:text-2xl">
-            Live Monitor
-          </h1>
-          <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-text-secondary">
-            Code 1 prints the full key-11 board (Player · Pos · Apps · Mins · Rating · Status),
-            KMV / RV holes, GK liability, odds scan, strategic picks and killer rules. Code 2 then
-            tracks those same picks live (monitoring → 30&apos; handshake → 45&apos; supreme).
-          </p>
-        </div>
-      </section>
-
-      {/* ── Code 1 ONLY on Main Page ────────────────────────────────────── */}
-      <section className="flex flex-col gap-3">
+    <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
+      
+      {/* ── 1. SLEEK COMPACT TOP BANNER (50% REDUCED HEIGHT) ────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-indigo/15 text-accent-indigo">
-            <Shield className="h-4 w-4" />
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-indigo/30 bg-accent-indigo/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]">
+            <Radio className="h-4 w-4 text-accent-indigo animate-pulse" />
           </div>
           <div>
-            <h2 className="text-sm font-semibold text-text-primary">
-              Prematch Strategic Audit
-            </h2>
-            <p className="text-2xs text-text-dim">
-              Console columns persisted · {stats.fixtures} fixtures · Tap any match card to open Code 2 &amp; 3 details
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary flex items-center gap-2">
+              Live Monitor
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.2 font-mono text-[9px] font-bold text-emerald-400">
+                CODE 1 STRATEGIC AUDIT
+              </span>
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Key-11 lineups, GK liabilities &amp; odds scan. Tap fixture or arrow to open Code 2 &amp; 3 in-play validation.
             </p>
           </div>
         </div>
+      </div>
+
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. CODE 1: PREMATCH STRATEGIC AUDIT CARDS ────────────────── */}
+      <section className="flex flex-col gap-3">
+        <div className="flex items-center justify-between border-b border-white/5 pb-2 px-1">
+          <div className="flex items-center gap-2">
+            <Shield className="h-4 w-4 text-cyan-400" />
+            <h2 className="text-xs font-bold uppercase tracking-wider text-text-primary">
+              Prematch Strategic Audit
+            </h2>
+            <span className="rounded-full bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.2 font-mono text-[9px] font-bold text-cyan-300">
+              {stats.fixtures} FIXTURES
+            </span>
+          </div>
+          <p className="text-[11px] text-text-dim hidden sm:block">
+            Tap match title or arrow to view in-play validation
+          </p>
+        </div>
+
         {prematch.loading && auditRows.length === 0 ? (
           <div className="grid gap-3">
             <Skeleton className="h-64 rounded-xl bg-bg-elevated" />
@@ -495,47 +512,51 @@ export default function LivePage() {
         )}
       </section>
 
-      {/* ── Match Detail Modal / Sub-View for Code 2 and Code 3 ──────────── */}
+      {/* ── 4. CODE 2 & 3 IN-PLAY DETAIL MODAL ───────────────────────── */}
       {selectedAudit && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-primary/80 backdrop-blur-md p-4 overflow-y-auto">
-          <div className="relative w-full max-w-4xl glass rounded-2xl border border-accent-indigo/30 bg-bg-secondary p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-border pb-4 mb-5">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-3 sm:p-5 overflow-y-auto">
+          <div className="relative w-full max-w-4xl glass rounded-2xl border border-cyan-500/30 bg-[#0a0f1d] p-4 sm:p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+            
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-4">
               <div>
-                <p className="text-xs font-bold uppercase tracking-widest text-accent-indigo">
-                  Match Forensic &amp; Validation Details
+                <p className="text-[10px] font-bold uppercase tracking-widest text-cyan-400 flex items-center gap-1.5">
+                  <Zap className="h-3 w-3 fill-cyan-400" />
+                  Code 2 &amp; 3 Live In-Play Intelligence
                 </p>
-                <h2 className="text-lg font-bold text-text-primary">
-                  {selectedAudit.fixture} (ID: {selectedAudit.fixture_id})
+                <h2 className="text-base font-black text-white">
+                  {selectedAudit.fixture} <span className="text-xs text-text-dim font-mono">(ID: {selectedAudit.fixture_id})</span>
                 </h2>
               </div>
               <button
                 type="button"
                 onClick={() => setSelectedAudit(null)}
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-bg-elevated text-text-secondary hover:text-text-primary"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-400 hover:text-white transition-colors"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="space-y-6">
-              {/* Code 2 Section */}
-              <section className="flex flex-col gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-green/15 text-accent-green">
+            <div className="space-y-5">
+              
+              {/* CODE 2: TRIPLE PHASE PROGRESSION BOARD */}
+              <section className="flex flex-col gap-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-950/50 border border-emerald-500/30 text-emerald-400 shadow-sm">
                     <ShieldCheck className="h-4 w-4" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-text-primary">
-                      Code 2 — Live Validation of Code 1 Predictions
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-white">
+                      Code 2 — Live Validation Engine
                     </h3>
-                    <p className="text-2xs text-text-dim">
-                      Cycle #{board.cycle || "—"} · Live tracking board for this fixture
+                    <p className="text-[10px] font-mono text-text-dim">
+                      Cycle #{board.cycle || "—"} · Live tracking status for this fixture
                     </p>
                   </div>
                 </div>
 
                 {matchedValidationMatches.length === 0 ? (
-                  <p className="text-xs text-text-dim italic p-3 bg-bg-elevated/40 rounded-lg">
+                  <p className="text-xs text-text-dim italic p-3 bg-bg-elevated/40 rounded-xl border border-white/5 font-mono">
                     No active live validation tracking entries for this fixture yet.
                   </p>
                 ) : (
@@ -547,18 +568,18 @@ export default function LivePage() {
                 )}
               </section>
 
-              {/* Code 3 Section */}
-              <section className="flex flex-col gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-cyan/15 text-accent-cyan">
-                    <Radio className="h-4 w-4" />
+              {/* CODE 3: VALIDATED ALERTS & SUPREME CONFIRMATIONS */}
+              <section className="flex flex-col gap-2.5 border-t border-white/10 pt-4">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-950/50 border border-cyan-500/30 text-cyan-400 shadow-sm">
+                    <Activity className="h-4 w-4" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-text-primary">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-white">
                       Code 3 — Validated Alerts &amp; Supreme Confirmations
                     </h3>
-                    <p className="text-2xs text-text-dim">
-                      In-play alerts confirmed at 45&apos; / 30&apos; handshake
+                    <p className="text-[10px] font-mono text-text-dim">
+                      In-play alerts confirmed at 30&apos; handshake / 45&apos; supreme gates
                     </p>
                   </div>
                 </div>
@@ -580,13 +601,14 @@ export default function LivePage() {
               </section>
             </div>
 
-            <div className="mt-6 flex justify-end">
+            {/* Modal Close Footer */}
+            <div className="mt-5 flex justify-end border-t border-white/10 pt-3">
               <button
                 type="button"
                 onClick={() => setSelectedAudit(null)}
-                className="rounded-lg bg-accent-indigo px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-accent-indigo/80"
+                className="rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-1.5 text-xs font-bold text-white transition-opacity hover:opacity-90 shadow-sm"
               >
-                Close Match Details
+                Close Details
               </button>
             </div>
           </div>
