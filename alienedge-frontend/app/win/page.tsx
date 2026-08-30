@@ -34,10 +34,6 @@ import {
 
 // ============================================================
 // Columns = exact backend return / printout keys
-// Apex   → AGGREGATOR/win_apex_aggregator.py final_rows
-// Psych  → PSYCHOLOGY/win_psychology.py FULL WIN FORENSIC BOARD cols
-// U2S    → PSYCHOLOGY/u2s_psychology.py FULL U2S FORENSIC BOARD + Audit_Verdict
-// Forecast / Raw → Engine CSV/dict keys (full print)
 // ============================================================
 
 const apexColumns: PredictionColumn<WinApexPick>[] = [
@@ -507,14 +503,38 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
 
-  // ── 1. VERIFY COLUMN PREPENDED RIGHT BEFORE DNA ─────────────────────
+  // 1. Win Apex (Verify -> DNA -> Rest)
   const apexColumnsWithVerifyAndDna = useMemo(
     () => [
-      createVerifyColumn<WinApexPick>(), // ◄── 1ST: VERIFY COLUMN
-      createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date), // ◄── 2ND: DNA COLUMN
-      ...apexColumns, // ◄── 3RD: REST OF FIXTURE COLUMNS
+      createVerifyColumn<WinApexPick>(),
+      createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date),
+      ...apexColumns,
     ],
     [dnaV2, date]
+  );
+
+  // 2. Win Psychology (Verify -> Rest)
+  const psychologyColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<WinPsychologyPick>(), ...psychologyColumns],
+    []
+  );
+
+  // 3. Underdog-to-Score (Verify -> Rest)
+  const u2sColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<WinU2SPick>(), ...u2sColumns],
+    []
+  );
+
+  // 4. Win Forecast (Verify -> Rest)
+  const forecastColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<WinForecastPick>(), ...forecastColumns],
+    []
+  );
+
+  // 5. Win Raw (Verify -> Rest)
+  const rawColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<WinRawPick>(), ...rawColumns],
+    []
   );
 
   return (
@@ -522,7 +542,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
       data-embedded={embedded || undefined}
       className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
     >
-      {/* ── 2. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      {/* Sleek Compact Top Banner */}
       <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-green/30 bg-accent-green/10 shadow-[0_0_12px_rgba(16,185,129,0.2)]">
@@ -539,10 +559,10 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         </div>
       </div>
 
-      {/* ── 3. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      {/* 5-Day History Audit Strip */}
       <QuickHistoryStrip />
 
-      {/* ── 4. WIN APEX TABLE (NOW WITH [VERIFY] BEFORE [DNA]) ───────── */}
+      {/* Stage 1: Win Apex — Final Aggregator */}
       <ChainStage
         title="Win Apex — Final Aggregator"
         description="Top-of-chain picks after full 3-stage audit"
@@ -554,6 +574,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         fallbackData={MOCK_WIN_APEX}
       />
 
+      {/* Stage 2: Team DNA — Goal Intent Board */}
       <ChainStage
         title="Team DNA — Goal Intent Board"
         description="Tactical DNA scores: Goal Intent, Win Dominance, BTTS Friction, Corner Power"
@@ -565,45 +586,49 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         fallbackData={MOCK_DNA}
       />
 
+      {/* Stage 3: Win Psychology */}
       <ChainStage
         title="Win Psychology"
         description="Psychological edge analysis — spears, quality grades, home/away logic"
         fetcher={() => winApi.getPsychology(date)}
         deps={[date]}
-        columns={psychologyColumns}
+        columns={psychologyColumnsWithVerify}
         rowKey={(r, i) => `${r.Fixture}-${i}`}
         emptyMessage="No psychology audits for this date."
         fallbackData={MOCK_WIN_PSYCH}
       />
 
+      {/* Stage 4: Underdog-to-Score Signal (U2S) */}
       <ChainStage
         title="Underdog-to-Score Signal (U2S)"
         description="Shots-on-target and scoring consistency analysis for underdog picks"
         fetcher={() => winApi.getU2S(date)}
         deps={[date]}
-        columns={u2sColumns}
+        columns={u2sColumnsWithVerify}
         rowKey={(r, i) => `${r.Fixture}-${i}`}
         emptyMessage="No U2S signals for this date."
         fallbackData={MOCK_WIN_U2S}
       />
 
+      {/* Stage 5: Win Forecast */}
       <ChainStage
         title="Win Forecast"
         description="Poisson-ranked win probability with venue and H2H breakdown"
         fetcher={() => foundationApi.getWinForecast(date)}
         deps={[date]}
-        columns={forecastColumns}
+        columns={forecastColumnsWithVerify}
         rowKey={(r, i) => `${r.fixture_id}-${r.side}-${i}`}
         emptyMessage="No forecast data for this date."
         fallbackData={MOCK_WIN_FORECAST}
       />
 
+      {/* Stage 6: Win Raw */}
       <ChainStage
         title="Win Raw"
         description="Unfiltered engine output — full fixture dataset before ranking"
         fetcher={() => winApi.getRaw(date)}
         deps={[date]}
-        columns={rawColumns}
+        columns={rawColumnsWithVerify}
         rowKey={(r, i) => `${r.fixture_id}-${r.side}-${i}`}
         emptyMessage="No raw engine data for this date."
         fallbackData={MOCK_WIN_RAW}
