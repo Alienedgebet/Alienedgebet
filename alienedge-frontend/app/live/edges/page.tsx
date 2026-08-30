@@ -19,7 +19,6 @@ import {
   ChainBranch,
   type PredictionColumn,
 } from "@/components/predictions";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -302,9 +301,6 @@ function PrematchAuditCard({
       <div className="border-b border-border/70 px-4 py-3 pr-36">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p className="mb-1 text-2xs font-bold uppercase tracking-widest text-accent-indigo">
-              Stage 1 · Strategic Audit (Tap to open Code 2 &amp; 3)
-            </p>
             <h3 className="text-sm font-semibold text-text-primary">
               MATCH: {row.fixture}
             </h3>
@@ -397,23 +393,6 @@ function ValidationMatchCard({ entry }: { entry: LiveValidationMatch }) {
   );
 }
 
-function FeedStat({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: string;
-}) {
-  return (
-    <div className="border-l border-border/60 pl-4 first:border-l-0 first:pl-0">
-      <p className="text-2xs uppercase tracking-wide text-text-dim">{label}</p>
-      <p className={cn("font-bold tabular-nums", accent ?? "text-text-primary")}>{value}</p>
-    </div>
-  );
-}
-
 export default function LivePage() {
   const [selectedAudit, setSelectedAudit] = useState<LivePrematchAudit | null>(null);
 
@@ -450,8 +429,6 @@ export default function LivePage() {
     };
   }, [auditRows, board.matches.length, board.total_tracked, validationRows.length]);
 
-  const anyMock = prematch.isMock || validation.isMock;
-
   const matchedValidationMatches = selectedAudit
     ? board.matches.filter(
         (m) =>
@@ -474,49 +451,12 @@ export default function LivePage() {
     <div className="relative flex flex-col gap-5 p-6">
       <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow opacity-80" />
 
-      <div className="glass flex flex-wrap items-center gap-x-7 gap-y-3 rounded-xl px-5 py-3.5 shadow-panel">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-red/20 shadow-glow-red">
-            <Radio className="h-4 w-4 text-accent-red" />
-          </div>
-          <div>
-            <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-text-primary">
-              Live Monitor
-              <span className="inline-flex items-center gap-1 rounded border border-accent-red/30 bg-accent-red/10 px-1.5 py-0.5 text-2xs font-bold text-accent-red">
-                <span className="h-1.5 w-1.5 animate-live-pulse rounded-full bg-accent-red" />
-                LIVE
-              </span>
-              {anyMock && (
-                <Badge
-                  variant="outline"
-                  className="h-4 border-accent-amber/30 px-1 text-[0.6rem] text-accent-amber"
-                >
-                  Demo
-                </Badge>
-              )}
-            </p>
-            <p className="text-2xs text-text-dim">
-              Code 1 audit → Code 2 validates those same predictions in-play
-            </p>
-          </div>
-        </div>
-        <div className="ml-auto flex flex-wrap gap-x-6 font-mono text-sm">
-          <FeedStat label="Audits" value={String(stats.fixtures)} />
-          <FeedStat label="GK liabilities" value={String(stats.gkLiabilities)} accent="text-accent-red" />
-          <FeedStat label="Tracked" value={String(stats.tracked)} accent="text-accent-cyan" />
-          <FeedStat label="Supreme" value={String(stats.validated)} accent="text-accent-green" />
-        </div>
-      </div>
-
       <section className="relative overflow-hidden rounded-2xl border border-accent-indigo/20 bg-nebula shadow-elevated">
-        <div className="relative z-10 px-6 py-7 md:px-8">
-          <p className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-accent-indigo/40 bg-accent-indigo/10 px-2.5 py-1 text-2xs font-bold uppercase tracking-[0.14em] text-accent-indigo">
-            Master Engine A · Strategic Audit
-          </p>
-          <h1 className="text-3xl font-extrabold tracking-tight text-text-primary sm:text-4xl">
+        <div className="relative z-10 px-5 py-3.5 md:px-6">
+          <h1 className="text-xl font-extrabold tracking-tight text-text-primary sm:text-2xl">
             Live Monitor
           </h1>
-          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-secondary">
+          <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-text-secondary">
             Code 1 prints the full key-11 board (Player · Pos · Apps · Mins · Rating · Status),
             KMV / RV holes, GK liability, odds scan, strategic picks and killer rules. Code 2 then
             tracks those same picks live (monitoring → 30&apos; handshake → 45&apos; supreme).
@@ -532,7 +472,7 @@ export default function LivePage() {
           </div>
           <div>
             <h2 className="text-sm font-semibold text-text-primary">
-              Code 1 — Prematch Strategic Audit
+              Prematch Strategic Audit
             </h2>
             <p className="text-2xs text-text-dim">
               Console columns persisted · {stats.fixtures} fixtures · Tap any match card to open Code 2 &amp; 3 details
