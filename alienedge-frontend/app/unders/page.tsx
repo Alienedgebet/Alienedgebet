@@ -7,6 +7,8 @@ import { useSelectedDate } from "@/lib/date-context";
 import { useApi } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UNDERS } from "@/lib/mock-chains";
 
@@ -111,15 +113,20 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
     cacheKey: `unders:${date}`,
   });
 
-  const u25ColumnsWithDna = useMemo(
+  // Under 2.5 (Verify -> DNA -> Rest)
+  const u25ColumnsWithVerifyAndDna = useMemo(
     () => [
+      createVerifyColumn<UndersPick>(),
       createDnaColumn<UndersPick>(dnaV2?.market_factors, "unders", date),
       ...u25Columns,
     ],
     [dnaV2, date]
   );
-  const u35ColumnsWithDna = useMemo(
+
+  // Under 3.5 (Verify -> DNA -> Rest)
+  const u35ColumnsWithVerifyAndDna = useMemo(
     () => [
+      createVerifyColumn<UndersPick>(),
       createDnaColumn<UndersPick>(dnaV2?.market_factors, "unders", date),
       ...u35Columns,
     ],
@@ -137,21 +144,29 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
   return (
     <div
       data-embedded={embedded || undefined}
-      className="flex flex-col gap-4 p-6"
+      className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
     >
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-red/15">
-          <TrendingDown className="h-5 w-5 text-accent-red" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">Unders Intelligence</h1>
-          <p className="text-xs text-text-secondary">
-            Single-code special — one composite response covering both Under 2.5 and Under 3.5 in
-            a single engine run.
-          </p>
+      {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-red/30 bg-accent-red/10 shadow-[0_0_12px_rgba(244,63,94,0.2)]">
+            <TrendingDown className="h-4 w-4 text-accent-red" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              Unders Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Defensive Under Empire — composite analysis covering Under 2.5 &amp; Under 3.5
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. BRANCH 1: Under 2.5 ──────────────────────────────────── */}
       <div>
         <ChainBranch
           title="Under 2.5"
@@ -163,12 +178,13 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           data={payload.u25}
           loading={result.loading}
           error={null}
-          columns={u25ColumnsWithDna}
+          columns={u25ColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Under 2.5 picks for this date."
         />
       </div>
 
+      {/* ── 4. BRANCH 2: Under 3.5 ──────────────────────────────────── */}
       <div>
         <ChainBranch
           title="Under 3.5"
@@ -180,7 +196,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           data={payload.u35}
           loading={result.loading}
           error={null}
-          columns={u35ColumnsWithDna}
+          columns={u35ColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Under 3.5 picks for this date."
         />
