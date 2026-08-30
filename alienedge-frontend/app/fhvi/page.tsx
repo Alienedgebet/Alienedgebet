@@ -1,8 +1,11 @@
 "use client";
 
+import { useMemo } from "react";
 import { Hourglass } from "lucide-react";
 import { specialsApi, type FHVIPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_FHVI } from "@/lib/mock-chains";
 
@@ -42,28 +45,42 @@ const columns: PredictionColumn<FHVIPick>[] = [
 export default function FHVIPage() {
   const { date } = useSelectedDate();
 
+  // Verify -> Fixture -> Rest
+  const columnsWithVerify = useMemo(
+    () => [createVerifyColumn<FHVIPick>(), ...columns],
+    []
+  );
+
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-indigo/15">
-          <Hourglass className="h-5 w-5 text-accent-indigo" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">First Half Volatility Intelligence</h1>
-          <p className="text-xs text-text-secondary">
-            Single-code special — the First Half Volatility Index streak miner, one head, no
-            psychology/aggregator siblings.
-          </p>
+    <div className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6">
+      {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-indigo/30 bg-accent-indigo/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]">
+            <Hourglass className="h-4 w-4 text-accent-indigo" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              First Half Volatility Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Single-code special — First Half Volatility Index (FHVI) streak miner
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. FHVI STREAK MINER TABLE ───────────────────────────────── */}
       <div>
         <ChainStage
           title="FHVI Streak Miner"
           description="Foundation base"
           fetcher={() => specialsApi.getFHVI(date)}
           deps={[date]}
-          columns={columns}
+          columns={columnsWithVerify}
           rowKey={(r, i) => `${r.fixture}-${i}`}
           emptyMessage="No FHVI picks for this date."
           fallbackData={MOCK_FHVI}
