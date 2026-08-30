@@ -22,6 +22,7 @@ import {
   Shield,
   SlidersHorizontal,
   Swords,
+  Target,
   TimerReset,
   TrendingDown,
   TrendingUp,
@@ -43,11 +44,20 @@ interface NavSection {
   items: NavItem[];
 }
 
+// ── 1. LIVE SUB-MENU ───────────────────────────────────────────────
 const LIVE_CHILDREN: NavItem[] = [
   { label: "Live Match Edges", href: "/live/edges", icon: Shield },
   { label: "Incoming Live Matches", href: "/live/incoming", icon: Inbox },
   { label: "Live Alert Scanner", href: "/live/alerts", icon: Bell },
   { label: "Build My Alert", href: "/live/rules", icon: SlidersHorizontal },
+];
+
+// ── 2. WEEKLY FORECASTS SUB-MENU ───────────────────────────────────
+const WEEKLY_CHILDREN: NavItem[] = [
+  { label: "GG Precision Filter", href: "/weekly/gg", icon: Zap },
+  { label: "Over 2.5 Filter", href: "/weekly/over25", icon: TrendingUp },
+  { label: "Win Poisson Filter", href: "/weekly/win", icon: Trophy },
+  { label: "Win Cross-Check", href: "/weekly/precision", icon: Target },
 ];
 
 const NAV: NavSection[] = [
@@ -72,7 +82,7 @@ const NAV: NavSection[] = [
   },
   {
     title: "Intelligence Tools",
-    items: [{ label: "Weekly Forecast Filter", href: "/weekly", icon: Filter }],
+    items: [], // Handled by accordion groups below
   },
 ];
 
@@ -83,7 +93,6 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-/** Spinner shown while the linked route is compiling / streaming. */
 function NavPendingHint() {
   const { pending } = useLinkStatus();
   return (
@@ -97,11 +106,6 @@ function NavPendingHint() {
   );
 }
 
-/**
- * Memoized so only the two items whose `active` prop flips actually re-render
- * during navigation (the rest stay idle even when Sidebar re-renders on
- * pathname change).
- */
 const NavLink = memo(function NavLink({
   item,
   active,
@@ -147,6 +151,7 @@ const NavLink = memo(function NavLink({
   );
 });
 
+// ── EXPANDABLE LIVE ACCORDION ───────────────────────────────────────
 const LiveNavGroup = memo(function LiveNavGroup({
   activePath,
   onNavigate,
@@ -182,7 +187,7 @@ const LiveNavGroup = memo(function LiveNavGroup({
               : "text-text-muted group-hover:text-text-secondary"
           )}
         />
-        <span className="flex-1 truncate text-left">Live</span>
+        <span className="flex-1 truncate text-left">Live Monitor</span>
         <span className="animate-pulse-slow rounded border border-accent-red/30 bg-accent-red/10 px-1 py-0.5 text-2xs font-semibold text-accent-red">
           LIVE
         </span>
@@ -208,13 +213,72 @@ const LiveNavGroup = memo(function LiveNavGroup({
   );
 });
 
+// ── EXPANDABLE WEEKLY FORECASTS ACCORDION ───────────────────────────
+const WeeklyNavGroup = memo(function WeeklyNavGroup({
+  activePath,
+  onNavigate,
+}: {
+  activePath: string;
+  onNavigate: (href: string) => void;
+}) {
+  const onWeekly = activePath === "/weekly" || activePath.startsWith("/weekly");
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    if (onWeekly) setOpen(true);
+  }, [onWeekly]);
+
+  return (
+    <div className="space-y-0.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={cn(
+          "group flex w-full items-center gap-3 rounded px-3 py-2 text-sm transition-colors duration-100",
+          onWeekly
+            ? "nav-active font-medium"
+            : "text-text-secondary hover:bg-bg-elevated/60 hover:text-text-primary"
+        )}
+      >
+        <Filter
+          className={cn(
+            "h-4 w-4 shrink-0 transition-colors",
+            onWeekly
+              ? "text-cyan-400"
+              : "text-text-muted group-hover:text-text-secondary"
+          )}
+        />
+        <span className="flex-1 truncate text-left">Weekly Forecasts</span>
+        <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-1 py-0.5 text-2xs font-semibold text-cyan-300">
+          WEEKLY
+        </span>
+        {open ? (
+          <ChevronDown className="h-3 w-3 shrink-0 text-cyan-400/70" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0 text-text-muted" />
+        )}
+      </button>
+      {open && (
+        <div className="ml-2 space-y-0.5 border-l border-cyan-500/20 pl-2">
+          {WEEKLY_CHILDREN.map((item) => (
+            <NavLink
+              key={item.href}
+              item={item}
+              active={isActive(activePath, item.href)}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
 export function Sidebar() {
   const pathname = usePathname();
   const { mobileOpen, close } = useSidebar();
 
-  // Optimistic active state: flip the active item immediately on click so the
-  // user sees <100ms visual feedback instead of waiting for usePathname() to
-  // resolve after the route change completes.
   const [optimisticPath, setOptimisticPath] = useState<string | null>(null);
 
   useEffect(() => {
@@ -233,7 +297,6 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile backdrop — tap to close */}
       {mobileOpen && (
         <div
           aria-hidden
@@ -287,10 +350,16 @@ export function Sidebar() {
                   />
                 ))}
                 {section.title === "Intelligence Tools" && (
-                  <LiveNavGroup
-                    activePath={effectivePath}
-                    onNavigate={handleNavigate}
-                  />
+                  <>
+                    <WeeklyNavGroup
+                      activePath={effectivePath}
+                      onNavigate={handleNavigate}
+                    />
+                    <LiveNavGroup
+                      activePath={effectivePath}
+                      onNavigate={handleNavigate}
+                    />
+                  </>
                 )}
               </div>
             </div>
