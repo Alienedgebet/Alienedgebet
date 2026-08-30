@@ -15,6 +15,8 @@ import {
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import {
   MOCK_O25_APEX,
@@ -190,117 +192,169 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
 
-  const apexColumnsWithDna = useMemo(
+  // 1. Apex (Verify -> DNA -> Rest)
+  const apexColumnsWithVerifyAndDna = useMemo(
     () => [
+      createVerifyColumn<Over25ApexPick>(),
       createDnaColumn<Over25ApexPick>(dnaV2?.market_factors, "over25", date),
       ...apexColumns,
     ],
     [dnaV2, date]
   );
 
+  // 2. Gold (Verify -> Rest)
+  const goldColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<Over25GoldPick>(), ...goldColumns],
+    []
+  );
+
+  // 3. Forecast (Verify -> Rest)
+  const forecastColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<Over25ForecastPick>(), ...forecastColumns],
+    []
+  );
+
+  // 4. Kill-Switch Stage 3 (Verify -> Rest)
+  const stage3ColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<Over25Stage3Pick>(), ...stage3Columns],
+    []
+  );
+
+  // 5. Psychology (Verify -> Rest)
+  const psychologyColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<Over25PsychologyPick>(), ...psychologyColumns],
+    []
+  );
+
+  // 6. Council Stage 2 (Verify -> Rest)
+  const stage2ColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<Over25Stage2Pick>(), ...stage2Columns],
+    []
+  );
+
+  // 7. Base Stage 1 (Verify -> Rest)
+  const stage1ColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<Over25Stage1Pick>(), ...stage1Columns],
+    []
+  );
+
   return (
     <div
       data-embedded={embedded || undefined}
-      className="flex flex-col gap-4 p-6"
+      className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
     >
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-green/15">
-          <TrendingUp className="h-5 w-5 text-accent-green" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">Over 2.5 Intelligence</h1>
-          <p className="text-xs text-text-secondary">
-            Full 7-stage engine chain, every stage visible — apex aggregation up top, down through
-            gold flags, forecast, kill-switch, psychology, council and the probabilistic base.
-          </p>
+      {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-amber/30 bg-accent-amber/10 shadow-[0_0_12px_rgba(245,158,11,0.2)]">
+            <TrendingUp className="h-4 w-4 text-accent-amber" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              Over 2.5 Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Full 7-stage engine chain — Apex picks, gold flags, forecast &amp; kill-switch
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. STAGE 1: Over 2.5 Apex ────────────────────────────────── */}
       <div>
         <ChainStage
           title="Over 2.5 Apex — Final Aggregator"
           description="Elite output"
           fetcher={() => over25Api.getApex(date)}
           deps={[date]}
-          columns={apexColumnsWithDna}
+          columns={apexColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No apex picks for this date."
           fallbackData={MOCK_O25_APEX}
         />
       </div>
 
+      {/* ── 4. STAGE 2: Over 2.5 Gold ────────────────────────────────── */}
       <div>
         <ChainStage
           title="Over 2.5 Gold"
           description="100%-flag gold engine"
           fetcher={() => over25Api.getGold(date)}
           deps={[date]}
-          columns={goldColumns}
+          columns={goldColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No gold picks for this date."
           fallbackData={MOCK_O25_GOLD}
         />
       </div>
 
+      {/* ── 5. STAGE 3: Over 2.5 Forecast ────────────────────────────── */}
       <div>
         <ChainStage
           title="Over 2.5 Forecast"
           description="Forecast layer"
           fetcher={() => over25Api.getForecast(date)}
           deps={[date]}
-          columns={forecastColumns}
+          columns={forecastColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No forecast picks for this date."
           fallbackData={MOCK_O25_FORECAST}
         />
       </div>
 
+      {/* ── 6. STAGE 4: Over 2.5 Kill-Switch (Stage 3) ────────────────── */}
       <div>
         <ChainStage
           title="Over 2.5 Kill-Switch (Stage 3)"
           description="Failure-audited grading"
           fetcher={() => over25Api.getStage3(date)}
           deps={[date]}
-          columns={stage3Columns}
+          columns={stage3ColumnsWithVerify}
           rowKey={(r, i) => `${r.Match}-${i}`}
           emptyMessage="No stage 3 picks for this date."
           fallbackData={MOCK_O25_S3}
         />
       </div>
 
+      {/* ── 7. STAGE 5: Over 2.5 Psychology ──────────────────────────── */}
       <div>
         <ChainStage
           title="Over 2.5 Psychology"
           description="Psychology layer"
           fetcher={() => over25Api.getPsychology(date)}
           deps={[date]}
-          columns={psychologyColumns}
+          columns={psychologyColumnsWithVerify}
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No psychology audits for this date."
           fallbackData={MOCK_O25_PSYCH}
         />
       </div>
 
+      {/* ── 8. STAGE 6: Over 2.5 Council (Stage 2) ───────────────────── */}
       <div>
         <ChainStage
           title="Over 2.5 Council (Stage 2)"
           description="Multi-algorithm voting"
           fetcher={() => over25Api.getStage2(date)}
           deps={[date]}
-          columns={stage2Columns}
+          columns={stage2ColumnsWithVerify}
           rowKey={(r, i) => `${r.id}-${i}`}
           emptyMessage="No stage 2 picks for this date."
           fallbackData={MOCK_O25_S2}
         />
       </div>
 
+      {/* ── 9. STAGE 7: Over 2.5 Probabilistic Base (Stage 1) ─────────── */}
       <div>
         <ChainStage
           title="Over 2.5 Probabilistic Base (Stage 1)"
           description="Foundation base"
           fetcher={() => over25Api.getStage1(date)}
           deps={[date]}
-          columns={stage1Columns}
+          columns={stage1ColumnsWithVerify}
           rowKey={(r, i) => `${r.id}-${i}`}
           emptyMessage="No stage 1 picks for this date."
           fallbackData={MOCK_O25_S1}
