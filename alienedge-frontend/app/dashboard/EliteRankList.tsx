@@ -21,14 +21,8 @@ export interface EliteRankItem {
   isMock: boolean;
   odds?: number;
   dnaMarketKey?: DnaV2MarketKey;
-  verification?: VerificationData; // ◄── Verification state
+  verification?: VerificationData;
 }
-
-const RANK_ACCENT: Record<number, string> = {
-  1: "bg-accent-indigo/20 text-accent-indigo border-accent-indigo/30",
-  2: "bg-accent-cyan/15 text-accent-cyan border-accent-cyan/30",
-  3: "bg-accent-amber/15 text-accent-amber border-accent-amber/30",
-};
 
 export function EliteRankList({
   items,
@@ -61,12 +55,11 @@ export function EliteRankList({
 
       {/* ── 2. SCROLLABLE TABLE CONTAINER ──────────────────────── */}
       <div className="w-full overflow-x-auto scrollbar-none [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <div className="min-w-[620px]">
+        <div className="min-w-[580px]">
           
-          {/* Table Column Headers */}
+          {/* Table Column Headers (Starts directly with VERIFY) */}
           {items.length > 0 && (
             <div className="flex items-center border-b border-border/60 bg-bg-elevated/30 px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-text-secondary">
-              <div className="w-12 shrink-0 font-mono text-center">#</div>
               <div className="w-20 shrink-0 font-mono text-center">Verify</div>
               <div className="w-16 shrink-0 font-mono text-center">DNA</div>
               <div className="flex-1 min-w-[200px] font-mono">Match &amp; Market</div>
@@ -87,26 +80,12 @@ export function EliteRankList({
                   key={item.key}
                   className="flex items-center px-4 py-3 transition-colors hover:bg-bg-elevated/60"
                 >
-                  {/* Column 1: Rank Number */}
-                  <div className="flex w-12 shrink-0 items-center justify-center">
-                    <span
-                      className={cn(
-                        "flex h-6 w-6 shrink-0 items-center justify-center rounded font-mono text-xs font-bold shadow-sm",
-                        RANK_ACCENT[item.rank]
-                          ? cn("border", RANK_ACCENT[item.rank])
-                          : "bg-bg-elevated text-text-muted border border-border"
-                      )}
-                    >
-                      {item.rank}
-                    </span>
-                  </div>
-
-                  {/* Column 2: VERIFY CELL (Right before DNA) */}
+                  {/* Column 1: VERIFY CELL (First Column) */}
                   <div className="flex w-20 shrink-0 items-center justify-center">
                     <VerifyCell data={item.verification} />
                   </div>
 
-                  {/* Column 3: DNA Badge */}
+                  {/* Column 2: DNA Badge */}
                   <div className="flex w-16 shrink-0 items-center justify-center">
                     {item.dnaMarketKey ? (
                       <DnaCountBadge
@@ -121,7 +100,7 @@ export function EliteRankList({
                     )}
                   </div>
 
-                  {/* Column 4: Match & Market */}
+                  {/* Column 3: Match & Market */}
                   <div className="flex-1 min-w-[200px] pr-4">
                     <Link
                       href={item.href}
@@ -147,7 +126,7 @@ export function EliteRankList({
                     </Link>
                   </div>
 
-                  {/* Column 5: Badges & Odds */}
+                  {/* Column 4: Badges & Odds */}
                   <div className="flex w-64 shrink-0 items-center justify-end gap-2.5">
                     <div className="flex shrink-0">
                       <TierBadge tier={item.tier} pulse={false} />
