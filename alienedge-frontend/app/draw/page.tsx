@@ -7,6 +7,8 @@ import { useSelectedDate } from "@/lib/date-context";
 import { useApi } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_DRAW } from "@/lib/mock-chains";
 
@@ -58,15 +60,16 @@ export default function DrawPage() {
     cacheKey: `draw:${date}`,
   });
 
-  const drawColumnsWithDna = useMemo(
+  // Verify -> DNA -> Rest (Used across all 3 draw branches)
+  const drawColumnsWithVerifyAndDna = useMemo(
     () => [
+      createVerifyColumn<DrawPick>(),
       createDnaColumn<DrawPick>(dnaV2?.market_factors, "draw", date),
       ...drawColumns,
     ],
     [dnaV2, date]
   );
 
-  // Render-time fallback — same contract as dashboard withFallback / ChainStage.
   const live = result.data;
   const liveHasRows =
     Boolean(live) &&
@@ -77,49 +80,59 @@ export default function DrawPage() {
   const isMock = !liveHasRows || result.isMock;
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-indigo/15">
-          <Scale className="h-5 w-5 text-accent-indigo" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">Draw Intelligence</h1>
-          <p className="text-xs text-text-secondary">
-            Single-code special — one composite response split into three ranked branches: the
-            full Draw Magnet Index, the high-parity list, and the amateur-table list.
-          </p>
+    <div className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6">
+      {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-indigo/30 bg-accent-indigo/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]">
+            <Scale className="h-4 w-4 text-accent-indigo" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              Draw Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Draw Magnet Index — composite analysis, high-parity list &amp; amateur draws
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. BRANCH 1: Draw Magnet Index ──────────────────────────── */}
       <ChainBranch
         title="Draw Magnet Index"
         description={isMock ? "Full ranked draw list · Demo" : "Full ranked draw list"}
         data={payload.draws}
         loading={result.loading}
         error={null}
-        columns={drawColumnsWithDna}
+        columns={drawColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No draw picks for this date."
       />
 
+      {/* ── 4. BRANCH 2: High Parity List ───────────────────────────── */}
       <ChainBranch
         title="High Parity List"
         description={isMock ? "Parity ≥ 0.9 subset · Demo" : "Parity ≥ 0.9 subset"}
         data={payload.parity_list}
         loading={result.loading}
         error={null}
-        columns={drawColumnsWithDna}
+        columns={drawColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No high-parity fixtures for this date."
       />
 
+      {/* ── 5. BRANCH 3: Amateurs List ──────────────────────────────── */}
       <ChainBranch
         title="Amateurs List"
         description={isMock ? "Total draws > 5 subset · Demo" : "Total draws > 5 subset"}
         data={payload.amateurs_list}
         loading={result.loading}
         error={null}
-        columns={drawColumnsWithDna}
+        columns={drawColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No amateur-table fixtures for this date."
       />
