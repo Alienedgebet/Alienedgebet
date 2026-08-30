@@ -82,7 +82,7 @@ const NAV: NavSection[] = [
   },
   {
     title: "Intelligence Tools",
-    items: [], // Handled by accordion groups below
+    items: [],
   },
 ];
 
@@ -110,10 +110,12 @@ const NavLink = memo(function NavLink({
   item,
   active,
   onNavigate,
+  isSubItem = false,
 }: {
   item: NavItem;
   active: boolean;
   onNavigate: (href: string) => void;
+  isSubItem?: boolean;
 }) {
   const Icon = item.icon;
   return (
@@ -123,15 +125,17 @@ const NavLink = memo(function NavLink({
       onClick={() => onNavigate(item.href)}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "group flex items-center gap-3 rounded px-3 py-2 text-sm transition-colors duration-100",
+        "group flex items-center gap-2.5 rounded transition-colors duration-100",
+        isSubItem ? "px-2.5 py-1.5 text-xs" : "px-3 py-2 text-sm",
         active
-          ? "nav-active font-medium"
+          ? "nav-active font-semibold"
           : "text-text-secondary hover:bg-bg-elevated/60 hover:text-text-primary"
       )}
     >
       <Icon
         className={cn(
-          "h-4 w-4 shrink-0 transition-colors",
+          "shrink-0 transition-colors",
+          isSubItem ? "h-3.5 w-3.5" : "h-4 w-4",
           active
             ? "text-accent-indigo"
             : "text-text-muted group-hover:text-text-secondary"
@@ -139,13 +143,13 @@ const NavLink = memo(function NavLink({
       />
       <span className="flex-1 truncate">{item.label}</span>
       {item.badge && (
-        <span className="animate-pulse-slow rounded border border-accent-red/30 bg-accent-red/10 px-1 py-0.5 text-2xs font-semibold text-accent-red">
+        <span className="animate-pulse-slow rounded border border-accent-red/30 bg-accent-red/10 px-1 py-0.2 text-[9px] font-bold text-accent-red">
           {item.badge}
         </span>
       )}
       <NavPendingHint />
       {active && (
-        <ChevronRight className="h-3 w-3 shrink-0 text-accent-indigo/50" />
+        <ChevronRight className="h-3 w-3 shrink-0 text-accent-indigo/70" />
       )}
     </Link>
   );
@@ -173,22 +177,22 @@ const LiveNavGroup = memo(function LiveNavGroup({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         className={cn(
-          "group flex w-full items-center gap-3 rounded px-3 py-2 text-sm transition-colors duration-100",
+          "group flex w-full items-center gap-2.5 rounded px-2.5 py-2 text-xs transition-colors duration-100",
           onLive
-            ? "nav-active font-medium"
+            ? "nav-active font-semibold"
             : "text-text-secondary hover:bg-bg-elevated/60 hover:text-text-primary"
         )}
       >
         <Radio
           className={cn(
-            "h-4 w-4 shrink-0 transition-colors",
+            "h-3.5 w-3.5 shrink-0 transition-colors",
             onLive
               ? "text-accent-indigo"
               : "text-text-muted group-hover:text-text-secondary"
           )}
         />
-        <span className="flex-1 truncate text-left">Live Monitor</span>
-        <span className="animate-pulse-slow rounded border border-accent-red/30 bg-accent-red/10 px-1 py-0.5 text-2xs font-semibold text-accent-red">
+        <span className="flex-1 text-left font-semibold">Live Monitor</span>
+        <span className="animate-pulse-slow rounded border border-accent-red/30 bg-accent-red/10 px-1 py-0.2 text-[9px] font-bold text-accent-red">
           LIVE
         </span>
         {open ? (
@@ -205,6 +209,7 @@ const LiveNavGroup = memo(function LiveNavGroup({
               item={item}
               active={isActive(activePath, item.href)}
               onNavigate={onNavigate}
+              isSubItem={true}
             />
           ))}
         </div>
@@ -213,7 +218,7 @@ const LiveNavGroup = memo(function LiveNavGroup({
   );
 });
 
-// ── EXPANDABLE WEEKLY FORECASTS ACCORDION ───────────────────────────
+// ── EXPANDABLE WEEKLY FORECAST FILTER ACCORDION ──────────────────────
 const WeeklyNavGroup = memo(function WeeklyNavGroup({
   activePath,
   onNavigate,
@@ -235,23 +240,26 @@ const WeeklyNavGroup = memo(function WeeklyNavGroup({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         className={cn(
-          "group flex w-full items-center gap-3 rounded px-3 py-2 text-sm transition-colors duration-100",
+          "group flex w-full items-center gap-2 rounded px-2.5 py-2 text-xs transition-colors duration-100",
           onWeekly
-            ? "nav-active font-medium"
+            ? "nav-active font-semibold"
             : "text-text-secondary hover:bg-bg-elevated/60 hover:text-text-primary"
         )}
       >
         <Filter
           className={cn(
-            "h-4 w-4 shrink-0 transition-colors",
+            "h-3.5 w-3.5 shrink-0 transition-colors",
             onWeekly
               ? "text-cyan-400"
               : "text-text-muted group-hover:text-text-secondary"
           )}
         />
-        <span className="flex-1 truncate text-left">Weekly Forecasts</span>
-        <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-1 py-0.5 text-2xs font-semibold text-cyan-300">
-          WEEKLY
+        {/* Full Title Visible without Truncation */}
+        <span className="flex-1 text-left font-semibold text-[11.5px] leading-tight">
+          Weekly Forecast Filter
+        </span>
+        <span className="shrink-0 rounded border border-cyan-500/30 bg-cyan-500/10 px-1 py-0.2 text-[8.5px] font-bold text-cyan-300">
+          WKY
         </span>
         {open ? (
           <ChevronDown className="h-3 w-3 shrink-0 text-cyan-400/70" />
@@ -267,6 +275,7 @@ const WeeklyNavGroup = memo(function WeeklyNavGroup({
               item={item}
               active={isActive(activePath, item.href)}
               onNavigate={onNavigate}
+              isSubItem={true}
             />
           ))}
         </div>
