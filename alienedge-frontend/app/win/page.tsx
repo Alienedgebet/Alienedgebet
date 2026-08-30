@@ -15,6 +15,8 @@ import {
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import {
   ChainStage,
   ProbCell,
@@ -505,10 +507,12 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
 
-  const apexColumnsWithDna = useMemo(
+  // ── 1. VERIFY COLUMN PREPENDED RIGHT BEFORE DNA ─────────────────────
+  const apexColumnsWithVerifyAndDna = useMemo(
     () => [
-      createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date),
-      ...apexColumns,
+      createVerifyColumn<WinApexPick>(), // ◄── 1ST: VERIFY COLUMN
+      createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date), // ◄── 2ND: DNA COLUMN
+      ...apexColumns, // ◄── 3RD: REST OF FIXTURE COLUMNS
     ],
     [dnaV2, date]
   );
@@ -516,29 +520,35 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   return (
     <div
       data-embedded={embedded || undefined}
-      className="flex flex-col gap-4 p-6"
+      className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
     >
-      <div className="glass flex items-center gap-3 rounded-lg p-4 shadow-panel">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-green/15">
-          <Trophy className="h-5 w-5 text-accent-green" />
-        </div>
-        <div>
-          <h1 className="text-base font-bold text-text-primary">
-            Win Intelligence
-          </h1>
-          <p className="text-xs text-text-secondary">
-            Multi-stage win probability engine — Apex picks, psychology
-            forensics, underdog signal (U2S), and raw forecast data.
-          </p>
+      {/* ── 2. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-green/30 bg-accent-green/10 shadow-[0_0_12px_rgba(16,185,129,0.2)]">
+            <Trophy className="h-4 w-4 text-accent-green" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              Win Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              Multi-stage win probability engine — Apex picks, psychology forensics &amp; forecast data
+            </p>
+          </div>
         </div>
       </div>
 
+      {/* ── 3. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 4. WIN APEX TABLE (NOW WITH [VERIFY] BEFORE [DNA]) ───────── */}
       <ChainStage
         title="Win Apex — Final Aggregator"
         description="Top-of-chain picks after full 3-stage audit"
         fetcher={() => winApi.getApex(date)}
         deps={[date]}
-        columns={apexColumnsWithDna}
+        columns={apexColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No apex picks for this date."
         fallbackData={MOCK_WIN_APEX}
