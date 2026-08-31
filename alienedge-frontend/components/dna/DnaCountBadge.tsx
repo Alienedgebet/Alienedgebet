@@ -21,30 +21,14 @@ function findEntryByLabel(
 }
 
 interface DnaCountBadgeProps {
-  /** Full market-factor payload for every fixture, keyed by fixture_id. */
   marketFactors: Record<string, DnaV2FixtureFactors> | undefined;
-  /** Preferred join key — exact match against the backend's fixture_id. */
   fixtureId?: string | number;
-  /** Fallback join key for pick types with no fixture_id — "Home vs Away". */
   fixtureLabel?: string;
   market: DnaV2MarketKey;
   date: string;
   className?: string;
 }
 
-/**
- * Compact, always-first-column DNA factor count — e.g. "9 : 3".
- *
- * Deliberately renders NOTHING else: no percentages, bars, charts, or
- * pillar breakdowns. Every number comes straight from the backend
- * (CORE/dna_v2_market_factors.py) — this component only reads and renders.
- *
- * Fully clickable — routes to the full-screen DNA Analysis page for this
- * exact fixture + market. Because the fixture list and the DNA page share
- * the same `dna-v2:latest` useApi cache (see lib/use-dna-v2.ts), the data
- * is already in memory by the time this is clicked, so the transition is
- * instant.
- */
 export function DnaCountBadge({
   marketFactors,
   fixtureId,
@@ -69,24 +53,19 @@ export function DnaCountBadge({
       href={`/dna/${market}/${resolvedId}?date=${date}`}
       prefetch
       className={cn(
-        "inline-flex items-center gap-1 rounded border border-border bg-bg-card px-1.5 py-0.5 font-mono text-2xs font-semibold tabular-nums text-text-primary transition-colors hover:border-accent-indigo hover:text-accent-indigo",
+        "inline-flex items-center justify-center gap-1 rounded-md border border-cyan-500/30 bg-[#0c1526]/90 px-1.5 py-0.5 font-mono text-[11px] font-black tabular-nums text-cyan-200 shadow-[0_0_8px_rgba(6,182,212,0.15)] transition-all hover:border-cyan-400 hover:bg-cyan-500/20 hover:text-white active:scale-95",
         className
       )}
-      aria-label={`DNA factor count: home ${counts.home_count}, away ${counts.away_count}. Open DNA analysis.`}
+      title="Tap to open full Tactical DNA analysis"
+      aria-label={`DNA count: home ${counts.home_count}, away ${counts.away_count}. Open DNA analysis.`}
     >
       <span>{counts.home_count}</span>
-      <span className="text-text-dim">:</span>
+      <span className="text-cyan-400/60 font-medium">:</span>
       <span>{counts.away_count}</span>
     </Link>
   );
 }
 
-/**
- * Builds a ready-to-prepend PredictionColumn that renders a DnaCountBadge,
- * joining rows to the backend's market-factor payload by fixture_id.
- * Every market page uses this to keep the DNA column first, consistent,
- * and backed by the exact same server-computed counts.
- */
 export function createDnaColumn<T extends { fixture_id: string | number }>(
   marketFactors: Record<string, DnaV2FixtureFactors> | undefined,
   market: DnaV2MarketKey,
@@ -106,10 +85,6 @@ export function createDnaColumn<T extends { fixture_id: string | number }>(
   };
 }
 
-/**
- * Same as createDnaColumn, but for pick types with no fixture_id field —
- * joins by normalized "Home vs Away" fixture label instead.
- */
 export function createDnaColumnByLabel<T>(
   marketFactors: Record<string, DnaV2FixtureFactors> | undefined,
   market: DnaV2MarketKey,
