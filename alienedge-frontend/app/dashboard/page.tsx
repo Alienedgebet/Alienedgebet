@@ -32,10 +32,6 @@ import { EngineStatusList } from "./EngineStatusList";
 import { LiveMonitorPanel } from "./LiveMonitorPanel";
 import { MarketIntelList } from "./MarketIntelList";
 
-/**
- * Keep rows on screen during fetch. Prefer live data; otherwise seeded mock
- * from useApi fallback. Never return null once a market has anything to show.
- */
 function withFallback(
   key: string,
   result: UseApiResult<MarketPick[]>
@@ -48,7 +44,6 @@ function withFallback(
   return { data: mock, isMock: true };
 }
 
-/** Only these 7 of the 11 dashboard markets are covered by DNA Engine V2. */
 const DNA_SUPPORTED_MARKET_KEYS = new Set<string>([
   "win",
   "gg",
@@ -63,9 +58,6 @@ function DashboardOverview() {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
 
-  // Cache key = dashboard + market key + date. Means: leave the dashboard,
-  // come back within the TTL window → instant paint from cache instead of
-  // re-running all 11 requests (same contract as ChainStage on market pages).
   const win = useApi(() => WIN_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.win,
     cacheKey: `dashboard-win:${date}`,
@@ -167,41 +159,18 @@ function DashboardOverview() {
     items.sort((a, b) => b.value - a.value);
     items.forEach((item, i) => (item.rank = i + 1));
     return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    win.data,
-    win.loading,
-    win.isMock,
-    gg.data,
-    gg.loading,
-    gg.isMock,
-    over25.data,
-    over25.loading,
-    over25.isMock,
-    over15.data,
-    over15.loading,
-    over15.isMock,
-    draw.data,
-    draw.loading,
-    draw.isMock,
-    unders.data,
-    unders.loading,
-    unders.isMock,
-    corners.data,
-    corners.loading,
-    corners.isMock,
-    sot.data,
-    sot.loading,
-    sot.isMock,
-    fhvi.data,
-    fhvi.loading,
-    fhvi.isMock,
-    shvi.data,
-    shvi.loading,
-    shvi.isMock,
-    underdog.data,
-    underdog.loading,
-    underdog.isMock,
+    win.data, win.loading, win.isMock,
+    gg.data, gg.loading, gg.isMock,
+    over25.data, over25.loading, over25.isMock,
+    over15.data, over15.loading, over15.isMock,
+    draw.data, draw.loading, draw.isMock,
+    unders.data, unders.loading, unders.isMock,
+    corners.data, corners.loading, corners.isMock,
+    sot.data, sot.loading, sot.isMock,
+    fhvi.data, fhvi.loading, fhvi.isMock,
+    shvi.data, shvi.loading, shvi.isMock,
+    underdog.data, underdog.loading, underdog.isMock,
   ]);
 
   const peakConfidence = allElite[0]?.value ?? 0;
@@ -251,14 +220,18 @@ function DashboardOverview() {
         </div>
       </div>
 
-      <MarketIntelList rows={marketRows} />
+      {/* ── MARKET INTEL WITH DNA FACTORS & DATE CONNECTED ──────────── */}
+      <MarketIntelList
+        rows={marketRows}
+        marketFactors={dnaV2?.market_factors}
+        date={date}
+      />
 
       <AIMarketAssessment />
     </div>
   );
 }
 
-/** Old /dashboard?tab=<market> bookmarks → dedicated market routes. */
 function LegacyTabRedirect() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -276,8 +249,6 @@ function LegacyTabRedirect() {
 export default function DashboardPage() {
   return (
     <>
-      {/* searchParams Suspense must NOT wrap the command center — that caused
-          a blank "Loading…" flash on every sidebar click into /dashboard. */}
       <Suspense fallback={null}>
         <LegacyTabRedirect />
       </Suspense>
