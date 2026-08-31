@@ -1029,12 +1029,13 @@ class SupremeOrchestrator:
 
     # ── LIVE SCORE FETCH ─────────────────────────────────────────────────
     def fetch_live_scores(self):
-        url = (
-            f"{BASE_URL}?include="
-            "statistics.type;events.type;scores;"
-            "participants;state;periods"
-        )
-        return GET(url).get('data', [])
+        # ◄── Reads from the 2-minute shared cache (0 extra SportMonks calls)
+        try:
+            from backend.live_cache import get_live_scores_cached
+        except ImportError:
+            from live_cache import get_live_scores_cached
+            
+        return get_live_scores_cached()
 
 
 # ==============================================================================
