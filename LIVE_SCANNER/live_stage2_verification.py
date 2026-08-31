@@ -614,13 +614,14 @@ def run_live_validator_engine():
         cycle_number += 1
         cycle_log = []
 
-        live_data = GET(
-            f"{BASE_URL}",
-            params={"include": "participants;scores;statistics.type;events.type;state;periods"}
-        )
+        try:
+            from backend.live_cache import get_live_scores_cached
+        except ImportError:
+            from live_cache import get_live_scores_cached
 
-        live_matches   = live_data.get("data", [])
-        tracked_count  = 0
+        live_matches = get_live_scores_cached()
+        tracked_count = 0
+    
 
         for fx in live_matches:
             f_id = str(fx.get("id"))
