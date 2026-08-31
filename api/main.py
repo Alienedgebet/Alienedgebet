@@ -17,9 +17,14 @@ app = FastAPI(
     description="Forensic football prediction engine — REST interface",
 )
 
+# CORS: Allows requests from your Vercel frontend and local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://alienedgebet.vercel.app",
+        "http://localhost:3000",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,8 +34,12 @@ app.add_middleware(
 from api.user_rules_router import router as user_rules_router
 app.include_router(user_rules_router)
 
+# ── VERIFICATION SETTLEMENT IMPORTS ──────────────────────────────────────────
+from backend.settlement_service import settle_predictions
+from backend.live_cache import get_live_scores_cached
 
-# ── SHARED HELPER ─────────────────────────────────────────────────────────────
+
+# ── SHARED HELPERS ────────────────────────────────────────────────────────────
 def _run(fn, *args, **kwargs):
     """Run a synchronous engine function and catch any exceptions."""
     try:
@@ -38,6 +47,18 @@ def _run(fn, *args, **kwargs):
         return result if result is not None else []
     except Exception:
         raise HTTPException(status_code=500, detail=traceback.format_exc())
+
+
+def _settled(data, market_type="win"):
+    """Enriches prediction rows with live scores and ✅/❌ verdicts."""
+    if isinstance(data, list) and len(data) > 0:
+        try:
+            live_db = get_live_scores_cached()
+            return settle_predictions(data, live_db, market_type=market_type)
+        except Exception as e:
+            print(f"[SETTLEMENT WARN] Could not settle: {e}")
+            return data
+    return data
 
 
 def _read_json(path: str, default=None):
@@ -147,17 +168,17 @@ def get_dna_v2_latest():
 @app.get("/api/underdog/{date}", tags=["Foundation"])
 def get_underdog(date: str):
     from Engine.underdog_engine import run_underdog_engine
-    return _run(run_underdog_engine, date)
+    return _settled(_run(run_underdog_engine, date), "u2s")
 
 @app.get("/api/underdog/audit/{date}", tags=["Foundation"])
 def get_underdog_audit(date: str):
     from Engine.master_underdog_audit import run_underdog_master_engine
-    return _run(run_underdog_master_engine, date)
+    return _settled(_run(run_underdog_master_engine, date), "u2s")
 
 @app.get("/api/underdog/apex/{date}", tags=["Foundation"])
 def get_underdog_apex(date: str):
     from AGGREGATOR.apex_ud_aggregator import run_apex_underdog_aggregator
-    return _run(run_apex_underdog_aggregator, date)
+    return _settled(_run(run_apex_underdog_aggregator, date), "u2s")
 
 @app.get("/api/calibration/{date}", tags=["Foundation"])
 def get_calibration(date: str):
@@ -166,212 +187,212 @@ def get_calibration(date: str):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# WIN ENGINES
+# WIN ENGINES (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
-@app.get("/api/win/forecast/{date}", tags=["Foundation"])
+@app.get("/api/win/forecast/{date}", tags=["Win"])
 def get_win_forecast(date: str):
     from Engine.win_forecast import run_win_forecast_engine
-    return _run(run_win_forecast_engine, date)
+    return _settled(_run(run_win_forecast_engine, date), "win")
 
 @app.get("/api/win/psychology/{date}", tags=["Win"])
 def get_win_psychology(date: str):
     from PSYCHOLOGY.win_psychology import run_win_psychology_engine
-    return _run(run_win_psychology_engine, date)
+    return _settled(_run(run_win_psychology_engine, date), "win")
 
 @app.get("/api/win/apex/{date}", tags=["Win"])
 def get_win_apex(date: str):
     from AGGREGATOR.win_apex_aggregator import run_win_apex_aggregator
-    return _run(run_win_apex_aggregator, date)
+    return _settled(_run(run_win_apex_aggregator, date), "win")
 
 @app.get("/api/win/raw/{date}", tags=["Win"])
 def get_win_raw(date: str):
     from Engine.win_raw_engine import run_win_raw_engine
-    return _run(run_win_raw_engine, date)
+    return _settled(_run(run_win_raw_engine, date), "win")
 
 @app.get("/api/win/u2s/{date}", tags=["Win"])
 def get_u2s(date: str):
     from PSYCHOLOGY.u2s_psychology import run_u2s_psychology_engine
-    return _run(run_u2s_psychology_engine, date)
+    return _settled(_run(run_u2s_psychology_engine, date), "u2s")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# GG / BTTS ENGINES
+# GG / BTTS ENGINES (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/gg/precision/{date}", tags=["GG"])
 def get_gg_precision(date: str):
     from Engine.gg_precision_engine import run_gg_o15_engine
     gg, o15 = _run(run_gg_o15_engine, date)
-    return {"gg": gg, "o15": o15}
+    return {"gg": _settled(gg, "gg"), "o15": _settled(o15, "o15")}
 
 @app.get("/api/gg/forensics/{date}", tags=["GG"])
 def get_gg_forensics(date: str):
     from AGGREGATOR.gg_forensics_audit import run_gg_forensic_aggregator
-    return _run(run_gg_forensic_aggregator, date)
+    return _settled(_run(run_gg_forensic_aggregator, date), "gg")
 
 @app.get("/api/gg/psychology/{date}", tags=["GG"])
 def get_gg_psychology(date: str):
     from PSYCHOLOGY.gg_psychology import run_gg_psychology_engine
-    return _run(run_gg_psychology_engine, date)
+    return _settled(_run(run_gg_psychology_engine, date), "gg")
 
 @app.get("/api/gg/supreme/{date}", tags=["GG"])
 def get_gg_supreme(date: str):
     from AGGREGATOR.gg_supreme_vip import run_supreme_gg_aggregator
-    return _run(run_supreme_gg_aggregator, date)
+    return _settled(_run(run_supreme_gg_aggregator, date), "gg")
 
 @app.get("/api/gg/cross-verify", tags=["GG"])
 def get_gg_cross_verify():
     """GG precision filter — 7-day cross-verification (original command)."""
     from FILTER.gg_precision_filter import run_gg_precision_filter
-    return _run(run_gg_precision_filter)
+    return _settled(_run(run_gg_precision_filter), "gg")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# OVER 2.5 ENGINES
+# OVER 2.5 ENGINES (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/over25/stage1/{date}", tags=["Over 2.5"])
 def get_over25_stage1(date: str):
     from Engine.over25_probabilistic import run_over25_stage1
-    return _run(run_over25_stage1, date)
+    return _settled(_run(run_over25_stage1, date), "o25")
 
 @app.get("/api/over25/stage2/{date}", tags=["Over 2.5"])
 def get_over25_stage2(date: str):
     from Engine.over25_council import run_over25_stage2
-    return _run(run_over25_stage2, date)
+    return _settled(_run(run_over25_stage2, date), "o25")
 
 @app.get("/api/over25/stage3/{date}", tags=["Over 2.5"])
 def get_over25_stage3(date: str):
     from AGGREGATOR.over25_killswitch import run_over25_stage3
-    return _run(run_over25_stage3, date)
+    return _settled(_run(run_over25_stage3, date), "o25")
 
 @app.get("/api/over25/psychology/{date}", tags=["Over 2.5"])
 def get_over25_psychology(date: str):
     from PSYCHOLOGY.over25_psychology import run_o25_psychology_engine
-    return _run(run_o25_psychology_engine, date)
+    return _settled(_run(run_o25_psychology_engine, date), "o25")
 
 @app.get("/api/over25/gold/{date}", tags=["Over 2.5"])
 def get_over25_gold(date: str):
     from Engine.gold_over25 import run_gold_over_25_engine
-    return _run(run_gold_over_25_engine, date)
+    return _settled(_run(run_gold_over_25_engine, date), "o25")
 
 @app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
 def get_over25_apex(date: str):
     from AGGREGATOR.over25_apex import run_over25_aggregator
-    return _run(run_over25_aggregator, date)
+    return _settled(_run(run_over25_aggregator, date), "o25")
 
 @app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
 def get_over25_forecast(date: str):
     from Engine.over25_forecast import run_over25_forecast_engine
-    return _run(run_over25_forecast_engine, date)
+    return _settled(_run(run_over25_forecast_engine, date), "o25")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# OVER 1.5 ENGINES
+# OVER 1.5 ENGINES (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/over15/stage3/{date}", tags=["Over 1.5"])
 def get_over15_stage3(date: str):
     from Engine.over15_stage3 import run_over15_stage3
-    return _run(run_over15_stage3, date)
+    return _settled(_run(run_over15_stage3, date), "o15")
 
 @app.get("/api/over15/psychology/{date}", tags=["Over 1.5"])
 def get_over15_psychology(date: str):
     from PSYCHOLOGY.over15_psychology import run_o15_psychology_engine
-    return _run(run_o15_psychology_engine, date)
+    return _settled(_run(run_o15_psychology_engine, date), "o15")
 
 @app.get("/api/over15/apex/{date}", tags=["Over 1.5"])
 def get_over15_apex(date: str):
     from AGGREGATOR.over15_apex import run_o15_apex_engine
-    return _run(run_o15_apex_engine, date)
+    return _settled(_run(run_o15_apex_engine, date), "o15")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# UNDER ENGINES
+# UNDER ENGINES (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/unders/{date}", tags=["Unders"])
 def get_unders(date: str):
     from Engine.unders_engine import run_unders_engine
     u25, u35 = _run(run_unders_engine, date)
-    return {"u25": u25, "u35": u35}
+    return {"u25": _settled(u25, "o25"), "u35": u35}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# DRAW ENGINE
+# DRAW ENGINE (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/draw/{date}", tags=["Draw"])
 def get_draw(date: str):
     from Engine.draw_engine import run_draw_engine
     draws, parity, amateurs = _run(run_draw_engine, date)
-    return {"draws": draws, "parity_list": parity, "amateurs_list": amateurs}
+    return {"draws": _settled(draws, "win"), "parity_list": parity, "amateurs_list": amateurs}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# CORNER ENGINES
+# CORNER ENGINES (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/corners/stage1/{date}", tags=["Corners"])
 def get_corners_stage1(date: str):
     from Engine.corner_miner import run_corner_engine_stage1
-    return _run(run_corner_engine_stage1, date)
+    return _settled(_run(run_corner_engine_stage1, date), "corners")
 
 @app.get("/api/corners/stage2/{date}", tags=["Corners"])
 def get_corners_stage2(date: str):
     from Engine.corner_refiner import run_corner_engine_stage2
-    return _run(run_corner_engine_stage2, date)
+    return _settled(_run(run_corner_engine_stage2, date), "corners")
 
 @app.get("/api/corners/psychology/{date}", tags=["Corners"])
 def get_corners_psychology(date: str):
     from PSYCHOLOGY.corner_psychology import run_corner3_psychology_engine
-    return _run(run_corner3_psychology_engine, date)
+    return _settled(_run(run_corner3_psychology_engine, date), "corners")
 
 @app.get("/api/corners/catalyst/{date}", tags=["Corners"])
 def get_corners_catalyst(date: str):
     from Engine.corner_catalyst import run_catalyst_corner_engine
-    return _run(run_catalyst_corner_engine, date)
+    return _settled(_run(run_catalyst_corner_engine, date), "corners")
 
 @app.get("/api/corners/aggregator/{date}", tags=["Corners"])
 def get_corners_aggregator(date: str):
     from AGGREGATOR.corner4_aggregator import run_corner4_aggregator_engine
-    return _run(run_corner4_aggregator_engine, date)
+    return _settled(_run(run_corner4_aggregator_engine, date), "corners")
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# SOT / HALF-TIME / SECOND-HALF ENGINES
+# SOT / HALF-TIME / SECOND-HALF ENGINES (Settlement Enabled)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/sot/{date}", tags=["Specials"])
 def get_sot(date: str):
     from Engine.sot_engine import run_sot_engine
-    return _run(run_sot_engine, date)
+    return _settled(_run(run_sot_engine, date), "sot")
 
 @app.get("/api/fhvi/{date}", tags=["Specials"])
 def get_fhvi(date: str):
     from Engine.fhvi_engine import run_fhvi_engine
-    return _run(run_fhvi_engine, date)
+    return _settled(_run(run_fhvi_engine, date), "shvi")
 
 @app.get("/api/shvi/{date}", tags=["Specials"])
 def get_shvi(date: str):
     from Engine.shvi_engine import run_shvi_engine
-    return _run(run_shvi_engine, date)
+    return _settled(_run(run_shvi_engine, date), "shvi")
 
 @app.get("/api/sh-gg-winner/{date}", tags=["Specials"])
 def get_sh_gg_winner(date: str):
     from Engine.sh_gg_winner import run_sh_gg_winner_engine
-    return _run(run_sh_gg_winner_engine, date)
+    return _settled(_run(run_sh_gg_winner_engine, date), "shvi")
 
 @app.get("/api/sh-master/{date}", tags=["Specials"])
 def get_sh_master(date: str):
     from Engine.sh_master_vortex import run_sh_master_vortex
-    return _run(run_sh_master_vortex, date)
+    return _settled(_run(run_sh_master_vortex, date), "shvi")
 
 @app.get("/api/sh-8goal/{date}", tags=["Specials"])
 def get_sh_8goal(date: str):
     from AGGREGATOR.sh_8goal_aggregator import run_sh_gg_8goal_aggregator
-    return _run(run_sh_gg_8goal_aggregator, date)
+    return _settled(_run(run_sh_gg_8goal_aggregator, date), "shvi")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -434,12 +455,8 @@ def get_live_dashboard():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# ★  NEW FILTER ENDPOINTS — upgraded 3-engine system
+# FILTER ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
-
-# ── GG FILTER (Engine/gg_engine_weekly.py) ───────────────────────────────────
-# NOTE: /weekly must be registered BEFORE /{date} so FastAPI doesn't swallow
-#       the literal string "weekly" as a date path parameter.
 
 @app.get("/api/filter/gg/weekly", tags=["Filters"])
 def filter_gg_weekly(
@@ -455,10 +472,6 @@ def filter_gg_weekly(
     min_dominance: int = 5,
     strict_mode: bool = True,
 ):
-    """
-    GG weekly filter — scans full date range then applies filter.
-    mode: public | tipster | odds_band | advanced
-    """
     from Engine.gg_engine_weekly import run_gg_weekly_filter
     kwargs = dict(
         risk_level=risk_level, odds_band=odds_band,
@@ -466,10 +479,9 @@ def filter_gg_weekly(
         max_parity=max_parity, min_dominance=min_dominance,
         strict_mode=strict_mode,
     )
-    return _run(
-        run_gg_weekly_filter,
-        start_date, end_date, anchor_date, mode,
-        **kwargs
+    return _settled(
+        _run(run_gg_weekly_filter, start_date, end_date, anchor_date, mode, **kwargs),
+        "gg"
     )
 
 
@@ -493,10 +505,6 @@ def filter_gg_single(
     max_gg_odds: float = 2.50,
     strict_mode: bool = True,
 ):
-    """
-    GG single-date filter.
-    mode: public | tipster | odds_band | advanced
-    """
     from Engine.gg_engine_weekly import run_gg_filter_service
     kwargs = dict(
         risk_level=risk_level, odds_band=odds_band,
@@ -504,16 +512,12 @@ def filter_gg_single(
         min_away_gg5=min_away_gg5, min_home_gg3=min_home_gg3,
         min_away_gg3=min_away_gg3, min_h2h_gg=min_h2h_gg,
         max_parity=max_parity, min_dominance=min_dominance,
-        max_home_missing=max_home_missing,
-        max_away_missing=max_away_missing,
+        max_home_missing=max_home_missing, max_away_missing=max_away_missing,
         min_gg_odds=min_gg_odds, max_gg_odds=max_gg_odds,
         strict_mode=strict_mode,
     )
-    return _run(run_gg_filter_service, date, mode, **kwargs)
+    return _settled(_run(run_gg_filter_service, date, mode, **kwargs), "gg")
 
-
-# ── WIN FILTER (Engine/win_engine_weekly.py) ─────────────────────────────────
-# NOTE: /weekly registered before /{date} — prevents path-param shadowing.
 
 @app.get("/api/filter/win/weekly", tags=["Filters"])
 def filter_win_weekly(
@@ -527,20 +531,15 @@ def filter_win_weekly(
     min_parity_gap: int = 10,
     strict_mode: bool = True,
 ):
-    """
-    Win weekly filter — scans full date range then applies filter.
-    mode: public | tipster | odds_band
-    """
     from Engine.win_engine_weekly import run_win_weekly_filter
     kwargs = dict(
         risk_level=risk_level, odds_band=odds_band,
         min_form_wins=min_form_wins, min_parity_gap=min_parity_gap,
         strict_mode=strict_mode,
     )
-    return _run(
-        run_win_weekly_filter,
-        start_date, end_date, anchor_date, mode,
-        **kwargs
+    return _settled(
+        _run(run_win_weekly_filter, start_date, end_date, anchor_date, mode, **kwargs),
+        "win"
     )
 
 
@@ -565,10 +564,6 @@ def filter_win_single(
     strict_mode: bool = True,
     min_parity: int = 10,
 ):
-    """
-    Win single-date filter.
-    mode: public | tipster | odds_band
-    """
     from Engine.win_engine_weekly import run_win_filter_service
     kwargs = dict(
         risk_level=risk_level, odds_band=odds_band,
@@ -580,11 +575,8 @@ def filter_win_single(
         min_parity_gap=min_parity_gap, min_even_count=min_even_count,
         strict_mode=strict_mode, min_parity=min_parity,
     )
-    return _run(run_win_filter_service, date, mode, **kwargs)
+    return _settled(_run(run_win_filter_service, date, mode, **kwargs), "win")
 
-
-# ── OVER 2.5 FILTER (Engine/over25_engine_weekly.py) ─────────────────────────
-# NOTE: /weekly registered before /{date} — prevents path-param shadowing.
 
 @app.get("/api/filter/over25/weekly", tags=["Filters"])
 def filter_over25_weekly(
@@ -597,19 +589,14 @@ def filter_over25_weekly(
     min_poisson: float = 60.0,
     min_votes: int = 5,
 ):
-    """
-    Over 2.5 weekly filter — scans full date range then applies filter.
-    mode: public | tipster | odds_band
-    """
     from Engine.over25_engine_weekly import run_over25_weekly_filter
     kwargs = dict(
         risk_level=risk_level, odds_band=odds_band,
         min_poisson=min_poisson, min_votes=min_votes,
     )
-    return _run(
-        run_over25_weekly_filter,
-        start_date, end_date, anchor_date, mode,
-        **kwargs
+    return _settled(
+        _run(run_over25_weekly_filter, start_date, end_date, anchor_date, mode, **kwargs),
+        "o25"
     )
 
 
@@ -626,10 +613,6 @@ def filter_over25_single(
     min_odds: float = 1.40,
     max_odds: float = 2.20,
 ):
-    """
-    Over 2.5 single-date filter.
-    mode: public | tipster | odds_band
-    """
     from Engine.over25_engine_weekly import run_over25_filter_service
     kwargs = dict(
         risk_level=risk_level, odds_band=odds_band,
@@ -637,11 +620,8 @@ def filter_over25_single(
         max_pos_gap=max_pos_gap, min_h2h_overs=min_h2h_overs,
         min_odds=min_odds, max_odds=max_odds,
     )
-    return _run(run_over25_filter_service, date, mode, **kwargs)
+    return _settled(_run(run_over25_filter_service, date, mode, **kwargs), "o25")
 
-
-# ── WIN PRECISION COMMAND (FILTER/win_precision_filter.py) ───────────────────
-# NOTE: /weekly registered before /{date} — prevents path-param shadowing.
 
 @app.get("/api/filter/win/precision/weekly", tags=["Filters"])
 def filter_win_precision_weekly(
@@ -649,22 +629,14 @@ def filter_win_precision_weekly(
     end_date: Optional[str] = None,
     anchor_date: Optional[str] = None,
 ):
-    """
-    Win precision command — 7-day cross-verification.
-    Mirrors what gg_precision_filter does for GG picks.
-    """
     from FILTER.win_precision_filter import run_win_weekly_precision
-    return _run(run_win_weekly_precision, start_date, end_date, anchor_date)
+    return _settled(_run(run_win_weekly_precision, start_date, end_date, anchor_date), "win")
 
 
 @app.get("/api/filter/win/precision/{date}", tags=["Filters"])
 def filter_win_precision_single(date: str):
-    """
-    Win precision command — single date.
-    Applies the locked WIN_PRECISION_FILTER rules.
-    """
     from FILTER.win_precision_filter import run_win_precision_filter
-    return _run(run_win_precision_filter, date)
+    return _settled(_run(run_win_precision_filter, date), "win")
 
 
 # ════════════════════════════════════════════════════════════════════════════
