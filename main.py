@@ -6,7 +6,7 @@ import threading
 from datetime import datetime
 
 # ==============================================================================
-# 1. THE HIJACK (GLOBAL TRAFFIC WARDEN - FULL UNLOCKED MODE)
+# 1. THE HIJACK (GLOBAL TRAFFIC WARDEN)
 # ==============================================================================
 GLOBAL_API_CACHE = {}
 original_get = requests.get
@@ -59,17 +59,13 @@ print("✅ TRAFFIC WARDEN ACTIVE: Global API Hijack & Memory Cache Successful.")
 
 
 # ==============================================================================
-# 2. PIPELINE IMPORTS (STRICT ARCHITECTURAL ROUTING)
+# 2. PIPELINE IMPORTS (REAL CONFIRMED MODULES)
 # ==============================================================================
 
 # --- PHASE A: CORE BRAIN & FOUNDATION ENGINES ---
 from CORE.dna_profiler import run_dna_profiler
-
-# ✅ NEW: DNA Engine V2 — fully independent, parallel DNA provider.
-# Does not replace or touch run_dna_profiler / team_dna_profiles.json.
 from CORE.dna_engine_v2 import run_dna_engine_v2
 from CORE.dna_v2_market_factors import build_market_factor_counts
-
 from Engine.underdog_engine import run_underdog_engine
 from Engine.master_underdog_audit import run_underdog_master_engine
 from CORE.handshake_logic import run_total_visibility_merger
@@ -93,13 +89,6 @@ from AGGREGATOR.corner4_aggregator import run_corner4_aggregator_engine
 from Engine.gg_precision_engine import run_gg_o15_engine
 from AGGREGATOR.gg_forensics_audit import run_gg_forensic_aggregator
 from AGGREGATOR.gg_supreme_vip import run_supreme_gg_aggregator
-from FILTER.gg_precision_filter import run_gg_precision_filter
-
-# ✅ NEW: Standalone GG weekly filter engine
-from Engine.gg_engine_weekly import (
-    run_gg_filter_service,
-    run_gg_weekly_filter,
-)
 
 # --- PHASE E: THE OVER 2.5 EMPIRE ---
 from Engine.over25_probabilistic import run_over25_stage1
@@ -108,12 +97,6 @@ from AGGREGATOR.over25_killswitch import run_over25_stage3
 from Engine.gold_over25 import run_gold_over_25_engine
 from AGGREGATOR.over25_apex import run_over25_aggregator
 from Engine.over25_forecast import run_over25_forecast_engine
-
-# ✅ NEW: Over 2.5 weekly filter engine
-from Engine.over25_engine_weekly import (
-    run_over25_filter_service,
-    run_over25_weekly_filter,
-)
 
 # --- PHASE F: THE OVER 1.5 EMPIRE ---
 from Engine.over15_stage3 import run_over15_stage3
@@ -134,17 +117,12 @@ from AGGREGATOR.sh_8goal_aggregator import run_sh_gg_8goal_aggregator
 from AGGREGATOR.apex_ud_aggregator import run_apex_underdog_aggregator
 from Engine.win_raw_engine import run_win_raw_engine
 
-# ✅ NEW: Win weekly filter engine + precision command
-from Engine.win_engine_weekly import (
-    run_win_filter_service,
-    run_win_weekly_filter,
-)
-from FILTER.win_precision_filter import (
-    run_win_precision_filter,
-    run_win_weekly_precision,
-)
+# --- PHASE I: REAL FILTER ENGINES (FROM FILTER/) ---
+from FILTER.gg_precision_filter import run_gg_precision_filter
+from FILTER.over25_risk_filter import run_over25_filter_aggregator
+from FILTER.win_filter_service import run_win_filter_service
 
-# --- PHASE I: LIVE FORENSIC SEQUENCE ---
+# --- PHASE J: LIVE FORENSIC SEQUENCE ---
 from LIVE_SCANNER.live_stage1_prematch import run_prematch_engine
 from LIVE_SCANNER.live_stage3_incoming import run_incoming_forensic_engine
 from LIVE_SCANNER.live_stage4_danger import run_danger_forensic_aggregator
@@ -162,16 +140,33 @@ def alienedge_master_system():
     print(f"{'THE TOTAL FORENSIC & PSYCHOLOGICAL BETTING MACHINE':^115}")
     print("█"*115)
 
-    # --- INITIALIZATION ---
-    target_date = input("\n📅 Enter Target Date (YYYY-MM-DD) or [Enter] for Today: ").strip()
-    if not target_date:
-        target_date = datetime.now().strftime("%Y-%m-%d")
+    # ── CLI ARGUMENT & INTERACTIVE DATE CHECK ─────────────────────────────────
+    cli_date = None
+    cli_live = None
+
+    for arg in sys.argv[1:]:
+        if arg.startswith("--date="):
+            cli_date = arg.split("=")[1].strip()
+        elif arg == "--no-live":
+            cli_live = "n"
+        elif arg == "--live":
+            cli_live = "y"
+
+    if cli_date:
+        target_date = cli_date
+        print(f"\n📅 [AUTO MODE] Target Date: {target_date}")
+    else:
+        try:
+            target_date = input("\n📅 Enter Target Date (YYYY-MM-DD) or [Enter] for Today: ").strip()
+        except (EOFError, OSError):
+            target_date = ""
+
+        if not target_date:
+            target_date = datetime.now().strftime("%Y-%m-%d")
 
     # ── PHASE 1: FOUNDATION ──────────────────────────────────────────────────
-    print("\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH...")
+    print(f"\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH for {target_date}...")
     run_dna_profiler(target_date)
-
-    # ✅ NEW: DNA Engine V2 — runs alongside v1, writes its own separate files.
     run_dna_engine_v2(target_date)
     build_market_factor_counts(target_date)
 
@@ -204,13 +199,6 @@ def alienedge_master_system():
     run_gg_forensic_aggregator(target_date)
     run_gg_psychology_engine(target_date)
     run_supreme_gg_aggregator(target_date)
-    run_gg_precision_filter()
-
-    # ✅ NEW: GG standalone filter engine (single date, all 4 modes)
-    print("\n> ⚽ Running GG Standalone Filter Engine...")
-    run_gg_filter_service(target_date, mode="public",   risk_level="balanced")
-    run_gg_filter_service(target_date, mode="public",   risk_level="banker")
-    run_gg_filter_service(target_date, mode="advanced")
 
     # 4. Over 2.5 Pipeline
     print("\n> 🔥 Processing Over 2.5 Goals Pipeline...")
@@ -221,12 +209,6 @@ def alienedge_master_system():
     run_gold_over_25_engine(target_date)
     run_over25_aggregator(target_date)
     run_over25_forecast_engine(target_date)
-
-    # ✅ NEW: Over 2.5 standalone filter engine (single date, all 3 modes)
-    print("\n> 🔥 Running Over 2.5 Standalone Filter Engine...")
-    run_over25_filter_service(target_date, mode="public",   risk_level="balanced")
-    run_over25_filter_service(target_date, mode="public",   risk_level="banker")
-    run_over25_filter_service(target_date, mode="tipster",  min_poisson=65, min_votes=7)
 
     # 5. Over 1.5 Pipeline
     print("\n> ⚡ Processing Over 1.5 Goals Pipeline...")
@@ -260,16 +242,11 @@ def alienedge_master_system():
     run_sh_gg_8goal_aggregator(target_date)
     run_win_raw_engine(target_date)
 
-    # ✅ NEW: Win standalone filter engine (single date, all 3 modes)
-    print("\n> 🏆 Running Win Standalone Filter Engine...")
-    run_win_filter_service(target_date, mode="public",  risk_level="balanced")
-    run_win_filter_service(target_date, mode="public",  risk_level="safe")
-    run_win_filter_service(target_date, mode="tipster",
-                           min_parity_gap=10, min_overall_wins=3, strict_mode=True)
-
-    # ✅ NEW: Win precision command (single date)
-    print("\n> 🏆 Running Win Precision Command...")
-    run_win_precision_filter(target_date)
+    # 11. Real Filter Engines
+    print("\n> 🎯 Running FILTER/ Precision Engines...")
+    run_gg_precision_filter()
+    run_over25_filter_aggregator(target_date, mode="public", risk_level="banker")
+    run_win_filter_service(target_date, mode="public", risk_level="safe")
 
     # ── PHASE 3: LIVE DASHBOARD PREP ────────────────────────────────────────
     print("\n" + "="*115)
@@ -280,40 +257,20 @@ def alienedge_master_system():
     run_danger_forensic_aggregator()
     run_master_aggregator()
 
-    # ── PHASE 4: WEEKLY FILTER OPTION ───────────────────────────────────────
-    print("\n" + "="*115)
-    run_weekly = input(
-        "\n📅 Run Weekly Filter Scans for full week? (y/n): "
-    ).strip().lower()
-
-    if run_weekly == "y":
-        print("\n> 📅 Running Weekly Scans for all 3 filter engines...")
-
-        print("\n  → GG Weekly Filter (public balanced)...")
-        run_gg_weekly_filter(anchor_date=target_date, mode="public",
-                             risk_level="balanced")
-
-        print("\n  → Over 2.5 Weekly Filter (public balanced)...")
-        run_over25_weekly_filter(anchor_date=target_date, mode="public",
-                                 risk_level="balanced")
-
-        print("\n  → Win Weekly Filter (public balanced)...")
-        run_win_weekly_filter(anchor_date=target_date, mode="public",
-                              risk_level="balanced")
-
-        print("\n  → Win Weekly Precision Cross-Verification...")
-        run_win_weekly_precision(anchor_date=target_date)
-
-        print("\n✅ All Weekly Scans Complete.")
-
-    # ── PHASE 5: LIVE EXECUTION ──────────────────────────────────────────────
+    # ── PHASE 4: LIVE EXECUTION DECISION ────────────────────────────────────
     print("\n" + "█"*115)
     print(f"{'✅ ALL PRE-MATCH SUPER-MATRIX HARVESTS COMPLETE':^115}")
     print("█"*115)
 
-    start_live = input(
-        "\n📡 Ready for the field. Start LIVE 30' Verification & Alerts? (y/n): "
-    ).strip().lower()
+    if cli_live is not None:
+        start_live = cli_live
+    else:
+        try:
+            start_live = input(
+                "\n📡 Ready for the field. Start LIVE 30' Verification & Alerts? (y/n): "
+            ).strip().lower()
+        except (EOFError, OSError):
+            start_live = "n"  # Defaults to clean exit in automated server cron runs
 
     if start_live == "y":
         print("\n🚀 [LIVE MODE ACTIVE] Monitoring 30' Exploitations & Supreme Alerts...")
@@ -335,7 +292,7 @@ def alienedge_master_system():
         except KeyboardInterrupt:
             print("\n🛑 Shutting down Super-Matrix Command Center.")
     else:
-        print("\nPipeline Finished. VIP locks are ready in your Output & Master directories.")
+        print(f"\nPipeline Finished for {target_date}. Pre-computed predictions are ready on disk.")
 
 
 if __name__ == "__main__":
