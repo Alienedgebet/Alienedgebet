@@ -617,7 +617,10 @@ class SupremeOrchestrator:
                         "in_db":      bool(pre)
                     })
 
-                self.print_orchestrator_board(
+                                self.print_orchestrator_board(
+                    cycle_matches, len(live_data), len(db)
+                )
+                self.save_orchestrator_board(
                     cycle_matches, len(live_data), len(db)
                 )
 
