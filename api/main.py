@@ -448,8 +448,10 @@ def get_live_aggregator():
 
 @app.get("/api/live/orchestrator", tags=["Live"])
 def get_live_orchestrator():
-    """Reads Code 6 orchestrator session board from system.log."""
-    return _read_json(os.path.join(OUTPUT_DIR, "system.log"), [])
+    """Reads Code 6's orchestrator board JSON snapshot (written every cycle
+    by SupremeOrchestrator.save_orchestrator_board)."""
+    default_board = {"session": "", "cycle": 0, "total_live": 0, "total_db": 0, "matches": []}
+    return _read_json(os.path.join(OUTPUT_DIR, "orchestrator_board.json"), default_board)
 
 @app.get("/api/live/alerts", tags=["Live"])
 def get_live_alerts():
@@ -494,6 +496,11 @@ def filter_gg_weekly(
     min_dominance: int = 5,
     strict_mode: bool = True,
 ):
+    # run_gg_precision_filter() (FILTER/gg_precision_filter.py) takes no
+    # date/param arguments — it's a fixed 7-day cross-verification sweep
+    # over whatever's already on disk. The mode/risk_level/etc. query
+    # params above are accepted for frontend compatibility but this
+    # specific filter type has no per-call knobs to apply them to.
     from FILTER.gg_precision_filter import run_gg_precision_filter
     return _settled(_run(run_gg_precision_filter), "gg")
 
@@ -518,6 +525,9 @@ def filter_gg_single(
     max_gg_odds: float = 2.50,
     strict_mode: bool = True,
 ):
+    # Same underlying engine as /api/filter/gg/weekly (run_gg_precision_filter
+    # takes no per-call params) — date is accepted for route/frontend
+    # compatibility but the engine itself sweeps its own fixed window.
     from FILTER.gg_precision_filter import run_gg_precision_filter
     return _settled(_run(run_gg_precision_filter), "gg", date)
 
@@ -536,7 +546,11 @@ def filter_win_weekly(
 ):
     from FILTER.win_filter_service import run_win_filter_service
     target = anchor_date or start_date or datetime.now().strftime("%Y-%m-%d")
-    return _settled(_run(run_win_filter_service, target, mode=mode, risk_level=risk_level), "win")
+    if mode == "public":
+        kwargs = dict(risk_level=risk_level, odds_band=odds_band, min_form_wins=min_form_wins)
+    else:
+        kwargs = dict(min_parity_gap=min_parity_gap, strict_mode=strict_mode)
+    return _settled(_run(run_win_filter_service, target, mode=mode, **kwargs), "win")
 
 
 @app.get("/api/filter/win/{date}", tags=["Filters"])
@@ -561,7 +575,21 @@ def filter_win_single(
     min_parity: int = 10,
 ):
     from FILTER.win_filter_service import run_win_filter_service
-    return _settled(_run(run_win_filter_service, date, mode=mode, risk_level=risk_level), "win", date)
+    if mode == "public":
+        kwargs = dict(
+            risk_level=risk_level, odds_band=odds_band,
+            min_form_wins=min_form_wins, min_opp_conceded=min_opp_conceded,
+            min_h2h=min_h2h, require_no_draw=require_no_draw,
+        )
+    else:
+        kwargs = dict(
+            min_odds=min_odds, max_odds=max_odds,
+            min_overall_wins=min_overall_wins, min_venue_wins=min_venue_wins,
+            min_h2h_wins=min_h2h_wins, min_opp_losses=min_opp_losses,
+            min_parity_gap=min_parity_gap, min_even_count=min_even_count,
+            strict_mode=strict_mode,
+        )
+    return _settled(_run(run_win_filter_service, date, mode=mode, **kwargs), "win", date)
 
 
 @app.get("/api/filter/over25/weekly", tags=["Filters"])
@@ -577,7 +605,10 @@ def filter_over25_weekly(
 ):
     from FILTER.over25_risk_filter import run_over25_filter_aggregator
     target = anchor_date or start_date or datetime.now().strftime("%Y-%m-%d")
-    return _settled(_run(run_over25_filter_aggregator, target, mode=mode, risk_level=risk_level), "o25")
+    return _settled(
+        _run(run_over25_filter_aggregator, target, mode=mode, risk_level=risk_level, odds_band=odds_band),
+        "o25",
+    )
 
 
 @app.get("/api/filter/over25/{date}", tags=["Filters"])
@@ -594,7 +625,10 @@ def filter_over25_single(
     max_odds: float = 2.20,
 ):
     from FILTER.over25_risk_filter import run_over25_filter_aggregator
-    return _settled(_run(run_over25_filter_aggregator, date, mode=mode, risk_level=risk_level), "o25", date)
+    return _settled(
+        _run(run_over25_filter_aggregator, date, mode=mode, risk_level=risk_level, odds_band=odds_band),
+        "o25", date,
+    )
 
 
 @app.get("/api/filter/win/precision/weekly", tags=["Filters"])
