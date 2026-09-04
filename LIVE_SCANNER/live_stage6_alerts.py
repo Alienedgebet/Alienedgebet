@@ -729,7 +729,24 @@ class SupremeOrchestrator:
                     f"{a['msg'][:55]}"
                 )
 
-        print(f"{'═'*80}\n")
+                print(f"{'═'*80}\n")
+
+    # ── NEW: JSON BOARD SNAPSHOT (for the API process to read) ─────────────
+    def save_orchestrator_board(self, cycle_matches, total_live, total_db):
+        board = {
+            "session":   SESSION_ID,
+            "cycle":     self.cycle,
+            "total_live": total_live,
+            "total_db":   total_db,
+            "matches":   cycle_matches,
+        }
+        try:
+            tmp_path = ORCHESTRATOR_BOARD_FILE + ".tmp"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(board, f)
+            os.replace(tmp_path, ORCHESTRATOR_BOARD_FILE)  # atomic swap
+        except Exception as e:
+            logging.error(f"Orchestrator Board Save Failed: {e}")
 
     # ── AI GATES ─────────────────────────────────────────────────────────
     def process_ai_gates(self, f_id, fixture_name,
