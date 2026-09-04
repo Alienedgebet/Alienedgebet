@@ -27,6 +27,10 @@ os.makedirs(DATA_DIR,   exist_ok=True)
 
 AGGREGATOR_REPORT_FILE   = os.path.join(DATA_DIR,   "aggregator_report.json")
 SH_GG_WINNER_FILE        = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json")
+# NEW: JSON snapshot of the orchestrator board, written every cycle so the
+# API (a separate process) can read it. print_orchestrator_board() only
+# wrote to console/system.log (plain text) — this is the missing JSON twin.
+ORCHESTRATOR_BOARD_FILE  = os.path.join(OUTPUT_DIR, "orchestrator_board.json")
 # NEW: Stage 1's GK liability + missing-key-player audit, written by the
 # additive patch to live_stage1_prematch.py. Third prematch source, merged
 # into the same `db` dict as the other two — never overwrites their fields.
