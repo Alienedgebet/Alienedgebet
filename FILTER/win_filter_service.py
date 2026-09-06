@@ -121,14 +121,20 @@ def run_win_filter_service(target_date, mode="public", **kwargs):
     # Ensure directory exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Automatically look for the Poisson Engine output in the OUTPUT folder
-    input_csv = os.path.join(OUTPUT_DIR, f"win_poisson_production_{target_date}.csv")
+    # Candidate source files produced by upstream engines
+    candidate_files = [
+        os.path.join(OUTPUT_DIR, f"production_raw_engine_{target_date}.csv"),
+        os.path.join(OUTPUT_DIR, f"win_poisson_production_{target_date}.csv"),
+        os.path.join(OUTPUT_DIR, f"ranked_win_forecast_{target_date}.csv"),
+    ]
 
-    if not os.path.exists(input_csv):
-        print(f"[ERROR] Win Filter Engine: Source file {input_csv} not found.")
-        return[]
+    input_csv = next((f for f in candidate_files if os.path.exists(f)), None)
 
-    print(f"\n[INFO] Running Win Filter Engine ({mode.upper()} MODE) for {target_date}...")
+    if not input_csv:
+        print(f"[ERROR] Win Filter Engine: No source file found for {target_date} (checked: {candidate_files}).")
+        return []
+
+    print(f"\n[INFO] Running Win Filter Engine ({mode.upper()} MODE) using source: {os.path.basename(input_csv)}...")
     
     # Load data from the Poisson Engine
     df = pd.read_csv(input_csv)
@@ -142,7 +148,7 @@ def run_win_filter_service(target_date, mode="public", **kwargs):
 
     if filtered_df.empty:
         print(f"[WARN] No picks survived the {label} filter constraints.")
-        return[]
+        return []
 
     # Sorting by strongest Poisson Probability first
     if "poisson_win_prob" in filtered_df.columns:
