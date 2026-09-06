@@ -660,25 +660,49 @@ def run_dna_engine_v2(target_date):
     print(f"[2/3] Identity Check: Found {len(unique_teams)} teams across "
           f"{len(fixture_pairs)} fixtures to profile.")
 
-    # Step 3 — compute DNA for every team
+    # ─────────────────────────────────────────────────────────────────────────
+    # Step 3 — compute DNA for every team (UPGRADED: PERSISTENT DISK CACHE)
+    # ─────────────────────────────────────────────────────────────────────────
+    output_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
     dna_profiles = {}
+
+    # Check if we already have teams cached on disk from previous runs
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                dna_profiles = json.load(f)
+            print(f"   [⚡ DISK CACHE LOADED] Loaded {len(dna_profiles)} pre-computed teams from disk.")
+        except Exception:
+            dna_profiles = {}
+
     count = 1
+    newly_fetched = 0
 
     for team_id, team_name in unique_teams.items():
-        print(f"   ({count}/{len(unique_teams)}) Processing DNA: {team_name}...",
+        tid_str = str(team_id)
+
+        # ── PERMANENT API SHIELD: SKIP IF TEAM ALREADY CACHED (0 API CALLS) ──
+        if tid_str in dna_profiles:
+            count += 1
+            continue
+
+        print(f"   ({count}/{len(unique_teams)}) Fetching New DNA: {team_name}...",
               end=" ", flush=True)
 
         match_history = get_team_history_stats(team_id)
         profile       = calculate_comprehensive_dna(team_id, team_name, match_history)
 
         if profile:
-            dna_profiles[str(team_id)] = profile
+            dna_profiles[tid_str] = profile
+            newly_fetched += 1
             print("Done ✅")
         else:
             print("Skipped (No Stats) ⚠️")
 
         count += 1
         time.sleep(REQUEST_DELAY)
+
+    print(f"   [⚡ CACHE SUMMARY] Reused {len(dna_profiles) - newly_fetched} teams from disk | Fetched {newly_fetched} new teams.")
 
     # Step 4 — compute style clashes for every fixture (NEW in v2)
     print("\n[2.5/3] Computing fixture-level style clashes...")
@@ -699,17 +723,22 @@ def run_dna_engine_v2(target_date):
             fixture_clashes.append(clash)
             print(f"   ✅ Clash: {clash['fixture']} → Edge: {clash['overall_structural_edge']}")
 
-    # Step 5 — save DNA profiles (NEW v2-specific path — v1 file is never touched)
+    # Step 5 — save DNA profiles (v2-specific path)
     output_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
     print(f"\n[3/3] Saving DNA library to {output_path}...")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(dna_profiles, f, indent=4)
 
-    # Step 6 — save style clashes (NEW — separate file, no v1 file overwritten)
+    # Step 6 — save style clashes (separate file)
     clashes_path = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
     print(f"[3/3] Saving style clashes to {clashes_path}...")
     with open(clashes_path, "w", encoding="utf-8") as f:
         json.dump(fixture_clashes, f, indent=4)
+
+    # Step 7 — save v1 compatibility copy (Feeds older engines automatically, 0 API calls)
+    v1_path = os.path.join(DATA_DIR, "team_dna_profiles.json")
+    with open(v1_path, "w", encoding="utf-8") as f:
+        json.dump(dna_profiles, f, indent=4)
 
     print("\n" + "=" * 60)
     print(f"🏆 ALIENEDGE DNA ENGINE v2: COMPLETE ({target_date})")
