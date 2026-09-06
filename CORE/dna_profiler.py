@@ -7,7 +7,10 @@ V2_PATH  = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
 V1_PATH  = os.path.join(DATA_DIR, "team_dna_profiles.json")
 
 def run_dna_profiler(target_date):
-    """Unified DNA v1 wrapper. Reads from disk. 0 API calls."""
+    """
+    Unified DNA v1 compatibility wrapper.
+    Reads from pre-computed unified profiles on disk. 0 API calls.
+    """
     for path in [V2_PATH, V1_PATH]:
         if os.path.exists(path) and os.path.getsize(path) > 100:
             try:
@@ -17,6 +20,8 @@ def run_dna_profiler(target_date):
                 return data
             except Exception:
                 pass
+
+    print("[⚠️ DNA] No cached profiles found on disk yet. Run run_dna_engine_v2 first.")
     return {}
 
 if __name__ == "__main__":
