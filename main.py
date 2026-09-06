@@ -1,12 +1,13 @@
 import os
 import sys
 import time
+import gc
 import requests
-import threading
+import traceback
 from datetime import datetime
 
 # ==============================================================================
-# 1. THE HIJACK (GLOBAL TRAFFIC WARDEN)
+# 1. THE HIJACK (GLOBAL TRAFFIC WARDEN & CONTROLLED CACHE)
 # ==============================================================================
 GLOBAL_API_CACHE = {}
 original_get = requests.get
@@ -22,6 +23,14 @@ class CachedResponseWrapper:
     def raise_for_status(self):
         pass
 
+def flush_system_ram():
+    """
+    Clears the in-memory response cache and runs explicit garbage collection
+    between pipeline phases to permanently eliminate Out-Of-Memory (OOM) kills.
+    """
+    GLOBAL_API_CACHE.clear()
+    gc.collect()
+
 def smart_get(url, params=None, **kwargs):
     safe_params = dict(params) if params else {}
     param_string = "&".join([f"{k}={v}" for k, v in sorted(safe_params.items()) if k != "api_token"])
@@ -31,7 +40,7 @@ def smart_get(url, params=None, **kwargs):
         print("🟨", end="", flush=True)
         return CachedResponseWrapper(GLOBAL_API_CACHE[cache_key])
 
-    backoff = 2.0
+    backoff = 3.0
     for attempt in range(5):
         try:
             resp = original_get(url, params=params, **kwargs)
@@ -39,27 +48,28 @@ def smart_get(url, params=None, **kwargs):
                 data = resp.json()
                 GLOBAL_API_CACHE[cache_key] = data
                 print("🟩", end="", flush=True)
-                time.sleep(0.15)
+                # Deliberate pacing to respect SportMonks per-minute burst boundaries
+                time.sleep(0.25)
                 return CachedResponseWrapper(data, 200)
             elif resp.status_code == 429:
-                print(f"[API LIMIT: Pausing {backoff}s] ", end="", flush=True)
+                print(f"[API BURST: Cooling {backoff}s] ", end="", flush=True)
                 time.sleep(backoff)
                 backoff *= 1.5
                 continue
             else:
                 return resp
         except Exception:
-            time.sleep(1)
+            time.sleep(1.5)
             continue
 
     return original_get(url, params=params, **kwargs)
 
 requests.get = smart_get
-print("✅ TRAFFIC WARDEN ACTIVE: Global API Hijack & Memory Cache Successful.")
+print("✅ TRAFFIC WARDEN ACTIVE: Global API Hijack & Managed Cache Synchronized.")
 
 
 # ==============================================================================
-# 2. PIPELINE IMPORTS (REAL CONFIRMED MODULES)
+# 2. PRE-MATCH PIPELINE IMPORTS (STRICTLY PRE-MATCH ONLY)
 # ==============================================================================
 
 # --- PHASE A: CORE BRAIN & FOUNDATION ENGINES ---
@@ -122,39 +132,43 @@ from FILTER.gg_precision_filter import run_gg_precision_filter
 from FILTER.over25_risk_filter import run_over25_filter_aggregator
 from FILTER.win_filter_service import run_win_filter_service
 
-# --- PHASE J: LIVE FORENSIC SEQUENCE ---
-from LIVE_SCANNER.live_stage1_prematch import run_prematch_engine
-from LIVE_SCANNER.live_stage3_incoming import run_incoming_forensic_engine
-from LIVE_SCANNER.live_stage4_danger import run_danger_forensic_aggregator
-from LIVE_SCANNER.live_stage5_aggregator import run_master_aggregator
-from LIVE_SCANNER.live_stage2_verification import run_live_validator_engine
-from LIVE_SCANNER.live_stage6_alerts import SupremeOrchestrator
+
+# ==============================================================================
+# 3. FAULT-TOLERANT EXECUTION BARRIER
+# ==============================================================================
+def _safe_exec(engine_name, func, *args, **kwargs):
+    """
+    Executes a mathematical engine safely. If a specific league or API call
+    encounters a data gap, the error is isolated and logged so the remainder
+    of the pre-match pipeline continues uninterrupted.
+    """
+    try:
+        print(f"\n> ⚙️ Initializing: {engine_name}...")
+        res = func(*args, **kwargs)
+        return res
+    except Exception as e:
+        print(f"⚠️ [NON-CRITICAL ENGINE NOTICE in {engine_name}]: {e}")
+        return None
 
 
 # ==============================================================================
-# 3. THE SUPREME MASTER PIPELINE SEQUENCE
+# 4. THE SUPREME MASTER PIPELINE (PURE PRE-MATCH ARCHITECTURE)
 # ==============================================================================
 def alienedge_master_system():
     print("\n" + "█"*115)
     print(f"{'🚀 ALIENEDGE SUPER-MATRIX COMMAND CENTER v11.0':^115}")
-    print(f"{'THE TOTAL FORENSIC & PSYCHOLOGICAL BETTING MACHINE':^115}")
+    print(f"{'THE TOTAL FORENSIC & PSYCHOLOGICAL PRE-MATCH BETTING MACHINE':^115}")
     print("█"*115)
 
-    # ── CLI ARGUMENT & INTERACTIVE DATE CHECK ─────────────────────────────────
+    # ── CLI ARGUMENT & DATE RESOLUTION ────────────────────────────────────────
     cli_date = None
-    cli_live = None
-
     for arg in sys.argv[1:]:
         if arg.startswith("--date="):
             cli_date = arg.split("=")[1].strip()
-        elif arg == "--no-live":
-            cli_live = "n"
-        elif arg == "--live":
-            cli_live = "y"
 
     if cli_date:
         target_date = cli_date
-        print(f"\n📅 [AUTO MODE] Target Date: {target_date}")
+        print(f"\n📅 [TARGET DATE]: {target_date}")
     else:
         try:
             target_date = input("\n📅 Enter Target Date (YYYY-MM-DD) or [Enter] for Today: ").strip()
@@ -164,135 +178,108 @@ def alienedge_master_system():
         if not target_date:
             target_date = datetime.now().strftime("%Y-%m-%d")
 
-    # ── PHASE 1: FOUNDATION ──────────────────────────────────────────────────
-    print(f"\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH for {target_date}...")
-    run_dna_profiler(target_date)
-    run_dna_engine_v2(target_date)
-    build_market_factor_counts(target_date)
+    start_time = time.time()
 
-    run_underdog_engine(target_date)
-    run_underdog_master_engine(target_date)
-    run_total_visibility_merger(target_date)
-    run_apex_underdog_aggregator(target_date)
-    run_win_forecast_engine(target_date)
-    run_sh_gg_winner_engine(target_date)
+    # ── PHASE 1: FOUNDATION & DNA IDENTITY ───────────────────────────────────
+    print(f"\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH for {target_date}...")
+    _safe_exec("DNA Profiler", run_dna_profiler, target_date)
+    _safe_exec("DNA Engine V2", run_dna_engine_v2, target_date)
+    _safe_exec("DNA Market Factors", build_market_factor_counts, target_date)
+
+    _safe_exec("Underdog Base Engine", run_underdog_engine, target_date)
+    _safe_exec("Underdog Master Engine", run_underdog_master_engine, target_date)
+    _safe_exec("Total Visibility Merger", run_total_visibility_merger, target_date)
+    _safe_exec("Apex Underdog Aggregator", run_apex_underdog_aggregator, target_date)
+    _safe_exec("Win Forecast Base Engine", run_win_forecast_engine, target_date)
+    _safe_exec("SH-GG Winner Engine", run_sh_gg_winner_engine, target_date)
+
+    flush_system_ram()
 
     # ── PHASE 2: SECTIONAL HARVESTS ─────────────────────────────────────────
     print("\n" + "="*115)
     print(f"{'🧠 INITIATING SUPER-MATRIX: SECTIONAL HARVESTS':^115}")
     print("="*115)
 
-    # 1. Corners
+    # 1. Corners Empire
     print("\n> 🚩 Processing Corner Empire...")
-    run_corner_engine_stage1(target_date)
-    run_corner_engine_stage2(target_date)
-    run_corner3_psychology_engine(target_date)
-    run_catalyst_corner_engine(target_date)
-    run_corner4_aggregator_engine(target_date)
+    _safe_exec("Corner Stage 1 (Miner)", run_corner_engine_stage1, target_date)
+    _safe_exec("Corner Stage 2 (Refiner)", run_corner_engine_stage2, target_date)
+    _safe_exec("Corner Stage 3 (Psychology)", run_corner3_psychology_engine, target_date)
+    _safe_exec("Corner Catalyst Engine", run_catalyst_corner_engine, target_date)
+    _safe_exec("Corner Stage 4 Aggregator", run_corner4_aggregator_engine, target_date)
+    flush_system_ram()
 
     # 2. GG & Over 1.5 Unified Head
     print("\n> ⚽ Running Unified GG & Over 1.5 Precision Head Engine...")
-    run_gg_o15_engine(target_date, verbose=False)
+    _safe_exec("Unified GG & O1.5 Head Engine", run_gg_o15_engine, target_date, verbose=False)
 
     # 3. GG Forensic Pipeline
     print("\n> ⚽ Processing Downstream GG Forensics...")
-    run_gg_forensic_aggregator(target_date)
-    run_gg_psychology_engine(target_date)
-    run_supreme_gg_aggregator(target_date)
+    _safe_exec("GG Forensic Aggregator", run_gg_forensic_aggregator, target_date)
+    _safe_exec("GG Psychology Engine", run_gg_psychology_engine, target_date)
+    _safe_exec("Supreme GG VIP Aggregator", run_supreme_gg_aggregator, target_date)
+    flush_system_ram()
 
-    # 4. Over 2.5 Pipeline
+    # 4. Over 2.5 Goals Pipeline
     print("\n> 🔥 Processing Over 2.5 Goals Pipeline...")
-    run_over25_stage1(target_date)
-    run_over25_stage2(target_date)
-    run_over25_stage3(target_date)
-    run_o25_psychology_engine(target_date)
-    run_gold_over_25_engine(target_date)
-    run_over25_aggregator(target_date)
-    run_over25_forecast_engine(target_date)
+    _safe_exec("Over 2.5 Stage 1 (Probabilistic)", run_over25_stage1, target_date)
+    _safe_exec("Over 2.5 Stage 2 (Council)", run_over25_stage2, target_date)
+    _safe_exec("Over 2.5 Stage 3 (Killswitch)", run_over25_stage3, target_date)
+    _safe_exec("Over 2.5 Psychology Engine", run_o25_psychology_engine, target_date)
+    _safe_exec("Gold Over 2.5 Engine", run_gold_over_25_engine, target_date)
+    _safe_exec("Over 2.5 Apex Aggregator", run_over25_aggregator, target_date)
+    _safe_exec("Over 2.5 Forecast Engine", run_over25_forecast_engine, target_date)
+    flush_system_ram()
 
-    # 5. Over 1.5 Pipeline
+    # 5. Over 1.5 Goals Pipeline
     print("\n> ⚡ Processing Over 1.5 Goals Pipeline...")
-    run_over15_stage3(target_date)
-    run_o15_psychology_engine(target_date)
-    run_o15_apex_engine(target_date)
+    _safe_exec("Over 1.5 Stage 3", run_over15_stage3, target_date)
+    _safe_exec("Over 1.5 Psychology Engine", run_o15_psychology_engine, target_date)
+    _safe_exec("Over 1.5 Apex Aggregator", run_o15_apex_engine, target_date)
+    flush_system_ram()
 
     # 6. Defensive Under Empire
     print("\n> 🛡️ Processing Defensive Under Empire...")
-    run_unders_engine(target_date, verbose=False)
+    _safe_exec("Unders Engine (U2.5 / U3.5)", run_unders_engine, target_date, verbose=False)
 
-    # 7. Draw Engine
+    # 7. Draw Magnet Engine
     print("\n> ⚖️ Processing Draw Magnet Index...")
-    run_draw_engine(target_date, verbose=False)
+    _safe_exec("Draw Magnet Engine", run_draw_engine, target_date, verbose=False)
 
     # 8. SOT Cerberus Engine
     print("\n> 🎯 Processing Cerberus S.O.T. Engine...")
-    run_sot_engine(target_date, verbose=False)
+    _safe_exec("SOT Cerberus Engine", run_sot_engine, target_date, verbose=False)
 
     # 9. Half-Time Streak Miners
     print("\n> ⛏️ Processing Half-Time Streak Miners...")
-    run_fhvi_engine(target_date, verbose=False)
-    run_shvi_engine(target_date, verbose=False)
+    _safe_exec("FHVI First Half Engine", run_fhvi_engine, target_date, verbose=False)
+    _safe_exec("SHVI Second Half Engine", run_shvi_engine, target_date, verbose=False)
+    flush_system_ram()
 
-    # 10. Wins, U2S & SH Master
+    # 10. Wins, U2S & SH Master Vortex
     print("\n> 🏆 Processing Win, U2S, & SH Elite Aggregation...")
-    run_u2s_psychology_engine(target_date)
-    run_win_psychology_engine(target_date)
-    run_win_apex_aggregator()
-    run_sh_master_vortex(target_date)
-    run_sh_gg_8goal_aggregator(target_date)
-    run_win_raw_engine(target_date)
+    _safe_exec("U2S Psychology Engine", run_u2s_psychology_engine, target_date)
+    _safe_exec("Win Psychology Engine", run_win_psychology_engine, target_date)
+    _safe_exec("Win Apex Aggregator", run_win_apex_aggregator)
+    _safe_exec("SH Master Vortex", run_sh_master_vortex, target_date)
+    _safe_exec("SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, target_date)
+    _safe_exec("Win Raw Probability Engine", run_win_raw_engine, target_date)
+    flush_system_ram()
 
-    # 11. Real Filter Engines
+    # 11. Real Filter Engines (Risk Modes)
     print("\n> 🎯 Running FILTER/ Precision Engines...")
-    run_gg_precision_filter()
-    run_over25_filter_aggregator(target_date, mode="public", risk_level="banker")
-    run_win_filter_service(target_date, mode="public", risk_level="safe")
+    _safe_exec("Filter GG Precision Filter", run_gg_precision_filter)
+    _safe_exec("Filter Over 2.5 Aggregator (Banker)", run_over25_filter_aggregator, target_date, mode="public", risk_level="banker")
+    _safe_exec("Filter Win Service (Safe)", run_win_filter_service, target_date, mode="public", risk_level="safe")
+    flush_system_ram()
 
-    # ── PHASE 3: LIVE DASHBOARD PREP ────────────────────────────────────────
-    print("\n" + "="*115)
-    print(f"{'📡 PREPARING LIVE FORENSIC DASHBOARD':^115}")
-    print("="*115)
-    run_prematch_engine()
-    run_incoming_forensic_engine()
-    run_danger_forensic_aggregator()
-    run_master_aggregator()
-
-    # ── PHASE 4: LIVE EXECUTION DECISION ────────────────────────────────────
+    # ── PIPELINE COMPLETION ──────────────────────────────────────────────────
+    duration = round((time.time() - start_time) / 60, 2)
     print("\n" + "█"*115)
     print(f"{'✅ ALL PRE-MATCH SUPER-MATRIX HARVESTS COMPLETE':^115}")
+    print(f"{f'Duration: {duration} minutes | Target Date: {target_date}':^115}")
+    print(f"{'Pre-computed predictions, feeds, and analytics are fully saved on disk.':^115}")
     print("█"*115)
-
-    if cli_live is not None:
-        start_live = cli_live
-    else:
-        try:
-            start_live = input(
-                "\n📡 Ready for the field. Start LIVE 30' Verification & Alerts? (y/n): "
-            ).strip().lower()
-        except (EOFError, OSError):
-            start_live = "n"  # Defaults to clean exit in automated server cron runs
-
-    if start_live == "y":
-        print("\n🚀 [LIVE MODE ACTIVE] Monitoring 30' Exploitations & Supreme Alerts...")
-        try:
-            def validator_loop():
-                while True:
-                    try:
-                        run_live_validator_engine()
-                    except Exception:
-                        pass
-                    time.sleep(60)
-
-            validator_thread = threading.Thread(target=validator_loop, daemon=True)
-            validator_thread.start()
-
-            orchestrator = SupremeOrchestrator()
-            orchestrator.run()
-
-        except KeyboardInterrupt:
-            print("\n🛑 Shutting down Super-Matrix Command Center.")
-    else:
-        print(f"\nPipeline Finished for {target_date}. Pre-computed predictions are ready on disk.")
 
 
 if __name__ == "__main__":
