@@ -11,7 +11,7 @@ const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   // 800ms — fail fast when API is off so market pages paint mocks quickly
   // instead of stacking multi-second waits across 5–7 parallel stage calls.
-  timeout: 800,
+  timeout: 1000,
   headers: { "Content-Type": "application/json" },
 });
 
