@@ -20,11 +20,11 @@ MASTER_AGG_DIR = os.path.join(ROOT, "master_aggregator")
 # ── APP INIT ──────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="AlienEdge Prediction API",
-    version="2.0.2",
+    version="2.0.1",
     description="Forensic football prediction engine — REST interface",
 )
 
-# ── CORS SPECIFICATION (Supports all Vercel domains & local dev) ───────────────
+# ── CORS SPECIFICATION (Valid W3C: no '*' wildcard with credentials) ─────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -50,6 +50,7 @@ from live_cache import get_live_scores_cached
 
 # ── DISK READING & NORMALIZATION HELPERS ──────────────────────────────────────
 def _read_json(path: str, default=None):
+    """Fast disk read for live REST snapshots — never imports heavy engines."""
     if default is None:
         default = []
     if not os.path.exists(path):
@@ -62,6 +63,7 @@ def _read_json(path: str, default=None):
 
 
 def _read_csv(path: str, default=None):
+    """Fast disk read for pre-computed CSV prediction files."""
     if default is None:
         default = []
     if not os.path.exists(path):
@@ -95,7 +97,6 @@ def _normalize_row_safeties(rows):
         return rows
     for r in rows:
         if isinstance(r, dict):
-            # Normalise tier
             if "tier" not in r and "Tier" not in r:
                 r["tier"] = "STANDARD"
             elif "Tier" in r and "tier" not in r:
@@ -103,16 +104,6 @@ def _normalize_row_safeties(rows):
             elif "tier" in r and not r["tier"]:
                 r["tier"] = "STANDARD"
 
-            # Normalise fixture string
-            if "fixture" not in r:
-                if "Fixture" in r:
-                    r["fixture"] = str(r["Fixture"])
-                elif "Match" in r:
-                    r["fixture"] = str(r["Match"])
-                elif "home_team" in r and "away_team" in r:
-                    r["fixture"] = f"{r['home_team']} vs {r['away_team']}"
-
-            # Normalise chemistry
             if "chemistry" not in r:
                 r["chemistry"] = "strong"
             elif not r["chemistry"]:
@@ -121,6 +112,10 @@ def _normalize_row_safeties(rows):
 
 
 def _read_disk_first(candidate_paths, fallback_fn=None, *args, **kwargs):
+    """
+    Looks for existing pre-computed files on disk first.
+    Only falls back to live engine execution if no file exists.
+    """
     for p in candidate_paths:
         if os.path.exists(p) and os.path.getsize(p) > 10:
             if p.endswith(".json"):
@@ -132,6 +127,7 @@ def _read_disk_first(candidate_paths, fallback_fn=None, *args, **kwargs):
             if data:
                 return _normalize_row_safeties(data)
 
+    # Fallback to live computation if no pre-computed file is on disk
     if fallback_fn:
         try:
             res = fallback_fn(*args, **kwargs)
@@ -142,6 +138,7 @@ def _read_disk_first(candidate_paths, fallback_fn=None, *args, **kwargs):
 
 
 def _run(fn, *args, **kwargs):
+    """Run a synchronous engine function and catch any exceptions."""
     try:
         result = fn(*args, **kwargs)
         return _normalize_row_safeties(result if result is not None else [])
@@ -150,15 +147,21 @@ def _run(fn, *args, **kwargs):
 
 
 def _settled(data, market_type="win", date_str=None):
+    """
+    Enriches prediction rows with live scores and ✅/❌ verdicts.
+    Reads from daily_archiver JSON if viewing a past date (0 API cost).
+    """
     if not isinstance(data, list) or len(data) == 0:
         return data
 
+    # 1. Check if an offline archive exists for this date (0 API calls)
     if date_str:
         archive_path = os.path.join(OUTPUT_DIR, f"archive_{date_str}.json")
         archive_data = _read_json(archive_path, None)
         if archive_data and "fixtures" in archive_data:
             return settle_predictions(data, archive_data["fixtures"], market_type=market_type)
 
+    # 2. Live in-play fallback (2-min shared cache)
     try:
         live_db = get_live_scores_cached()
         return settle_predictions(data, live_db, market_type=market_type)
@@ -167,6 +170,7 @@ def _settled(data, market_type="win", date_str=None):
 
 
 def _incoming_rows_from_disk():
+    """Normalize incoming_predictions.json → [{fixture_id, fixture, picks}]."""
     path = os.path.join(DATA_DIR, "incoming_predictions.json")
     raw = _read_json(path, {})
     if isinstance(raw, list):
@@ -198,7 +202,7 @@ def _incoming_rows_from_disk():
 @app.get("/", tags=["Health"])
 @app.get("/health", tags=["Health"])
 def health():
-    return {"status": "ok", "service": "AlienEdge Prediction API", "version": "2.0.2"}
+    return {"status": "ok", "service": "AlienEdge Prediction API", "version": "2.0.1"}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -215,6 +219,10 @@ def get_dna_profiles(date: str):
 
 @app.get("/api/dna/v2/{date}", tags=["Foundation"])
 def get_dna_v2(date: str):
+    """
+    Runs DNA Engine V2 + the market-factor mapper live and returns the
+    combined payload. Mirrors the existing /api/dna/{date} pattern.
+    """
     profiles_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
     clashes_path = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
     factors_path = os.path.join(DATA_DIR, "dna_v2_market_factors.json")
@@ -235,15 +243,23 @@ def get_dna_v2(date: str):
     engine_result = _run(run_dna_engine_v2, date)
     market_factors = _run(build_market_factor_counts, date)
 
+    dna_profiles = engine_result.get("dna_profiles", {}) if isinstance(engine_result, dict) else {}
+    fixture_clashes = engine_result.get("fixture_clashes", []) if isinstance(engine_result, dict) else []
+
     return {
-        "dna_profiles": engine_result.get("dna_profiles", {}) if isinstance(engine_result, dict) else {},
-        "fixture_clashes": engine_result.get("fixture_clashes", []) if isinstance(engine_result, dict) else [],
+        "dna_profiles": dna_profiles,
+        "fixture_clashes": fixture_clashes,
         "market_factors": market_factors,
     }
 
 
 @app.get("/api/dna/v2/latest", tags=["Foundation"])
 def get_dna_v2_latest():
+    """
+    Fast disk-only read of the most recently computed DNA v2 output —
+    never imports or runs the engine. Used by the frontend for instant
+    fixture-list DNA counts and instant DNA Analysis page opens.
+    """
     profiles_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
     clashes_path = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
     factors_path = os.path.join(DATA_DIR, "dna_v2_market_factors.json")
@@ -334,7 +350,7 @@ def get_win_apex(date: str):
         os.path.join(MASTER_AGG_DIR, f"WIN_SUPER_MATRIX_FINAL_{date}.csv"),
         os.path.join(MASTER_AGG_DIR, "WIN_SUPER_MATRIX_FINAL.csv"),
         os.path.join(OUTPUT_DIR, f"WIN_SUPER_MATRIX_FINAL_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"ranked_win_forecast_{date}.csv"),
+        os.path.join(OUTPUT_DIR, "WIN_SUPER_MATRIX_FINAL.csv"),
     ]
     from AGGREGATOR.win_apex_aggregator import run_win_apex_aggregator
     data = _read_disk_first(paths, fallback_fn=run_win_apex_aggregator)
@@ -412,6 +428,7 @@ def get_gg_supreme(date: str):
         os.path.join(MASTER_AGG_DIR, f"FINAL_GG_MASTER_LIVE_{date}.csv"),
         os.path.join(MASTER_AGG_DIR, "FINAL_GG_MASTER_LIVE.csv"),
         os.path.join(OUTPUT_DIR, "FINAL_GG_MASTER_LIVE.csv"),
+        os.path.join(OUTPUT_DIR, f"supreme_gg_vip_{date}.json"),
     ]
     from AGGREGATOR.gg_supreme_vip import run_supreme_gg_aggregator
     data = _read_disk_first(paths, fallback_fn=run_supreme_gg_aggregator, target_date=date)
@@ -420,6 +437,7 @@ def get_gg_supreme(date: str):
 
 @app.get("/api/gg/cross-verify", tags=["GG"])
 def get_gg_cross_verify():
+    """GG precision filter — 7-day cross-verification."""
     paths = [
         os.path.join(OUTPUT_DIR, "forecast_final_gg_precision.csv"),
         os.path.join(MASTER_AGG_DIR, "FINAL_GG_MASTER_LIVE.csv"),
@@ -495,7 +513,8 @@ def get_over25_apex(date: str):
     paths = [
         os.path.join(MASTER_AGG_DIR, f"O25_MASTER_LIVE_{date}.csv"),
         os.path.join(MASTER_AGG_DIR, "O25_MASTER_LIVE.csv"),
-        os.path.join(OUTPUT_DIR, "over25_stage3_final.json"),
+        os.path.join(OUTPUT_DIR, f"O25_MASTER_LIVE_{date}.csv"),
+        os.path.join(OUTPUT_DIR, "O25_MASTER_LIVE.csv"),
     ]
     from AGGREGATOR.over25_apex import run_over25_aggregator
     data = _read_disk_first(paths, fallback_fn=run_over25_aggregator, target_date=date)
@@ -507,6 +526,7 @@ def get_over25_forecast(date: str):
     paths = [
         os.path.join(OUTPUT_DIR, f"over25_forecast_{date}.csv"),
         os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv"),
+        os.path.join(OUTPUT_DIR, "over25_stage1_picks.csv"),
     ]
     from Engine.over25_forecast import run_over25_forecast_engine
     data = _read_disk_first(paths, fallback_fn=run_over25_forecast_engine, target_date=date)
@@ -603,6 +623,7 @@ def get_draw(date: str):
 @app.get("/api/corners/stage1/{date}", tags=["Corners"])
 def get_corners_stage1(date: str):
     paths = [
+        os.path.join(OUTPUT_DIR, f"corner_stage1_{date}.json"),
         os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
     ]
     from Engine.corner_miner import run_corner_engine_stage1
@@ -613,6 +634,7 @@ def get_corners_stage1(date: str):
 @app.get("/api/corners/stage2/{date}", tags=["Corners"])
 def get_corners_stage2(date: str):
     paths = [
+        os.path.join(OUTPUT_DIR, f"corner_stage2_{date}.json"),
         os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
     ]
     from Engine.corner_refiner import run_corner_engine_stage2
@@ -623,6 +645,7 @@ def get_corners_stage2(date: str):
 @app.get("/api/corners/psychology/{date}", tags=["Corners"])
 def get_corners_psychology(date: str):
     paths = [
+        os.path.join(OUTPUT_DIR, f"corner_psychology_{date}.json"),
         os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
     ]
     from PSYCHOLOGY.corner_psychology import run_corner3_psychology_engine
@@ -633,6 +656,7 @@ def get_corners_psychology(date: str):
 @app.get("/api/corners/catalyst/{date}", tags=["Corners"])
 def get_corners_catalyst(date: str):
     paths = [
+        os.path.join(OUTPUT_DIR, f"corner_catalyst_{date}.json"),
         os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
     ]
     from Engine.corner_catalyst import run_catalyst_corner_engine
@@ -674,6 +698,7 @@ def get_fhvi(date: str):
     paths = [
         os.path.join(OUTPUT_DIR, f"fhvi_strict_filtered_{date}.json"),
         os.path.join(OUTPUT_DIR, f"fhvi_strict_filtered_{date}.csv"),
+        os.path.join(OUTPUT_DIR, f"hvi_strict_filtered_{date}.json"),
     ]
     from Engine.fhvi_engine import run_fhvi_engine
     data = _read_disk_first(paths, fallback_fn=run_fhvi_engine, target_date=date)
@@ -726,11 +751,12 @@ def get_sh_8goal(date: str):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# LIVE / DASHBOARD ENGINES
+# LIVE / DASHBOARD ENGINES (Disk-Safe Reads — Zero Crash on Process Isolation)
 # ════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/live/prematch", tags=["Live"])
 def get_live_prematch():
+    """Reads persisted strategic audit from data/prematch_team_audit.json."""
     raw = _read_json(os.path.join(DATA_DIR, "prematch_team_audit.json"), {})
     if isinstance(raw, dict):
         return list(raw.values())
@@ -739,6 +765,7 @@ def get_live_prematch():
 
 @app.get("/api/live/validation", tags=["Live"])
 def get_live_validation():
+    """Reads persisted in-play validation state from data/validated_picks.json."""
     alerts = _read_json(os.path.join(DATA_DIR, "validated_picks.json"), {})
     state = _read_json(os.path.join(DATA_DIR, "validation_state.json"), {})
     alert_list = list(alerts.values()) if isinstance(alerts, dict) else alerts
@@ -752,27 +779,32 @@ def get_live_validation():
 
 @app.get("/api/live/incoming", tags=["Live"])
 def get_live_incoming():
+    """Stage 3 snapshot — thin JSON read."""
     return _incoming_rows_from_disk()
 
 
 @app.get("/api/live/danger", tags=["Live"])
 def get_live_danger():
+    """Stage 4 snapshot — thin JSON read."""
     return _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
 
 
 @app.get("/api/live/aggregator", tags=["Live"])
 def get_live_aggregator():
+    """Stage 5 snapshot — thin JSON read."""
     return _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
 
 
 @app.get("/api/live/orchestrator", tags=["Live"])
 def get_live_orchestrator():
+    """Reads Code 6's orchestrator board JSON snapshot."""
     default_board = {"session": "", "cycle": 0, "total_live": 0, "total_db": 0, "matches": []}
     return _read_json(os.path.join(OUTPUT_DIR, "orchestrator_board.json"), default_board)
 
 
 @app.get("/api/live/alerts", tags=["Live"])
 def get_live_alerts():
+    """Reads Code 6 ready_to_push alerts from output/ready_to_push.json."""
     path = os.path.join(OUTPUT_DIR, "ready_to_push.json")
     if not os.path.exists(path):
         return []
