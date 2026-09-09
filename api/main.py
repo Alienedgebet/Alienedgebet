@@ -1,12 +1,42 @@
+"""
+AlienEdge Prediction API — v4.0 (pure disk-first architecture)
+
+HOW DATA GETS HERE
+--------------------
+This API never runs an engine. Every route below reads a file that main.py
+already wrote via output_store.save() — same module, same key, imported by
+both sides, so there is no filename to guess and nothing to drift out of
+sync. If main.py hasn't run for a date yet, the route returns an honest
+empty list/dict (never a wrong date's stale data, never a crash) and the
+frontend's own mock-fallback (`useApi` in lib/use-api.ts) paints demo rows
+with a visible "Demo" badge until the pipeline catches up.
+
+Two file-sourcing patterns exist side by side, deliberately:
+  1. Pre-match picks (Win/GG/Over.../Corners/etc.) — written by main.py on a
+     cron schedule. Read via output_store.load(key, date).
+  2. Live in-play data (/api/live/*) — written continuously by the SEPARATE
+     always-on run_live_scanner_24_7.py process. Read directly from the
+     data/*.json files it maintains. This was already correct before and is
+     unchanged here.
+
+Starting main.py itself is done OUT OF PROCESS (cron / systemd timer, see
+the deployment guide) — NOT from inside a request handler. The one
+admin-triggered `/api/admin/run-pipeline/{date}` route below only launches
+main.py as a detached background subprocess and returns immediately; it
+never blocks a web worker for the minutes a full run takes.
+"""
+
 import os
 import sys
 import json
-import csv
+import subprocess
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # ── PATH BOOTSTRAP ────────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,42 +45,696 @@ if ROOT not in sys.path:
 
 DATA_DIR = os.path.join(ROOT, "data")
 OUTPUT_DIR = os.path.join(ROOT, "output")
-MASTER_AGG_DIR = os.path.join(ROOT, "master_aggregator")
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+import output_store as store  # noqa: E402  (same module main.py writes through)
 
 # ── APP INIT ──────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="AlienEdge Prediction API",
-    version="2.0.1",
-    description="Forensic football prediction engine — REST interface",
+    version="4.0.0",
+    description="Forensic football prediction engine — disk-first REST interface",
 )
 
-# ── CORS SPECIFICATION (Valid W3C: no '*' wildcard with credentials) ─────────
+# ── CORS ──────────────────────────────────────────────────────────────────────
+_env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+ALLOW_ORIGINS = [o.strip() for o in _env_origins.split(",") if o.strip()]
+if not ALLOW_ORIGINS:
+    ALLOW_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://alienedgebet.vercel.app",
-        "https://alienedgebet-baston1.vercel.app",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=ALLOW_ORIGINS,
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc):
+    print(f"[UNHANDLED] {request.url}: {traceback.format_exc()}")
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
 # ── ROUTERS ───────────────────────────────────────────────────────────────────
-from api.user_rules_router import router as user_rules_router
+from api.user_rules_router import router as user_rules_router  # noqa: E402
 app.include_router(user_rules_router)
 
-# ── VERIFICATION SETTLEMENT IMPORTS (Root Level) ──────────────────────────────
-from settlement_service import settle_predictions
-from live_cache import get_live_scores_cached
+# ── SETTLEMENT / LIVE SCORES (independent of the pre-match pipeline) ──────────
+from settlement_service import settle_predictions  # noqa: E402
+from live_cache import get_live_scores_cached  # noqa: E402
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 
-# ── DISK READING & NORMALIZATION HELPERS ──────────────────────────────────────
+def require_admin(token: Optional[str]):
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid or missing admin token")
+
+
+def to_records(x) -> list:
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    if isinstance(x, dict):
+        return x
+    return []
+
+
+def ensure_defaults(rows, defaults: dict) -> list:
+    """
+    Guarantees every row has every key `defaults` names, using the default
+    only when the SAVED row is missing that key entirely — this is what
+    stopped `r.fatigue_home.toFixed()` etc. from ever crashing the frontend
+    again, regardless of which historical engine version wrote the file.
+
+    Also stamps `_incomplete` (bool) + `_missing_fields` (list) onto each
+    row that needed any defaulting. This does NOT change any field the
+    frontend's TypeScript interfaces already expect — it's an additive,
+    ignorable-by-default marker — but it means a defaulted/failed row is no
+    longer visually indistinguishable from a genuine "0%" prediction to
+    anything that chooses to check it (ops tooling, or a future frontend
+    badge), instead of defaults silently passing as real data.
+    """
+    records = to_records(rows)
+    if isinstance(records, dict):
+        return records
+    out = []
+    for r in records:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        missing = [k for k in defaults.keys() if k not in r]
+        merged = dict(defaults)
+        merged.update(r)
+        for tier_key in ("tier", "Tier", "Category", "Rank", "gg_tier", "o15_tier",
+                          "u25_tier", "u35_tier", "corner_tier", "Verdict"):
+            if tier_key in merged and not merged[tier_key]:
+                merged[tier_key] = "STANDARD"
+                if tier_key not in missing:
+                    missing.append(tier_key)
+        if "chemistry" in defaults and not merged.get("chemistry"):
+            merged["chemistry"] = "strong"
+        if missing:
+            merged["_incomplete"] = True
+            merged["_missing_fields"] = missing
+        out.append(merged)
+    return out
+
+
+def _settled(data, market_type: str = "win", date_str: Optional[str] = None):
+    if not isinstance(data, list) or len(data) == 0:
+        return data
+    try:
+        live_db = get_live_scores_cached()
+        return settle_predictions(data, live_db, market_type=market_type)
+    except Exception:
+        print(f"[SETTLEMENT WARNING] {market_type}: {traceback.format_exc()}")
+        return data
+
+
+def _today() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _date_range(start: str, end: str, max_days: int = 14) -> list:
+    """Inclusive list of YYYY-MM-DD strings from start to end, capped so a
+    malformed/huge range can't make a single request scan years of files."""
+    try:
+        d0 = datetime.strptime(start, "%Y-%m-%d")
+        d1 = datetime.strptime(end, "%Y-%m-%d")
+    except ValueError:
+        return [start]
+    if d1 < d0:
+        d0, d1 = d1, d0
+    days = []
+    cursor = d0
+    while cursor <= d1 and len(days) < max_days:
+        days.append(cursor.strftime("%Y-%m-%d"))
+        cursor += timedelta(days=1)
+    return days or [start]
+
+
+def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, settle: bool = True) -> list:
+    """
+    Reads and concatenates one saved file PER DATE in `dates`, tagging each
+    row with the date it came from so a "7-day range" filter route actually
+    returns a week of picks instead of silently collapsing to a single day
+    (the previous behaviour, inherited unchanged from the old backend).
+    `key_prefix_fn(date)` returns the output_store key to load for that date.
+    """
+    combined = []
+    for d in dates:
+        data, _ = store.load(key_prefix_fn(d), d, default=[])
+        rows = ensure_defaults(data, defaults)
+        if settle:
+            rows = _settled(rows, market_type, d)
+        for row in rows:
+            if isinstance(row, dict) and "match_date" not in row:
+                row["match_date"] = d
+        combined.extend(rows)
+    return combined
+
+
+def read(key: str, date: Optional[str], defaults: dict, market_type: str = "win", settle: bool = True):
+    """The one helper every picks route uses: load from disk, fill defaults,
+    optionally settle against live/finished scores. No engine is ever called
+    here — a cache miss is just an empty list, not a live recompute."""
+    data, _generated_at = store.load(key, date, default=[])
+    rows = ensure_defaults(data, defaults)
+    if settle and date:
+        rows = _settled(rows, market_type, date)
+    return rows
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# DEFAULT FIELD MAPS — matches lib/api.ts's TypeScript interfaces exactly.
+# ════════════════════════════════════════════════════════════════════════════
+WIN_APEX_DEFAULTS = dict(
+    fixture_id="", Fixture="", Target="", Category="STANDARD", Cat_Priority=0,
+    Monte_Win_Prob=0, Monte_Draw_Prob=0, Lambda_Detail="", Underdog_Risk="",
+    Psych_Score=0, Psych_Logic="", Chokehold_Status="", Veto_Reason="",
+)
+WIN_PSYCH_DEFAULTS = dict(
+    Fixture="", Master_Pick="", Master_Prob="0%", Audit_Score=0, H_Base=0,
+    A_Base=0, Tier="STANDARD", Spears="", H_Quality="", A_Quality="",
+    Home_Logic="", Away_Logic="",
+)
+WIN_U2S_DEFAULTS = dict(
+    Fixture="", Underdog="", Audit_Verdict="", Spear_Matchup="",
+    Dog_Venue_SOT=0, Fav_Venue_SOT=0, Dog_H2H_SOT=0, Fav_H2H_SOT=0,
+    Dog_Opp_Avg_Conceded=0, Fav_Opp_Avg_Conceded=0, Dog_Scoring_Consistency="",
+    Psych_Score=0, Tier="STANDARD", Triggers="",
+)
+WIN_FORECAST_DEFAULTS = dict(
+    fixture_id="", fixture="", side="", team_name="", win_odds=0,
+    poisson_win_prob="0%", poisson_draw_prob="0%", last_5_wins_overall=0,
+    last_5_wins_at_venue=0, last_5_goals_scored=0, opp_last_5_goals_scored=0,
+    opp_last_5_losses=0, opp_last_5_conceded_raw=0, opp_no_clean_sheet_count=0,
+    h2h_wins_last_5=0, last_3_no_draw_BOTH=False, parity_score=0,
+    parity_even_count=0,
+)
+WIN_RAW_DEFAULTS = {k: v for k, v in WIN_FORECAST_DEFAULTS.items()
+                    if k not in ("poisson_win_prob", "poisson_draw_prob")}
+
+GG_PRECISION_DEFAULTS = dict(
+    fixture_id="", fixture="", home_team="", away_team="", league_id="",
+    lambda_home=0, lambda_away=0, combined_lambda=0, mc_btts_prob=0,
+    venue_btts_combined=0, h2h_btts_rate=0, home_gk_liable=False,
+    away_gk_liable=False, home_gk_cpg=0, away_gk_cpg=0, home_gk_note="",
+    away_gk_note="", fatigue_home=0, fatigue_away=0, league_weight=1,
+    gg_score=0, gg_signals_fired=0, gg_tier="STANDARD",
+    sig1_mc_btts=0, sig2_venue_btts=0, sig3_gk_vuln=0, sig4_h2h_btts=0,
+    sig5_directional=0,
+)
+GG_O15_DEFAULTS = dict(
+    fixture_id="", fixture="", home_team="", away_team="", league_id="",
+    o15_tier="STANDARD", o15_score=0, combined_lambda=0, mc_over15_prob=0,
+    sig1_combined_lambda=0, sig2_mc_over15=0, sig3_venue_goals_avg=0,
+    sig4_league_weight=0, sig5_fatigue_penalty=0, combined_venue_goals_avg=0,
+    venue_goals_avg_home=0, venue_goals_avg_away=0, fatigue_home=0,
+    fatigue_away=0, league_weight=1,
+)
+GG_FORENSIC_DEFAULTS = dict(
+    fixture_id="", league_id="", Fixture="", Score="", DNA_Intelligence="",
+    **{"Poisson%": 0}, H2H_GG="", DNA_Insight="", Ranks="", Forensic_Audit="",
+)
+GG_PSYCH_DEFAULTS = dict(
+    Fixture="", MC_Rank="", MC_Prob="0%", Psych_Score=0, Spears="",
+    Tier="STANDARD", Psych_Triggers="",
+)
+GG_SUPREME_DEFAULTS = dict(
+    fixture_id="", Fixture="", Category="STANDARD", Cat_Priority=0,
+    Monte_GG_Prob=0, NGG_Risk=0, Base_Marks="", DNA_Status="", Psych_Score=0,
+    Psych_Triggers="", VIP_Status="", Veto_Status="", Spears="",
+)
+GG_CROSS_DEFAULTS = dict(
+    fixture_id="", home_team="", away_team="", league_id="", gg_prob_pct=0,
+    tier="STANDARD", verification_days=0, table_distance=0, audit_timestamp="",
+)
+
+O25_STAGE1_DEFAULTS = dict(id="", fixture="", Time="", Odds=0, Confidence="", Algorithm="")
+O25_STAGE2_DEFAULTS = dict(id="", fixture="", Time="", Votes=0, Odds=0, Algorithm="", Reasons="")
+O25_STAGE3_DEFAULTS = dict(
+    Match="", Odds=0, **{"Poisson%": 0}, Grade="", GradeNum=0,
+    H2H_Record="", PickedBy="", Failures="",
+)
+O25_PSYCH_DEFAULTS = dict(Fixture="", Base_Poisson="0%", Base_Grade="", Score=0, Tier="STANDARD", Reasons="")
+O25_APEX_DEFAULTS = dict(
+    fixture_id="", Fixture="", Category="STANDARD", Cat_Priority=0,
+    Super_Monte_Prob=0, U25_Risk=0, Base_Grade="", DNA_Status="",
+    Psych_Score=0, Psych_Triggers="", VIP_Status="", Veto_Status="",
+)
+O25_FORECAST_DEFAULTS = dict(
+    fixture_id="", league="", fixture="", o25_odds=0, kill_switch_pass=False,
+    poisson_over_prob_num=0, council_votes="", pos_gap=0, parity_diff=0,
+    h2h_overs_last_5=0, combined_gs_last_5=0,
+)
+
+O15_STAGE3_DEFAULTS = dict(O25_STAGE3_DEFAULTS)
+O15_PSYCH_DEFAULTS = dict(O25_PSYCH_DEFAULTS)
+O15_APEX_DEFAULTS = dict(Fixture="", Base_Poisson="0%", Base_Grade="", Score=0, Tier="STANDARD", Reasons="")
+
+CORNER_S1_DEFAULTS = dict(
+    fixture_id="", fixture="", expected_total_corners=0, corner_tier="STANDARD",
+    expected_difference=0, team_more_corners="", team_more_corners_probability_like=0,
+    avg_confidence=0, home_win_odds=0, over_2_5_odds=0, tier_1_priority=False,
+)
+CORNER_S2_DEFAULTS = dict(
+    fixture_id="", fixture="", stage1_predicted_corners=0, stage2_predicted_corners=0,
+    expected_total_corners=0, corner_tier="STANDARD", style_alignment="",
+    expected_difference=0, avg_confidence=0, home_is_persistent_venue=False,
+    away_is_persistent_venue=False, home_is_persistent_overall=False,
+    away_is_persistent_overall=False,
+)
+CORNER_PSYCH_DEFAULTS = dict(
+    fixture_name="", home_position=0, away_position=0, friction_grade="",
+    standings_gap=0, tactical_intelligence_grade="", tactical_note="",
+    is_wounded_beast=False, wounded_reason="", wounded_team_name="",
+)
+CORNER_CATALYST_DEFAULTS = dict(
+    fixture_name="", predicted_corners=0, corner_tier="STANDARD",
+    home_position=0, away_position=0, friction_grade="",
+    home_is_wounded_beast=False, home_wounded_intensity="",
+    away_is_wounded_beast=False, away_wounded_intensity="",
+)
+CORNER_AGG_DEFAULTS = dict(
+    Fixture="", Master_Score=0, Chaos_Rating=0, Tier="STANDARD",
+    True_Corner_Fav="", Match_Flow="", **{"U2.5%": "0%"}, UD_Prob="0%",
+    NB_Prob="0%", Total_Exp=0, Home_Pos=0, Away_Pos=0, Friction="",
+    Home_Wounded="False", Home_Wound_Int="", Away_Wounded="False",
+    Away_Wound_Int="", Home_Team="", Away_Team="", Home_Score=0, Away_Score=0,
+    Home_Label="", Away_Label="", Home_DNA="", Away_DNA="",
+    Home_SH_Ratio=0, Away_SH_Ratio=0,
+)
+
+DRAW_DEFAULTS = dict(
+    fixture_id="", fixture="", home_team="", away_team="", tier="STANDARD",
+    section="", composite_draw_score=0, mc_draw_prob=0, poisson_draw_prob=0,
+    dmi=0, parity=0, draw_odds=0, value_edge=0, mc_spread=0, mc_stability="",
+    most_likely_draw_score="", most_likely_draw_pct=0, home_draws=0,
+    away_draws=0, h2h_draws=0, total_draws=0, fatigue_score=0,
+    home_position=0, away_position=0,
+)
+UNDERS_DEFAULTS = dict(
+    fixture_id="", fixture="", home_team="", away_team="", combined_lambda=0,
+    mc_u25_prob=0, mc_u35_prob=0, u25_score=0, u25_tier="STANDARD",
+    u25_signals_fired=0, u35_score=0, u35_tier="STANDARD", home_gk_cpg=0,
+    away_gk_cpg=0, home_gk_note="", away_gk_note="", fatigue_home=0,
+    fatigue_away=0,
+)
+SOT_DEFAULTS = dict(
+    Fixture="", Verdict="STANDARD", Proj_SOT=0, **{"Poisson_Over_8.5": "0%"},
+    Consistency="", Game_Script="", Momentum="", **{"1x2_Home_Odd": 0},
+)
+FHVI_DEFAULTS = dict(
+    fixture="", ht_score="", ft_score="", fhvi_score=0, fhvi_label="",
+    fh_pressure=0, country="", comb_fh_r=0, avg_sh_goals=0, h_fh_r_disp=0,
+    a_fh_r_disp=0, h_fh_c_r_disp=0, a_fh_c_r_disp=0, Category="STANDARD",
+)
+SHVI_DEFAULTS = dict(
+    fixture="", ht_score="", ft_score="", shvi_score=0, shvi_label="",
+    sh_pressure=0, country="", comb_sh_r=0, avg_fh_goals=0, h_sh_r_disp=0,
+    a_sh_r_disp=0, h_sh_c_r_disp=0, a_sh_c_r_disp=0, Category="STANDARD",
+)
+
+UD_BASE_DEFAULTS = dict(
+    fixture_id="", fixture="", league="", underdog_team="", dog_odds=0,
+    dog_score_prob="0%", parity_gap=0, dog_att_strength=0, fav_def_weakness=0,
+    dog_is_hot=False, dog_due_goal=False, both_no_draw_3=False,
+    fav_vulnerability_5="", fav_cs_streak=0, h2h_dog_gs_last_5=0,
+    dog_venue_wins=0,
+)
+UD_AUDIT_DEFAULTS = dict(
+    fixture_id="", fixture="", underdog_team="", Audit_Real_Prob="0%",
+    Dog_Score_Prob="0%", Fav_Spear_Power="", Dominance_Gap=0,
+    Audit_Verdict="STANDARD", parity_gap=0, dog_is_hot=False,
+    dog_due_goal=False, fav_cs_streak=0,
+)
+UD_APEX_DEFAULTS = dict(
+    fixture_id="", Fixture="", Rank="STANDARD", Monte_UD_Prob="0%",
+    Engine="", Handshake="", DNA="", Rule="", Fav_Vuln="0%", SH_GG_Label="",
+)
+
+SH_GG_WINNER_DEFAULTS = dict(
+    fixture_id="", league="", kickoff_datetime="",
+    teams={"home": {"id": "", "name": ""}, "away": {"id": "", "name": ""}},
+    pick_labels=[], flags={}, metrics={},
+)
+SH_MASTER_DEFAULTS = dict(
+    fixture="", league="", shvi_score=0, sh_pressure=0, ht="", ft="",
+    sh_scoring_rate="0%", avg_fh_goals=0, late_threat="",
+)
+SH_8GOAL_DEFAULTS = dict(
+    Fixture_ID="", League="", Time="", Fixture="", H_Goals_L5=0,
+    A_Goals_L5=0, Labels="", Status="STANDARD",
+)
+
+# All engine keys — used by /api/status/{date} to report freshness at a glance.
+ALL_ENGINE_KEYS = [
+    "dna", "dna_v2", "dna_market_factors", "underdog_base", "underdog_audit",
+    "calibration", "underdog_apex", "win_forecast", "sh_gg_winner",
+    "corners_stage1", "corners_stage2", "corners_psychology", "corners_catalyst",
+    "corners_aggregator", "gg_o15", "gg_forensics", "gg_psychology", "gg_supreme",
+    "over25_stage1", "over25_stage2", "over25_stage3", "over25_psychology",
+    "over25_gold", "over25_apex", "over25_forecast", "over15_stage3",
+    "over15_psychology", "over15_apex", "unders", "draw", "sot", "fhvi", "shvi",
+    "u2s_psychology", "win_psychology", "win_apex", "sh_master", "sh_8goal",
+    "win_raw", "filter_gg",
+    "filter_win__safe", "filter_win__balanced", "filter_win__aggressive",
+    "filter_over25__banker", "filter_over25__balanced", "filter_over25__aggressive",
+]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# HEALTH & OPS
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/", tags=["Health"])
+@app.get("/health", tags=["Health"])
+def health():
+    return {
+        "status": "ok",
+        "service": "AlienEdge Prediction API",
+        "version": "4.0.0",
+        "architecture": "disk-first — no live engine calls in request handlers",
+        "server_time": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/status/{date}", tags=["Ops"])
+def get_status(date: str):
+    """Freshness report — which engines have saved output for this date, and
+    when. This is your first stop when a page shows Demo data: it tells you
+    immediately whether main.py has run for that date yet."""
+    return store.status_for_date(date, ALL_ENGINE_KEYS)
+
+
+@app.post("/api/admin/run-pipeline/{date}", tags=["Admin"])
+def trigger_pipeline(date: str, x_admin_token: Optional[str] = Header(default=None)):
+    """
+    Launches `python main.py --date={date}` as a DETACHED background process
+    and returns immediately (HTTP request is not held open for the minutes a
+    full run takes). Poll /api/status/{date} to watch it complete. Requires
+    ADMIN_TOKEN — this is an ops tool, not something the frontend calls.
+    """
+    require_admin(x_admin_token)
+    python_bin = sys.executable
+    log_path = os.path.join(OUTPUT_DIR, f"pipeline_run_{date}.log")
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        subprocess.Popen(
+            [python_bin, os.path.join(ROOT, "main.py"), f"--date={date}"],
+            cwd=ROOT,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # detach fully — survives the API request finishing
+        )
+    return {"started": True, "date": date, "log_file": log_path}
+
+
+@app.post("/api/admin/cache/clear-status", tags=["Admin"])
+def noop_cache_clear(x_admin_token: Optional[str] = Header(default=None)):
+    """No in-memory cache exists in this architecture (pure disk-first), so
+    there is nothing to clear — this endpoint is kept only so any old ops
+    tooling pointed at a 'clear cache' URL gets a clean 200 instead of 404."""
+    require_admin(x_admin_token)
+    return {"cleared": 0, "note": "disk-first architecture has no in-memory cache to clear"}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FOUNDATION
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/dna/{date}", tags=["Foundation"])
+def get_dna_profiles(date: str):
+    data, _ = store.load("dna", date, default=[])
+    return to_records(data)
+
+
+@app.get("/api/dna/v2/{date}", tags=["Foundation"])
+def get_dna_v2(date: str):
+    engine_result, _ = store.load("dna_v2", date, default={})
+    market_factors, _ = store.load("dna_market_factors", date, default={})
+    dna_profiles = engine_result.get("dna_profiles", {}) if isinstance(engine_result, dict) else {}
+    fixture_clashes = engine_result.get("fixture_clashes", []) if isinstance(engine_result, dict) else []
+    return {
+        "dna_profiles": dna_profiles,
+        "fixture_clashes": fixture_clashes,
+        "market_factors": market_factors or {},
+    }
+
+
+@app.get("/api/dna/v2/latest", tags=["Foundation"])
+def get_dna_v2_latest():
+    """Disk-only, no recompute — reads today's saved DNA v2 file if present."""
+    return get_dna_v2(_today())
+
+
+@app.get("/api/underdog/{date}", tags=["Foundation"])
+def get_underdog(date: str):
+    return read("underdog_base", date, UD_BASE_DEFAULTS, "u2s")
+
+
+@app.get("/api/underdog/audit/{date}", tags=["Foundation"])
+def get_underdog_audit(date: str):
+    return read("underdog_audit", date, UD_AUDIT_DEFAULTS, "u2s")
+
+
+@app.get("/api/underdog/apex/{date}", tags=["Foundation"])
+def get_underdog_apex(date: str):
+    return read("underdog_apex", date, UD_APEX_DEFAULTS, "u2s")
+
+
+@app.get("/api/calibration/{date}", tags=["Foundation"])
+def get_calibration(date: str):
+    data, _ = store.load("calibration", date, default=[])
+    return to_records(data)
+
+
+@app.get("/api/win/forecast/{date}", tags=["Win"])
+def get_win_forecast(date: str):
+    return read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win")
+
+
+@app.get("/api/sh-gg-winner/{date}", tags=["Specials"])
+def get_sh_gg_winner(date: str):
+    return read("sh_gg_winner", date, SH_GG_WINNER_DEFAULTS, "shvi")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# WIN
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/win/psychology/{date}", tags=["Win"])
+def get_win_psychology(date: str):
+    return read("win_psychology", date, WIN_PSYCH_DEFAULTS, "win")
+
+
+@app.get("/api/win/u2s/{date}", tags=["Win"])
+def get_u2s(date: str):
+    return read("u2s_psychology", date, WIN_U2S_DEFAULTS, "u2s")
+
+
+@app.get("/api/win/apex/{date}", tags=["Win"])
+def get_win_apex(date: str):
+    # Prefer the exact date-tagged snapshot (main.py saves both); fall back
+    # to '__latest' only if this specific date was never snapshotted.
+    data, generated_at = store.load("win_apex", date, default=None)
+    if data is None:
+        data, generated_at = store.load("win_apex", None, default=[])
+    return _settled(ensure_defaults(data, WIN_APEX_DEFAULTS), "win", date)
+
+
+@app.get("/api/win/raw/{date}", tags=["Win"])
+def get_win_raw(date: str):
+    return read("win_raw", date, WIN_RAW_DEFAULTS, "win")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# GG / BTTS + OVER 1.5 (unified head engine — composite file)
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/gg/precision/{date}", tags=["GG"])
+def get_gg_precision(date: str):
+    raw, _ = store.load("gg_o15", date, default=[None, None])
+    gg_raw = raw[0] if isinstance(raw, list) and len(raw) > 0 else []
+    o15_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
+    gg = ensure_defaults(gg_raw, GG_PRECISION_DEFAULTS)
+    o15 = ensure_defaults(o15_raw, GG_O15_DEFAULTS)
+    return {"gg": _settled(gg, "gg", date), "o15": _settled(o15, "o15", date)}
+
+
+@app.get("/api/gg/forensics/{date}", tags=["GG"])
+def get_gg_forensics(date: str):
+    return read("gg_forensics", date, GG_FORENSIC_DEFAULTS, "gg")
+
+
+@app.get("/api/gg/psychology/{date}", tags=["GG"])
+def get_gg_psychology(date: str):
+    return read("gg_psychology", date, GG_PSYCH_DEFAULTS, "gg")
+
+
+@app.get("/api/gg/supreme/{date}", tags=["GG"])
+def get_gg_supreme(date: str):
+    return read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg")
+
+
+@app.get("/api/gg/cross-verify", tags=["GG"])
+def get_gg_cross_verify():
+    # This route has no date param by design (7-day rolling cross-verify) —
+    # correctly reads the dateless "__latest" snapshot main.py always writes.
+    data, _ = store.load("filter_gg", None, default=[])
+    return _settled(ensure_defaults(data, GG_CROSS_DEFAULTS), "gg")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# OVER 2.5
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/over25/stage1/{date}", tags=["Over 2.5"])
+def get_over25_stage1(date: str):
+    return read("over25_stage1", date, O25_STAGE1_DEFAULTS, "o25")
+
+
+@app.get("/api/over25/stage2/{date}", tags=["Over 2.5"])
+def get_over25_stage2(date: str):
+    return read("over25_stage2", date, O25_STAGE2_DEFAULTS, "o25")
+
+
+@app.get("/api/over25/stage3/{date}", tags=["Over 2.5"])
+def get_over25_stage3(date: str):
+    return read("over25_stage3", date, O25_STAGE3_DEFAULTS, "o25")
+
+
+@app.get("/api/over25/psychology/{date}", tags=["Over 2.5"])
+def get_over25_psychology(date: str):
+    return read("over25_psychology", date, O25_PSYCH_DEFAULTS, "o25")
+
+
+@app.get("/api/over25/gold/{date}", tags=["Over 2.5"])
+def get_over25_gold(date: str):
+    data, _ = store.load("over25_gold", date, default=[])
+    return to_records(data)
+
+
+@app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
+def get_over25_apex(date: str):
+    return read("over25_apex", date, O25_APEX_DEFAULTS, "o25")
+
+
+@app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
+def get_over25_forecast(date: str):
+    return read("over25_forecast", date, O25_FORECAST_DEFAULTS, "o25")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# OVER 1.5
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/over15/stage3/{date}", tags=["Over 1.5"])
+def get_over15_stage3(date: str):
+    return read("over15_stage3", date, O15_STAGE3_DEFAULTS, "o15")
+
+
+@app.get("/api/over15/psychology/{date}", tags=["Over 1.5"])
+def get_over15_psychology(date: str):
+    return read("over15_psychology", date, O15_PSYCH_DEFAULTS, "o15")
+
+
+@app.get("/api/over15/apex/{date}", tags=["Over 1.5"])
+def get_over15_apex(date: str):
+    return read("over15_apex", date, O15_APEX_DEFAULTS, "o15")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# CORNERS
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/corners/stage1/{date}", tags=["Corners"])
+def get_corners_stage1(date: str):
+    return read("corners_stage1", date, CORNER_S1_DEFAULTS, "corners")
+
+
+@app.get("/api/corners/stage2/{date}", tags=["Corners"])
+def get_corners_stage2(date: str):
+    return read("corners_stage2", date, CORNER_S2_DEFAULTS, "corners")
+
+
+@app.get("/api/corners/psychology/{date}", tags=["Corners"])
+def get_corners_psychology(date: str):
+    return read("corners_psychology", date, CORNER_PSYCH_DEFAULTS, "corners")
+
+
+@app.get("/api/corners/catalyst/{date}", tags=["Corners"])
+def get_corners_catalyst(date: str):
+    return read("corners_catalyst", date, CORNER_CATALYST_DEFAULTS, "corners")
+
+
+@app.get("/api/corners/aggregator/{date}", tags=["Corners"])
+def get_corners_aggregator(date: str):
+    return read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# DRAW / UNDERS (composite files: (draws, parity, amateurs) and (u25, u35))
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/draw/{date}", tags=["Draw"])
+def get_draw(date: str):
+    raw, _ = store.load("draw", date, default=[[], [], []])
+    draws_raw = raw[0] if isinstance(raw, list) and len(raw) > 0 else []
+    parity_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
+    amateurs_raw = raw[2] if isinstance(raw, list) and len(raw) > 2 else []
+    return {
+        "draws": _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "win", date),
+        "parity_list": ensure_defaults(parity_raw, DRAW_DEFAULTS),
+        "amateurs_list": ensure_defaults(amateurs_raw, DRAW_DEFAULTS),
+    }
+
+
+@app.get("/api/unders/{date}", tags=["Unders"])
+def get_unders(date: str):
+    raw, _ = store.load("unders", date, default=[[], []])
+    u25_raw = raw[0] if isinstance(raw, list) and len(raw) > 0 else []
+    u35_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
+    return {
+        "u25": _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "o25", date),
+        "u35": ensure_defaults(u35_raw, UNDERS_DEFAULTS),
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SOT / FHVI / SHVI
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/sot/{date}", tags=["Specials"])
+def get_sot(date: str):
+    return read("sot", date, SOT_DEFAULTS, "sot")
+
+
+@app.get("/api/fhvi/{date}", tags=["Specials"])
+def get_fhvi(date: str):
+    return read("fhvi", date, FHVI_DEFAULTS, "shvi")
+
+
+@app.get("/api/shvi/{date}", tags=["Specials"])
+def get_shvi(date: str):
+    # Strictly keyed on (shvi, date) — this is the fix for the old
+    # "shows real data but wrong date" bug. No undated fallback exists here.
+    return read("shvi", date, SHVI_DEFAULTS, "shvi")
+
+
+@app.get("/api/sh-master/{date}", tags=["Specials"])
+def get_sh_master(date: str):
+    return read("sh_master", date, SH_MASTER_DEFAULTS, "shvi")
+
+
+@app.get("/api/sh-8goal/{date}", tags=["Specials"])
+def get_sh_8goal(date: str):
+    return read("sh_8goal", date, SH_8GOAL_DEFAULTS, "shvi")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# LIVE ENGINES — written continuously by run_live_scanner_24_7.py (a separate
+# always-on process). Read directly from data/*.json — unchanged, this
+# pattern was already correct (continuous writer, on-demand reader).
+# ════════════════════════════════════════════════════════════════════════════
 def _read_json(path: str, default=None):
-    """Fast disk read for live REST snapshots — never imports heavy engines."""
     if default is None:
         default = []
     if not os.path.exists(path):
@@ -62,117 +746,8 @@ def _read_json(path: str, default=None):
         return default
 
 
-def _read_csv(path: str, default=None):
-    """Fast disk read for pre-computed CSV prediction files."""
-    if default is None:
-        default = []
-    if not os.path.exists(path):
-        return default
-    try:
-        rows = []
-        with open(path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                row = {}
-                for k, v in r.items():
-                    if v is None:
-                        continue
-                    v_str = str(v).strip()
-                    try:
-                        if "." in v_str:
-                            row[k] = float(v_str)
-                        else:
-                            row[k] = int(v_str)
-                    except (ValueError, TypeError):
-                        row[k] = v_str
-                rows.append(row)
-        return rows
-    except Exception:
-        return default
-
-
-def _normalize_row_safeties(rows):
-    """Guarantees every row contains safe tier and string defaults so UI never throws toLowerCase error."""
-    if not isinstance(rows, list):
-        return rows
-    for r in rows:
-        if isinstance(r, dict):
-            if "tier" not in r and "Tier" not in r:
-                r["tier"] = "STANDARD"
-            elif "Tier" in r and "tier" not in r:
-                r["tier"] = str(r["Tier"])
-            elif "tier" in r and not r["tier"]:
-                r["tier"] = "STANDARD"
-
-            if "chemistry" not in r:
-                r["chemistry"] = "strong"
-            elif not r["chemistry"]:
-                r["chemistry"] = "strong"
-    return rows
-
-
-def _read_disk_first(candidate_paths, fallback_fn=None, *args, **kwargs):
-    """
-    Looks for existing pre-computed files on disk first.
-    Only falls back to live engine execution if no file exists.
-    """
-    for p in candidate_paths:
-        if os.path.exists(p) and os.path.getsize(p) > 10:
-            if p.endswith(".json"):
-                data = _read_json(p, None)
-            elif p.endswith(".csv"):
-                data = _read_csv(p, None)
-            else:
-                data = None
-            if data:
-                return _normalize_row_safeties(data)
-
-    # Fallback to live computation if no pre-computed file is on disk
-    if fallback_fn:
-        try:
-            res = fallback_fn(*args, **kwargs)
-            return _normalize_row_safeties(res if res is not None else [])
-        except Exception:
-            return []
-    return []
-
-
-def _run(fn, *args, **kwargs):
-    """Run a synchronous engine function and catch any exceptions."""
-    try:
-        result = fn(*args, **kwargs)
-        return _normalize_row_safeties(result if result is not None else [])
-    except Exception:
-        raise HTTPException(status_code=500, detail=traceback.format_exc())
-
-
-def _settled(data, market_type="win", date_str=None):
-    """
-    Enriches prediction rows with live scores and ✅/❌ verdicts.
-    Reads from daily_archiver JSON if viewing a past date (0 API cost).
-    """
-    if not isinstance(data, list) or len(data) == 0:
-        return data
-
-    # 1. Check if an offline archive exists for this date (0 API calls)
-    if date_str:
-        archive_path = os.path.join(OUTPUT_DIR, f"archive_{date_str}.json")
-        archive_data = _read_json(archive_path, None)
-        if archive_data and "fixtures" in archive_data:
-            return settle_predictions(data, archive_data["fixtures"], market_type=market_type)
-
-    # 2. Live in-play fallback (2-min shared cache)
-    try:
-        live_db = get_live_scores_cached()
-        return settle_predictions(data, live_db, market_type=market_type)
-    except Exception:
-        return data
-
-
 def _incoming_rows_from_disk():
-    """Normalize incoming_predictions.json → [{fixture_id, fixture, picks}]."""
-    path = os.path.join(DATA_DIR, "incoming_predictions.json")
-    raw = _read_json(path, {})
+    raw = _read_json(os.path.join(DATA_DIR, "incoming_predictions.json"), {})
     if isinstance(raw, list):
         return raw
     if not isinstance(raw, dict):
@@ -180,11 +755,7 @@ def _incoming_rows_from_disk():
     rows = []
     for fixture_id, value in raw.items():
         if isinstance(value, list):
-            rows.append({
-                "fixture_id": str(fixture_id),
-                "fixture": str(fixture_id),
-                "picks": value,
-            })
+            rows.append({"fixture_id": str(fixture_id), "fixture": str(fixture_id), "picks": value})
         elif isinstance(value, dict):
             picks = value.get("picks", [])
             rows.append({
@@ -195,616 +766,48 @@ def _incoming_rows_from_disk():
     return rows
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# HEALTH CHECK
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/", tags=["Health"])
-@app.get("/health", tags=["Health"])
-def health():
-    return {"status": "ok", "service": "AlienEdge Prediction API", "version": "2.0.1"}
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# FOUNDATION ENGINES (Disk-First)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/dna/{date}", tags=["Foundation"])
-def get_dna_profiles(date: str):
-    p1 = os.path.join(DATA_DIR, "team_dna_profiles.json")
-    p2 = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
-    from CORE.dna_profiler import run_dna_profiler
-    return _read_disk_first([p1, p2], fallback_fn=run_dna_profiler, target_date=date)
-
-
-@app.get("/api/dna/v2/{date}", tags=["Foundation"])
-def get_dna_v2(date: str):
-    """
-    Runs DNA Engine V2 + the market-factor mapper live and returns the
-    combined payload. Mirrors the existing /api/dna/{date} pattern.
-    """
-    profiles_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
-    clashes_path = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
-    factors_path = os.path.join(DATA_DIR, "dna_v2_market_factors.json")
-
-    profiles = _read_json(profiles_path, {})
-    clashes = _read_json(clashes_path, [])
-    factors = _read_json(factors_path, {})
-
-    if profiles and clashes:
-        return {
-            "dna_profiles": profiles,
-            "fixture_clashes": clashes,
-            "market_factors": factors,
-        }
-
-    from CORE.dna_engine_v2 import run_dna_engine_v2
-    from CORE.dna_v2_market_factors import build_market_factor_counts
-    engine_result = _run(run_dna_engine_v2, date)
-    market_factors = _run(build_market_factor_counts, date)
-
-    dna_profiles = engine_result.get("dna_profiles", {}) if isinstance(engine_result, dict) else {}
-    fixture_clashes = engine_result.get("fixture_clashes", []) if isinstance(engine_result, dict) else []
-
-    return {
-        "dna_profiles": dna_profiles,
-        "fixture_clashes": fixture_clashes,
-        "market_factors": market_factors,
-    }
-
-
-@app.get("/api/dna/v2/latest", tags=["Foundation"])
-def get_dna_v2_latest():
-    """
-    Fast disk-only read of the most recently computed DNA v2 output —
-    never imports or runs the engine. Used by the frontend for instant
-    fixture-list DNA counts and instant DNA Analysis page opens.
-    """
-    profiles_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
-    clashes_path = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
-    factors_path = os.path.join(DATA_DIR, "dna_v2_market_factors.json")
-
-    return {
-        "dna_profiles": _read_json(profiles_path, {}),
-        "fixture_clashes": _read_json(clashes_path, []),
-        "market_factors": _read_json(factors_path, {}),
-    }
-
-
-@app.get("/api/underdog/{date}", tags=["Foundation"])
-def get_underdog(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"audited_underdog_backtest_{date}.json"),
-        os.path.join(OUTPUT_DIR, f"backtest_underdog_{date}.json"),
-        os.path.join(OUTPUT_DIR, "backtest_underdog.json"),
-    ]
-    from Engine.underdog_engine import run_underdog_engine
-    data = _read_disk_first(paths, fallback_fn=run_underdog_engine, target_date=date)
-    return _settled(data, "u2s", date)
-
-
-@app.get("/api/underdog/audit/{date}", tags=["Foundation"])
-def get_underdog_audit(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"audited_underdog_backtest_{date}.json"),
-        os.path.join(OUTPUT_DIR, "audited_underdog_backtest.json"),
-        os.path.join(OUTPUT_DIR, f"backtest_underdog_{date}.json"),
-    ]
-    from Engine.master_underdog_audit import run_underdog_master_engine
-    data = _read_disk_first(paths, fallback_fn=run_underdog_master_engine, target_date=date)
-    return _settled(data, "u2s", date)
-
-
-@app.get("/api/underdog/apex/{date}", tags=["Foundation"])
-def get_underdog_apex(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FINAL_APEX_UD_SCORE_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "FINAL_APEX_UD_SCORE.csv"),
-        os.path.join(OUTPUT_DIR, f"audited_underdog_backtest_{date}.json"),
-    ]
-    from AGGREGATOR.apex_ud_aggregator import run_apex_underdog_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_apex_underdog_aggregator, target_date=date)
-    return _settled(data, "u2s", date)
-
-
-@app.get("/api/calibration/{date}", tags=["Foundation"])
-def get_calibration(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"MASTER_CALIBRATION_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "MASTER_CALIBRATION.csv"),
-    ]
-    from CORE.handshake_logic import run_total_visibility_merger
-    return _read_disk_first(paths, fallback_fn=run_total_visibility_merger, target_date=date)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# WIN ENGINES (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/win/forecast/{date}", tags=["Win"])
-def get_win_forecast(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"ranked_win_forecast_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "ranked_win_forecast.csv"),
-        os.path.join(OUTPUT_DIR, f"production_raw_engine_{date}.csv"),
-    ]
-    from Engine.win_forecast import run_win_forecast_engine
-    data = _read_disk_first(paths, fallback_fn=run_win_forecast_engine, target_date=date)
-    return _settled(data, "win", date)
-
-
-@app.get("/api/win/psychology/{date}", tags=["Win"])
-def get_win_psychology(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"tactical_brain_output_{date}.json"),
-        os.path.join(OUTPUT_DIR, "tactical_brain_output.json"),
-    ]
-    from PSYCHOLOGY.win_psychology import run_win_psychology_engine
-    data = _read_disk_first(paths, fallback_fn=run_win_psychology_engine, target_date=date)
-    return _settled(data, "win", date)
-
-
-@app.get("/api/win/apex/{date}", tags=["Win"])
-def get_win_apex(date: str):
-    paths = [
-        os.path.join(MASTER_AGG_DIR, f"WIN_SUPER_MATRIX_FINAL_{date}.csv"),
-        os.path.join(MASTER_AGG_DIR, "WIN_SUPER_MATRIX_FINAL.csv"),
-        os.path.join(OUTPUT_DIR, f"WIN_SUPER_MATRIX_FINAL_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "WIN_SUPER_MATRIX_FINAL.csv"),
-    ]
-    from AGGREGATOR.win_apex_aggregator import run_win_apex_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_win_apex_aggregator)
-    return _settled(data, "win", date)
-
-
-@app.get("/api/win/raw/{date}", tags=["Win"])
-def get_win_raw(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"production_raw_engine_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"win_poisson_production_{date}.csv"),
-    ]
-    from Engine.win_raw_engine import run_win_raw_engine
-    data = _read_disk_first(paths, fallback_fn=run_win_raw_engine, target_date=date)
-    return _settled(data, "win", date)
-
-
-@app.get("/api/win/u2s/{date}", tags=["Win"])
-def get_u2s(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"tactical_brain_output_{date}.json"),
-        os.path.join(OUTPUT_DIR, "tactical_brain_output.json"),
-        os.path.join(OUTPUT_DIR, f"u2s_predictions_{date}.json"),
-    ]
-    from PSYCHOLOGY.u2s_psychology import run_u2s_psychology_engine
-    data = _read_disk_first(paths, fallback_fn=run_u2s_psychology_engine, target_date=date)
-    return _settled(data, "u2s", date)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# GG / BTTS ENGINES (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/gg/precision/{date}", tags=["GG"])
-def get_gg_precision(date: str):
-    p_json = os.path.join(OUTPUT_DIR, f"gg_o15_feed_{date}.json")
-    if os.path.exists(p_json) and os.path.getsize(p_json) > 10:
-        raw = _read_json(p_json, {})
-        gg = _normalize_row_safeties(raw.get("gg", []) if isinstance(raw, dict) else raw)
-        o15 = _normalize_row_safeties(raw.get("o15", []) if isinstance(raw, dict) else [])
-        return {"gg": _settled(gg, "gg", date), "o15": _settled(o15, "o15", date)}
-
-    from Engine.gg_precision_engine import run_gg_o15_engine
-    gg, o15 = _run(run_gg_o15_engine, date)
-    return {"gg": _settled(gg, "gg", date), "o15": _settled(o15, "o15", date)}
-
-
-@app.get("/api/gg/forensics/{date}", tags=["GG"])
-def get_gg_forensics(date: str):
-    paths = [
-        os.path.join(MASTER_AGG_DIR, f"FINAL_GG_MASTER_LIVE_{date}.csv"),
-        os.path.join(MASTER_AGG_DIR, "FINAL_GG_MASTER_LIVE.csv"),
-        os.path.join(OUTPUT_DIR, "FINAL_GG_MASTER_LIVE.csv"),
-    ]
-    from AGGREGATOR.gg_forensics_audit import run_gg_forensic_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_gg_forensic_aggregator, target_date=date)
-    return _settled(data, "gg", date)
-
-
-@app.get("/api/gg/psychology/{date}", tags=["GG"])
-def get_gg_psychology(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"ALIENEDGE_GG_PSYCHOLOGY_FINAL_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "ALIENEDGE_GG_PSYCHOLOGY_FINAL.csv"),
-        os.path.join(OUTPUT_DIR, f"gg_psychology_output_{date}.json"),
-    ]
-    from PSYCHOLOGY.gg_psychology import run_gg_psychology_engine
-    data = _read_disk_first(paths, fallback_fn=run_gg_psychology_engine, target_date=date)
-    return _settled(data, "gg", date)
-
-
-@app.get("/api/gg/supreme/{date}", tags=["GG"])
-def get_gg_supreme(date: str):
-    paths = [
-        os.path.join(MASTER_AGG_DIR, f"FINAL_GG_MASTER_LIVE_{date}.csv"),
-        os.path.join(MASTER_AGG_DIR, "FINAL_GG_MASTER_LIVE.csv"),
-        os.path.join(OUTPUT_DIR, "FINAL_GG_MASTER_LIVE.csv"),
-        os.path.join(OUTPUT_DIR, f"supreme_gg_vip_{date}.json"),
-    ]
-    from AGGREGATOR.gg_supreme_vip import run_supreme_gg_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_supreme_gg_aggregator, target_date=date)
-    return _settled(data, "gg", date)
-
-
-@app.get("/api/gg/cross-verify", tags=["GG"])
-def get_gg_cross_verify():
-    """GG precision filter — 7-day cross-verification."""
-    paths = [
-        os.path.join(OUTPUT_DIR, "forecast_final_gg_precision.csv"),
-        os.path.join(MASTER_AGG_DIR, "FINAL_GG_MASTER_LIVE.csv"),
-    ]
-    from FILTER.gg_precision_filter import run_gg_precision_filter
-    data = _read_disk_first(paths, fallback_fn=run_gg_precision_filter)
-    return _settled(data, "gg")
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# OVER 2.5 ENGINES (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/over25/stage1/{date}", tags=["Over 2.5"])
-def get_over25_stage1(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, "over25_stage1_picks.json"),
-        os.path.join(OUTPUT_DIR, "over25_stage1_picks.csv"),
-    ]
-    from Engine.over25_probabilistic import run_over25_stage1
-    data = _read_disk_first(paths, fallback_fn=run_over25_stage1, target_date=date)
-    return _settled(data, "o25", date)
-
-
-@app.get("/api/over25/stage2/{date}", tags=["Over 2.5"])
-def get_over25_stage2(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, "over25_stage2_picks.json"),
-        os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv"),
-        os.path.join(OUTPUT_DIR, f"master_over_stage2_{date}.csv"),
-    ]
-    from Engine.over25_council import run_over25_stage2
-    data = _read_disk_first(paths, fallback_fn=run_over25_stage2, target_date=date)
-    return _settled(data, "o25", date)
-
-
-@app.get("/api/over25/stage3/{date}", tags=["Over 2.5"])
-def get_over25_stage3(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, "over25_stage3_final.json"),
-        os.path.join(OUTPUT_DIR, "over25_stage3_final.csv"),
-    ]
-    from AGGREGATOR.over25_killswitch import run_over25_stage3
-    data = _read_disk_first(paths, fallback_fn=run_over25_stage3, target_date=date)
-    return _settled(data, "o25", date)
-
-
-@app.get("/api/over25/psychology/{date}", tags=["Over 2.5"])
-def get_over25_psychology(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"o25_psychology_{date}.json"),
-        os.path.join(OUTPUT_DIR, "over25_stage2_picks.json"),
-        os.path.join(OUTPUT_DIR, "over25_stage3_final.json"),
-    ]
-    from PSYCHOLOGY.over25_psychology import run_o25_psychology_engine
-    data = _read_disk_first(paths, fallback_fn=run_o25_psychology_engine, target_date=date)
-    return _settled(data, "o25", date)
-
-
-@app.get("/api/over25/gold/{date}", tags=["Over 2.5"])
-def get_over25_gold(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, "gold_over_25_feed.json"),
-        os.path.join(OUTPUT_DIR, "over25_stage1_picks.json"),
-    ]
-    from Engine.gold_over25 import run_gold_over_25_engine
-    data = _read_disk_first(paths, fallback_fn=run_gold_over_25_engine, target_date=date)
-    return _settled(data, "o25", date)
-
-
-@app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
-def get_over25_apex(date: str):
-    paths = [
-        os.path.join(MASTER_AGG_DIR, f"O25_MASTER_LIVE_{date}.csv"),
-        os.path.join(MASTER_AGG_DIR, "O25_MASTER_LIVE.csv"),
-        os.path.join(OUTPUT_DIR, f"O25_MASTER_LIVE_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "O25_MASTER_LIVE.csv"),
-    ]
-    from AGGREGATOR.over25_apex import run_over25_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_over25_aggregator, target_date=date)
-    return _settled(data, "o25", date)
-
-
-@app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
-def get_over25_forecast(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"over25_forecast_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv"),
-        os.path.join(OUTPUT_DIR, "over25_stage1_picks.csv"),
-    ]
-    from Engine.over25_forecast import run_over25_forecast_engine
-    data = _read_disk_first(paths, fallback_fn=run_over25_forecast_engine, target_date=date)
-    return _settled(data, "o25", date)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# OVER 1.5 ENGINES (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/over15/stage3/{date}", tags=["Over 1.5"])
-def get_over15_stage3(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, "over15_stage3_final.json"),
-        os.path.join(OUTPUT_DIR, "over15_stage3_final.csv"),
-    ]
-    from Engine.over15_stage3 import run_over15_stage3
-    data = _read_disk_first(paths, fallback_fn=run_over15_stage3, target_date=date)
-    return _settled(data, "o15", date)
-
-
-@app.get("/api/over15/psychology/{date}", tags=["Over 1.5"])
-def get_over15_psychology(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"o15_psychology_{date}.json"),
-        os.path.join(OUTPUT_DIR, "over15_stage3_final.json"),
-    ]
-    from PSYCHOLOGY.over15_psychology import run_o15_psychology_engine
-    data = _read_disk_first(paths, fallback_fn=run_o15_psychology_engine, target_date=date)
-    return _settled(data, "o15", date)
-
-
-@app.get("/api/over15/apex/{date}", tags=["Over 1.5"])
-def get_over15_apex(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, "over15_stage3_final.json"),
-    ]
-    from AGGREGATOR.over15_apex import run_o15_apex_engine
-    data = _read_disk_first(paths, fallback_fn=run_o15_apex_engine, target_date=date)
-    return _settled(data, "o15", date)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# UNDER ENGINES (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/unders/{date}", tags=["Unders"])
-def get_unders(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"unders_predictions_{date}.json"),
-        os.path.join(OUTPUT_DIR, "unders_predictions.json"),
-    ]
-    if any(os.path.exists(p) for p in paths):
-        raw = _read_disk_first(paths)
-        if isinstance(raw, dict):
-            u25 = _normalize_row_safeties(raw.get("u25", []))
-            u35 = _normalize_row_safeties(raw.get("u35", []))
-            return {"u25": _settled(u25, "o25", date), "u35": u35}
-
-    from Engine.unders_engine import run_unders_engine
-    u25, u35 = _run(run_unders_engine, date)
-    return {"u25": _settled(u25, "o25", date), "u35": u35}
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# DRAW ENGINE (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/draw/{date}", tags=["Draw"])
-def get_draw(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"draw_predictions_{date}.json"),
-        os.path.join(OUTPUT_DIR, "draw_predictions.json"),
-    ]
-    if any(os.path.exists(p) for p in paths):
-        raw = _read_disk_first(paths)
-        if isinstance(raw, dict):
-            draws = _normalize_row_safeties(raw.get("draws", []))
-            return {
-                "draws": _settled(draws, "win", date),
-                "parity_list": _normalize_row_safeties(raw.get("parity_list", [])),
-                "amateurs_list": _normalize_row_safeties(raw.get("amateurs_list", []))
-            }
-
-    from Engine.draw_engine import run_draw_engine
-    draws, parity, amateurs = _run(run_draw_engine, date)
-    return {"draws": _settled(draws, "win", date), "parity_list": parity, "amateurs_list": amateurs}
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# CORNER ENGINES (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/corners/stage1/{date}", tags=["Corners"])
-def get_corners_stage1(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"corner_stage1_{date}.json"),
-        os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
-    ]
-    from Engine.corner_miner import run_corner_engine_stage1
-    data = _read_disk_first(paths, fallback_fn=run_corner_engine_stage1, target_date=date)
-    return _settled(data, "corners", date)
-
-
-@app.get("/api/corners/stage2/{date}", tags=["Corners"])
-def get_corners_stage2(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"corner_stage2_{date}.json"),
-        os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
-    ]
-    from Engine.corner_refiner import run_corner_engine_stage2
-    data = _read_disk_first(paths, fallback_fn=run_corner_engine_stage2, target_date=date)
-    return _settled(data, "corners", date)
-
-
-@app.get("/api/corners/psychology/{date}", tags=["Corners"])
-def get_corners_psychology(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"corner_psychology_{date}.json"),
-        os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
-    ]
-    from PSYCHOLOGY.corner_psychology import run_corner3_psychology_engine
-    data = _read_disk_first(paths, fallback_fn=run_corner3_psychology_engine, target_date=date)
-    return _settled(data, "corners", date)
-
-
-@app.get("/api/corners/catalyst/{date}", tags=["Corners"])
-def get_corners_catalyst(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"corner_catalyst_{date}.json"),
-        os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
-    ]
-    from Engine.corner_catalyst import run_catalyst_corner_engine
-    data = _read_disk_first(paths, fallback_fn=run_catalyst_corner_engine, target_date=date)
-    return _settled(data, "corners", date)
-
-
-@app.get("/api/corners/aggregator/{date}", tags=["Corners"])
-def get_corners_aggregator(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"SUPREME_EVOLUTION_OUTPUT_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "SUPREME_EVOLUTION_OUTPUT.csv"),
-        os.path.join(OUTPUT_DIR, f"ALIENEDGE_CORNER_AGGREGATOR_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "ALIENEDGE_CORNER_AGGREGATOR.csv"),
-        os.path.join(OUTPUT_DIR, "corner3_qualified.json"),
-    ]
-    from AGGREGATOR.corner4_aggregator import run_corner4_aggregator_engine
-    data = _read_disk_first(paths, fallback_fn=run_corner4_aggregator_engine, target_date=date)
-    return _settled(data, "corners", date)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# SOT / HALF-TIME / SECOND-HALF ENGINES (Disk-First with Settlement)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/sot/{date}", tags=["Specials"])
-def get_sot(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"sot_cerberus_predictions_{date}.json"),
-        os.path.join(OUTPUT_DIR, f"sot_cerberus_predictions_{date}.csv"),
-    ]
-    from Engine.sot_engine import run_sot_engine
-    data = _read_disk_first(paths, fallback_fn=run_sot_engine, target_date=date)
-    return _settled(data, "sot", date)
-
-
-@app.get("/api/fhvi/{date}", tags=["Specials"])
-def get_fhvi(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"fhvi_strict_filtered_{date}.json"),
-        os.path.join(OUTPUT_DIR, f"fhvi_strict_filtered_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"hvi_strict_filtered_{date}.json"),
-    ]
-    from Engine.fhvi_engine import run_fhvi_engine
-    data = _read_disk_first(paths, fallback_fn=run_fhvi_engine, target_date=date)
-    return _settled(data, "shvi", date)
-
-
-@app.get("/api/shvi/{date}", tags=["Specials"])
-def get_shvi(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"shvi_vortex_report_{date}.json"),
-        os.path.join(OUTPUT_DIR, f"shvi_vortex_report_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"shvi_strict_filtered_{date}.json"),
-        os.path.join(OUTPUT_DIR, f"shvi_strict_filtered_{date}.csv"),
-    ]
-    from Engine.shvi_engine import run_shvi_engine
-    data = _read_disk_first(paths, fallback_fn=run_shvi_engine, target_date=date)
-    return _settled(data, "shvi", date)
-
-
-@app.get("/api/sh-gg-winner/{date}", tags=["Specials"])
-def get_sh_gg_winner(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json"),
-    ]
-    from Engine.sh_gg_winner import run_sh_gg_winner_engine
-    data = _read_disk_first(paths, fallback_fn=run_sh_gg_winner_engine, target_date=date)
-    return _settled(data, "shvi", date)
-
-
-@app.get("/api/sh-master/{date}", tags=["Specials"])
-def get_sh_master(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"shvi_vortex_report_{date}.json"),
-        os.path.join(OUTPUT_DIR, "shvi_vortex_report.json"),
-    ]
-    from Engine.sh_master_vortex import run_sh_master_vortex
-    data = _read_disk_first(paths, fallback_fn=run_sh_master_vortex, target_date=date)
-    return _settled(data, "shvi", date)
-
-
-@app.get("/api/sh-8goal/{date}", tags=["Specials"])
-def get_sh_8goal(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FINAL_SH_GG_8GOAL_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "FINAL_SH_GG_8GOAL.csv"),
-    ]
-    from AGGREGATOR.sh_8goal_aggregator import run_sh_gg_8goal_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_sh_gg_8goal_aggregator, target_date=date)
-    return _settled(data, "shvi", date)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# LIVE / DASHBOARD ENGINES (Disk-Safe Reads — Zero Crash on Process Isolation)
-# ════════════════════════════════════════════════════════════════════════════
-
 @app.get("/api/live/prematch", tags=["Live"])
 def get_live_prematch():
-    """Reads persisted strategic audit from data/prematch_team_audit.json."""
     raw = _read_json(os.path.join(DATA_DIR, "prematch_team_audit.json"), {})
-    if isinstance(raw, dict):
-        return list(raw.values())
-    return raw if isinstance(raw, list) else []
+    return list(raw.values()) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
 
 
 @app.get("/api/live/validation", tags=["Live"])
 def get_live_validation():
-    """Reads persisted in-play validation state from data/validated_picks.json."""
     alerts = _read_json(os.path.join(DATA_DIR, "validated_picks.json"), {})
     state = _read_json(os.path.join(DATA_DIR, "validation_state.json"), {})
     alert_list = list(alerts.values()) if isinstance(alerts, dict) else alerts
     return {
         "cycle": 1,
-        "total_tracked": len(state),
+        "total_tracked": len(state) if isinstance(state, (list, dict)) else 0,
         "alerts": alert_list if isinstance(alert_list, list) else [],
-        "matches": []
+        "matches": [],
     }
 
 
 @app.get("/api/live/incoming", tags=["Live"])
 def get_live_incoming():
-    """Stage 3 snapshot — thin JSON read."""
     return _incoming_rows_from_disk()
 
 
 @app.get("/api/live/danger", tags=["Live"])
 def get_live_danger():
-    """Stage 4 snapshot — thin JSON read."""
     return _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
 
 
 @app.get("/api/live/aggregator", tags=["Live"])
 def get_live_aggregator():
-    """Stage 5 snapshot — thin JSON read."""
     return _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
 
 
 @app.get("/api/live/orchestrator", tags=["Live"])
 def get_live_orchestrator():
-    """Reads Code 6's orchestrator board JSON snapshot."""
     default_board = {"session": "", "cycle": 0, "total_live": 0, "total_db": 0, "matches": []}
     return _read_json(os.path.join(OUTPUT_DIR, "orchestrator_board.json"), default_board)
 
 
 @app.get("/api/live/alerts", tags=["Live"])
 def get_live_alerts():
-    """Reads Code 6 ready_to_push alerts from output/ready_to_push.json."""
     path = os.path.join(OUTPUT_DIR, "ready_to_push.json")
     if not os.path.exists(path):
         return []
@@ -813,9 +816,12 @@ def get_live_alerts():
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if not line: continue
-                try: rows.append(json.loads(line))
-                except json.JSONDecodeError: continue
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     except Exception:
         return []
     rows.sort(key=lambda r: r.get("time", ""), reverse=True)
@@ -824,63 +830,36 @@ def get_live_alerts():
 
 @app.get("/api/live/dashboard", tags=["Live"])
 def get_live_dashboard():
-    from LIVE_SCANNER.live_stage7_dashboard import run_supreme_dashboard
-    return _run(run_supreme_dashboard)
+    return _read_json(os.path.join(OUTPUT_DIR, "live_dashboard.json"), [])
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# FILTER ENDPOINTS (Full parameter signatures preserved, Disk-First)
+# FILTER ENDPOINTS — read the risk-level matrix main.py now precomputes
+# (filter_win__safe / __balanced / __aggressive, filter_over25__banker /
+# __balanced / __aggressive) so the interactive Weekly Filter page never
+# needs a live compute either.
 # ════════════════════════════════════════════════════════════════════════════
+_WIN_RISK_LEVELS = {"safe", "balanced", "aggressive"}
+_O25_RISK_LEVELS = {"banker", "balanced", "aggressive"}
+
 
 @app.get("/api/filter/gg/weekly", tags=["Filters"])
-def filter_gg_weekly(
-    mode: str = "public",
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    anchor_date: Optional[str] = None,
-    risk_level: str = "balanced",
-    odds_band: str = "1.50-2.00",
-    min_prob: float = 60.0,
-    min_h2h_gg: int = 2,
-    max_parity: int = 5,
-    min_dominance: int = 5,
-    strict_mode: bool = True,
-):
-    paths = [
-        os.path.join(OUTPUT_DIR, "forecast_final_gg_precision.csv"),
-    ]
-    from FILTER.gg_precision_filter import run_gg_precision_filter
-    data = _read_disk_first(paths, fallback_fn=run_gg_precision_filter)
-    return _settled(data, "gg")
+def filter_gg_weekly(mode: str = "public"):
+    return get_gg_cross_verify()
 
 
 @app.get("/api/filter/gg/{date}", tags=["Filters"])
-def filter_gg_single(
-    date: str,
-    mode: str = "public",
-    risk_level: str = "balanced",
-    odds_band: str = "1.50-2.00",
-    min_prob: float = 60.0,
-    min_home_gg5: int = 3,
-    min_away_gg5: int = 3,
-    min_home_gg3: int = 2,
-    min_away_gg3: int = 2,
-    min_h2h_gg: int = 2,
-    max_parity: int = 5,
-    min_dominance: int = 5,
-    max_home_missing: int = 1,
-    max_away_missing: int = 1,
-    min_gg_odds: float = 1.40,
-    max_gg_odds: float = 2.50,
-    strict_mode: bool = True,
-):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"forecast_final_gg_precision_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "forecast_final_gg_precision.csv"),
-    ]
-    from FILTER.gg_precision_filter import run_gg_precision_filter
-    data = _read_disk_first(paths, fallback_fn=run_gg_precision_filter)
-    return _settled(data, "gg", date)
+def filter_gg_single(date: str, mode: str = "public"):
+    # FIX: main.py saves filter_gg under BOTH the dateless "__latest" key
+    # AND a per-date snapshot (store.save("filter_gg", d, ...) in main.py).
+    # This route previously always read "__latest" regardless of the date
+    # requested, so picking a different date silently returned today's data.
+    # Now: prefer the exact date's snapshot; fall back to "__latest" only if
+    # that specific date was never snapshotted (e.g. pipeline hasn't run yet).
+    data, generated_at = store.load("filter_gg", date, default=None)
+    if data is None:
+        data, generated_at = store.load("filter_gg", None, default=[])
+    return _settled(ensure_defaults(data, GG_CROSS_DEFAULTS), "gg", date)
 
 
 @app.get("/api/filter/win/weekly", tags=["Filters"])
@@ -890,65 +869,24 @@ def filter_win_weekly(
     end_date: Optional[str] = None,
     anchor_date: Optional[str] = None,
     risk_level: str = "balanced",
-    odds_band: str = "1.40-1.90",
-    min_form_wins: int = 3,
-    min_parity_gap: int = 10,
-    strict_mode: bool = True,
 ):
-    target = anchor_date or start_date or datetime.now().strftime("%Y-%m-%d")
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FILTERED_PUBLIC_PICKS_{target}.csv"),
-        os.path.join(OUTPUT_DIR, f"FILTERED_TIPSTER_PICKS_{target}.csv"),
-    ]
-    from FILTER.win_filter_service import run_win_filter_service
-    kwargs = dict(risk_level=risk_level, odds_band=odds_band, min_form_wins=min_form_wins) if mode == "public" else dict(min_parity_gap=min_parity_gap, strict_mode=strict_mode)
-    data = _read_disk_first(paths, fallback_fn=run_win_filter_service, target_date=target, mode=mode, **kwargs)
-    return _settled(data, "win")
+    # FIX: previously only ever read ONE day even for a 7-day range request.
+    # Now genuinely walks every date in [start_date, end_date] (or a single
+    # anchor_date if that's all that was given) and concatenates each day's
+    # saved picks — this requires main.py to have actually run for each of
+    # those dates; days it hasn't reached yet simply contribute 0 rows.
+    risk = risk_level if risk_level in _WIN_RISK_LEVELS else "balanced"
+    if start_date and end_date:
+        dates = _date_range(start_date, end_date)
+    else:
+        dates = [anchor_date or start_date or _today()]
+    return read_range(lambda d: f"filter_win__{risk}", dates, WIN_FORECAST_DEFAULTS, "win")
 
 
 @app.get("/api/filter/win/{date}", tags=["Filters"])
-def filter_win_single(
-    date: str,
-    mode: str = "public",
-    risk_level: str = "balanced",
-    odds_band: str = "1.40-1.90",
-    min_form_wins: int = 3,
-    min_opp_conceded: int = 5,
-    min_h2h: int = 2,
-    require_no_draw: bool = False,
-    min_odds: float = 1.40,
-    max_odds: float = 2.00,
-    min_overall_wins: int = 0,
-    min_venue_wins: int = 0,
-    min_h2h_wins: int = 0,
-    min_opp_losses: int = 0,
-    min_parity_gap: int = 0,
-    min_even_count: int = 0,
-    strict_mode: bool = True,
-    min_parity: int = 10,
-):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FILTERED_PUBLIC_PICKS_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"FILTERED_TIPSTER_PICKS_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"ranked_win_forecast_{date}.csv"),
-    ]
-    from FILTER.win_filter_service import run_win_filter_service
-    if mode == "public":
-        kwargs = dict(
-            risk_level=risk_level, odds_band=odds_band,
-            min_form_wins=min_form_wins, min_opp_conceded=min_opp_conceded,
-            min_h2h=min_h2h, require_no_draw=require_no_draw,
-        )
-    else:
-        kwargs = dict(
-            min_odds=min_odds, max_odds=max_odds,
-            min_overall_wins=min_overall_wins, min_venue_wins=min_venue_wins,
-            min_h2h_wins=min_h2h_wins, min_opp_losses=min_opp_losses,
-            min_parity_gap=min_parity_gap, min_even_count=min_even_count,
-            strict_mode=strict_mode,
-        )
-    data = _read_disk_first(paths, fallback_fn=run_win_filter_service, target_date=date, mode=mode, **kwargs)
-    return _settled(data, "win", date)
+def filter_win_single(date: str, mode: str = "public", risk_level: str = "balanced"):
+    risk = risk_level if risk_level in _WIN_RISK_LEVELS else "balanced"
+    return read(f"filter_win__{risk}", date, WIN_FORECAST_DEFAULTS, "win")
 
 
 @app.get("/api/filter/over25/weekly", tags=["Filters"])
@@ -959,39 +897,19 @@ def filter_over25_weekly(
     anchor_date: Optional[str] = None,
     risk_level: str = "balanced",
     odds_band: str = "1.50-1.85",
-    min_poisson: float = 60.0,
-    min_votes: int = 5,
 ):
-    target = anchor_date or start_date or datetime.now().strftime("%Y-%m-%d")
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FILTERED_O25_PUBLIC_{risk_level.upper()}_{target}.csv"),
-        os.path.join(OUTPUT_DIR, "over25_stage3_final.json"),
-    ]
-    from FILTER.over25_risk_filter import run_over25_filter_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_over25_filter_aggregator, target_date=target, mode=mode, risk_level=risk_level, odds_band=odds_band)
-    return _settled(data, "o25")
+    risk = risk_level if risk_level in _O25_RISK_LEVELS else "balanced"
+    if start_date and end_date:
+        dates = _date_range(start_date, end_date)
+    else:
+        dates = [anchor_date or start_date or _today()]
+    return read_range(lambda d: f"filter_over25__{risk}", dates, O25_FORECAST_DEFAULTS, "o25")
 
 
 @app.get("/api/filter/over25/{date}", tags=["Filters"])
-def filter_over25_single(
-    date: str,
-    mode: str = "public",
-    risk_level: str = "balanced",
-    odds_band: str = "1.50-1.85",
-    min_poisson: float = 60.0,
-    min_votes: int = 6,
-    max_pos_gap: int = 10,
-    min_h2h_overs: int = 3,
-    min_odds: float = 1.40,
-    max_odds: float = 2.20,
-):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FILTERED_O25_PUBLIC_{risk_level.upper()}_{date}.csv"),
-        os.path.join(OUTPUT_DIR, "over25_stage3_final.json"),
-    ]
-    from FILTER.over25_risk_filter import run_over25_filter_aggregator
-    data = _read_disk_first(paths, fallback_fn=run_over25_filter_aggregator, target_date=date, mode=mode, risk_level=risk_level, odds_band=odds_band)
-    return _settled(data, "o25", date)
+def filter_over25_single(date: str, mode: str = "public", risk_level: str = "balanced"):
+    risk = risk_level if risk_level in _O25_RISK_LEVELS else "balanced"
+    return read(f"filter_over25__{risk}", date, O25_FORECAST_DEFAULTS, "o25")
 
 
 @app.get("/api/filter/win/precision/weekly", tags=["Filters"])
@@ -1000,122 +918,13 @@ def filter_win_precision_weekly(
     end_date: Optional[str] = None,
     anchor_date: Optional[str] = None,
 ):
-    target = anchor_date or start_date or datetime.now().strftime("%Y-%m-%d")
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FILTERED_PUBLIC_SAFE_{target}.csv"),
-        os.path.join(OUTPUT_DIR, f"FILTERED_PUBLIC_PICKS_{target}.csv"),
-    ]
-    from FILTER.win_filter_service import run_win_filter_service
-    data = _read_disk_first(paths, fallback_fn=run_win_filter_service, target_date=target, mode="public", risk_level="safe")
-    return _settled(data, "win")
+    if start_date and end_date:
+        dates = _date_range(start_date, end_date)
+    else:
+        dates = [anchor_date or start_date or _today()]
+    return read_range(lambda d: "filter_win__safe", dates, WIN_FORECAST_DEFAULTS, "win")
 
 
 @app.get("/api/filter/win/precision/{date}", tags=["Filters"])
 def filter_win_precision_single(date: str):
-    paths = [
-        os.path.join(OUTPUT_DIR, f"FILTERED_PUBLIC_SAFE_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"FILTERED_PUBLIC_PICKS_{date}.csv"),
-        os.path.join(OUTPUT_DIR, f"ranked_win_forecast_{date}.csv"),
-    ]
-    from FILTER.win_filter_service import run_win_filter_service
-    data = _read_disk_first(paths, fallback_fn=run_win_filter_service, target_date=date, mode="public", risk_level="safe")
-    return _settled(data, "win", date)
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# FULL PIPELINE ENDPOINT (Complete 70+ Lines Restored & Preserved)
-# ════════════════════════════════════════════════════════════════════════════
-
-@app.get("/api/pipeline/{date}", tags=["Pipeline"])
-def run_full_pipeline(date: str, phases: Optional[str] = "all"):
-    """
-    Run multiple engines for a date in one call.
-    ?phases=foundation,win,gg,over25,over15,corners,specials,filters
-    Default: all phases.
-    """
-    requested = set(phases.split(",")) if phases != "all" else {
-        "foundation", "win", "gg", "over25", "over15",
-        "corners", "specials", "filters"
-    }
-    results: dict = {}
-    errors:  dict = {}
-
-    def safe(key, fn, *args, **kwargs):
-        try:
-            results[key] = fn(*args, **kwargs)
-        except Exception as exc:
-            errors[key] = str(exc)
-
-    if "foundation" in requested:
-        from Engine.underdog_engine import run_underdog_engine
-        from Engine.master_underdog_audit import run_underdog_master_engine
-        from CORE.handshake_logic import run_total_visibility_merger
-        from Engine.win_forecast import run_win_forecast_engine
-        safe("underdog",        run_underdog_engine,          date)
-        safe("underdog_audit",  run_underdog_master_engine,   date)
-        safe("calibration",     run_total_visibility_merger,  date)
-        safe("win_forecast",    run_win_forecast_engine,      date)
-
-    if "gg" in requested:
-        from Engine.gg_precision_engine import run_gg_o15_engine
-        from AGGREGATOR.gg_forensics_audit import run_gg_forensic_aggregator
-        try:
-            gg, o15 = run_gg_o15_engine(date)
-            results["gg_precision"] = gg
-            results["o15_precision"] = o15
-        except Exception as exc:
-            errors["gg_precision"] = str(exc)
-        safe("gg_forensics", run_gg_forensic_aggregator, date)
-
-    if "over25" in requested:
-        from Engine.over25_probabilistic import run_over25_stage1
-        from Engine.over25_council      import run_over25_stage2
-        from AGGREGATOR.over25_killswitch import run_over25_stage3
-        safe("over25_s1", run_over25_stage1, date)
-        safe("over25_s2", run_over25_stage2, date)
-        safe("over25_s3", run_over25_stage3, date)
-
-    if "over15" in requested:
-        from Engine.over15_stage3 import run_over15_stage3
-        safe("over15_s3", run_over15_stage3, date)
-
-    if "win" in requested:
-        from PSYCHOLOGY.win_psychology      import run_win_psychology_engine
-        from AGGREGATOR.win_apex_aggregator import run_win_apex_aggregator
-        safe("win_psychology", run_win_psychology_engine,  date)
-        safe("win_apex",       run_win_apex_aggregator,    date)
-
-    if "corners" in requested:
-        from Engine.corner_miner   import run_corner_engine_stage1
-        from Engine.corner_refiner import run_corner_engine_stage2
-        safe("corners_s1", run_corner_engine_stage1, date)
-        safe("corners_s2", run_corner_engine_stage2, date)
-
-    if "specials" in requested:
-        from Engine.sot_engine  import run_sot_engine
-        from Engine.draw_engine import run_draw_engine
-        safe("sot", run_sot_engine, date)
-        try:
-            draws, parity, amateurs = run_draw_engine(date)
-            results["draw"] = {
-                "draws": draws,
-                "parity_list": parity,
-                "amateurs_list": amateurs,
-            }
-        except Exception as exc:
-            errors["draw"] = str(exc)
-
-    if "filters" in requested:
-        from FILTER.gg_precision_filter import run_gg_precision_filter
-        from FILTER.over25_risk_filter import run_over25_filter_aggregator
-        from FILTER.win_filter_service import run_win_filter_service
-        safe("filter_gg",     run_gg_precision_filter)
-        safe("filter_win",    run_win_filter_service,        date, "public")
-        safe("filter_over25", run_over25_filter_aggregator,  date, "public")
-
-    return {
-        "date":        date,
-        "phases_run":  list(requested),
-        "results":     results,
-        "errors":      errors,
-    }
+    return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win")
