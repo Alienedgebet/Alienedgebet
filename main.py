@@ -2,9 +2,12 @@ import os
 import sys
 import time
 import gc
+import json
 import requests
 import traceback
 from datetime import datetime
+
+import output_store as store
 
 # ==============================================================================
 # 1. THE HIJACK (GLOBAL TRAFFIC WARDEN & CONTROLLED CACHE)
@@ -13,15 +16,44 @@ GLOBAL_API_CACHE = {}
 original_get = requests.get
 
 class CachedResponseWrapper:
+    """
+    Mimics enough of requests.Response that a cache HIT behaves the same as
+    a real HTTP response to whatever engine code consumes it. The original
+    version only implemented .json()/.status_code/.raise_for_status() — any
+    engine calling .text, .content, .headers, .ok, or .elapsed on a cached
+    response would hit an AttributeError deep inside engine code on a cache
+    hit only (never on a cache miss), which is a nasty intermittent bug to
+    chase. This version covers every commonly-used Response attribute.
+    """
     def __init__(self, json_data, status_code=200):
         self._json_data = json_data
         self.status_code = status_code
+        self.ok = 200 <= status_code < 400
+        self.headers = {}
+        self.elapsed = None
+        self.reason = "OK" if self.ok else "Cached-Error"
+        self.url = None
+        try:
+            self._text = json.dumps(json_data)
+        except Exception:
+            self._text = str(json_data)
 
     def json(self):
         return self._json_data
 
+    @property
+    def text(self):
+        return self._text
+
+    @property
+    def content(self):
+        return self._text.encode("utf-8")
+
     def raise_for_status(self):
-        pass
+        if not self.ok:
+            raise requests.exceptions.HTTPError(
+                f"{self.status_code} Error (cached)", response=self
+            )
 
 def flush_system_ram():
     """
@@ -134,37 +166,51 @@ from FILTER.win_filter_service import run_win_filter_service
 
 
 # ==============================================================================
-# 3. FAULT-TOLERANT EXECUTION BARRIER
+# 3. FAULT-TOLERANT EXECUTION BARRIER — now saves output on success
 # ==============================================================================
-def _safe_exec(engine_name, func, *args, **kwargs):
+def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs):
     """
     Executes a mathematical engine safely. If a specific league or API call
     encounters a data gap, the error is isolated and logged so the remainder
     of the pre-match pipeline continues uninterrupted.
+
+    If save_key is given, the successful result is written to
+    output/cache/{save_key}__{save_date or 'latest'}.json via output_store —
+    this is the ONLY place any engine's result gets persisted, and it's the
+    exact same lookup key api/main.py reads. Nothing is ever guessed.
     """
     try:
         print(f"\n> ⚙️ Initializing: {engine_name}...")
         res = func(*args, **kwargs)
+        if save_key is not None:
+            path = store.save(save_key, save_date, res)
+            print(f"   💾 saved -> {path}")
         return res
     except Exception as e:
         print(f"⚠️ [NON-CRITICAL ENGINE NOTICE in {engine_name}]: {e}")
+        # Record the failure explicitly instead of leaving the file simply
+        # absent — /api/status/{date} can now tell "never ran" apart from
+        # "ran and threw", which an absent file alone can't distinguish.
+        if save_key is not None:
+            store.save_failure(save_key, save_date, error=f"{engine_name}: {e}")
         return None
 
 
 # ==============================================================================
 # 4. THE SUPREME MASTER PIPELINE (PURE PRE-MATCH ARCHITECTURE)
 # ==============================================================================
-def alienedge_master_system():
+def alienedge_master_system(cli_date_override: str = None):
     print("\n" + "█"*115)
     print(f"{'🚀 ALIENEDGE SUPER-MATRIX COMMAND CENTER v11.0':^115}")
     print(f"{'THE TOTAL FORENSIC & PSYCHOLOGICAL PRE-MATCH BETTING MACHINE':^115}")
     print("█"*115)
 
     # ── CLI ARGUMENT & DATE RESOLUTION ────────────────────────────────────────
-    cli_date = None
-    for arg in sys.argv[1:]:
-        if arg.startswith("--date="):
-            cli_date = arg.split("=")[1].strip()
+    cli_date = cli_date_override
+    if not cli_date:
+        for arg in sys.argv[1:]:
+            if arg.startswith("--date="):
+                cli_date = arg.split("=")[1].strip()
 
     if cli_date:
         target_date = cli_date
@@ -178,20 +224,22 @@ def alienedge_master_system():
         if not target_date:
             target_date = datetime.now().strftime("%Y-%m-%d")
 
+    d = target_date  # shorthand used below in save_date=
+
     start_time = time.time()
 
     # ── PHASE 1: FOUNDATION & DNA IDENTITY ───────────────────────────────────
     print(f"\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH for {target_date}...")
-    _safe_exec("DNA Profiler", run_dna_profiler, target_date)
-    _safe_exec("DNA Engine V2", run_dna_engine_v2, target_date)
-    _safe_exec("DNA Market Factors", build_market_factor_counts, target_date)
+    _safe_exec("DNA Profiler", run_dna_profiler, target_date, save_key="dna", save_date=d)
+    _safe_exec("DNA Engine V2", run_dna_engine_v2, target_date, save_key="dna_v2", save_date=d)
+    _safe_exec("DNA Market Factors", build_market_factor_counts, target_date, save_key="dna_market_factors", save_date=d)
 
-    _safe_exec("Underdog Base Engine", run_underdog_engine, target_date)
-    _safe_exec("Underdog Master Engine", run_underdog_master_engine, target_date)
-    _safe_exec("Total Visibility Merger", run_total_visibility_merger, target_date)
-    _safe_exec("Apex Underdog Aggregator", run_apex_underdog_aggregator, target_date)
-    _safe_exec("Win Forecast Base Engine", run_win_forecast_engine, target_date)
-    _safe_exec("SH-GG Winner Engine", run_sh_gg_winner_engine, target_date)
+    _safe_exec("Underdog Base Engine", run_underdog_engine, target_date, save_key="underdog_base", save_date=d)
+    _safe_exec("Underdog Master Engine", run_underdog_master_engine, target_date, save_key="underdog_audit", save_date=d)
+    _safe_exec("Total Visibility Merger", run_total_visibility_merger, target_date, save_key="calibration", save_date=d)
+    _safe_exec("Apex Underdog Aggregator", run_apex_underdog_aggregator, target_date, save_key="underdog_apex", save_date=d)
+    _safe_exec("Win Forecast Base Engine", run_win_forecast_engine, target_date, save_key="win_forecast", save_date=d)
+    _safe_exec("SH-GG Winner Engine", run_sh_gg_winner_engine, target_date, save_key="sh_gg_winner", save_date=d)
 
     flush_system_ram()
 
@@ -202,75 +250,96 @@ def alienedge_master_system():
 
     # 1. Corners Empire
     print("\n> 🚩 Processing Corner Empire...")
-    _safe_exec("Corner Stage 1 (Miner)", run_corner_engine_stage1, target_date)
-    _safe_exec("Corner Stage 2 (Refiner)", run_corner_engine_stage2, target_date)
-    _safe_exec("Corner Stage 3 (Psychology)", run_corner3_psychology_engine, target_date)
-    _safe_exec("Corner Catalyst Engine", run_catalyst_corner_engine, target_date)
-    _safe_exec("Corner Stage 4 Aggregator", run_corner4_aggregator_engine, target_date)
+    _safe_exec("Corner Stage 1 (Miner)", run_corner_engine_stage1, target_date, save_key="corners_stage1", save_date=d)
+    _safe_exec("Corner Stage 2 (Refiner)", run_corner_engine_stage2, target_date, save_key="corners_stage2", save_date=d)
+    _safe_exec("Corner Stage 3 (Psychology)", run_corner3_psychology_engine, target_date, save_key="corners_psychology", save_date=d)
+    _safe_exec("Corner Catalyst Engine", run_catalyst_corner_engine, target_date, save_key="corners_catalyst", save_date=d)
+    _safe_exec("Corner Stage 4 Aggregator", run_corner4_aggregator_engine, target_date, save_key="corners_aggregator", save_date=d)
     flush_system_ram()
 
-    # 2. GG & Over 1.5 Unified Head
+    # 2. GG & Over 1.5 Unified Head — returns (gg, o15) tuple, saved as one composite file
     print("\n> ⚽ Running Unified GG & Over 1.5 Precision Head Engine...")
-    _safe_exec("Unified GG & O1.5 Head Engine", run_gg_o15_engine, target_date, verbose=False)
+    _safe_exec("Unified GG & O1.5 Head Engine", run_gg_o15_engine, target_date, verbose=False, save_key="gg_o15", save_date=d)
 
     # 3. GG Forensic Pipeline
     print("\n> ⚽ Processing Downstream GG Forensics...")
-    _safe_exec("GG Forensic Aggregator", run_gg_forensic_aggregator, target_date)
-    _safe_exec("GG Psychology Engine", run_gg_psychology_engine, target_date)
-    _safe_exec("Supreme GG VIP Aggregator", run_supreme_gg_aggregator, target_date)
+    _safe_exec("GG Forensic Aggregator", run_gg_forensic_aggregator, target_date, save_key="gg_forensics", save_date=d)
+    _safe_exec("GG Psychology Engine", run_gg_psychology_engine, target_date, save_key="gg_psychology", save_date=d)
+    _safe_exec("Supreme GG VIP Aggregator", run_supreme_gg_aggregator, target_date, save_key="gg_supreme", save_date=d)
     flush_system_ram()
 
     # 4. Over 2.5 Goals Pipeline
     print("\n> 🔥 Processing Over 2.5 Goals Pipeline...")
-    _safe_exec("Over 2.5 Stage 1 (Probabilistic)", run_over25_stage1, target_date)
-    _safe_exec("Over 2.5 Stage 2 (Council)", run_over25_stage2, target_date)
-    _safe_exec("Over 2.5 Stage 3 (Killswitch)", run_over25_stage3, target_date)
-    _safe_exec("Over 2.5 Psychology Engine", run_o25_psychology_engine, target_date)
-    _safe_exec("Gold Over 2.5 Engine", run_gold_over_25_engine, target_date)
-    _safe_exec("Over 2.5 Apex Aggregator", run_over25_aggregator, target_date)
-    _safe_exec("Over 2.5 Forecast Engine", run_over25_forecast_engine, target_date)
+    _safe_exec("Over 2.5 Stage 1 (Probabilistic)", run_over25_stage1, target_date, save_key="over25_stage1", save_date=d)
+    _safe_exec("Over 2.5 Stage 2 (Council)", run_over25_stage2, target_date, save_key="over25_stage2", save_date=d)
+    _safe_exec("Over 2.5 Stage 3 (Killswitch)", run_over25_stage3, target_date, save_key="over25_stage3", save_date=d)
+    _safe_exec("Over 2.5 Psychology Engine", run_o25_psychology_engine, target_date, save_key="over25_psychology", save_date=d)
+    _safe_exec("Gold Over 2.5 Engine", run_gold_over_25_engine, target_date, save_key="over25_gold", save_date=d)
+    _safe_exec("Over 2.5 Apex Aggregator", run_over25_aggregator, target_date, save_key="over25_apex", save_date=d)
+    _safe_exec("Over 2.5 Forecast Engine", run_over25_forecast_engine, target_date, save_key="over25_forecast", save_date=d)
     flush_system_ram()
 
     # 5. Over 1.5 Goals Pipeline
     print("\n> ⚡ Processing Over 1.5 Goals Pipeline...")
-    _safe_exec("Over 1.5 Stage 3", run_over15_stage3, target_date)
-    _safe_exec("Over 1.5 Psychology Engine", run_o15_psychology_engine, target_date)
-    _safe_exec("Over 1.5 Apex Aggregator", run_o15_apex_engine, target_date)
+    _safe_exec("Over 1.5 Stage 3", run_over15_stage3, target_date, save_key="over15_stage3", save_date=d)
+    _safe_exec("Over 1.5 Psychology Engine", run_o15_psychology_engine, target_date, save_key="over15_psychology", save_date=d)
+    _safe_exec("Over 1.5 Apex Aggregator", run_o15_apex_engine, target_date, save_key="over15_apex", save_date=d)
     flush_system_ram()
 
-    # 6. Defensive Under Empire
+    # 6. Defensive Under Empire — returns (u25, u35) tuple, saved as one composite file
     print("\n> 🛡️ Processing Defensive Under Empire...")
-    _safe_exec("Unders Engine (U2.5 / U3.5)", run_unders_engine, target_date, verbose=False)
+    _safe_exec("Unders Engine (U2.5 / U3.5)", run_unders_engine, target_date, verbose=False, save_key="unders", save_date=d)
 
-    # 7. Draw Magnet Engine
+    # 7. Draw Magnet Engine — returns (draws, parity, amateurs) tuple, saved as one composite file
     print("\n> ⚖️ Processing Draw Magnet Index...")
-    _safe_exec("Draw Magnet Engine", run_draw_engine, target_date, verbose=False)
+    _safe_exec("Draw Magnet Engine", run_draw_engine, target_date, verbose=False, save_key="draw", save_date=d)
 
     # 8. SOT Cerberus Engine
     print("\n> 🎯 Processing Cerberus S.O.T. Engine...")
-    _safe_exec("SOT Cerberus Engine", run_sot_engine, target_date, verbose=False)
+    _safe_exec("SOT Cerberus Engine", run_sot_engine, target_date, verbose=False, save_key="sot", save_date=d)
 
     # 9. Half-Time Streak Miners
     print("\n> ⛏️ Processing Half-Time Streak Miners...")
-    _safe_exec("FHVI First Half Engine", run_fhvi_engine, target_date, verbose=False)
-    _safe_exec("SHVI Second Half Engine", run_shvi_engine, target_date, verbose=False)
+    _safe_exec("FHVI First Half Engine", run_fhvi_engine, target_date, verbose=False, save_key="fhvi", save_date=d)
+    _safe_exec("SHVI Second Half Engine", run_shvi_engine, target_date, verbose=False, save_key="shvi", save_date=d)
     flush_system_ram()
 
     # 10. Wins, U2S & SH Master Vortex
     print("\n> 🏆 Processing Win, U2S, & SH Elite Aggregation...")
-    _safe_exec("U2S Psychology Engine", run_u2s_psychology_engine, target_date)
-    _safe_exec("Win Psychology Engine", run_win_psychology_engine, target_date)
-    _safe_exec("Win Apex Aggregator", run_win_apex_aggregator)
-    _safe_exec("SH Master Vortex", run_sh_master_vortex, target_date)
-    _safe_exec("SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, target_date)
-    _safe_exec("Win Raw Probability Engine", run_win_raw_engine, target_date)
+    _safe_exec("U2S Psychology Engine", run_u2s_psychology_engine, target_date, save_key="u2s_psychology", save_date=d)
+    _safe_exec("Win Psychology Engine", run_win_psychology_engine, target_date, save_key="win_psychology", save_date=d)
+    # Win Apex takes NO date argument — it always reads the latest merged
+    # state, so it's saved under save_date=None ('__latest') AND separately
+    # snapshotted under this date so /api/status/{date} can show when it
+    # last actually ran relative to the date being viewed.
+    win_apex_result = _safe_exec("Win Apex Aggregator", run_win_apex_aggregator, save_key="win_apex", save_date=None)
+    if win_apex_result is not None:
+        store.save("win_apex", d, win_apex_result)
+    _safe_exec("SH Master Vortex", run_sh_master_vortex, target_date, save_key="sh_master", save_date=d)
+    _safe_exec("SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, target_date, save_key="sh_8goal", save_date=d)
+    _safe_exec("Win Raw Probability Engine", run_win_raw_engine, target_date, save_key="win_raw", save_date=d)
     flush_system_ram()
 
     # 11. Real Filter Engines (Risk Modes)
+    # main.py's own defaults (banker / safe) plus every OTHER risk level the
+    # frontend's interactive Weekly Filter page can request (see
+    # app/weekly/filter-config.ts) — precomputed here so that page never
+    # needs a live engine call at request time either.
     print("\n> 🎯 Running FILTER/ Precision Engines...")
-    _safe_exec("Filter GG Precision Filter", run_gg_precision_filter)
-    _safe_exec("Filter Over 2.5 Aggregator (Banker)", run_over25_filter_aggregator, target_date, mode="public", risk_level="banker")
-    _safe_exec("Filter Win Service (Safe)", run_win_filter_service, target_date, mode="public", risk_level="safe")
+    gg_filter_result = _safe_exec("Filter GG Precision Filter", run_gg_precision_filter,
+                                   save_key="filter_gg", save_date=None)
+    if gg_filter_result is not None:
+        store.save("filter_gg", d, gg_filter_result)
+
+    for risk in ("banker", "balanced", "aggressive"):
+        _safe_exec(f"Filter Over 2.5 Aggregator ({risk})", run_over25_filter_aggregator,
+                    target_date, mode="public", risk_level=risk,
+                    save_key=f"filter_over25__{risk}", save_date=d)
+
+    for risk in ("safe", "balanced", "aggressive"):
+        _safe_exec(f"Filter Win Service ({risk})", run_win_filter_service,
+                    target_date, mode="public", risk_level=risk,
+                    save_key=f"filter_win__{risk}", save_date=d)
     flush_system_ram()
 
     # ── PIPELINE COMPLETION ──────────────────────────────────────────────────
@@ -278,8 +347,9 @@ def alienedge_master_system():
     print("\n" + "█"*115)
     print(f"{'✅ ALL PRE-MATCH SUPER-MATRIX HARVESTS COMPLETE':^115}")
     print(f"{f'Duration: {duration} minutes | Target Date: {target_date}':^115}")
-    print(f"{'Pre-computed predictions, feeds, and analytics are fully saved on disk.':^115}")
+    print(f"{'Pre-computed predictions, feeds, and analytics are fully saved to output/cache/.':^115}")
     print("█"*115)
+    return target_date
 
 
 if __name__ == "__main__":
