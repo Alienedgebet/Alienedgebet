@@ -3,6 +3,8 @@ import sys
 import time
 import gc
 import json
+import csv
+import glob
 import requests
 import traceback
 from datetime import datetime
@@ -168,11 +170,115 @@ from FILTER.win_filter_service import run_win_filter_service
 # ==============================================================================
 # 3. FAULT-TOLERANT EXECUTION BARRIER — now saves output on success
 # ==============================================================================
+def _normalize_fixture_schema(payload):
+    """
+    Ensures case-insensitive compatibility between engines producing 'Fixture'
+    and api/main.py expecting lowercase 'fixture'.
+    """
+    if isinstance(payload, list):
+        for row in payload:
+            if isinstance(row, dict) and "Fixture" in row and "fixture" not in row:
+                row["fixture"] = row["Fixture"]
+    elif isinstance(payload, dict):
+        if "Fixture" in payload and "fixture" not in payload:
+            payload["fixture"] = payload["Fixture"]
+        if "data" in payload and isinstance(payload["data"], list):
+            for row in payload["data"]:
+                if isinstance(row, dict) and "Fixture" in row and "fixture" not in row:
+                    row["fixture"] = row["Fixture"]
+    return payload
+
+
+def _recover_engine_output_from_disk(save_key, save_date=None, engine_name="", func=None):
+    """
+    If an engine wrote its results directly to disk in /output/ (CSV or JSON)
+    instead of returning them to memory, this finds, parses, and loads the data
+    so output_store can register it into output/cache/.
+    """
+    out_dir = "/var/www/backend/output"
+    if not os.path.exists(out_dir):
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+    if not os.path.exists(out_dir):
+        return None
+
+    func_name = getattr(func, "__name__", "") if func else ""
+    d_str = str(save_date) if save_date else ""
+
+    # Specific known file mappings across legacy engine outputs
+    candidates = [
+        # Direct key matches
+        os.path.join(out_dir, f"{save_key}__{d_str}.json"),
+        os.path.join(out_dir, f"{save_key}.json"),
+        os.path.join(out_dir, f"{save_key}_{d_str}.json"),
+        os.path.join(out_dir, f"{save_key}_{d_str}.csv"),
+        # Corner empire specific files
+        os.path.join(out_dir, "corner3_qualified.json"),
+        os.path.join(out_dir, "corner2_qualified.json"),
+        os.path.join(out_dir, "tactical_brain_output.json"),
+        os.path.join(out_dir, "corner4_aggregator.json"),
+        # Over 2.5 / Over 1.5 specific files
+        os.path.join(out_dir, f"over25_stage1_picks_{d_str}.json"),
+        os.path.join(out_dir, "over25_stage1_picks.json"),
+        os.path.join(out_dir, f"over25_stage1_picks_{d_str}.csv"),
+        os.path.join(out_dir, "over25_stage1_picks.csv"),
+        os.path.join(out_dir, f"over25_stage2_picks_{d_str}.json"),
+        os.path.join(out_dir, "over25_stage2_picks.json"),
+        # GG and Win feeds
+        os.path.join(out_dir, f"sh_gg_winner_feed_{d_str}.json"),
+        os.path.join(out_dir, "sh_gg_winner_feed.json"),
+        os.path.join(out_dir, f"gg_o15_feed_{d_str}.json"),
+        os.path.join(out_dir, "gg_o15_feed.json"),
+        os.path.join(out_dir, f"ranked_win_forecast_{d_str}.csv"),
+        os.path.join(out_dir, f"audited_underdog_backtest_{d_str}.json"),
+        os.path.join(out_dir, f"audited_underdog_backtest_{d_str}.csv"),
+        os.path.join(out_dir, f"SUPREME_EVOLUTION_OUTPUT_{d_str}.csv"),
+        os.path.join(out_dir, f"ALIENEDGE_GG_PSYCHOLOGY_FINAL_{d_str}.csv"),
+        os.path.join(out_dir, f"JUDGED_GG_PICKS_{d_str}.csv"),
+        os.path.join(out_dir, f"ALIENEDGE_GG_PICKS_{d_str}.csv"),
+        os.path.join(out_dir, f"FINAL_APEX_UD_SCORE_{d_str}.csv"),
+    ]
+
+    # Broad search in /output/ for files matching key, func, or date
+    search_patterns = [
+        os.path.join(out_dir, f"*{save_key}*"),
+        os.path.join(out_dir, f"*{func_name.replace('run_', '')}*") if func_name else "",
+    ]
+    for p in search_patterns:
+        if p:
+            for match in glob.glob(p):
+                if match not in candidates and "cache" not in match:
+                    candidates.append(match)
+
+    for target_path in candidates:
+        if not target_path or not os.path.exists(target_path):
+            continue
+        try:
+            # Skip empty 0-byte files
+            if os.path.getsize(target_path) == 0:
+                continue
+
+            if target_path.endswith(".json"):
+                with open(target_path, "r", encoding="utf-8") as jf:
+                    data = json.load(jf)
+                    if data:
+                        return _normalize_fixture_schema(data)
+            elif target_path.endswith(".csv"):
+                with open(target_path, "r", encoding="utf-8") as cf:
+                    reader = csv.DictReader(cf)
+                    rows = list(reader)
+                    if rows:
+                        return _normalize_fixture_schema(rows)
+        except Exception:
+            continue
+
+    return None
+
+
 def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs):
     """
-    Executes a mathematical engine safely. If a specific league or API call
-    encounters a data gap, the error is isolated and logged so the remainder
-    of the pre-match pipeline continues uninterrupted.
+    Executes a mathematical engine safely. Checks both in-memory return values
+    AND physical disk files in /var/www/backend/output/ so that engines which
+    write directly to disk are seamlessly captured and persisted to output/cache/.
 
     If save_key is given, the successful result is written to
     output/cache/{save_key}__{save_date or 'latest'}.json via output_store —
@@ -182,16 +288,43 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
     try:
         print(f"\n> ⚙️ Initializing: {engine_name}...")
         res = func(*args, **kwargs)
+
+        # ── DISK FALLBACK CHECK ───────────────────────────────────────────────
+        # If engine returned None or empty, check if it saved an output file to disk
+        if (res is None or (hasattr(res, "__len__") and len(res) == 0)) and save_key is not None:
+            disk_res = _recover_engine_output_from_disk(save_key, save_date, engine_name, func)
+            if disk_res is not None and (not hasattr(disk_res, "__len__") or len(disk_res) > 0):
+                print(f"   📂 Recovered {len(disk_res) if hasattr(disk_res, '__len__') else 'data'} items from disk output.")
+                res = disk_res
+
+        # Schema normalization (Fixture -> fixture)
+        if res is not None:
+            res = _normalize_fixture_schema(res)
+
         if save_key is not None:
             path = store.save(save_key, save_date, res)
             print(f"   💾 saved -> {path}")
         return res
     except Exception as e:
         print(f"⚠️ [NON-CRITICAL ENGINE NOTICE in {engine_name}]: {e}")
-        # Record the failure explicitly instead of leaving the file simply
-        # absent — /api/status/{date} can now tell "never ran" apart from
-        # "ran and threw", which an absent file alone can't distinguish.
+        
+        # Before declaring failure, verify if disk or existing cache holds valid data
+        recovered = None
         if save_key is not None:
+            recovered = _recover_engine_output_from_disk(save_key, save_date, engine_name, func)
+            if recovered is not None:
+                recovered = _normalize_fixture_schema(recovered)
+                path = store.save(save_key, save_date, recovered)
+                print(f"   💾 rescued from disk -> {path}")
+                return recovered
+
+            # Check if cache file already exists with good data from a previous run
+            existing_cache = f"/var/www/backend/output/cache/{save_key}__{save_date or 'latest'}.json"
+            if os.path.exists(existing_cache) and os.path.getsize(existing_cache) > 200:
+                print(f"   🛡️ Retained existing valid cache: {existing_cache}")
+                return None
+
+            # Only record explicit failure if neither memory, disk, nor cache had data
             store.save_failure(save_key, save_date, error=f"{engine_name}: {e}")
         return None
 
