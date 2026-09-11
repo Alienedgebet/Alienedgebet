@@ -19,6 +19,28 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER (CALLABLE BY THE MASTER API/SCHEDULER)
 # ==============================================================================
+def _valid_fixture_id(fid):
+    """BUG-2 guard: return a real integer fixture id, or None for any
+    placeholder (None, NaN, '', 'N/A', 'Unknown', ...). A fixture row must
+    never carry a string placeholder as its identity, or sub-picks / DNA /
+    intelligence / settlement lose their anchor to the correct match."""
+    if fid is None:
+        return None
+    try:
+        if pd.isna(fid):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(fid).strip()
+    if not s or s.lower() in {"n/a", "na", "none", "unknown", "nan", "null", "-"}:
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+
 def run_sh_gg_8goal_aggregator(target_date):
     """
     Executes the SH/GG/Winner 8-Goal Filter Aggregator.
@@ -168,7 +190,7 @@ def run_sh_gg_8goal_aggregator(target_date):
     print(f"[INFO] Running 8-Goal Attack verification on {len(feed_data)} matches...\n")
 
     for item in feed_data:
-        fid = item.get("fixture_id", "N/A")
+        fid = _valid_fixture_id(item.get("fixture_id"))
         league_name = item.get("league", "Unknown")
         match_time = item.get("kickoff_datetime", "Unknown")
         
@@ -182,6 +204,9 @@ def run_sh_gg_8goal_aggregator(target_date):
         labels_str = " | ".join(pick_labels)
 
         if not h_id or not a_id: continue
+        if fid is None:
+            print(f"   ⚠️ SKIPPED (no resolvable fixture_id): {h_name} vs {a_name}")
+            continue
 
         # Fetch Goals utilizing Gold Engine logic
         h_2h_act, h_tot, h_goals = check_recent_form_math(h_id, h_name)

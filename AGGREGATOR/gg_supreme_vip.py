@@ -46,6 +46,28 @@ MASTER_DIR = os.path.join(BASE_DIR, "master_aggregator")
 
 # ==============================================================================
 
+def _valid_fixture_id(fid):
+    """BUG-2 guard: return a real integer fixture id, or None for any
+    placeholder (None, NaN, '', 'N/A', 'Unknown', ...). A fixture row must
+    never carry a string placeholder as its identity, or sub-picks / DNA /
+    intelligence / settlement lose their anchor to the correct match."""
+    if fid is None:
+        return None
+    try:
+        if pd.isna(fid):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(fid).strip()
+    if not s or s.lower() in {"n/a", "na", "none", "unknown", "nan", "null", "-"}:
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+
 def run_supreme_gg_aggregator(target_date=None):
 
     """
@@ -359,6 +381,7 @@ def run_supreme_gg_aggregator(target_date=None):
                     "name": f_name, 
 
                     "marks": row.get('Score', row.get('marks', '4/6')),
+                    "fixture_id": _valid_fixture_id(row.get('fixture_id')),
 
                     "dna_intel": row.get('DNA_Intelligence', '⚖️ BALANCED')
 
@@ -440,7 +463,7 @@ def run_supreme_gg_aggregator(target_date=None):
 
                         key = get_match_key(f_name)
 
-                        list_vip_feed[key] = {"name": f_name, "fixture_id": item.get("fixture_id", "N/A")}
+                        list_vip_feed[key] = {"name": f_name, "fixture_id": _valid_fixture_id(item.get("fixture_id"))}
 
         except: pass
 
@@ -534,9 +557,17 @@ def run_supreme_gg_aggregator(target_date=None):
 
 
 
-    api_resp = GET(f"/fixtures/date/{target_date}", params={"include": "participants"})
-
-    api_map = {get_match_key(fx['name']): fx for fx in api_resp.get("data",[])}
+    api_fixtures = []
+    page = 1
+    while True:
+        resp = GET(f"/fixtures/date/{target_date}", params={"include": "participants", "page": page, "per_page": 50})
+        data = resp.get("data", [])
+        if not data: break
+        api_fixtures.extend(data)
+        if len(data) < 50: break
+        page += 1
+        time.sleep(0.1)
+    api_map = {get_match_key(fx['name']): fx for fx in api_fixtures}
 
 
 
@@ -568,7 +599,14 @@ def run_supreme_gg_aggregator(target_date=None):
 
         fx_api = api_map.get(key)
 
-        f_id = fx_api['id'] if fx_api else (vip['fixture_id'] if vip else "N/A")
+        f_id = _valid_fixture_id(fx_api['id']) if fx_api else None
+        if f_id is None and eng:
+            f_id = _valid_fixture_id(eng.get('fixture_id'))
+        if f_id is None and vip:
+            f_id = _valid_fixture_id(vip.get('fixture_id'))
+        if f_id is None:
+            print(f"   ⚠️ SKIPPED (no resolvable fixture_id): {key}")
+            continue
 
         
 

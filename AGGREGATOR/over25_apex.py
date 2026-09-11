@@ -23,6 +23,28 @@ pd.set_option('display.max_rows', None)
 pd.set_option('display.width', 2000)
 pd.set_option('display.max_columns', None)
 
+def _valid_fixture_id(fid):
+    """BUG-2 guard: return a real integer fixture id, or None for any
+    placeholder (None, NaN, '', 'N/A', 'Unknown', ...). A fixture row must
+    never carry a string placeholder as its identity, or sub-picks / DNA /
+    intelligence / settlement lose their anchor to the correct match."""
+    if fid is None:
+        return None
+    try:
+        if pd.isna(fid):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(fid).strip()
+    if not s or s.lower() in {"n/a", "na", "none", "unknown", "nan", "null", "-"}:
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+
 class ApexO25Aggregator:
     def __init__(self):
         self.api_key = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
@@ -186,6 +208,7 @@ class ApexO25Aggregator:
                         
                         list_vip_feed[key] = {
                             "name": fixture_name,
+                            "fixture_id": _valid_fixture_id(row.get("fixture_id")),
                             "rule": "💎 VIP O2.5 List"
                         }
             except Exception as e:
@@ -282,7 +305,12 @@ class ApexO25Aggregator:
             p_lock = list_psych_locks.get(key)
             p_veto = list_psych_vetoes.get(key)
 
-            f_id = dna_id or api_map.get(key, {}).get('id', 'Unknown')
+            f_id = _valid_fixture_id(dna_id
+                                     or (vip['fixture_id'] if vip else None)
+                                     or api_map.get(key, {}).get('id'))
+            if f_id is None:
+                print(f"   ⚠️ SKIPPED (no resolvable fixture_id): {key}")
+                continue
             
             # Base names
             if eng: f_name = eng['name']

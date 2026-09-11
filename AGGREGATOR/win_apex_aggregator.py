@@ -23,6 +23,28 @@ MASTER_DIR = os.path.join(BASE_DIR, "master_aggregator")
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER
 # ==============================================================================
+def _valid_fixture_id(fid):
+    """BUG-2 guard: return a real integer fixture id, or None for any
+    placeholder (None, NaN, '', 'N/A', 'Unknown', ...). A fixture row must
+    never carry a string placeholder as its identity, or sub-picks / DNA /
+    intelligence / settlement lose their anchor to the correct match."""
+    if fid is None:
+        return None
+    try:
+        if pd.isna(fid):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(fid).strip()
+    if not s or s.lower() in {"n/a", "na", "none", "unknown", "nan", "null", "-"}:
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+
 def run_win_apex_aggregator(target_date=None):
     """
     AlienEdge Apex Win Aggregator — GODMODE PRECISION UPDATE
@@ -522,7 +544,7 @@ def run_win_apex_aggregator(target_date=None):
                     key    = get_match_key(f_name)
                     list_vip_feed[key] = {
                         "name":        f_name,
-                        "fixture_id":  item.get("fixture_id","N/A"),
+                        "fixture_id":  _valid_fixture_id(item.get("fixture_id")),
                         "target_team": h_name if h_win else a_name,
                         "win_side":    "home" if h_win else "away"
                     }
@@ -584,9 +606,12 @@ def run_win_apex_aggregator(target_date=None):
             continue
 
         # ── FIXTURE ID ───────────────────────────────────────────────────
-        f_id = (eng['fixture_id'] if eng
-                else (vip['fixture_id'] if vip
-                      else api_map.get(key,{}).get('id','N/A')))
+        f_id = (_valid_fixture_id(eng['fixture_id']) if eng
+                else (_valid_fixture_id(vip['fixture_id']) if vip
+                      else _valid_fixture_id(api_map.get(key, {}).get('id'))))
+        if f_id is None:
+            print(f"   ⚠️ SKIPPED (no resolvable fixture_id): {key}")
+            continue
 
         # ── DNA ALIGNMENT ────────────────────────────────────────────────
         dna_align = (dna and (target_side == dna['fav_side'] or

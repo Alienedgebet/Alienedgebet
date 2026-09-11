@@ -22,6 +22,28 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER (CALLABLE BY THE MASTER API/SCHEDULER)
 # ==============================================================================
+def _valid_fixture_id(fid):
+    """BUG-2 guard: return a real integer fixture id, or None for any
+    placeholder (None, NaN, '', 'N/A', 'Unknown', ...). A fixture row must
+    never carry a string placeholder as its identity, or sub-picks / DNA /
+    intelligence / settlement lose their anchor to the correct match."""
+    if fid is None:
+        return None
+    try:
+        if pd.isna(fid):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(fid).strip()
+    if not s or s.lower() in {"n/a", "na", "none", "unknown", "nan", "null", "-"}:
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+
 def run_apex_underdog_aggregator(target_date):
     """
     Executes the Apex UD Aggregator.
@@ -121,7 +143,8 @@ def run_apex_underdog_aggregator(target_date):
                 list_pool[get_match_key(f_name)] = {
                     "name": f_name, "prob": prob, 
                     "dog_team": row.get('underdog_team', row.get('Underdog_Side', 'Unknown')),
-                    "fav_vuln": row.get('fav_vulnerability_5', 'N/A')
+                    "fav_vuln": row.get('fav_vulnerability_5', 'N/A'),
+                    "fixture_id": _valid_fixture_id(row.get('fixture_id'))
                 }
         print(f"[✅] Loaded {len(list_pool)} Elite Underdogs from {FILE_UD_ENGINE_CSV}")
 
@@ -212,8 +235,15 @@ def run_apex_underdog_aggregator(target_date):
         # Simulate Final Prob via Monte Carlo
         m_prob = run_monte_carlo_ud_score(pool['prob'] if pool else 70, hs['d'] if hs else "N/A")
 
+        f_id = (_valid_fixture_id(fx_api['id']) if fx_api
+                else (_valid_fixture_id(pool.get('fixture_id')) if pool
+                      else _valid_fixture_id(dna_f_id)))
+        if f_id is None:
+            print(f"   ⚠️ SKIPPED (no resolvable fixture_id): {key}")
+            continue
+
         row = {
-            "fixture_id": fx_api['id'] if fx_api else "N/A",
+            "fixture_id": f_id,
             "Fixture": fx_api['name'] if fx_api else (pool['name'] if pool else hs['name']),
             "Rank": f"Rank {rank}",
             "Monte_UD_Prob": f"{m_prob}%",
