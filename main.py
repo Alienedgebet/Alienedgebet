@@ -4,7 +4,6 @@ import time
 import gc
 import json
 import csv
-import glob
 import requests
 import traceback
 from datetime import datetime
@@ -189,6 +188,46 @@ def _normalize_fixture_schema(payload):
     return payload
 
 
+# Verified per-key recovery map (RULE 4/5). Each save_key may ONLY recover
+# from legacy /output/ files that its OWN engine writes (filenames confirmed
+# against the module sources). No cross-market entries and no glob/filename
+# discovery — a key absent here has no recovery sources at all.
+_RECOVERY_SOURCES = {
+    # ── CORNER EMPIRE (engines return None after writing) ──
+    "corners_stage1":     ["corner3_qualified.json"],                # Engine/corner_miner.py
+    "corners_stage2":     ["backend_2_output.json"],                 # Engine/corner_refiner.py:919
+    "corners_catalyst":   ["tactical_brain_output.json"],            # Engine/corner_catalyst.py
+    "corners_aggregator": ["SUPREME_EVOLUTION_OUTPUT_{date}.csv"],   # AGGREGATOR/corner4_aggregator.py:1072
+    # ── WIN EMPIRE ──
+    "win_forecast":       ["ranked_win_forecast_{date}.csv"],        # Engine/win_forecast.py:312
+    # ── UNDERDOG ──
+    "underdog_base":      ["backtest_underdog_{date}.json",          # Engine/underdog_engine.py
+                           "backtest_underdog_{date}.csv"],
+    "underdog_audit":     ["audited_underdog_backtest_{date}.json",  # Engine/master_underdog_audit.py
+                           "audited_underdog_backtest_{date}.csv"],
+    "underdog_apex":      ["FINAL_APEX_UD_SCORE_{date}.csv"],        # AGGREGATOR/apex_ud_aggregator.py
+    # ── OVER 2.5 / OVER 1.5 ──
+    "over25_stage1":      ["over25_stage1_picks.json",               # Engine/over25_probabilistic.py
+                           "over25_stage1_picks.csv"],
+    "over25_stage2":      ["over25_stage2_picks.json",               # Engine/over25_council.py
+                           "over25_stage2_picks.csv"],
+    "over25_stage3":      ["over25_stage3_final.json",               # AGGREGATOR/over25_killswitch.py
+                           "over25_stage3_final.csv"],
+    "over15_stage3":      ["over15_stage3_final.json",               # Engine/over15_stage3.py
+                           "over15_stage3_final.csv"],
+    # ── GG EMPIRE ──
+    "sh_gg_winner":       ["sh_gg_winner_feed.json"],                # Engine/sh_gg_winner.py
+    "gg_o15":             ["gg_o15_feed_{date}.json",                # Engine/gg_precision_engine.py
+                           "ALIENEDGE_GG_PICKS_{date}.csv",
+                           "ALIENEDGE_O15_PICKS_{date}.csv"],
+    "gg_forensics":       ["JUDGED_GG_PICKS_{date}.csv"],            # AGGREGATOR/gg_forensics_audit.py
+    "gg_psychology":      ["ALIENEDGE_GG_PSYCHOLOGY_FINAL_{date}.csv"],  # PSYCHOLOGY/gg_psychology.py
+    # ── SH MASTER ──
+    "sh_master":          ["shvi_vortex_report_{date}.json",         # Engine/sh_master_vortex.py
+                           "shvi_vortex_report_{date}.csv"],
+}
+
+
 def _recover_engine_output_from_disk(save_key, save_date=None, engine_name="", func=None):
     """
     If an engine wrote its results directly to disk in /output/ (CSV or JSON)
@@ -201,53 +240,14 @@ def _recover_engine_output_from_disk(save_key, save_date=None, engine_name="", f
     if not os.path.exists(out_dir):
         return None
 
-    func_name = getattr(func, "__name__", "") if func else ""
     d_str = str(save_date) if save_date else ""
 
-    # Specific known file mappings across legacy engine outputs
+    # RULE 4/5: candidates are strictly the files THIS save_key's engine
+    # writes. Unknown keys (filter_*, gg_supreme, ...) recover nothing.
     candidates = [
-        # Direct key matches
-        os.path.join(out_dir, f"{save_key}__{d_str}.json"),
-        os.path.join(out_dir, f"{save_key}.json"),
-        os.path.join(out_dir, f"{save_key}_{d_str}.json"),
-        os.path.join(out_dir, f"{save_key}_{d_str}.csv"),
-        # Corner empire specific files
-        os.path.join(out_dir, "corner3_qualified.json"),
-        os.path.join(out_dir, "corner2_qualified.json"),
-        os.path.join(out_dir, "tactical_brain_output.json"),
-        os.path.join(out_dir, "corner4_aggregator.json"),
-        # Over 2.5 / Over 1.5 specific files
-        os.path.join(out_dir, f"over25_stage1_picks_{d_str}.json"),
-        os.path.join(out_dir, "over25_stage1_picks.json"),
-        os.path.join(out_dir, f"over25_stage1_picks_{d_str}.csv"),
-        os.path.join(out_dir, "over25_stage1_picks.csv"),
-        os.path.join(out_dir, f"over25_stage2_picks_{d_str}.json"),
-        os.path.join(out_dir, "over25_stage2_picks.json"),
-        # GG and Win feeds
-        os.path.join(out_dir, f"sh_gg_winner_feed_{d_str}.json"),
-        os.path.join(out_dir, "sh_gg_winner_feed.json"),
-        os.path.join(out_dir, f"gg_o15_feed_{d_str}.json"),
-        os.path.join(out_dir, "gg_o15_feed.json"),
-        os.path.join(out_dir, f"ranked_win_forecast_{d_str}.csv"),
-        os.path.join(out_dir, f"audited_underdog_backtest_{d_str}.json"),
-        os.path.join(out_dir, f"audited_underdog_backtest_{d_str}.csv"),
-        os.path.join(out_dir, f"SUPREME_EVOLUTION_OUTPUT_{d_str}.csv"),
-        os.path.join(out_dir, f"ALIENEDGE_GG_PSYCHOLOGY_FINAL_{d_str}.csv"),
-        os.path.join(out_dir, f"JUDGED_GG_PICKS_{d_str}.csv"),
-        os.path.join(out_dir, f"ALIENEDGE_GG_PICKS_{d_str}.csv"),
-        os.path.join(out_dir, f"FINAL_APEX_UD_SCORE_{d_str}.csv"),
+        os.path.join(out_dir, template.format(date=d_str))
+        for template in _RECOVERY_SOURCES.get(save_key, [])
     ]
-
-    # Broad search in /output/ for files matching key, func, or date
-    search_patterns = [
-        os.path.join(out_dir, f"*{save_key}*"),
-        os.path.join(out_dir, f"*{func_name.replace('run_', '')}*") if func_name else "",
-    ]
-    for p in search_patterns:
-        if p:
-            for match in glob.glob(p):
-                if match not in candidates and "cache" not in match:
-                    candidates.append(match)
 
     for target_path in candidates:
         if not target_path or not os.path.exists(target_path):
@@ -290,8 +290,9 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
         res = func(*args, **kwargs)
 
         # ── DISK FALLBACK CHECK ───────────────────────────────────────────────
-        # If engine returned None or empty, check if it saved an output file to disk
-        if (res is None or (hasattr(res, "__len__") and len(res) == 0)) and save_key is not None:
+        # RULE 1-3: a legitimate [] is a final result and is saved as-is;
+        # recovery only for an explicit None, only from this key's own files.
+        if res is None and save_key is not None:
             disk_res = _recover_engine_output_from_disk(save_key, save_date, engine_name, func)
             if disk_res is not None and (not hasattr(disk_res, "__len__") or len(disk_res) > 0):
                 print(f"   📂 Recovered {len(disk_res) if hasattr(disk_res, '__len__') else 'data'} items from disk output.")
@@ -302,8 +303,16 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
             res = _normalize_fixture_schema(res)
 
         if save_key is not None:
-            path = store.save(save_key, save_date, res)
-            print(f"   💾 saved -> {path}")
+            if res is None:
+                # None-with-no-recovery is an explicit failure state, not "ok"
+                # with null data (store docstring: failures go through
+                # save_failure so /api/status can tell them apart).
+                path = store.save_failure(save_key, save_date,
+                                          error=f"{engine_name}: returned None (no disk fallback)")
+                print(f"   ⚠️ recorded failure -> {path}")
+            else:
+                path = store.save(save_key, save_date, res)
+                print(f"   💾 saved -> {path}")
         return res
     except Exception as e:
         print(f"⚠️ [NON-CRITICAL ENGINE NOTICE in {engine_name}]: {e}")
