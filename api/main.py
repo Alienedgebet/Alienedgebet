@@ -101,8 +101,10 @@ def to_records(x) -> list:
         return []
     if isinstance(x, list):
         return x
-    if isinstance(x, dict):
-        return x
+    # A dict is NOT a list of records. Returning it as-is let /api/dna/{date}
+    # (before the hoist below) emit a JSON object where the frontend expects an
+    # array, silently emptying the Win "Team DNA — Goal Intent Board". The
+    # {'team_id': profile} shape is unpacked to records in get_dna_profiles().
     return []
 
 
@@ -328,11 +330,11 @@ CORNER_S1_DEFAULTS = dict(
     avg_confidence=0, home_win_odds=0, over_2_5_odds=0, tier_1_priority=False,
 )
 CORNER_S2_DEFAULTS = dict(
-    fixture_id="", fixture="", stage1_predicted_corners=0, stage2_predicted_corners=0,
-    expected_total_corners=0, corner_tier="STANDARD", style_alignment="",
-    expected_difference=0, avg_confidence=0, home_is_persistent_venue=False,
-    away_is_persistent_venue=False, home_is_persistent_overall=False,
-    away_is_persistent_overall=False,
+    fixture_id="", fixture_name="", stage1_predicted_corners=0, stage2_predicted_corners=0,
+    predicted_corners=0, corner_tier="STANDARD", style_alignment="",
+    diff=0, avg_confidence=0, prob=0,
+    home_is_persistent_venue=False, away_is_persistent_venue=False,
+    home_is_persistent_overall=False, away_is_persistent_overall=False,
 )
 CORNER_PSYCH_DEFAULTS = dict(
     fixture_name="", home_position=0, away_position=0, friction_grade="",
@@ -492,7 +494,18 @@ def noop_cache_clear(x_admin_token: Optional[str] = Header(default=None)):
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/dna/{date}", tags=["Foundation"])
 def get_dna_profiles(date: str):
-    data, _ = store.load("dna", date, default=[])
+    data, _ = store.load("dna", date, default={})
+    if isinstance(data, dict):
+        # dna v1 is persisted as {team_id: profile}. The frontend DnaProfile[]
+        # contract expects a flat list, so hoist each dict key into `team_id`
+        # and emit records — otherwise Array.isArray() on the client sees an
+        # object and the "Team DNA — Goal Intent Board" renders empty despite
+        # real profiles being present on disk.
+        return [
+            {"team_id": str(team_id), **profile}
+            for team_id, profile in data.items()
+            if isinstance(profile, dict)
+        ]
     return to_records(data)
 
 

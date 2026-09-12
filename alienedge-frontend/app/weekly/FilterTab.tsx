@@ -20,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { getTodayDate } from "@/lib/api";
+import { DEMO_MODE_ENABLED } from "@/lib/use-api";
 import { MarketFilterConfig, MOCK_WEEKLY_RESULTS } from "./filter-config";
 
 interface FilterTabProps {
@@ -45,9 +46,13 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
   const [viewFormat, setViewFormat] = useState<"cards" | "table">("cards");
   const [customParams, setCustomParams] = useState<Record<string, any>>({});
   
-  // Data State
-  const [rows, setRows] = useState<Record<string, any>[]>(MOCK_WEEKLY_RESULTS[config.key] || []);
+  // Data State — starts empty; real results are fetched on mount and on every
+  // control change (mock only ever appears if NEXT_PUBLIC_DEMO_MODE is set).
+  const [rows, setRows] = useState<Record<string, any>[]>(
+    DEMO_MODE_ENABLED ? (MOCK_WEEKLY_RESULTS[config.key] || []) : []
+  );
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Sync default options when switching between tabs
   useEffect(() => {
@@ -55,9 +60,10 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
     setOddsBand(config.oddsBands[0]);
   }, [config.key]);
 
-  // Filter Runner
-  const handleRunFilter = () => {
+  // Filter Runner — shared by the auto-fetch effect and the manual button.
+  const runFilter = () => {
     setLoading(true);
+    setError(null);
 
     const payload = {
       mode,
@@ -73,35 +79,22 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
     apiCall
       .then((res: any) => {
         const raw = res?.data?.results || res?.data?.picks || res?.data;
-        if (Array.isArray(raw) && raw.length > 0) {
-          setRows(raw);
-        } else {
-          // Real empty response stays a real empty state — never a silent
-          // swap back to the interactive mock rows.
-          setRows([]);
-        }
+        setRows(Array.isArray(raw) ? raw : []);
       })
-      .catch(() => {
-        // API failure surfaces honestly — never a silent mock swap.
+      .catch((err: any) => {
         setRows([]);
+        setError(err?.message || "Filter request failed");
       })
       .finally(() => setLoading(false));
   };
 
-  // Immediate Interactive Mock Filter
-  const filterMockRows = () => {
-    const base = MOCK_WEEKLY_RESULTS[config.key] || [];
-    if (mode === "public") {
-      const filtered = base.filter((r) => !r.risk || r.risk === riskLevel);
-      setRows(filtered.length > 0 ? filtered : base);
-    } else {
-      setRows(base);
-    }
-  };
+  const handleRunFilter = () => runFilter();
 
+  // Auto-fetch real results on mount and whenever the filter controls change.
   useEffect(() => {
-    filterMockRows();
-  }, [mode, riskLevel, oddsBand, config.key]);
+    runFilter();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, mode, riskLevel, oddsBand, date, startDate, endDate, config.key]);
 
   const getRiskIcon = (iconName: string) => {
     if (iconName === "shield") return <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />;
@@ -346,6 +339,21 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
           </div>
         </div>
 
+        {loading && rows.length === 0 && (
+          <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm text-slate-400">
+            Loading filter results…
+          </div>
+        )}
+        {error && (
+          <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-6 text-center text-sm text-red-300">
+            {error}
+          </div>
+        )}
+        {!loading && !error && rows.length === 0 && (
+          <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm text-slate-400">
+            No picks survived these filter gates.
+          </div>
+        )}
         {/* Results View: Cards Mode */}
         {viewFormat === "cards" ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

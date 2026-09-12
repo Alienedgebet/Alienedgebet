@@ -43,21 +43,20 @@ function asAuditList(data: unknown): LivePrematchAudit[] {
   return [];
 }
 
-function liveRows<T>(data: T[] | null, loading: boolean, fallback: T[]): T[] {
-  if (loading && (!data || data.length === 0)) return fallback;
-  if (data && data.length > 0) return data;
-  return fallback;
+const EMPTY_VALIDATION_BOARD: LiveValidationBoard = {
+  cycle: 0,
+  total_live: 0,
+  total_tracked: 0,
+  matches: [],
+  alerts: [],
+};
+
+function liveRows<T>(data: T[] | null): T[] {
+  return data ?? [];
 }
 
-function boardFrom(
-  data: LiveValidationBoard | null,
-  loading: boolean
-): LiveValidationBoard {
-  if (loading && (!data || (!data.matches?.length && !data.alerts?.length))) {
-    return MOCK_LIVE_VALIDATION;
-  }
-  if (data && (data.matches?.length > 0 || data.alerts?.length > 0)) return data;
-  return MOCK_LIVE_VALIDATION;
+function boardFrom(data: LiveValidationBoard | null): LiveValidationBoard {
+  return data ?? EMPTY_VALIDATION_BOARD;
 }
 
 function formatPick(
@@ -468,17 +467,9 @@ export default function LivePage() {
     cacheKey: "live-edges-validation",
   });
 
-  const auditRows = liveRows(
-    asAuditList(prematch.data),
-    prematch.loading,
-    MOCK_LIVE_PREMATCH_AUDIT
-  );
-  const board = boardFrom(validation.data, validation.loading);
-  const validationRows = liveRows(
-    board.alerts,
-    validation.loading,
-    MOCK_LIVE_VALIDATION.alerts
-  );
+  const auditRows = liveRows(asAuditList(prematch.data));
+  const board = boardFrom(validation.data);
+  const validationRows = liveRows(board.alerts);
 
   const stats = useMemo(() => {
     const gkLiabilities = auditRows.filter((r) => r.home.gk_out || r.away.gk_out).length;

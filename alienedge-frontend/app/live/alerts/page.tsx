@@ -1,80 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Bell, Flame, CheckCircle, Activity, Radio, RefreshCw } from "lucide-react";
+import { useState } from "react";
+import { Bell, Flame, CheckCircle, Activity, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useSelectedDate } from "@/lib/date-context";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
-
-export interface LiveAlertRecord {
-  f_id: string;
-  fixture: string;
-  time: string;
-  minute: number;
-  level: "🔥 PREMIUM" | "✅ STANDARD" | "📊 MONITOR" | string;
-  confidence: number;
-  msg: string;
-  session?: string;
-  user_id?: string;
-  rule_id?: string;
-  rule_label?: string;
-}
-
-const MOCK_LIVE_ALERTS: LiveAlertRecord[] = [
-  {
-    f_id: "fx_901",
-    fixture: "Arsenal vs Liverpool",
-    time: new Date().toISOString(),
-    minute: 45,
-    level: "🔥 PREMIUM",
-    confidence: 88.5,
-    msg: "Arsenal vs Liverpool — 45' Verified Handshake. Chaos: 7.4 | H-xG: 1.62 A-xG: 0.90 | Pressure: 62% Home",
-    rule_label: "VIP 45' Handshake Engine",
-  },
-  {
-    f_id: "fx_902",
-    fixture: "Real Madrid vs Alaves",
-    time: new Date().toISOString(),
-    minute: 34,
-    level: "🔥 PREMIUM",
-    confidence: 82.0,
-    msg: "Real Madrid Dominance Surge — 8 SOT, 14 Box Attacks, High xG Slope (+0.45)",
-    rule_label: "Home Dominance Spike",
-  },
-  {
-    f_id: "fx_903",
-    fixture: "Bayern Munich vs Stuttgart",
-    time: new Date().toISOString(),
-    minute: 68,
-    level: "✅ STANDARD",
-    confidence: 64.0,
-    msg: "Second-Half BTTS Trigger — Away substitute threat active, Chaos Index: 5.8",
-    rule_label: "2H Volatility Special",
-  },
-  {
-    f_id: "fx_904",
-    fixture: "Napoli vs Roma",
-    time: new Date().toISOString(),
-    minute: 22,
-    level: "📊 MONITOR",
-    confidence: 45.0,
-    msg: "Early Momentum Build — High corner acceleration (4 corners in 6 mins)",
-    rule_label: "Corner Surge Tracker",
-  },
-];
+import { useApi } from "@/lib/use-api";
+import { liveApi } from "@/lib/api";
+import { MOCK_LIVE_ALERTS } from "@/lib/mock-chains";
 
 export default function LiveAlertScannerPage() {
-  const { date } = useSelectedDate();
-  const [alerts, setAlerts] = useState<LiveAlertRecord[]>(MOCK_LIVE_ALERTS);
+  const alertsQuery = useApi(
+    () => liveApi.getAlerts(),
+    [],
+    { fallback: MOCK_LIVE_ALERTS, cacheKey: "live-alerts" }
+  );
+  const alerts = alertsQuery.data ?? [];
+  const refreshing = alertsQuery.loading || alertsQuery.isRefetching;
   const [filterLevel, setFilterLevel] = useState<"ALL" | "PREMIUM" | "STANDARD" | "MONITOR">("ALL");
-  const [refreshing, setRefreshing] = useState(false);
 
-  const handleRefresh = () => {
-    setRefreshing(true);
-    setTimeout(() => {
-      setRefreshing(false);
-    }, 600);
-  };
+  const handleRefresh = () => alertsQuery.refetch();
 
   const filteredAlerts = alerts.filter((a) => {
     if (filterLevel === "PREMIUM") return a.level.includes("PREMIUM");
@@ -175,6 +119,21 @@ export default function LiveAlertScannerPage() {
 
       {/* ── 4. LIVE ALERTS STREAM CARDS ──────────────────────────────── */}
       <div className="flex flex-col gap-3">
+        {alertsQuery.loading && alerts.length === 0 && (
+          <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm text-slate-400">
+            Loading live alert stream…
+          </div>
+        )}
+        {alertsQuery.error && (
+          <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-6 text-center text-sm text-red-300">
+            Live alerts unavailable: {alertsQuery.error}
+          </div>
+        )}
+        {!alertsQuery.loading && !alertsQuery.error && filteredAlerts.length === 0 && (
+          <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm text-slate-400">
+            No live alerts have fired yet.
+          </div>
+        )}
         {filteredAlerts.map((alert, idx) => {
           const isPremium = alert.level.includes("PREMIUM");
           const isStandard = alert.level.includes("STANDARD");

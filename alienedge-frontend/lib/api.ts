@@ -655,13 +655,13 @@ export interface CornerStage1Pick {
 
 export interface CornerStage2Pick {
   fixture_id: string;
-  fixture: string;
+  fixture_name: string;
   stage1_predicted_corners: number;
   stage2_predicted_corners: number;
-  expected_total_corners: number;
+  predicted_corners: number;
   corner_tier: string;
   style_alignment: string;
-  expected_difference: number;
+  diff: number;
   avg_confidence: number;
   home_is_persistent_venue: boolean;
   away_is_persistent_venue: boolean;

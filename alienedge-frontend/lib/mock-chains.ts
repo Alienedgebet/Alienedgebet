@@ -861,13 +861,13 @@ export const MOCK_CORNER_PSYCH: CornerPsychologyPick[] = [
 export const MOCK_CORNER_S2: CornerStage2Pick[] = [
   {
     fixture_id: "demo-c2",
-    fixture: "Sevilla vs Villarreal",
+    fixture_name: "Sevilla vs Villarreal",
     stage1_predicted_corners: 10.2,
     stage2_predicted_corners: 10.8,
-    expected_total_corners: 10.8,
+    predicted_corners: 10.8,
     corner_tier: "Tier 2",
     style_alignment: "Aligned",
-    expected_difference: 1.4,
+    diff: 1.4,
     avg_confidence: 0.71,
     home_is_persistent_venue: true,
     away_is_persistent_venue: false,

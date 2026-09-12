@@ -32,10 +32,8 @@ import { cn } from "@/lib/utils";
  * forensic pick stream → danger audit → master handshake chemistry.
  */
 
-function liveRows<T>(data: T[] | null, loading: boolean, fallback: T[]): T[] {
-  if (loading && (!data || data.length === 0)) return fallback;
-  if (data && data.length > 0) return data;
-  return fallback;
+function liveRows<T>(data: T[] | null): T[] {
+  return data ?? [];
 }
 
 function pickLabel(p: LiveIncomingPick["picks"][number]): string {
@@ -236,9 +234,9 @@ export default function LiveIncomingPage() {
     { fallback: MOCK_LIVE_AGG, cacheKey: "live-incoming-aggregator" }
   );
 
-  const incomingRows = liveRows(incoming.data, incoming.loading, MOCK_LIVE_INCOMING);
-  const dangerRows = liveRows(danger.data, danger.loading, MOCK_LIVE_DANGER);
-  const aggRows = liveRows(aggregator.data, aggregator.loading, MOCK_LIVE_AGG);
+  const incomingRows = liveRows(incoming.data);
+  const dangerRows = liveRows(danger.data);
+  const aggRows = liveRows(aggregator.data);
 
   const stats = useMemo(() => {
     const breaches = dangerRows.filter(
