@@ -70,14 +70,11 @@ export default function DrawPage() {
     [dnaV2, date]
   );
 
-  const live = result.data;
-  const liveHasRows =
-    Boolean(live) &&
-    ((live!.draws?.length ?? 0) > 0 ||
-      (live!.parity_list?.length ?? 0) > 0 ||
-      (live!.amateurs_list?.length ?? 0) > 0);
-  const payload = liveHasRows ? live! : MOCK_DRAW;
-  const isMock = !liveHasRows || result.isMock;
+  // Real data stays real; real empty stays real empty; demo rows appear
+  // only when useApi flagged them (demo explicitly enabled). API failures
+  // surface through ChainBranch's error state below.
+  const payload = result.data;
+  const isMock = result.isMock;
 
   return (
     <div className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6">
@@ -105,9 +102,9 @@ export default function DrawPage() {
       <ChainBranch
         title="Draw Magnet Index"
         description={isMock ? "Full ranked draw list · Demo" : "Full ranked draw list"}
-        data={payload.draws}
+        data={payload?.draws ?? []}
         loading={result.loading}
-        error={null}
+        error={result.error}
         columns={drawColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No draw picks for this date."
@@ -117,9 +114,9 @@ export default function DrawPage() {
       <ChainBranch
         title="High Parity List"
         description={isMock ? "Parity ≥ 0.9 subset · Demo" : "Parity ≥ 0.9 subset"}
-        data={payload.parity_list}
+        data={payload?.parity_list ?? []}
         loading={result.loading}
-        error={null}
+        error={result.error}
         columns={drawColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No high-parity fixtures for this date."
@@ -129,9 +126,9 @@ export default function DrawPage() {
       <ChainBranch
         title="Amateurs List"
         description={isMock ? "Total draws > 5 subset · Demo" : "Total draws > 5 subset"}
-        data={payload.amateurs_list}
+        data={payload?.amateurs_list ?? []}
         loading={result.loading}
-        error={null}
+        error={result.error}
         columns={drawColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No amateur-table fixtures for this date."

@@ -1,4 +1,8 @@
-import axios, { AxiosInstance, AxiosResponse } from "axios";
+import axios, {
+  AxiosInstance,
+  AxiosResponse,
+  AxiosRequestConfig,
+} from "axios";
 
 // ============================================================
 // ALIENEDGE API CLIENT
@@ -7,12 +11,29 @@ import axios, { AxiosInstance, AxiosResponse } from "axios";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// ── Endpoint-aware timeouts ───────────────────────────────────────────
+// A single aggressive timeout made large-but-legitimate analytics payloads
+// (Corners Stage 1 is ~345 KB) look like failures and swap into demo data.
+// Normal endpoints keep a sensible default; the known heavy analytics
+// chains get a longer budget. Any per-request override (config.timeout,
+// including 0 = no timeout) always wins.
+const DEFAULT_TIMEOUT_MS = 10_000; // normal endpoints
+const HEAVY_TIMEOUT_MS = 45_000; // corners stage 1/2, GG, Win, Over 1.5 / Over 2.5 chains
+const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25)\//;
+
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
-  // 800ms — fail fast when API is off so market pages paint mocks quickly
-  // instead of stacking multi-second waits across 5–7 parallel stage calls.
-  timeout: 1000,
+  timeout: DEFAULT_TIMEOUT_MS,
   headers: { "Content-Type": "application/json" },
+});
+
+api.interceptors.request.use((config) => {
+  if (config.timeout == null && config.url) {
+    config.timeout = HEAVY_ENDPOINT_PATTERN.test(config.url)
+      ? HEAVY_TIMEOUT_MS
+      : DEFAULT_TIMEOUT_MS;
+  }
+  return config;
 });
 
 api.interceptors.response.use(
@@ -22,6 +43,47 @@ api.interceptors.response.use(
     return Promise.reject(err);
   }
 );
+
+// ── Shared raw-response snapshot cache ────────────────────────────────
+// The dashboard and each market page fetch the same flagship endpoints
+// (e.g. /api/win/apex/{date}) through different components. So that
+// "same market + same date" always renders from ONE underlying response
+// (and cannot independently flip between real/demo), raw responses are
+// snapshotted here per URL for a short TTL, and concurrent in-flight
+// requests for the same URL are deduplicated. Components still keep their
+// own shaped useApi caches; this layer only guarantees the underlying
+// data snapshot is identical across them.
+const RAW_CACHE_TTL_MS = 3 * 60 * 1000; // matches useApi's cache TTL
+const rawCache = new Map<string, { data: unknown; ts: number }>();
+const inflight = new Map<string, Promise<AxiosResponse<unknown>>>();
+
+export function cachedGet<T>(
+  url: string,
+  config?: AxiosRequestConfig
+): Promise<AxiosResponse<T>> {
+  const hit = rawCache.get(url);
+  if (hit && Date.now() - hit.ts < RAW_CACHE_TTL_MS) {
+    return Promise.resolve({
+      data: hit.data as T,
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      config: {},
+    } as AxiosResponse<T>);
+  }
+  const pending = inflight.get(url);
+  if (pending) return pending as Promise<AxiosResponse<T>>;
+
+  const request = api
+    .get<T>(url, config)
+    .then((res) => {
+      rawCache.set(url, { data: res.data, ts: Date.now() });
+      return res;
+    })
+    .finally(() => inflight.delete(url));
+  inflight.set(url, request as Promise<AxiosResponse<unknown>>);
+  return request;
+}
 
 // ============================================================
 // HEALTH
@@ -1333,12 +1395,12 @@ export const foundationApi = {
 // this client only fetches and the UI only renders.
 export const dnaV2Api = {
   get: (date: string): Promise<AxiosResponse<DnaV2Response>> =>
-    api.get(`/api/dna/v2/${date}`),
+    cachedGet(`/api/dna/v2/${date}`),
 
   // Disk-only fast read — no engine recompute. Preferred for fixture-list
   // DNA counts and for the DNA Analysis page so opening it feels instant.
   getLatest: (): Promise<AxiosResponse<DnaV2Response>> =>
-    api.get(`/api/dna/v2/latest`),
+    cachedGet(`/api/dna/v2/latest`),
 };
 
 export const underdogApi = {
@@ -1349,7 +1411,7 @@ export const underdogApi = {
     api.get(`/api/underdog/audit/${date}`),
 
   getApex: (date: string): Promise<AxiosResponse<UnderdogApexPick[]>> =>
-    api.get(`/api/underdog/apex/${date}`),
+    cachedGet(`/api/underdog/apex/${date}`),
 };
 
 export const ggApi = {
@@ -1363,7 +1425,7 @@ export const ggApi = {
     api.get(`/api/gg/psychology/${date}`),
 
   getSupreme: (date: string): Promise<AxiosResponse<GGSupremePick[]>> =>
-    api.get(`/api/gg/supreme/${date}`),
+    cachedGet(`/api/gg/supreme/${date}`),
 
   getCrossVerify: (): Promise<AxiosResponse<GGCrossVerifyPick[]>> =>
     api.get("/api/gg/cross-verify"),
@@ -1378,7 +1440,7 @@ export const winApi = {
     api.get(`/api/win/psychology/${date}`),
 
   getApex: (date: string): Promise<AxiosResponse<WinApexPick[]>> =>
-    api.get(`/api/win/apex/${date}`),
+    cachedGet(`/api/win/apex/${date}`),
 
   getRaw: (date: string): Promise<AxiosResponse<WinRawPick[]>> =>
     api.get(`/api/win/raw/${date}`),
@@ -1401,7 +1463,7 @@ export const over25Api = {
     api.get(`/api/over25/gold/${date}`),
 
   getApex: (date: string): Promise<AxiosResponse<Over25ApexPick[]>> =>
-    api.get(`/api/over25/apex/${date}`),
+    cachedGet(`/api/over25/apex/${date}`),
 
   getForecast: (date: string): Promise<AxiosResponse<Over25ForecastPick[]>> =>
     api.get(`/api/over25/forecast/${date}`),
@@ -1415,7 +1477,7 @@ export const over15Api = {
     api.get(`/api/over15/psychology/${date}`),
 
   getApex: (date: string): Promise<AxiosResponse<Over15ApexPick[]>> =>
-    api.get(`/api/over15/apex/${date}`),
+    cachedGet(`/api/over15/apex/${date}`),
 };
 
 export const cornersApi = {
@@ -1432,24 +1494,24 @@ export const cornersApi = {
     api.get(`/api/corners/catalyst/${date}`),
 
   getAggregator: (date: string): Promise<AxiosResponse<CornerAggregatorPick[]>> =>
-    api.get(`/api/corners/aggregator/${date}`),
+    cachedGet(`/api/corners/aggregator/${date}`),
 };
 
 export const specialsApi = {
   getUnders: (date: string): Promise<AxiosResponse<UndersResponse>> =>
-    api.get(`/api/unders/${date}`),
+    cachedGet(`/api/unders/${date}`),
 
   getDraw: (date: string): Promise<AxiosResponse<DrawResponse>> =>
-    api.get(`/api/draw/${date}`),
+    cachedGet(`/api/draw/${date}`),
 
   getSOT: (date: string): Promise<AxiosResponse<SOTPick[]>> =>
-    api.get(`/api/sot/${date}`),
+    cachedGet(`/api/sot/${date}`),
 
   getFHVI: (date: string): Promise<AxiosResponse<FHVIPick[]>> =>
-    api.get(`/api/fhvi/${date}`),
+    cachedGet(`/api/fhvi/${date}`),
 
   getSHVI: (date: string): Promise<AxiosResponse<SHVIPick[]>> =>
-    api.get(`/api/shvi/${date}`),
+    cachedGet(`/api/shvi/${date}`),
 };
 
 export const shMasterApi = {
@@ -1553,6 +1615,50 @@ export const pipelineApi = {
 // Date helpers live in date-utils.ts so layout/shell can import them
 // without pulling this entire axios client into the first compile graph.
 export { getTodayDate, formatDate, shiftDate } from "./date-utils";
+
+/**
+ * Canonical in-memory cache key for one market + one date, independent of
+ * which component fetches it. Same market + same date → same key (and, via
+ * `cachedGet`, the same underlying raw snapshot), instead of per-component
+ * display names like "dashboard-win:..." vs "Win Apex — Final Aggregator:...".
+ */
+export const marketCacheKey = (market: string, date: string): string =>
+  `market:${market}:${date}`;
+
+/**
+ * Single numeric normalization boundary for every value that reaches
+ * `.toFixed()` or numeric comparison in the UI.
+ *
+ *  - finite number            → itself
+ *  - numeric string ("65")    → 65
+ *  - percentage string ("65%")→ 65  (only when `percentage: true` is passed,
+ *    i.e. when the field's schema explicitly says it is a percentage)
+ *  - null / undefined / NaN / ±Infinity / anything else → null
+ *
+ * Callers apply their existing UI fallback for null (skip the row, render
+ * "–"), so invalid values are never silently converted into misleading
+ * scores and can never crash `.toFixed()`.
+ */
+export function toFiniteNumber(
+  val: unknown,
+  opts?: { percentage?: boolean }
+): number | null {
+  if (val == null) return null;
+  if (typeof val === "number") return Number.isFinite(val) ? val : null;
+  if (typeof val === "string") {
+    const s = val.trim();
+    if (s === "" || s === "-" || s === "--") return null;
+    const source = opts?.percentage ? s.replace(/%$/, "") : s;
+    if (source !== s && opts?.percentage) {
+      // "65%" — strip the trailing % only in percentage-schema fields.
+      const n = Number(source);
+      return Number.isFinite(n) ? n : null;
+    }
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
 
 export const getTierClass = (tier: string): string => {
   const t = tier.toLowerCase();

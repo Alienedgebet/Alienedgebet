@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { TierBadge } from "@/components/predictions/TierBadge";
-import { getTrafficLightDot } from "@/lib/api";
+import { getTrafficLightDot, toFiniteNumber } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { DnaCountBadge } from "@/components/dna/DnaCountBadge";
 import { VerifyCell, type VerificationData } from "@/components/predictions/VerifyCell";
@@ -22,6 +22,22 @@ export interface EliteRankItem {
   odds?: number;
   dnaMarketKey?: DnaV2MarketKey;
   verification?: VerificationData;
+}
+
+// ── Final numeric render boundary ──────────────────────────────────────
+// Every value that reaches `.toFixed()` must first be guaranteed to be a
+// finite number. Values are normalized once at the market-config adapter
+// boundary; this is the defense-in-depth guard at the actual render site
+// so a stray string/null/NaN can never crash the dashboard again.
+const FALLBACK_CELL = "–";
+
+function safeFixed(value: unknown, digits: number): string | null {
+  const n = toFiniteNumber(value);
+  return n != null ? n.toFixed(digits) : null;
+}
+
+function safeNumeric(value: unknown): number {
+  return toFiniteNumber(value) ?? 0;
 }
 
 export function EliteRankList({
@@ -136,20 +152,20 @@ export function EliteRankList({
                       <span
                         className={cn(
                           "h-1.5 w-1.5 shrink-0 rounded-full shadow-sm",
-                          getTrafficLightDot(item.value)
+                          getTrafficLightDot(safeNumeric(item.value))
                         )}
                       />
                       <span>
-                        {item.value.toFixed(1)}
+                        {safeFixed(item.value, 1) ?? FALLBACK_CELL}
                         <span className="text-[9px] font-medium text-text-muted">
                           {item.suffix}
                         </span>
                       </span>
                     </div>
 
-                    {item.odds != null && item.odds > 0 && (
+                    {safeFixed(item.odds, 2) != null && safeNumeric(item.odds) > 0 && (
                       <span className="shrink-0 rounded border border-cyan-500/30 bg-cyan-950/40 px-1 py-0.2 font-mono text-[10px] font-bold text-cyan-300 shadow-sm">
-                        @{item.odds.toFixed(2)}
+                        @{safeFixed(item.odds, 2)}
                       </span>
                     )}
                   </div>

@@ -70,18 +70,40 @@ def _path(key: str, date: str = None) -> str:
     return os.path.join(CACHE_DIR, f"{safe_key}__{suffix}.json")
 
 
+def sanitize_non_finite(obj):
+    """Recursively convert non-finite floats (NaN, +Inf, -Inf) to None so a
+    payload is always strictly JSON-compliant.
+
+    Finite numbers, strings, booleans and all other legitimate values are
+    returned UNCHANGED. This is the single serving/write boundary that keeps
+    every engine file (including historical ones written with raw NaN
+    literals) serializable by FastAPI's `allow_nan=False` JSON encoder and
+    by the browser's JSON.parse."""
+    import math
+
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: sanitize_non_finite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_non_finite(v) for v in obj]
+    return obj
+
+
 def to_jsonable(x):
     """Convert engine return values (DataFrame / tuple / list / dict) into
-    something json.dump can serialize, without losing structure."""
+    something json.dump can serialize, without losing structure. Non-finite
+    floats are sanitized to None here so future pipeline runs can never
+    persist NaN/Infinity into a cache file."""
     try:
         import pandas as pd
         if isinstance(x, pd.DataFrame):
-            return x.to_dict("records")
+            x = x.to_dict("records")
     except ImportError:
         pass
     if isinstance(x, tuple):
-        return [to_jsonable(v) for v in x]
-    return x
+        x = [to_jsonable(v) for v in x]
+    return sanitize_non_finite(x)
 
 
 def save(key: str, date: str, data, status: str = "ok", error: str = None) -> str:
@@ -104,7 +126,7 @@ def save(key: str, date: str, data, status: str = "ok", error: str = None) -> st
     }
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, cls=SafeEncoder, ensure_ascii=False)
+        json.dump(payload, f, cls=SafeEncoder, ensure_ascii=False, allow_nan=False)
     os.replace(tmp_path, path)  # atomic — readers never see a partial file
     return path
 
@@ -141,7 +163,10 @@ def load(key: str, date: str = None, default=None):
         data = payload.get("data")
         if data is None:
             data = default
-        return data, payload.get("generated_at")
+        # Historical files may contain raw NaN/Infinity literals. Sanitize at
+        # the read boundary so every route can serve them as strict JSON
+        # (FastAPI serializes with allow_nan=False) without touching the file.
+        return sanitize_non_finite(data), payload.get("generated_at")
     except Exception:
         return default, None
 

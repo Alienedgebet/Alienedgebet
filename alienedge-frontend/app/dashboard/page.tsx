@@ -3,9 +3,9 @@
 import { Suspense, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSelectedDate } from "@/lib/date-context";
-import { useApi, type UseApiResult } from "@/lib/use-api";
+import { useApi, DEMO_MODE_ENABLED, type UseApiResult } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
-import { getTierClass, type DnaV2MarketKey } from "@/lib/api";
+import { getTierClass, marketCacheKey, type DnaV2MarketKey } from "@/lib/api";
 import { isDashboardMarketTab } from "@/lib/dashboard-tabs";
 import { RadialGauge } from "@/components/predictions/RadialGauge";
 import { EngineFeedBar } from "./EngineFeedBar";
@@ -40,8 +40,14 @@ function withFallback(
   if (hasData) {
     return { data: result.data!, isMock: result.isMock };
   }
-  const mock = MOCK_PICKS[key] ?? [];
-  return { data: mock, isMock: true };
+  if (DEMO_MODE_ENABLED) {
+    // D. Demo explicitly enabled → demo rows, clearly flagged.
+    const mock = MOCK_PICKS[key] ?? [];
+    return { data: mock, isMock: true };
+  }
+  // B/C. Real empty or API failure — NEVER substitute fake picks
+  // automatically. The empty/error states below handle both honestly.
+  return { data: [], isMock: false };
 }
 
 const DNA_SUPPORTED_MARKET_KEYS = new Set<string>([
@@ -60,47 +66,47 @@ function DashboardOverview() {
 
   const win = useApi(() => WIN_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.win,
-    cacheKey: `dashboard-win:${date}`,
+    cacheKey: marketCacheKey(WIN_MARKET.key, date),
   });
   const gg = useApi(() => GG_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.gg,
-    cacheKey: `dashboard-gg:${date}`,
+    cacheKey: marketCacheKey(GG_MARKET.key, date),
   });
   const over25 = useApi(() => OVER25_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.over25,
-    cacheKey: `dashboard-over25:${date}`,
+    cacheKey: marketCacheKey(OVER25_MARKET.key, date),
   });
   const over15 = useApi(() => OVER15_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.over15,
-    cacheKey: `dashboard-over15:${date}`,
+    cacheKey: marketCacheKey(OVER15_MARKET.key, date),
   });
   const draw = useApi(() => DRAW_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.draw,
-    cacheKey: `dashboard-draw:${date}`,
+    cacheKey: marketCacheKey(DRAW_MARKET.key, date),
   });
   const unders = useApi(() => UNDERS_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.unders,
-    cacheKey: `dashboard-unders:${date}`,
+    cacheKey: marketCacheKey(UNDERS_MARKET.key, date),
   });
   const corners = useApi(() => CORNERS_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.corners,
-    cacheKey: `dashboard-corners:${date}`,
+    cacheKey: marketCacheKey(CORNERS_MARKET.key, date),
   });
   const sot = useApi(() => SOT_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.sot,
-    cacheKey: `dashboard-sot:${date}`,
+    cacheKey: marketCacheKey(SOT_MARKET.key, date),
   });
   const fhvi = useApi(() => FHVI_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.fhvi,
-    cacheKey: `dashboard-fhvi:${date}`,
+    cacheKey: marketCacheKey(FHVI_MARKET.key, date),
   });
   const shvi = useApi(() => SHVI_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.shvi,
-    cacheKey: `dashboard-shvi:${date}`,
+    cacheKey: marketCacheKey(SHVI_MARKET.key, date),
   });
   const underdog = useApi(() => UNDERDOG_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.underdog,
-    cacheKey: `dashboard-underdog:${date}`,
+    cacheKey: marketCacheKey(UNDERDOG_MARKET.key, date),
   });
 
   const rawResults = [

@@ -29,6 +29,7 @@ never blocks a web worker for the minutes a full run takes.
 import os
 import sys
 import json
+import math
 import subprocess
 import traceback
 from datetime import datetime, timedelta
@@ -112,6 +113,11 @@ def ensure_defaults(rows, defaults: dict) -> list:
     stopped `r.fatigue_home.toFixed()` etc. from ever crashing the frontend
     again, regardless of which historical engine version wrote the file.
 
+    Non-finite floats (NaN / ±Infinity) written by older engine versions are
+    treated exactly like a missing value: replaced with the schema default
+    (`defaults[k]`, else 0) so the row stays JSON-safe and numerically
+    meaningful. Finite numbers are NEVER touched.
+
     Also stamps `_incomplete` (bool) + `_missing_fields` (list) onto each
     row that needed any defaulting. This does NOT change any field the
     frontend's TypeScript interfaces already expect — it's an additive,
@@ -128,9 +134,26 @@ def ensure_defaults(rows, defaults: dict) -> list:
         if not isinstance(r, dict):
             out.append(r)
             continue
-        missing = [k for k in defaults.keys() if k not in r]
+        # ── Non-finite / None repair (NaN / ±Inf / null → schema default) ──
+        # NaN and ±Infinity written by older engine versions are treated
+        # exactly like a missing value: replaced with the schema default
+        # (`defaults[k]`, else 0). `None` values on schema-covered keys get
+        # the same treatment (mirrors the historical in-process sanitizer,
+        # which served 0 for both NaN and null on schema fields, e.g.
+        # corners_stage1 odds). `None` on a key OUTSIDE the schema is a
+        # legitimate "no data" marker and is preserved as null.
+        # Finite numbers are NEVER touched.
+        clean_r = {}
+        for k, v in r.items():
+            if isinstance(v, float) and not math.isfinite(v):
+                clean_r[k] = defaults.get(k, 0)
+            elif v is None and k in defaults:
+                clean_r[k] = defaults[k]
+            else:
+                clean_r[k] = v
+        missing = [k for k in defaults.keys() if k not in clean_r]
         merged = dict(defaults)
-        merged.update(r)
+        merged.update(clean_r)
         for tier_key in ("tier", "Tier", "Category", "Rank", "gg_tier", "o15_tier",
                           "u25_tier", "u35_tier", "corner_tier", "Verdict"):
             if tier_key in merged and not merged[tier_key]:
@@ -473,6 +496,56 @@ def get_dna_profiles(date: str):
     return to_records(data)
 
 
+@app.get("/api/dna/v2/latest", tags=["Foundation"])
+def get_dna_v2_latest():
+    """Disk-only, no recompute — returns the NEWEST dated DNA v2 snapshot on
+    disk (not "today"), so it never silently empties when the pipeline has
+    not yet run for the current calendar date.
+
+    Resolution: enumerate output/cache/dna_v2__YYYY-MM-DD.json, keep only
+    strictly-valid dates, pick the maximum, and delegate to
+    get_dna_v2(selected_date). If no valid dated file exists the route
+    preserves the safe empty response shape.
+
+    This route MUST stay registered BEFORE /api/dna/v2/{date}: FastAPI
+    matches routes in registration order, so with the {date} variant first
+    the literal path segment "latest" was captured as a date and resolved
+    to the (missing) dna_v2__latest.json file, silently emptying the DNA
+    badge across the frontend."""
+    prefix = "dna_v2__"
+    suffix = ".json"
+    try:
+        names = os.listdir(store.CACHE_DIR)
+    except OSError:
+        names = []
+
+    dates = []
+    for name in names:
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        candidate = name[len(prefix):-len(suffix)]
+        # Strict YYYY-MM-DD match: exactly 10 chars, numeric with dashes at
+        # positions 4 and 7 (i.e. "dna_v2__YYYY-MM-DD.json").
+        if (
+            len(candidate) == 10
+            and candidate[:4].isdigit()
+            and candidate[4] == "-"
+            and candidate[5:7].isdigit()
+            and candidate[7] == "-"
+            and candidate[8:10].isdigit()
+        ):
+            try:
+                datetime.strptime(candidate, "%Y-%m-%d")
+            except ValueError:
+                continue
+            dates.append(candidate)
+
+    if not dates:
+        return {"dna_profiles": {}, "fixture_clashes": [], "market_factors": {}}
+
+    return get_dna_v2(max(dates))
+
+
 @app.get("/api/dna/v2/{date}", tags=["Foundation"])
 def get_dna_v2(date: str):
     engine_result, _ = store.load("dna_v2", date, default={})
@@ -484,12 +557,6 @@ def get_dna_v2(date: str):
         "fixture_clashes": fixture_clashes,
         "market_factors": market_factors or {},
     }
-
-
-@app.get("/api/dna/v2/latest", tags=["Foundation"])
-def get_dna_v2_latest():
-    """Disk-only, no recompute — reads today's saved DNA v2 file if present."""
-    return get_dna_v2(_today())
 
 
 @app.get("/api/underdog/{date}", tags=["Foundation"])
@@ -538,11 +605,15 @@ def get_u2s(date: str):
 
 @app.get("/api/win/apex/{date}", tags=["Win"])
 def get_win_apex(date: str):
-    # Prefer the exact date-tagged snapshot (main.py saves both); fall back
-    # to '__latest' only if this specific date was never snapshotted.
-    data, generated_at = store.load("win_apex", date, default=None)
+    # Exact-date snapshot ONLY. A request for a specific date must never
+    # silently serve another date's data — the old '__latest' fallback did
+    # exactly that whenever the dated file was missing. A missing dated
+    # file now returns an honest empty list (existing API contract for a
+    # date the pipeline hasn't produced), which the frontend renders as
+    # its real-empty state.
+    data, _generated_at = store.load("win_apex", date, default=None)
     if data is None:
-        data, generated_at = store.load("win_apex", None, default=[])
+        data = []
     return _settled(ensure_defaults(data, WIN_APEX_DEFAULTS), "win", date)
 
 

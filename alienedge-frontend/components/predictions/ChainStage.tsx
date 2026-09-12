@@ -16,10 +16,17 @@ interface ChainStageProps<T> {
   emptyMessage?: string;
   defaultOpen?: boolean;
   /**
-   * Typed demo rows when the live fetch fails or returns [].
-   * API call still always runs — same pattern as dashboard MOCK_PICKS.
+   * Typed demo rows. Used ONLY when demo is explicitly enabled — either
+   * this `demo` prop or the global NEXT_PUBLIC_DEMO_MODE=1 switch. The API
+   * call still always runs; a real empty response stays a real empty state
+   * and a failure stays an error — demo never replaces them silently.
    */
   fallbackData?: T[];
+  /**
+   * Explicit opt-in for demo fallback rendering for this stage.
+   * Defaults to the global NEXT_PUBLIC_DEMO_MODE switch.
+   */
+  demo?: boolean;
 }
 
 /**
@@ -28,8 +35,8 @@ interface ChainStageProps<T> {
  * composite responses (e.g. `{ gg, o15 }`, `{ u25, u35 }`) should call
  * `useApi` directly on the page and render one <ChainBranch> per branch.
  *
- * Render-time fallback mirrors dashboard `withFallback`: even if useApi
- * surfaces a Network Error, demo rows still paint when provided.
+ * Demo data (fallbackData) renders only when it is actually being shown,
+ * and is always tagged via the "· Demo" description suffix.
  */
 export function ChainStage<T>({
   title,
@@ -41,6 +48,7 @@ export function ChainStage<T>({
   emptyMessage,
   defaultOpen,
   fallbackData,
+  demo,
 }: ChainStageProps<T>) {
   // Cache key = stable stage title + serialised deps (includes date).
   // Means: navigate away → come back → instant paint from cache (no spinner).
@@ -49,26 +57,28 @@ export function ChainStage<T>({
   const { data, loading, error, isRefetching, isMock } = useApi(fetcher, deps, {
     fallback: fallbackData,
     cacheKey,
+    demo,
   });
 
   const liveRows = Array.isArray(data) ? data : [];
   const hasLiveRows = liveRows.length > 0;
   const hasFallback = Boolean(fallbackData && fallbackData.length > 0);
 
-  // Settled + empty/error → demo rows (dashboard parity). While loading,
-  // keep whatever useApi already seeded so tables don't flash empty.
+  // Settled + empty → REAL EMPTY; settled + error → error state; demo rows
+  // only when useApi actually flagged them (isMock). While loading, show
+  // whatever useApi seeded (real cache hit or explicit demo seed) — or the
+  // skeleton — so tables never flash fake rows in strict mode.
   const displayData: T[] | null = (() => {
-    if (loading) return hasLiveRows ? liveRows : hasFallback ? fallbackData! : data;
+    if (loading) return hasLiveRows ? liveRows : Array.isArray(data) ? data : null;
     if (hasLiveRows) return liveRows;
-    if (hasFallback) return fallbackData!;
+    if (isMock && hasFallback) return fallbackData!;
     return data;
   })();
 
   const displayHasRows = Array.isArray(displayData) && displayData.length > 0;
   const displayError = displayHasRows ? null : error;
-  const displayIsMock =
-    isMock ||
-    (displayHasRows && hasFallback && (!hasLiveRows || Boolean(error)));
+  // isMock is TRUE only while actual mock data is displayed.
+  const displayIsMock = isMock && displayHasRows;
 
   const demoDescription =
     displayIsMock && description
