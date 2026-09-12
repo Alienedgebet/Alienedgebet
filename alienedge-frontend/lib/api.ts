@@ -28,7 +28,17 @@ const api: AxiosInstance = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  if (config.timeout == null && config.url) {
+  // axios merges the instance-level `timeout` (DEFAULT_TIMEOUT_MS) into
+  // `config` BEFORE request interceptors run, so `config.timeout` is never
+  // null here — the previous `== null` guard made the HEAVY_TIMEOUT_MS branch
+  // dead code and capped every pick page at the normal timeout. Detect "no
+  // explicit per-request override" by checking for the default value instead,
+  // so heavy analytics chains (corners/gg/win/over15/over25) actually get
+  // HEAVY_TIMEOUT_MS while an explicit override (incl. 0 = no timeout) still wins.
+  if (
+    config.url &&
+    (config.timeout == null || config.timeout === DEFAULT_TIMEOUT_MS)
+  ) {
     config.timeout = HEAVY_ENDPOINT_PATTERN.test(config.url)
       ? HEAVY_TIMEOUT_MS
       : DEFAULT_TIMEOUT_MS;
@@ -1379,8 +1389,28 @@ export const healthApi = {
 };
 
 export const foundationApi = {
+  // DNA v1 is persisted on disk as a {team_id: profile} object, but the Win
+  // "Team DNA — Goal Intent Board" consumes a flat DnaProfile[] array
+  // (ChainStage drops non-array payloads). Normalize the object shape here so
+  // real profiles render regardless of whether the API has hoisted them yet —
+  // an array response is passed through untouched.
   getDNA: (date: string): Promise<AxiosResponse<DnaProfile[]>> =>
-    api.get(`/api/dna/${date}`),
+    api.get(`/api/dna/${date}`).then((res) => {
+      const raw = res.data as unknown;
+      if (Array.isArray(raw)) return res;
+      if (raw && typeof raw === "object") {
+        const rows = Object.entries(raw as Record<string, unknown>)
+          .map(([team_id, profile]) => ({
+            team_id,
+            ...(profile as Record<string, unknown>),
+          }))
+          .filter(
+            (row) => typeof (row as { team_name?: unknown }).team_name === "string"
+          );
+        return { ...res, data: rows as DnaProfile[] };
+      }
+      return { ...res, data: [] as DnaProfile[] };
+    }),
 
   getCalibration: (date: string): Promise<AxiosResponse<UnderdogHandshake[]>> =>
     api.get(`/api/calibration/${date}`),
