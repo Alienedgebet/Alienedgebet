@@ -140,7 +140,7 @@ export default function DnaAnalysisPage() {
   const searchParams = useSearchParams();
   const date = searchParams.get("date") ?? "";
 
-  const { data, loading, isRefetching } = useDnaV2();
+  const { data, loading, isRefetching } = useDnaV2(date || undefined);
 
   const market = VALID_MARKETS.has(params.market)
     ? (params.market as DnaV2MarketKey)

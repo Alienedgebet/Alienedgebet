@@ -7,8 +7,16 @@ import { isAxiosError, type AxiosError, type AxiosResponse } from "axios";
 // GENERIC DATA-FETCHING HOOK
 // Wraps any lib/api.ts call with loading/error/data state so
 // market pages don't hand-roll useEffect boilerplate per stage.
-// Optional `fallback` restores demo rows when the backend is down
-// (same contract as dashboard withFallback / MOCK_PICKS).
+//
+// DEMO CONTRACT (strict by default):
+//   A. Successful real non-empty response  → REAL DATA
+//   B. Successful real empty response      → REAL EMPTY (never demo)
+//   C. API/network/timeout/5xx failure     → API FAILURE (never demo)
+//   D. Demo/mock explicitly requested      → DEMO DATA (isMock=true)
+//
+// Demo is only applied when explicitly enabled, either per-hook via the
+// `demo` option or globally via NEXT_PUBLIC_DEMO_MODE=1. `isMock` is TRUE
+// only while actual mock data is displayed.
 // Optional `cacheKey` enables in-memory caching so revisiting a
 // page within the TTL window returns data instantly without a
 // network round-trip.
@@ -21,6 +29,11 @@ import { isAxiosError, type AxiosError, type AxiosResponse } from "axios";
 // yesterday's data if the user runs analysis across midnight.
 
 const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
+
+/** Explicit global demo-mode switch for the whole deployment. */
+export const DEMO_MODE_ENABLED =
+  process.env.NEXT_PUBLIC_DEMO_MODE === "1" ||
+  process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 
 interface CacheEntry<T> {
   data: T;
@@ -54,8 +67,9 @@ export function invalidateCache(prefix: string): void {
 
 export interface UseApiOptions<T> {
   /**
-   * Typed demo payload used when the request fails or returns empty.
-   * Live fetch still always runs — fallback never replaces the call.
+   * Typed demo payload used ONLY when demo is explicitly enabled (see
+   * `demo`). The live fetch always runs — fallback never replaces the call
+   * on its own.
    */
   fallback?: T | (() => T);
   /**
@@ -65,6 +79,15 @@ export interface UseApiOptions<T> {
    * e.g. `"win-apex:2026-08-07"`.
    */
   cacheKey?: string;
+  /**
+   * Explicit opt-in for demo fallback rendering. When `true`, `fallback`
+   * is used as the initial seed, to fill genuinely-empty engine responses,
+   * and when the request fails — always flagged with `isMock: true`. When
+   * `false` or omitted, the fallback is NEVER applied automatically: a real
+   * empty response stays a real empty state and failures surface as
+   * `error`. Defaults to `NEXT_PUBLIC_DEMO_MODE === "1"`.
+   */
+  demo?: boolean;
 }
 
 export interface UseApiResult<T> {
@@ -125,12 +148,16 @@ export function useApi<T>(
   deps: DependencyList,
   options?: UseApiOptions<T>
 ): UseApiResult<T> {
-  const { fallback, cacheKey } = options ?? {};
+  const { fallback, cacheKey, demo } = options ?? {};
+  // Demo fallback is OFF unless explicitly requested per-hook (`demo`)
+  // or explicitly enabled for the deployment (NEXT_PUBLIC_DEMO_MODE=1).
+  const demoActive = demo ?? DEMO_MODE_ENABLED;
 
-  // Seed priority: cache hit > fallback mock > null.
+  // Seed priority: cache hit > explicit demo fallback > null.
   // Evaluated once at mount — the effect handles subsequent dep changes.
   const initialCached = cacheKey ? getCached<T>(cacheKey) : null;
-  const seeded = initialCached ?? resolveFallback(fallback);
+  const seeded =
+    initialCached ?? (demoActive ? resolveFallback(fallback) : null);
   const hasSeed = seeded != null;
 
   const [data, setData] = useState<T | null>(seeded ?? null);
@@ -180,18 +207,15 @@ export function useApi<T>(
     const run = () => {
       if (cancelled) return;
 
-      let request: Promise<AxiosResponse<T>>;
-      try {
-        request = fetcher();
-      } catch (err: unknown) {
-        const message =
-          err instanceof Error ? err.message : "Request failed";
+      const applyFailure = (message: string) => {
         const fb = resolveFallback(fallbackRef.current);
-        if (fb !== undefined) {
+        if (demoActive && fb !== undefined) {
+          // D. Demo explicitly enabled → DEMO DATA (clearly flagged).
           setData(fb);
           setIsMock(true);
           setError(null);
         } else {
+          // C. API/network/timeout/5xx → API FAILURE (never silent demo).
           setData(null);
           setIsMock(false);
           setError(message);
@@ -199,6 +223,15 @@ export function useApi<T>(
         setLoading(false);
         setIsRefetching(false);
         hasLoadedOnce.current = true;
+      };
+
+      let request: Promise<AxiosResponse<T>>;
+      try {
+        request = fetcher();
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error ? err.message : "Request failed";
+        applyFailure(message);
         return;
       }
 
@@ -206,13 +239,17 @@ export function useApi<T>(
         .then((res) => {
           if (cancelled) return;
           const payload = res.data;
+          const empty = isEmptyPayload(payload);
           const fb = resolveFallback(fallbackRef.current);
-          if (isEmptyPayload(payload) && fb !== undefined) {
+          if (empty && demoActive && fb !== undefined) {
+            // D. Demo explicitly enabled → DEMO DATA (clearly flagged).
             setData(fb);
             setIsMock(true);
             setError(null);
           } else {
-            // Store live response in cache for future navigations.
+            // A/B. Real non-empty AND real empty are both served exactly
+            // as the backend returned them — a legitimate empty engine
+            // result (status=ok, row_count=0) must never become fake picks.
             if (cacheKey) setCached(cacheKey, payload);
             setData(payload);
             setIsMock(false);
@@ -229,19 +266,7 @@ export function useApi<T>(
             : err instanceof Error
               ? err.message
               : "Request failed";
-          const fb = resolveFallback(fallbackRef.current);
-          if (fb !== undefined) {
-            setData(fb);
-            setIsMock(true);
-            setError(null);
-          } else {
-            setData(null);
-            setIsMock(false);
-            setError(message);
-          }
-          setLoading(false);
-          setIsRefetching(false);
-          hasLoadedOnce.current = true;
+          applyFailure(message);
         });
     };
 

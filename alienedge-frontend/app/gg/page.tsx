@@ -324,11 +324,8 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
   );
 
   const live = precision.data;
-  const liveHasRows =
-    Boolean(live) &&
-    ((live!.gg?.length ?? 0) > 0 || (live!.o15?.length ?? 0) > 0);
-  const precisionPayload = liveHasRows ? live! : MOCK_GG_PRECISION;
-  const precisionIsMock = !liveHasRows || precision.isMock;
+  const precisionPayload = live;
+  const precisionIsMock = precision.isMock;
 
   return (
     <div
@@ -406,9 +403,9 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
               ? "GG precision engine — Poisson, venue BTTS, GK vulnerability · Demo"
               : "GG precision engine — Poisson, venue BTTS, GK vulnerability"
           }
-          data={precisionPayload.gg}
+          data={precisionPayload?.gg ?? []}
           loading={precision.loading}
-          error={null}
+          error={precision.error}
           columns={ggColumnsWithVerify}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No GG precision picks for this date."
@@ -424,9 +421,9 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
               ? "Over 1.5 precision — lambda, venue goals avg, fatigue · Demo"
               : "Over 1.5 precision — lambda, venue goals avg, fatigue"
           }
-          data={precisionPayload.o15}
+          data={precisionPayload?.o15 ?? []}
           loading={precision.loading}
-          error={null}
+          error={precision.error}
           columns={o15ColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Over 1.5 precision picks for this date."

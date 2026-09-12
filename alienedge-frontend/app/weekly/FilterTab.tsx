@@ -76,11 +76,14 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
         if (Array.isArray(raw) && raw.length > 0) {
           setRows(raw);
         } else {
-          filterMockRows();
+          // Real empty response stays a real empty state — never a silent
+          // swap back to the interactive mock rows.
+          setRows([]);
         }
       })
       .catch(() => {
-        filterMockRows();
+        // API failure surfaces honestly — never a silent mock swap.
+        setRows([]);
       })
       .finally(() => setLoading(false));
   };

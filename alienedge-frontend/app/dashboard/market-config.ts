@@ -8,6 +8,7 @@ import {
   specialsApi,
   underdogApi,
   parseProbability,
+  toFiniteNumber,
 } from "@/lib/api";
 import {
   Zap,
@@ -83,7 +84,7 @@ export const WIN_MARKET: MarketConfig = {
       res.map((p) => ({
         fixture: p.Fixture,
         tier: p.Category,
-        prob: p.Monte_Win_Prob,
+        prob: toFiniteNumber(p.Monte_Win_Prob) ?? undefined,
       }))
     ),
 };
@@ -100,7 +101,7 @@ export const GG_MARKET: MarketConfig = {
       res.map((p) => ({
         fixture: p.Fixture,
         tier: p.Category,
-        prob: p.Monte_GG_Prob,
+        prob: toFiniteNumber(p.Monte_GG_Prob) ?? undefined,
       }))
     ),
 };
@@ -115,7 +116,7 @@ export const OVER25_MARKET: MarketConfig = {
       res.map((p) => ({
         fixture: p.Fixture,
         tier: p.Category,
-        prob: p.Super_Monte_Prob,
+        prob: toFiniteNumber(p.Super_Monte_Prob) ?? undefined,
       }))
     ),
 };
@@ -131,7 +132,7 @@ export const OVER15_MARKET: MarketConfig = {
         fixture: p.Fixture,
         tier: p.Tier,
         prob: parseProbability(p.Base_Poisson),
-        score: p.Score,
+        score: toFiniteNumber(p.Score) ?? undefined,
       }))
     ),
 };
@@ -146,7 +147,9 @@ export const CORNERS_MARKET: MarketConfig = {
       res.map((p) => ({
         fixture: p.Fixture,
         tier: p.Tier,
-        score: p.Master_Score,
+        // Master_Score is a numeric STRING in production ("65"), which
+        // previously crashed EliteRankList's `value.toFixed(1)`.
+        score: toFiniteNumber(p.Master_Score) ?? undefined,
       }))
     ),
 };
@@ -175,13 +178,18 @@ export const DRAW_MARKET: MarketConfig = {
   icon: Scale,
   fetcher: (date) =>
     mapResponse(specialsApi.getDraw(date), (res) =>
-      res.draws.map((p) => ({
-        fixture: p.fixture,
-        tier: p.tier,
-        prob: p.mc_draw_prob * 100,
-        score: p.composite_draw_score,
-        odds: p.draw_odds,
-      }))
+      res.draws.map((p) => {
+        const drawProb = toFiniteNumber(p.mc_draw_prob);
+        return {
+          fixture: p.fixture,
+          tier: p.tier,
+          // mc_draw_prob is stored on a 0–1 scale; keep the existing *100
+          // percentage mapping but only when the value is numeric.
+          prob: drawProb != null ? drawProb * 100 : undefined,
+          score: toFiniteNumber(p.composite_draw_score) ?? undefined,
+          odds: toFiniteNumber(p.draw_odds) ?? undefined,
+        };
+      })
     ),
 };
 
@@ -192,12 +200,17 @@ export const UNDERS_MARKET: MarketConfig = {
   icon: TrendingDown,
   fetcher: (date) =>
     mapResponse(specialsApi.getUnders(date), (res) =>
-      res.u25.map((p) => ({
-        fixture: p.fixture,
-        tier: p.u25_tier,
-        prob: p.mc_u25_prob != null ? p.mc_u25_prob * 100 : undefined,
-        score: p.u25_score,
-      }))
+      res.u25.map((p) => {
+        const u25Prob = toFiniteNumber(p.mc_u25_prob);
+        return {
+          fixture: p.fixture,
+          tier: p.u25_tier,
+          // mc_u25_prob is stored on a 0–1 scale; keep the existing *100
+          // percentage mapping but only when the value is numeric.
+          prob: u25Prob != null ? u25Prob * 100 : undefined,
+          score: toFiniteNumber(p.u25_score) ?? undefined,
+        };
+      })
     ),
 };
 
@@ -212,7 +225,7 @@ export const SOT_MARKET: MarketConfig = {
         fixture: p.Fixture,
         tier: p.Verdict,
         prob: parseProbability(p["Poisson_Over_8.5"]),
-        score: p.Proj_SOT,
+        score: toFiniteNumber(p.Proj_SOT) ?? undefined,
       }))
     ),
 };
@@ -227,7 +240,7 @@ export const FHVI_MARKET: MarketConfig = {
       res.map((p) => ({
         fixture: p.fixture,
         tier: p.fhvi_label,
-        score: p.fhvi_score,
+        score: toFiniteNumber(p.fhvi_score) ?? undefined,
       }))
     ),
 };
@@ -242,7 +255,7 @@ export const SHVI_MARKET: MarketConfig = {
       res.map((p) => ({
         fixture: p.fixture,
         tier: p.shvi_label,
-        score: p.shvi_score,
+        score: toFiniteNumber(p.shvi_score) ?? undefined,
       }))
     ),
 };

@@ -133,13 +133,12 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
     [dnaV2, date]
   );
 
-  // Render-time fallback — same contract as dashboard withFallback / ChainStage.
+  // Real data stays real; real empty stays real empty; demo rows appear
+  // only when useApi flagged them (demo explicitly enabled). API failures
+  // surface through ChainBranch's error state below.
   const live = result.data;
-  const liveHasRows =
-    Boolean(live) &&
-    ((live!.u25?.length ?? 0) > 0 || (live!.u35?.length ?? 0) > 0);
-  const payload = liveHasRows ? live! : MOCK_UNDERS;
-  const isMock = !liveHasRows || result.isMock;
+  const payload = live;
+  const isMock = result.isMock;
 
   return (
     <div
@@ -175,9 +174,9 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
               ? "Defensive Under Empire — head 1/2 · Demo"
               : "Defensive Under Empire — head 1/2"
           }
-          data={payload.u25}
+          data={payload?.u25 ?? []}
           loading={result.loading}
-          error={null}
+          error={result.error}
           columns={u25ColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Under 2.5 picks for this date."
@@ -193,9 +192,9 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
               ? "Defensive Under Empire — head 2/2 · Demo"
               : "Defensive Under Empire — head 2/2"
           }
-          data={payload.u35}
+          data={payload?.u35 ?? []}
           loading={result.loading}
-          error={null}
+          error={result.error}
           columns={u35ColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No Under 3.5 picks for this date."
