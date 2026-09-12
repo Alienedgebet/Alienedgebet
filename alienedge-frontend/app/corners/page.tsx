@@ -125,7 +125,7 @@ const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <span className="font-medium text-text-primary">{r.fixture_name}</span>,
   },
   {
     key: "predicted",
@@ -133,7 +133,7 @@ const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
     align: "right",
     render: (r) => `${r.stage1_predicted_corners} → ${r.stage2_predicted_corners}`,
   },
-  { key: "expected", header: "Expected Total", align: "right", render: (r) => r.expected_total_corners },
+  { key: "expected", header: "Predicted Corners", align: "right", render: (r) => r.predicted_corners },
   { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.corner_tier} /> },
   { key: "style", header: "Style Alignment", render: (r) => r.style_alignment },
   { key: "confidence", header: "Avg Confidence", align: "right", render: (r) => r.avg_confidence },

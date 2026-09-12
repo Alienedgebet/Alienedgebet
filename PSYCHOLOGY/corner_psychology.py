@@ -36,7 +36,7 @@ load_dotenv()
 
 # This ensures the aggregator finds the files in the correct folders
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
