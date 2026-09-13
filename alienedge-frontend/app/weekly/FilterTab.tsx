@@ -33,7 +33,13 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
   // Navigation & Scope
   const [scope, setScope] = useState<"single" | "weekly">("weekly");
   const [date, setDate] = useState(getTodayDate());
-  const [startDate, setStartDate] = useState(getTodayDate());
+  // The default scope is "7-Day Range", but both bounds previously defaulted to
+  // today, making the weekly request silently collapse to a single (usually
+  // empty) day. Anchor the start 6 days back so "weekly" is actually a week.
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date(Date.now() - 6 * 86400000);
+    return d.toISOString().split("T")[0];
+  });
   const [endDate, setEndDate] = useState(getTodayDate());
 
   // Mode & Risk State
