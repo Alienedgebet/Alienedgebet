@@ -8,7 +8,13 @@ from settlement_service import extract_match_data
 
 load_dotenv()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# daily_archiver.py lives in the repo ROOT (not a subpackage), so a single
+# dirname() resolves to the backend root. The old double-dirname() resolved to
+# the PARENT directory (/var/www) and would have written archive_{date}.json to
+# /var/www/output/ while settlement (and every other component) uses
+# /var/www/backend/output/. Same class of bug that 242b8f6 fixed in
+# live_cache.py — one canonical output hierarchy for the whole application.
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 API_KEY = os.getenv("SPORTMONKS_API_KEY")
 
