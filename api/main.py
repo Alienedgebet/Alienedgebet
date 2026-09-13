@@ -860,12 +860,24 @@ def get_live_prematch():
 def get_live_validation():
     alerts = _read_json(os.path.join(DATA_DIR, "validated_picks.json"), {})
     state = _read_json(os.path.join(DATA_DIR, "validation_state.json"), {})
+    board = _read_json(os.path.join(DATA_DIR, "validation_board.json"), {})
     alert_list = list(alerts.values()) if isinstance(alerts, dict) else alerts
+    if not isinstance(alert_list, list):
+        alert_list = []
+    # The frontend LiveValidationBoard expects `total_live`, `cycle` and a real
+    # `matches` list. Those previously defaulted to hardcoded empties because
+    # the stage-2 console board was printed but never persisted; it is now
+    # written to validation_board.json by run_live_validator_once().
     return {
-        "cycle": 1,
-        "total_tracked": len(state) if isinstance(state, (list, dict)) else 0,
-        "alerts": alert_list if isinstance(alert_list, list) else [],
-        "matches": [],
+        "cycle": board.get("cycle", 1) if isinstance(board, dict) else 1,
+        "total_live": board.get("total_live", 0) if isinstance(board, dict) else 0,
+        "total_tracked": (
+            board.get("total_tracked")
+            if isinstance(board, dict) and board.get("total_tracked") is not None
+            else (len(state) if isinstance(state, (list, dict)) else 0)
+        ),
+        "alerts": alert_list,
+        "matches": board.get("matches", []) if isinstance(board, dict) else [],
     }
 
 

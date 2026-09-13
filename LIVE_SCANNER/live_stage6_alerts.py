@@ -503,131 +503,139 @@ class SupremeOrchestrator:
         logging.info("═" * 70)
 
         while True:
-            self.cycle += 1
-            db = self.load_all_prematch_data()
-
-            if not db:
-                logging.info(
-                    "[MOCK MODE] No prematch report found. "
-                    "Live-only monitoring active."
-                )
-
-            self.maintenance_thread(db)
-
-            try:
-                live_data = self.fetch_live_scores()
-                live_ids  = {str(fx['id']) for fx in live_data}
-
-                self.cleanup_stale_memory(live_ids)
-
-                # ── FIX: Build name→fixture_id map for fallback matching ──
-                # Code 2's live_predictions.json uses fixture IDs from the
-                # scheduled endpoint. The inplay endpoint may return the
-                # same fixture under a different ID in some competitions.
-                # We build a name-based lookup as a fallback.
-                live_name_map = {}
-                for fx in live_data:
-                    name_key = self._name_key(fx.get('name', ''))
-                    live_name_map[name_key] = str(fx['id'])
-
-                cycle_matches = []
-
-                for fx in live_data:
-                    f_id     = str(fx['id'])
-                    pre      = db.get(f_id, {})
-
-                    # ── FIX: Name-based fallback for prematch context ──────
-                    # If the scheduled fixture ID doesn't match the live ID,
-                    # try matching by team names
-                    if not pre and db:
-                        name_key = self._name_key(fx.get('name', ''))
-                        for db_fid, db_entry in db.items():
-                            db_name = self._name_key(
-                                db_entry.get('fixture',
-                                db_entry.get('name', ''))
-                            )
-                            if db_name and db_name == name_key:
-                                pre = db_entry
-                                break
-
-                    minute   = self.extract_minute(fx)
-                    if not minute or minute <= 0: continue
-
-                    self.update_market_settlement(f_id, fx)
-
-                    h_s, a_s = self.extract_stats(fx)
-                    intel    = self.Brain.analyze_match_state(
-                        f_id, h_s, a_s, minute, fx.get('events', [])
-                    )
-                    ctx        = self.extract_impact_context(fx)
-                    structural = self.Detective.investigate(ctx, pre)
-
-                    # NEW: real live key-player-lost tracking, ported from
-                    # the same idea as live_stage2_verification.py — but
-                    # self-contained here so Code 6 doesn't depend on Stage
-                    # 2 running. Key-11 sets are built lazily once both
-                    # squads are cached, then substitution events are
-                    # checked against those sets every cycle.
-                    key_loss = self._track_key_player_loss(f_id, ctx, fx)
-
-                    fixture_name = fx.get('name', f_id)
-
-                    active_rules = list_rules(active_only=True)
-
-                    user_alerts   = self.UserLogic.evaluate(
-                        f_id, intel, structural, pre, minute, key_loss, active_rules
-                    )
-                    fired_this    = []
-
-                    for ua in user_alerts:
-                        if (ua['tier'] in ["🔥 PREMIUM","✅ STANDARD"] and
-                                ua['id'] not in ALERT_HISTORY):
-                            self.fire_alert(
-                                f_id, fixture_name,
-                                ua['tier'], ua['msg'], ua['conf'], minute,
-                                user_id=ua.get('user_id'),
-                                rule_id=ua.get('rule_id'),
-                                rule_label=ua.get('rule_label'),
-                            )
-                            ALERT_HISTORY.add(ua['id'])
-                            fired_this.append(ua)
-                        elif ua['tier'] == "📊 MONITOR":
-                            fired_this.append(ua)
-
-                    self.process_ai_gates(
-                        f_id, fixture_name, minute,
-                        intel, structural, pre
-                    )
-
-                    cycle_matches.append({
-                        "name":       fixture_name,
-                        "id":         f_id,
-                        "minute":     minute,
-                        "conf":       intel['match']['confidence_score'],
-                        "h_pressure": intel['match']['h_pressure_share'],
-                        "a_pressure": intel['match']['a_pressure_share'],
-                        "chaos":      intel['match']['chaos_index'],
-                        "h_xg":       intel['home']['live_xg'],
-                        "a_xg":       intel['away']['live_xg'],
-                        "h_sot":      intel['home']['sot'],
-                        "a_sot":      intel['away']['sot'],
-                        "structural": structural.get('status','OK'),
-                        "key_loss":   key_loss,
-                        "alerts":     fired_this,
-                        "in_db":      bool(pre)
-                    })
-
-                self.print_orchestrator_board(
-                    cycle_matches, len(live_data), len(db)
-                )
-                self.save_orchestrator_board(
-                    cycle_matches, len(live_data), len(db)
-                )
-
-            except Exception as e:
-                logging.error(f"Engine Loop Failure: {e}")
-
+            self.run_single_cycle()
             time.sleep(45)
+
+    def run_single_cycle(self):
+        """One full analysis pass: prematch load, live context, alerts,
+        and orchestrator-board save. Called by run() and by the 24/7
+        runner so Stage 6 does not block the shared scheduler with its
+        own infinite loop."""
+        self.cycle += 1
+        db = self.load_all_prematch_data()
+
+        if not db:
+            logging.info(
+                "[MOCK MODE] No prematch report found. "
+                "Live-only monitoring active."
+            )
+
+        self.maintenance_thread(db)
+
+        try:
+            live_data = self.fetch_live_scores()
+            live_ids  = {str(fx['id']) for fx in live_data}
+
+            self.cleanup_stale_memory(live_ids)
+
+            # ── FIX: Build name→fixture_id map for fallback matching ──
+            # Code 2's live_predictions.json uses fixture IDs from the
+            # scheduled endpoint. The inplay endpoint may return the
+            # same fixture under a different ID in some competitions.
+            # We build a name-based lookup as a fallback.
+            live_name_map = {}
+            for fx in live_data:
+                name_key = self._name_key(fx.get('name', ''))
+                live_name_map[name_key] = str(fx['id'])
+
+            cycle_matches = []
+
+            for fx in live_data:
+                f_id     = str(fx['id'])
+                pre      = db.get(f_id, {})
+
+                # ── FIX: Name-based fallback for prematch context ──────
+                # If the scheduled fixture ID doesn't match the live ID,
+                # try matching by team names
+                if not pre and db:
+                    name_key = self._name_key(fx.get('name', ''))
+                    for db_fid, db_entry in db.items():
+                        db_name = self._name_key(
+                            db_entry.get('fixture',
+                            db_entry.get('name', ''))
+                        )
+                        if db_name and db_name == name_key:
+                            pre = db_entry
+                            break
+
+                minute   = self.extract_minute(fx)
+                if not minute or minute <= 0: continue
+
+                self.update_market_settlement(f_id, fx)
+
+                h_s, a_s = self.extract_stats(fx)
+                intel    = self.Brain.analyze_match_state(
+                    f_id, h_s, a_s, minute, fx.get('events', [])
+                )
+                ctx        = self.extract_impact_context(fx)
+                structural = self.Detective.investigate(ctx, pre)
+
+                # NEW: real live key-player-lost tracking, ported from
+                # the same idea as live_stage2_verification.py — but
+                # self-contained here so Code 6 doesn't depend on Stage
+                # 2 running. Key-11 sets are built lazily once both
+                # squads are cached, then substitution events are
+                # checked against those sets every cycle.
+                key_loss = self._track_key_player_loss(f_id, ctx, fx)
+
+                fixture_name = fx.get('name', f_id)
+
+                active_rules = list_rules(active_only=True)
+
+                user_alerts   = self.UserLogic.evaluate(
+                    f_id, intel, structural, pre, minute, key_loss, active_rules
+                )
+                fired_this    = []
+
+                for ua in user_alerts:
+                    if (ua['tier'] in ["🔥 PREMIUM","✅ STANDARD"] and
+                            ua['id'] not in ALERT_HISTORY):
+                        self.fire_alert(
+                            f_id, fixture_name,
+                            ua['tier'], ua['msg'], ua['conf'], minute,
+                            user_id=ua.get('user_id'),
+                            rule_id=ua.get('rule_id'),
+                            rule_label=ua.get('rule_label'),
+                        )
+                        ALERT_HISTORY.add(ua['id'])
+                        fired_this.append(ua)
+                    elif ua['tier'] == "📊 MONITOR":
+                        fired_this.append(ua)
+
+                self.process_ai_gates(
+                    f_id, fixture_name, minute,
+                    intel, structural, pre
+                )
+
+                cycle_matches.append({
+                    "name":       fixture_name,
+                    "id":         f_id,
+                    "minute":     minute,
+                    "conf":       intel['match']['confidence_score'],
+                    "h_pressure": intel['match']['h_pressure_share'],
+                    "a_pressure": intel['match']['a_pressure_share'],
+                    "chaos":      intel['match']['chaos_index'],
+                    "h_xg":       intel['home']['live_xg'],
+                    "a_xg":       intel['away']['live_xg'],
+                    "h_sot":      intel['home']['sot'],
+                    "a_sot":      intel['away']['sot'],
+                    "structural": structural.get('status','OK'),
+                    "key_loss":   key_loss,
+                    "alerts":     fired_this,
+                    "in_db":      bool(pre)
+                })
+
+            self.print_orchestrator_board(
+                cycle_matches, len(live_data), len(db)
+            )
+            self.save_orchestrator_board(
+                cycle_matches, len(live_data), len(db)
+            )
+
+        except Exception as e:
+            logging.error(f"Engine Loop Failure: {e}")
+
+
 
     # ── HELPER: normalise fixture name for matching ───────────────────────
     def _name_key(self, name):

@@ -19,7 +19,7 @@ try:
     from LIVE_SCANNER.live_stage3_incoming import run_incoming_forensic_engine
     from LIVE_SCANNER.live_stage4_danger import run_danger_forensic_aggregator
     from LIVE_SCANNER.live_stage5_aggregator import run_master_aggregator
-    from LIVE_SCANNER.live_stage2_verification import run_live_validator_engine
+    from LIVE_SCANNER.live_stage2_verification import run_live_validator_once
     from LIVE_SCANNER.live_stage6_alerts import SupremeOrchestrator
 except ImportError as e:
     logging.error(f"Import error in live engines: {e}")
@@ -67,24 +67,21 @@ def live_scanner_master_loop():
             logging.error(f"[Stage 5 Aggregator Handshake] Error: {e}")
 
         # ── 5. STAGE 2: IN-PLAY MINUTE-BY-MINUTE VALIDATOR ───────────────────
+        # Single-cycle variant: the legacy run_live_validator_engine() owns an
+        # infinite while-True loop and would block stages 6 forever.
         try:
-            run_live_validator_engine()
+            run_live_validator_once(cycle_count)
         except Exception as e:
             logging.error(f"[Stage 2 Validator] Error: {e}")
 
         # ── 6. STAGE 6: EVALUATION & USER ALERTS ─────────────────────────────
-        # Note: If your Code 6 `SupremeOrchestrator.run()` is an infinite loop,
-        # running `orchestrator.run_single_cycle()` or running Code 6 in a separate
-        # thread keeps the loop moving smoothly every 45-60 seconds.
+        # run_single_cycle() performs one full pass (prematch load → live
+        # analysis → fire_alert → save_orchestrator_board) and writes
+        # orchestrator_board.json + ready_to_push.json for the API. The old
+        # block only refreshed memory and never ran the actual evaluation,
+        # which is why /api/live/orchestrator and /api/live/alerts were empty.
         try:
-            # Refresh prematch memory & run evaluation
-            db = orchestrator.load_all_prematch_data()
-            orchestrator.maintenance_thread(db)
-            live_data = orchestrator.fetch_live_scores()
-            live_ids = {str(fx['id']) for fx in live_data}
-            orchestrator.cleanup_stale_memory(live_ids)
-            
-            # (Or call orchestrator.run() directly if running standalone)
+            orchestrator.run_single_cycle()
         except Exception as e:
             logging.error(f"[Stage 6 Orchestrator] Error: {e}")
 

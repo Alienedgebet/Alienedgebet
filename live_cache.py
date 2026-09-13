@@ -8,7 +8,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# live_cache.py lives in the repo ROOT (not a subpackage), so a single
+# dirname() resolves to the backend root. The old double-dirname() resolved
+# to the PARENT directory (/var/www) and wrote live_inplay_cache.json to
+# /var/www/data/ while the API and every LIVE_SCANNER stage read/write
+# /var/www/backend/data/. One canonical path for all components.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LIVE_CACHE_FILE = os.path.join(DATA_DIR, "live_inplay_cache.json")
 PREMATCH_CACHE_FILE = os.path.join(DATA_DIR, "live_prematch_cache.json")
