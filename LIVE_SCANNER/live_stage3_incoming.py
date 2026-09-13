@@ -21,7 +21,11 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 # NOTE: Code 9 (Aggregator) reads incoming_predictions.json
 PREDICTIONS_FILE = os.path.join(DATA_DIR, "incoming_predictions.json")
-CACHE_FILE       = os.path.join(DATA_DIR, "squad_cache.json")
+# Stage 3's player records are {id, name, pos, worth, ...} — incompatible with
+# stage 6's {worth, doom, pos} players written to the shared squad_cache.json.
+# Sharing caused stage 3 to KeyError('id') on cached teams every cycle, which
+# silently skipped the incoming feed write. Give stage 3 its own cache file.
+CACHE_FILE       = os.path.join(DATA_DIR, "squad_cache_stage3_incoming.json")
 
 # ==============================================================================
 # SYSTEM CONFIGURATION
@@ -258,9 +262,9 @@ def get_squad_data_standardized(team_id):
         hid = aid = None
         for pt in fx.get("participants", []):
             if pt.get("meta", {}).get("location") == "home":
-                hid = safe_int(pt["id"])
+                hid = safe_int(pt.get("id"))
             else:
-                aid = safe_int(pt["id"])
+                aid = safe_int(pt.get("id"))
 
         h_g, a_g = extract_goals_v3(fx.get("scores", []))
         if h_g is not None and a_g is not None:
@@ -410,7 +414,7 @@ def run_incoming_forensic_engine():
             m_stats = []
 
             for team in fx.get("participants", []):
-                tid = safe_int(team['id'])
+                tid = safe_int(team.get('id'))
                 loc = team.get('meta', {}).get('location')
 
                 sq_data   = get_squad_data_standardized(tid)

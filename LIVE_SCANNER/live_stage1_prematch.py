@@ -16,7 +16,12 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 PREDICTIONS_FILE = os.path.join(DATA_DIR, "live_predictions.json")
-CACHE_FILE = os.path.join(DATA_DIR, "squad_cache.json")
+# Stage 1 keeps its own FLAT squad cache ({pid: {...}}) and must not read the
+# shared squad_cache.json written by stages 3/6 in the NEW
+# {"players": {...}, "team_avg_leak": ...} format — loading that here makes
+# get_squad_data_standardized() return the wrong shape and raises
+# KeyError('pos') for every fixture on subsequent cycles.
+CACHE_FILE = os.path.join(DATA_DIR, "squad_cache_stage1_prematch.json")
 # NEW: persists the GK liability + missing-key-player audit that was
 # previously only printed to console. Additive-only — does not change
 # PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED, or anything Live Match Edges

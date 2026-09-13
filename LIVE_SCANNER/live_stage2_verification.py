@@ -17,9 +17,16 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 PREDICTIONS_FILE     = os.path.join(DATA_DIR, "live_predictions.json")
 VALIDATED_OUTPUT_FILE = os.path.join(DATA_DIR, "validated_picks.json")
-CACHE_FILE           = os.path.join(DATA_DIR, "squad_cache.json")
+# NOTE: stage 2 keeps its own FLAT squad cache ({pid: {...}}) and must not
+# read the shared squad_cache.json written by stages 1/3/6 in the NEW
+# {"players": {...}, "team_avg_leak": ...} format — loading that here makes
+# extract_live_context()'s get_k() raise KeyError('pos') on every fixture.
+CACHE_FILE           = os.path.join(DATA_DIR, "squad_cache_stage2_validator.json")
 STATE_FILE           = os.path.join(DATA_DIR, "validation_state.json")
 ALERT_FILE           = os.path.join(DATA_DIR, "alert_history.json")
+# Persisted cycle board so /api/live/validation can return real `matches`
+# and `total_live` (the console print_cycle_board output was never saved).
+BOARD_FILE           = os.path.join(DATA_DIR, "validation_board.json")
 
 # ==============================================================================
 # CONFIGURATION
@@ -195,12 +202,27 @@ def engine_1_rule_validator(data, pick):
 # ENGINE 2 — STRUCTURAL STACKER (thresholds at 50%)
 # ==============================================================================
 def engine_2_structural_stacker(data, target_loc):
+    def get_s(d, k): return int(d.get(k, 0))
+
+    # Match-level markets (O2.5 / U2.5 / GG) have no single target side.
+    # Evaluate BOTH teams using their combined two-team match data instead
+    # of a home/away dominance split. Do NOT map None → "home".
+    if target_loc is None:
+        h = data['home']['stats']
+        a = data['away']['stats']
+        tot_sot = get_s(h, 'shots-on-target') + get_s(a, 'shots-on-target')
+        tot_box = get_s(h, 'box') + get_s(a, 'box')
+        sot_ok  = tot_sot >= 2
+        box_ok  = tot_box >= 2
+        return (sot_ok or box_ok), (
+            f"Combined SOT {tot_sot} ≥ 2: {'✅' if sot_ok else '❌'} | "
+            f"Combined box touches {tot_box} ≥ 2: {'✅' if box_ok else '❌'}"
+        )
+
     if target_loc == "match": target_loc = "home"
     opp_loc = "away" if target_loc == "home" else "home"
     exp = data[target_loc]['stats']
     opp = data[opp_loc]['stats']
-
-    def get_s(d, k): return int(d.get(k, 0))
 
     signals     = []
     signal_pass = []
@@ -537,7 +559,7 @@ def extract_live_context(fixture):
             p_off = str(e.get("player_id"))
             if p_off in cache[f"{loc[0]}_key"]:
                 impact[loc]["key_sub_off"] += 1
-                impact[loc]["worth_lost"]  += cache[f"{loc}_sq"].get(p_off, {"worth": 0})["worth"]
+                impact[loc]["worth_lost"]  += cache[f"{loc[0]}_sq"].get(p_off, {"worth": 0})["worth"]
 
     return {
         "id":     f_id,
@@ -588,6 +610,69 @@ def print_cycle_board(cycle_log, total_live, total_tracked, cycle_number):
 # ==============================================================================
 # 📦 MAIN ENGINE EXECUTION
 # ==============================================================================
+def run_live_validator_once(cycle_number=1):
+    """One validation cycle (no own loop).
+
+    The 24/7 runner calls this once per scheduler cycle. The legacy
+    run_live_validator_engine() owns an infinite while-True loop and would
+    block every stage after it (stage 6 never ran, so orchestrator_board.json
+    and ready_to_push.json were never produced). This returns the cycle board
+    and persists it to validation_board.json so /api/live/validation can serve
+    real `matches` + `total_live` instead of hardcoded empties.
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR,   exist_ok=True)
+
+    if not API_TOKEN:
+        return {}
+
+    load_memory()
+
+    try:
+        with open(PREDICTIONS_FILE, 'r') as f:
+            FEED_A = json.load(f)
+    except Exception:
+        FEED_A = {}
+
+    cycle_log = []
+
+    try:
+        from backend.live_cache import get_live_scores_cached
+    except ImportError:
+        from live_cache import get_live_scores_cached
+
+    live_matches = get_live_scores_cached()
+    tracked_count = 0
+
+    for fx in live_matches:
+        f_id = str(fx.get("id"))
+        if f_id in FEED_A:
+            tracked_count += 1
+            try:
+                ctx = extract_live_context(fx)
+                process_triple_phase_audit(ctx, FEED_A[f_id], cycle_log)
+            except Exception as e:
+                print(f"  ⚠️  Error processing {f_id}: {e}")
+
+    print_cycle_board(cycle_log, len(live_matches), tracked_count, cycle_number)
+
+    board = {
+        "cycle":        cycle_number,
+        "total_live":   len(live_matches),
+        "total_tracked": tracked_count,
+        "matches":      cycle_log,
+    }
+    try:
+        with open(BOARD_FILE, 'w') as f:
+            json.dump(board, f)
+    except Exception as e:
+        print(f"Error saving validation board: {e}", file=sys.stderr)
+
+    save_memory()
+
+    return board
+
+
 def run_live_validator_engine():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR,   exist_ok=True)
