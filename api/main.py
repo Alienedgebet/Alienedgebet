@@ -171,12 +171,50 @@ def ensure_defaults(rows, defaults: dict) -> list:
     return out
 
 
+# Market keys grade_row() actually implements. Any market outside this set has
+# no verdict math — routing it through grade_row would fabricate a LOST verdict
+# (grade_row's default is won=False), the same class of silent error the
+# "win"-keyed draw rows suffered. Those rows get an explicit PENDING payload
+# instead, so the UI never shows a false ❌ for an ungradeable market.
+SUPPORTED_SETTLEMENT_MARKETS = {
+    "win", "1x2",
+    "gg", "btts",
+    "o25", "over25", "over 2.5",
+    "o15", "over15", "over 1.5",
+    "draw", "draws",
+    "u25", "under25", "under 2.5",
+    "corners",
+    "shvi", "sh_goal",
+    "u2s",
+}
+
+
 def _settled(data, market_type: str = "win", date_str: Optional[str] = None):
     if not isinstance(data, list) or len(data) == 0:
         return data
+    if str(market_type).lower() not in SUPPORTED_SETTLEMENT_MARKETS:
+        # No grading branch for this market (e.g. "sot"): PENDING, never a
+        # fabricated verdict. Shape mirrors grade_row's SCHEDULED payload so
+        # the frontend contract is unchanged.
+        pending = {
+            "status": "SCHEDULED",
+            "score": "—",
+            "minute": None,
+            "verdict": "PENDING",
+            "badge_text": "—",
+            "note": "Awaiting Kickoff",
+        }
+        return [({**row, "verification": dict(pending)} if isinstance(row, dict) else row)
+                for row in data]
     try:
         live_db = get_live_scores_cached()
-        return settle_predictions(data, live_db, market_type=market_type)
+        # date_str (the date of the picks being verified) is what activates
+        # the persistent finished-results layer: settlement additionally
+        # loads output/archive_{date_str}.json so WON/LOST survives after a
+        # fixture leaves the in-play feed, and historical dates settle from
+        # their own archive instead of staying PENDING forever. Without it
+        # settlement behaves exactly as before (live feed only).
+        return settle_predictions(data, live_db, market_type=market_type, date_str=date_str)
     except Exception:
         print(f"[SETTLEMENT WARNING] {market_type}: {traceback.format_exc()}")
         return data
@@ -766,7 +804,7 @@ def get_draw(date: str):
     parity_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     amateurs_raw = raw[2] if isinstance(raw, list) and len(raw) > 2 else []
     return {
-        "draws": _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "win", date),
+        "draws": _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "draw", date),
         "parity_list": ensure_defaults(parity_raw, DRAW_DEFAULTS),
         "amateurs_list": ensure_defaults(amateurs_raw, DRAW_DEFAULTS),
     }
@@ -778,7 +816,7 @@ def get_unders(date: str):
     u25_raw = raw[0] if isinstance(raw, list) and len(raw) > 0 else []
     u35_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     return {
-        "u25": _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "o25", date),
+        "u25": _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "u25", date),
         "u35": ensure_defaults(u35_raw, UNDERS_DEFAULTS),
     }
 
