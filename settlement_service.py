@@ -192,9 +192,27 @@ def settle_predictions(predictions, live_matches_db, market_type="win"):
     Settles a list of prediction rows against actual live/finished matches.
     PRIORITY 1: Match by fixture_id (exact & unambiguous)
     PRIORITY 2: Fallback to clean_n() name key
+
+    `live_matches_db` is the raw SportMonks v3 in-play feed (from
+    live_cache.get_live_scores_cached()) — objects keyed by `id`, with
+    `participants` / `scores` / `statistics` / `state`. The maps below need
+    the STANDARDIZED shape that extract_match_data() produces (`fixture_id`,
+    `home_team`, `away_team`, `has_started`, `is_finished`, `h_ft`, `a_ft`,
+    …), so normalize every raw fixture first. Without this the lookups were
+    always empty and every row fell back to the SCHEDULED/"Awaiting Kickoff"
+    (PENDING) payload — leaving the frontend Verify badge permanently blank.
     """
-    id_map = {str(fx.get("fixture_id")): fx for fx in live_matches_db if fx.get("fixture_id")}
-    name_map = {get_match_key(f"{fx.get('home_team', '')} vs {fx.get('away_team', '')}"): fx for fx in live_matches_db if fx.get("home_team")}
+    std_db = []
+    for fx in (live_matches_db or []):
+        if not isinstance(fx, dict):
+            continue
+        if all(k in fx for k in ("fixture_id", "home_team", "has_started")):
+            std_db.append(fx)  # already standardized — pass through untouched
+        else:
+            std_db.append(extract_match_data(fx))
+
+    id_map = {str(fx.get("fixture_id")): fx for fx in std_db if fx.get("fixture_id")}
+    name_map = {get_match_key(f"{fx.get('home_team', '')} vs {fx.get('away_team', '')}"): fx for fx in std_db if fx.get("home_team")}
 
     enriched = []
     for row in predictions:
