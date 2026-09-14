@@ -431,7 +431,19 @@ def run_prematch_engine():
                     if kp:
                         print("\n[ADVANCED KILLER RULES TRIGGERED]")
                         for r in kp: print(f"*** {r}")
-                        match_picks.extend(kp)
+                        # FIX: killer rules are INFORMATIONAL notes, not
+                        # actionable picks. They used to be extended into
+                        # match_picks as raw strings, and Stage 2's
+                        # process_triple_phase_audit() then crashed on
+                        # pick['type'] (TypeError: string indices must be
+                        # integers, not 'str') — killing the whole fixture's
+                        # verification. Wrap each note in a structured
+                        # non-actionable record so the message survives but
+                        # can never be mistaken for a prediction. Stage 2
+                        # skips KILLER_NOTE entries explicitly.
+                        match_picks.extend(
+                            {"type": "KILLER_NOTE", "note": r} for r in kp
+                        )
                     if match_picks: FINAL_PREDICTIONS_FEED[f_id] = match_picks
 
             pagination = resp.get("pagination", {})

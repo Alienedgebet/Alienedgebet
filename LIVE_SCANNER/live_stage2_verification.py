@@ -361,6 +361,23 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
     match_summary_lines = []
 
     for idx, pick in enumerate(picks):
+        # ── HARDENING: never let a malformed/non-actionable entry kill ──
+        # ── the remaining valid picks for this fixture.             ──
+        # Killer rules used to append raw strings here, which crashed
+        # pick['type'] below with TypeError and aborted the whole fixture.
+        if not isinstance(pick, dict):
+            match_summary_lines.append(
+                f"   ⏭️  [{idx}] SKIPPED non-actionable feed entry: {str(pick)[:80]}"
+            )
+            continue
+        if pick.get('type') == "KILLER_NOTE":
+            # Informational killer-rule note (Stage 1). Not a prediction —
+            # excluded from verification but preserved on the board.
+            match_summary_lines.append(
+                f"   📝 [{idx}] KILLER NOTE: {str(pick.get('note', ''))[:80]}"
+            )
+            continue
+
         p_key  = f"{idx}_{pick['type']}"
         ptype  = pick.get('type', 'UNKNOWN')
         target = pick.get('target_loc', 'match')
@@ -643,6 +660,11 @@ def run_live_validator_once(cycle_number=1):
 
     live_matches = get_live_scores_cached()
     tracked_count = 0
+    # FIX 3: fixture-level processing errors used to vanish into stdout
+    # (⚠️  Error processing …), leaving downstream consumers unable to
+    # distinguish "no picks" / "pending" from "processing failed".
+    # Collect them here and expose them additively on the board.
+    fixture_errors = []
 
     for fx in live_matches:
         f_id = str(fx.get("id"))
@@ -653,6 +675,11 @@ def run_live_validator_once(cycle_number=1):
                 process_triple_phase_audit(ctx, FEED_A[f_id], cycle_log)
             except Exception as e:
                 print(f"  ⚠️  Error processing {f_id}: {e}")
+                fixture_errors.append({
+                    "fixture_id": f_id,
+                    "error":      str(e),
+                    "timestamp":  datetime.now().isoformat()
+                })
 
     print_cycle_board(cycle_log, len(live_matches), tracked_count, cycle_number)
 
@@ -661,6 +688,9 @@ def run_live_validator_once(cycle_number=1):
         "total_live":   len(live_matches),
         "total_tracked": tracked_count,
         "matches":      cycle_log,
+        # Additive field: only populated when a fixture actually failed to
+        # process. An empty list means every tracked fixture was processed.
+        "errors":       fixture_errors,
     }
     try:
         with open(BOARD_FILE, 'w') as f:
