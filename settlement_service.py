@@ -275,12 +275,64 @@ def grade_row(market_type, row, actual_match):
         won = (tot_g <= 2)
         note = f"{tot_g} goals ({ft_score})"
 
-    # --- CORNERS ---
+    # --- HIGH PARITY (score gap ≤ 2) ---
+    # User-confirmed: the High Parity List wins when the final score stays
+    # CLOSE (|home - away| <= 2), NOT only on an exact draw — that is the
+    # conventional Draw branch above and it is untouched.
+    elif m in ["parity", "high_parity"]:
+        gap = abs(h_ft - a_ft)
+        won = gap <= 2
+        note = f"Score gap {gap} (≤2) ({ft_score})"
+
+    # --- UNDER 3.5 GOALS ---
+    # The u35 list lives in the composite unders payload (raw[1]) and was
+    # previously graded nowhere — Verify stayed blank. Total goals <= 3 is
+    # the Under-3.5 condition; do NOT fold it into the u25 branch (<= 2).
+    elif m in ["u35", "u3.5", "under35", "under 3.5"]:
+        won = (tot_g <= 3)
+        note = f"{tot_g} goals ({ft_score})"
+
+    # --- CORNERS (verify the TOTAL, not the corner winner) ---
+    # The old branch graded every pick against `row.get("Corner_Line") or
+    # 9.5` — but NO corner payload in this system stores a Corner_Line
+    # column, so the fallback silently graded everything against a fixed
+    # 9.5 line instead of the pick's own predicted total. For a corner
+    # TOTAL market the result is home_corners + away_corners compared with
+    # the pick's line: OVER L is WON when total >= L (AlienEdge canonical
+    # line: 8, e.g. 5+4=9 → OVER 8 WON). The note exposes the actual
+    # counts so the UI can show "5+4=9 vs line 8".
     elif m in ["corners"]:
-        line = float(row.get("Corner_Line") or 9.5)
         tot_c = actual_match["total_corners"]
-        won = tot_c > line
-        note = f"{tot_c} corners (Line {line})"
+        if tot_c <= 0:
+            # 0-0 corners almost always means the finished snapshot carries
+            # no corner statistics (verified: 21 finished fixtures across
+            # the Sep 10-13 archives have 0+0). Grading those as LOST (or
+            # WON on an under) would be a fabricated verdict — stay PENDING.
+            return {
+                "status": "FINISHED",
+                "score": ft_score,
+                "minute": None,
+                "verdict": "PENDING",
+                "badge_text": ft_score,
+                "note": "Corner stats unavailable",
+            }
+        line = 8.0  # AlienEdge canonical OVER 8 threshold
+        for k in ("predicted_corners", "expected_total_corners",
+                  "Total_Exp", "total_exp"):
+            v = row.get(k)
+            if v is None:
+                continue
+            try:
+                pred = float(str(v).replace("%", ""))
+            except (TypeError, ValueError):
+                continue
+            if pred > 0:
+                line = max(8.0, float(round(pred)))
+                break
+        won = tot_c >= line
+        h_c = int(actual_match.get("h_corners", 0))
+        a_c = int(actual_match.get("a_corners", 0))
+        note = f"{h_c}+{a_c}={tot_c} corners vs line {line:g} → {'OVER' if won else 'UNDER'}"
 
     # --- SECOND HALF GOALS (SHVI) ---
     elif m in ["shvi", "sh_goal"]:
@@ -289,13 +341,37 @@ def grade_row(market_type, row, actual_match):
         note = f"{sh_g} SH goals ({ft_score})"
 
     # --- UNDERDOG TO SCORE (U2S) ---
+    # Verify against the STORED underdog selection (the engine's pick at
+    # prediction time — preferred over re-deriving from current odds, which
+    # can drift). The old fall-through graded an unmatched dog as a
+    # fabricated LOST even though its side was never identified; when the
+    # stored name cannot be matched to either team the honest answer is
+    # PENDING, never a verdict.
     elif m in ["u2s"]:
         target = str(row.get("Underdog") or row.get("Target_Underdog") or row.get("underdog_team") or "")
-        if clean_n(target) in clean_n(actual_match["home_team"]):
-            won = h_ft > 0
-        elif clean_n(target) in clean_n(actual_match["away_team"]):
-            won = a_ft > 0
-        note = f"Underdog scored ({ft_score})" if won else f"Underdog blanked ({ft_score})"
+        t_key = clean_n(target)
+        h_key = clean_n(actual_match["home_team"])
+        a_key = clean_n(actual_match["away_team"])
+        matched = None
+        if t_key and t_key in h_key:
+            matched = ("home", actual_match["home_team"], h_ft)
+        elif t_key and t_key in a_key:
+            matched = ("away", actual_match["away_team"], a_ft)
+        if matched is None:
+            return {
+                "status": "FINISHED",
+                "score": ft_score,
+                "minute": None,
+                "verdict": "PENDING",
+                "badge_text": ft_score,
+                "note": f"Underdog '{target or '?'}' not identifiable in this fixture",
+            }
+        side, team, goals = matched
+        won = goals >= 1
+        note = (
+            f"{team} ({side}) {'scored' if won else 'blanked'} "
+            f"({goals}g, {ft_score})"
+        )
 
     return {
         "status": "FINISHED",

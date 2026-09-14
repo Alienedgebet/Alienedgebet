@@ -183,6 +183,13 @@ SUPPORTED_SETTLEMENT_MARKETS = {
     "o15", "over15", "over 1.5",
     "draw", "draws",
     "u25", "under25", "under 2.5",
+    # High Parity List (score gap <= 2 — user-confirmed; NOT the exact-draw
+    # "draw" branch) and Under 3.5 (total goals <= 3 — NOT the u25 <= 2
+    # branch). Both were previously absent here, so /api/draw parity_list and
+    # /api/unders u35 rows got the blanket-PENDING path and Verify stayed
+    # blank even when grade_row had the math.
+    "parity", "high_parity",
+    "u35", "u3.5", "under35", "under 3.5",
     "corners",
     "shvi", "sh_goal",
     "u2s",
@@ -732,10 +739,26 @@ def get_over25_psychology(date: str):
     return read("over25_psychology", date, O25_PSYCH_DEFAULTS, "o25")
 
 
+# Gold Over 2.5 rows are NESTED ({teams:{home,away}, metrics:{...}, flags}) —
+# unlike every other market's flat rows. Defaults only fill flat scalar fields;
+# nested structures are preserved untouched by ensure_defaults. Verification
+# identity is the flat fixture_id, which grade_row/settle_predictions already
+# match on — no team-name matching needed for this market.
+O25_GOLD_DEFAULTS = dict(
+    fixture_id="", engine="", league="", kickoff_datetime="", kickoff_timestamp="",
+    flags={},
+)
+
+
 @app.get("/api/over25/gold/{date}", tags=["Over 2.5"])
 def get_over25_gold(date: str):
     data, _ = store.load("over25_gold", date, default=[])
-    return to_records(data)
+    # Gold O2.5 rows were returned raw (no verification payload at all) while
+    # every sibling over25 route settles with market key "o25" — the exact
+    # total-goals rule (>= 3 WON / <= 2 LOST) the Gold engine predicts. Settle
+    # identically to the rest of the Over 2.5 family; rows carry fixture_id so
+    # finished matches resolve through the persistent archive layer.
+    return _settled(ensure_defaults(data, O25_GOLD_DEFAULTS), "o25", date)
 
 
 @app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
@@ -805,7 +828,11 @@ def get_draw(date: str):
     amateurs_raw = raw[2] if isinstance(raw, list) and len(raw) > 2 else []
     return {
         "draws": _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "draw", date),
-        "parity_list": ensure_defaults(parity_raw, DRAW_DEFAULTS),
+        # HIGH PARITY LIST: expected close match. Settlement is the High-Parity
+        # rule (|home - away| <= 2, user-confirmed) — a DIFFERENT condition from
+        # the conventional Draw branch above (home_goals == away_goals), so
+        # these rows are graded with market key "parity", never "draw".
+        "parity_list": _settled(ensure_defaults(parity_raw, DRAW_DEFAULTS), "parity", date),
         "amateurs_list": ensure_defaults(amateurs_raw, DRAW_DEFAULTS),
     }
 
