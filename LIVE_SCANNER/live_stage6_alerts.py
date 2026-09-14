@@ -504,6 +504,39 @@ class SupremeOrchestrator:
         self.UserLogic = UserRuleEvaluator()
         self.executor  = ThreadPoolExecutor(max_workers=5)
         self.cycle     = 0
+        # FIX: seed ALERT_HISTORY from the persisted on-disk alert log so a
+        # restart cannot re-fire alerts that already went out. fire_alert()
+        # appends every record as one JSONL line in ready_to_push.json while
+        # run_single_cycle()/process_ai_gates() track the same keys only in
+        # the in-memory ALERT_HISTORY set — a restart wiped that set and the
+        # same fixture/rule pair could alert users twice. Rebuild keys:
+        #   user-rule alerts  -> "{f_id}_{rule_id}"   (exact match)
+        #   system 45' alerts -> "{f_id}_SUPREME_45"  (best-effort, matched
+        #   via the stable "45' Verified" msg emitted by process_ai_gates)
+        try:
+            if os.path.exists(OUTPUT_ALERTS_FILE):
+                with open(OUTPUT_ALERTS_FILE, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        rec_fid = rec.get('f_id')
+                        if not rec_fid:
+                            continue
+                        if rec.get('rule_id'):
+                            ALERT_HISTORY.add(f"{rec_fid}_{rec['rule_id']}")
+                        elif "45' Verified" in str(rec.get('msg', '')):
+                            ALERT_HISTORY.add(f"{rec_fid}_SUPREME_45")
+                logging.info(
+                    f"ALERT_HISTORY seeded from disk: "
+                    f"{len(ALERT_HISTORY)} previously fired alert keys"
+                )
+        except Exception as e:
+            logging.error(f"ALERT_HISTORY seed failed: {e}")
 
     def run(self):
         logging.info("═" * 70)
