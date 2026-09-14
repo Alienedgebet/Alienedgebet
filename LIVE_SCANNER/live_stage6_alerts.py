@@ -260,14 +260,27 @@ class StructuralDetective:
             # If it is the old flat format, return it directly but also
             # migrate it so next access is correct.
             if isinstance(entry, dict) and "players" in entry:
-                return entry["players"]
+                # FIX 6 (squad coverage): an EMPTY players dict is the
+                # poisoned residue of a failed/empty fetch (e.g. Huracán
+                # id 410 had 16 fixtures in its 150-day window yet an
+                # empty vault entry that could never recover, because
+                # both this guard and maintenance_thread's
+                # `str(tid) in SQUAD_VAULT` check treated it as valid
+                # data forever → INSUFFICIENT_SQUAD_DATA permanently).
+                # Treat empty as a cache MISS and refetch. Non-empty
+                # entries keep the exact same short-circuit as before.
+                if entry["players"]:
+                    return entry["players"]
+                # empty → fall through to a fresh fetch below
             else:
                 # Old flat format — migrate in place
-                SQUAD_VAULT[tid_str] = {
-                    "players":       entry,
-                    "team_avg_leak": 1.2
-                }
-                return entry
+                if entry:
+                    SQUAD_VAULT[tid_str] = {
+                        "players":       entry,
+                        "team_avg_leak": 1.2
+                    }
+                    return entry
+                # empty flat dict → fall through to a fresh fetch below
 
         start_dt = (datetime.now(timezone.utc).date()
                     - timedelta(days=150)).isoformat()
@@ -890,6 +903,44 @@ class SupremeOrchestrator:
             except Exception as e:
                 logging.warning(f"SH-GG file error: {e}")
 
+        # NEW: Gold Over 2.5 engine feed — fourth prematch source, same
+        # fixture_id-keyed merge pattern as SH-GG above. Some fixtures carry
+        # their prematch flags ONLY here (e.g. h2h_o25_100 from the gold
+        # engine), so without this merge user rules referencing those flags
+        # could never fire. flags/metrics are dict-merged so a fixture present
+        # in both feeds keeps the union of flags instead of being clobbered.
+        GOLD_O25_FILE = os.path.join(OUTPUT_DIR, "gold_over_25_feed.json")
+        if os.path.exists(GOLD_O25_FILE):
+            try:
+                with open(GOLD_O25_FILE, 'r', encoding='utf-8') as f:
+                    data  = json.load(f)
+                    items = data if isinstance(data, list) else data.values()
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        fid = str(item.get('fixture_id'))
+                        if not fid or fid == 'None':
+                            continue
+                        if fid not in db:
+                            db[fid] = item
+                        else:
+                            for k, v in item.items():
+                                if (k in ("flags", "metrics")
+                                        and isinstance(v, dict)
+                                        and isinstance(db[fid].get(k), dict)):
+                                    db[fid][k].update(v)
+                                else:
+                                    db[fid].setdefault(k, v)
+                        if 'h_id' not in db[fid]:
+                            db[fid]['h_id'] = str(
+                                safe_get(item,'teams','home','id') or ''
+                            )
+                            db[fid]['a_id'] = str(
+                                safe_get(item,'teams','away','id') or ''
+                            )
+            except Exception as e:
+                logging.warning(f"Gold O2.5 file error: {e}")
+
         # NEW: Stage 1's GK liability + missing-key-player audit — third
         # prematch source. Keyed by fixture_id like the other two. Uses
         # dict.update() so it never overwrites flags/chemistry already
@@ -936,9 +987,22 @@ class SupremeOrchestrator:
         for f_id, data in db.items():
             for tid in [data.get('h_id'), data.get('a_id')]:
                 if tid:
+                    # FIX 6 (squad coverage): an empty {"players": {}} vault
+                    # entry is the residue of a failed/empty fetch, not valid
+                    # squad data. The old `str(tid) in SQUAD_VAULT` check
+                    # treated it as cached forever, so a poisoned team was
+                    # never re-fetched and investigate() returned
+                    # INSUFFICIENT_SQUAD_DATA permanently. Only entries with
+                    # actual players count as cached.
+                    vault_entry = SQUAD_VAULT.get(str(tid))
+                    has_data = bool(
+                        vault_entry.get("players")
+                        if isinstance(vault_entry, dict)
+                        and "players" in vault_entry
+                        else vault_entry
+                    )
                     with FETCHING_LOCK:
-                        already = (tid in FETCHING_TEAMS or
-                                   str(tid) in SQUAD_VAULT)
+                        already = (tid in FETCHING_TEAMS or has_data)
                     if not already:
                         with FETCHING_LOCK:
                             FETCHING_TEAMS.add(tid)
