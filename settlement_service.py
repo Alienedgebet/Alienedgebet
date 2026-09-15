@@ -151,7 +151,9 @@ def extract_match_data(fx):
 # matches currently being played.
 ARCHIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
-_ARCHIVE_CACHE = {}  # {date_str: {fixture_id: standardized_match_dict}}
+_ARCHIVE_CACHE = {}  # {date_str: (mtime_or_None, size_or_None, {fixture_id: standardized})}
+_ARCHIVE_MISSING_RECHECK_S = 60  # re-stat a missing file at most once per minute
+_ARCHIVE_MISSING_LAST_CHECK = {}  # {date_str: monotonic_seconds_of_last_stat}
 
 
 def load_finished_archive(date_str):
@@ -159,39 +161,62 @@ def load_finished_archive(date_str):
 
     - Returns {} when the archive is missing or unreadable: settlement then
       behaves exactly as before (live in-play source only) and never crashes.
-    - The file is written once per completed day and never modified
-      afterwards, so per-process caching needs no invalidation.
+    - The per-process cache is invalidated by the file's mtime/size: an
+      archive that appears after being missing, or that is rewritten
+      (nightly archiver re-run), is re-read on the next call. A missing file
+      is NEVER cached permanently — it is re-statted (at most once per
+      minute per date) so a late-night archive landing is picked up without
+      a worker restart. A corrupt/unreadable file degrades to {} exactly as
+      before.
     - Every entry is already constrained to `date_str` by construction (one
       archive file per date), which is what gives historical Verify its
       date isolation: an id or name from another date can never leak in.
     """
+    import time as _time
+
     if not date_str:
         return {}
-    if date_str in _ARCHIVE_CACHE:
-        return _ARCHIVE_CACHE[date_str]
-
     archive_file = os.path.join(ARCHIVE_DIR, f"archive_{date_str}.json")
+    try:
+        st = os.stat(archive_file)
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        # Missing file: serve {} but do NOT cache it permanently — re-stat
+        # periodically so an archive that lands later is picked up.
+        now = _time.monotonic()
+        last = _ARCHIVE_MISSING_LAST_CHECK.get(date_str)
+        if last is not None and (now - last) < _ARCHIVE_MISSING_RECHECK_S:
+            cached = _ARCHIVE_CACHE.get(date_str)
+            if cached is not None:
+                return cached[2]
+            return {}
+        _ARCHIVE_MISSING_LAST_CHECK[date_str] = now
+        _ARCHIVE_CACHE[date_str] = (None, None, {})
+        return {}
+    cached = _ARCHIVE_CACHE.get(date_str)
+    if cached is not None and (cached[0], cached[1]) == sig:
+        return cached[2]
     fixtures_map = {}
     try:
-        if os.path.exists(archive_file):
-            with open(archive_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            raw = payload.get("fixtures", []) if isinstance(payload, dict) else []
-            if isinstance(raw, list):
-                for fx in raw:
-                    if not isinstance(fx, dict):
-                        continue
-                    if all(k in fx for k in ("fixture_id", "home_team", "has_started")):
-                        std = fx  # already standardized (archiver uses extract_match_data)
-                    else:
-                        std = extract_match_data(fx)
-                    fid = str(std.get("fixture_id") or "")
-                    if fid:
-                        fixtures_map[fid] = std
+        with open(archive_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        raw = payload.get("fixtures", []) if isinstance(payload, dict) else []
+        if isinstance(raw, list):
+            for fx in raw:
+                if not isinstance(fx, dict):
+                    continue
+                if all(k in fx for k in ("fixture_id", "home_team", "has_started")):
+                    std = fx  # already standardized (archiver uses extract_match_data)
+                else:
+                    std = extract_match_data(fx)
+                fid = str(std.get("fixture_id") or "")
+                if fid:
+                    fixtures_map[fid] = std
     except Exception:
         fixtures_map = {}  # corrupt archive → treat exactly like a missing one
 
-    _ARCHIVE_CACHE[date_str] = fixtures_map
+    _ARCHIVE_CACHE[date_str] = (sig[0], sig[1], fixtures_map)
+    _ARCHIVE_MISSING_LAST_CHECK.pop(date_str, None)
     return fixtures_map
 
 
