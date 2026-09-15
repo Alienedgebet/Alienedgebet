@@ -844,7 +844,13 @@ def get_unders(date: str):
     u35_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     return {
         "u25": _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "u25", date),
-        "u35": ensure_defaults(u35_raw, UNDERS_DEFAULTS),
+        # u35 was the only list in this composite payload never routed
+        # through _settled(): grade_row already holds the correct branch
+        # (total goals <= 3 -> WON, >= 4 -> LOST) and "u35" is already in
+        # SUPPORTED_SETTLEMENT_MARKETS, so Verify stayed blank purely
+        # because settlement was never invoked for this head. u25 above is
+        # unchanged.
+        "u35": _settled(ensure_defaults(u35_raw, UNDERS_DEFAULTS), "u35", date),
     }
 
 

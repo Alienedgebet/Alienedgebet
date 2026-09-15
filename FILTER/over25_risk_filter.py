@@ -46,7 +46,15 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
 
     def _extract_poisson(df):
         """Robust extractor for Poisson probability handling float, int, and percent string."""
-        for col in ['poisson_over_prob', 'poisson_prob', 'poisson_over', 'o25_prob', 'prob']:
+        # Stage 2 writes this value as `poisson_over_prob_num` (see
+        # output/master_over_stage2_<date>.csv). It was missing from the
+        # candidate list below, so every row fell through to the 0.0
+        # default and the risk gates (banker >=70 / balanced >=60 /
+        # aggressive >=65) rejected ALL rows on every date. Adding the
+        # real column name is a FIELD BINDING fix only — no threshold,
+        # gate, odds band, kill-switch, votes or pos-gap logic changed.
+        for col in ['poisson_over_prob', 'poisson_prob', 'poisson_over', 'o25_prob', 'prob',
+                    'poisson_over_prob_num']:
             if col in df.columns:
                 return pd.to_numeric(df[col].astype(str).str.replace('%', '', regex=False), errors='coerce').fillna(0.0)
         return pd.Series(0.0, index=df.index)
