@@ -359,50 +359,28 @@ def run_prematch_engine():
                     rv = max(kmv, kmv * (1 + ((w_l - rep_w) / max(1, w_l)))) if w_l > 0 else 0
                     
                     m_stats.append({
-                        "id": tid, "name": team['name'], "loc": loc, "miss": m_c, "kmv": kmv, "rv": rv, 
+                        "id": tid, "name": team['name'], "loc": loc, "miss": m_c, "kmv": kmv, "rv": rv,
                         "gk_out": gk_m, "def_miss": def_miss, "mid_miss": mid_miss, "att_miss": att_miss,
-                        "l_wing_miss": l_w_m, "r_wing_miss": r_w_m
+                        "l_wing_miss": l_w_m, "r_wing_miss": r_w_m,
+                        "players": [
+                            {
+                                "name": p['name'],
+                                "pos": p.get('pos', 'Unknown'),
+                                "apps": int(p.get('apps', 0) or 0),
+                                "mins": int(p.get('mins', 0) or 0),
+                                "rating": float(p.get('avg_rating', 0.0) or 0.0),
+                                "status": "STARTING" if p['id'] in today_team_ids
+                                    else (f"MISSING" if p.get('pos') != "Goalkeeper"
+                                          else (f"MISSING (GK Out: {gk_n})" if gk_m else "MISSING")),
+                            }
+                            for p in key_11
+                        ] if key_11 else [],
                     })
                     print(f"\n>> KEY MISSING VULNERABILITY (The Hole): {kmv:.1f}%")
                     print(f">> REPLACEMENT VULNERABILITY (The Doom): {rv:.1f}%")
 
                 if len(m_stats) == 2:
                     h, a = (m_stats[0], m_stats[1]) if m_stats[0]['loc'] == 'home' else (m_stats[1], m_stats[0])
-                    # NEW: build the persisted team audit entry for this
-                    # fixture using data already computed above (m_stats +
-                    # team_gk_notes). Purely additive — does not affect h/a
-                    # objects used below for match_picks/killer rules.
-                    TEAM_AUDIT_FEED[f_id] = {
-                        "fixture": fx.get('name'),
-                        "kickoff_utc": start_dt.strftime('%H:%M'),
-                        "status_text": status_text,
-                        "home": {
-                            "team_id": str(h['id']),
-                            "team_name": h['name'],
-                            "gk_out": h['gk_out'],
-                            "gk_status": team_gk_notes.get(str(h['id']), {}).get("gk_status", ""),
-                            "gk_vuln_score": team_gk_notes.get(str(h['id']), {}).get("gk_vuln_score", 0.0),
-                            "missing_count": h['miss'],
-                            "def_miss": h['def_miss'],
-                            "mid_miss": h['mid_miss'],
-                            "att_miss": h['att_miss'],
-                            "kmv": h['kmv'],
-                            "rv": h['rv'],
-                        },
-                        "away": {
-                            "team_id": str(a['id']),
-                            "team_name": a['name'],
-                            "gk_out": a['gk_out'],
-                            "gk_status": team_gk_notes.get(str(a['id']), {}).get("gk_status", ""),
-                            "gk_vuln_score": team_gk_notes.get(str(a['id']), {}).get("gk_vuln_score", 0.0),
-                            "missing_count": a['miss'],
-                            "def_miss": a['def_miss'],
-                            "mid_miss": a['mid_miss'],
-                            "att_miss": a['att_miss'],
-                            "kmv": a['kmv'],
-                            "rv": a['rv'],
-                        },
-                    }
 
                     match_picks =[]
                     print(f"\n[PRE-MATCH STRATEGIC PREDICTIONS]")
@@ -445,6 +423,60 @@ def run_prematch_engine():
                             {"type": "KILLER_NOTE", "note": r} for r in kp
                         )
                     if match_picks: FINAL_PREDICTIONS_FEED[f_id] = match_picks
+
+                    # NEW: build the persisted team audit entry for this
+                    # fixture using data already computed above (m_stats +
+                    # team_gk_notes) and the match_picks/killer rules just
+                    # calculated. Purely additive — does not affect the h/a
+                    # objects or the verdict/pick logic above.
+                    TEAM_AUDIT_FEED[f_id] = {
+                        "fixture_id": str(f_id),
+                        "fixture": fx.get('name'),
+                        "kickoff_utc": start_dt.strftime('%H:%M'),
+                        "status_text": status_text,
+                        "odds_home_win": odds_data['home_win'],
+                        "odds_away_win": odds_data['away_win'],
+                        "odds_o25": odds_data['o25'],
+                        "picks": [dict(p) for p in match_picks] if match_picks else [],
+                        "killer_rules": kp if kp else [],
+                        "combined_miss": int(h['miss'] + a['miss']),
+                        "home": {
+                            "loc": h['loc'],
+                            "miss": int(h['miss']),
+                            "team_id": str(h['id']),
+                            "team_name": h['name'],
+                            "gk_out": h['gk_out'],
+                            "gk_status": team_gk_notes.get(str(h['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(h['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": int(h['miss']),
+                            "def_miss": int(h['def_miss']),
+                            "mid_miss": int(h['mid_miss']),
+                            "att_miss": int(h['att_miss']),
+                            "l_wing_miss": bool(h.get('l_wing_miss', False)),
+                            "r_wing_miss": bool(h.get('r_wing_miss', False)),
+                            "kmv": float(h['kmv']),
+                            "rv": float(h['rv']),
+                            "players": h.get('players', []),
+                        },
+                        "away": {
+                            "loc": a['loc'],
+                            "miss": int(a['miss']),
+                            "team_id": str(a['id']),
+                            "team_name": a['name'],
+                            "gk_out": a['gk_out'],
+                            "gk_status": team_gk_notes.get(str(a['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(a['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": int(a['miss']),
+                            "def_miss": int(a['def_miss']),
+                            "mid_miss": int(a['mid_miss']),
+                            "att_miss": int(a['att_miss']),
+                            "l_wing_miss": bool(a.get('l_wing_miss', False)),
+                            "r_wing_miss": bool(a.get('r_wing_miss', False)),
+                            "kmv": float(a['kmv']),
+                            "rv": float(a['rv']),
+                            "players": a.get('players', []),
+                        },
+                    }
 
             pagination = resp.get("pagination", {})
             has_more_pages = pagination.get("has_more", False); current_page += 1

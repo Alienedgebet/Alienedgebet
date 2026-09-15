@@ -328,6 +328,8 @@ def grade_row(market_type, row, actual_match):
     # counts so the UI can show "5+4=9 vs line 8".
     elif m in ["corners"]:
         tot_c = actual_match["total_corners"]
+        h_c = int(actual_match.get("h_corners", 0))
+        a_c = int(actual_match.get("a_corners", 0))
         if tot_c <= 0:
             # 0-0 corners almost always means the finished snapshot carries
             # no corner statistics (verified: 21 finished fixtures across
@@ -340,6 +342,9 @@ def grade_row(market_type, row, actual_match):
                 "verdict": "PENDING",
                 "badge_text": ft_score,
                 "note": "Corner stats unavailable",
+                "h_corners": h_c,
+                "a_corners": a_c,
+                "total_corners": tot_c,
             }
         line = 8.0  # AlienEdge canonical OVER 8 threshold
         for k in ("predicted_corners", "expected_total_corners",
@@ -355,8 +360,6 @@ def grade_row(market_type, row, actual_match):
                 line = max(8.0, float(round(pred)))
                 break
         won = tot_c >= line
-        h_c = int(actual_match.get("h_corners", 0))
-        a_c = int(actual_match.get("a_corners", 0))
         note = f"{h_c}+{a_c}={tot_c} corners vs line {line:g} → {'OVER' if won else 'UNDER'}"
 
     # --- SECOND HALF GOALS (SHVI) ---
@@ -398,6 +401,18 @@ def grade_row(market_type, row, actual_match):
             f"({goals}g, {ft_score})"
         )
 
+    if m == "corners":
+        return {
+            "status": "FINISHED",
+            "score": ft_score,
+            "minute": None,
+            "verdict": "WON" if won else "LOST",
+            "badge_text": f"{'✅' if won else '❌'} {ft_score}",
+            "note": note,
+            "h_corners": h_c,
+            "a_corners": a_c,
+            "total_corners": tot_c,
+        }
     return {
         "status": "FINISHED",
         "score": ft_score,

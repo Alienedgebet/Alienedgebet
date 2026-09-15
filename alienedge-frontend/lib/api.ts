@@ -661,6 +661,17 @@ export interface CornerStage1Pick {
   home_win_odds: number;
   over_2_5_odds: number;
   tier_1_priority: boolean;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerStage2Pick {
@@ -677,6 +688,17 @@ export interface CornerStage2Pick {
   away_is_persistent_venue: boolean;
   home_is_persistent_overall: boolean;
   away_is_persistent_overall: boolean;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerPsychologyPick {
@@ -690,6 +712,17 @@ export interface CornerPsychologyPick {
   is_wounded_beast: boolean;
   wounded_reason: string;
   wounded_team_name: string;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerCatalystPick {
@@ -703,6 +736,17 @@ export interface CornerCatalystPick {
   home_wounded_intensity: string;
   away_is_wounded_beast: boolean;
   away_wounded_intensity: string;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerAggregatorPick {
@@ -733,6 +777,17 @@ export interface CornerAggregatorPick {
   Away_DNA: string;
   Home_SH_Ratio: number;
   Away_SH_Ratio: number;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 // ============================================================
@@ -993,6 +1048,12 @@ export interface LiveIncomingPick {
     target_name?: string;
     reason: string;
   }>;
+  live?: {
+    score: string;
+    minute: number;
+    state: string;
+    is_finished: boolean;
+  };
 }
 
 export interface LiveDangerReport {
@@ -1030,6 +1091,12 @@ export interface LiveDangerReport {
     "Under3.5": string;
     "Over1.5": string;
   };
+  live?: {
+    score: string;
+    minute: number;
+    state: string;
+    is_finished: boolean;
+  };
 }
 
 export interface LiveAggregatorReport {
@@ -1041,6 +1108,12 @@ export interface LiveAggregatorReport {
     away: { status: string; sync: string; breach: boolean };
   };
   match_chemistry_list: Record<string, string>;
+  live?: {
+    score: string;
+    minute: number;
+    state: string;
+    is_finished: boolean;
+  };
 }
 
 export interface LiveDashboardResult {

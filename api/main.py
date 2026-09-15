@@ -32,7 +32,7 @@ import json
 import math
 import subprocess
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Header
@@ -85,7 +85,7 @@ from api.user_rules_router import router as user_rules_router  # noqa: E402
 app.include_router(user_rules_router)
 
 # ── SETTLEMENT / LIVE SCORES (independent of the pre-match pipeline) ──────────
-from settlement_service import settle_predictions  # noqa: E402
+from settlement_service import settle_predictions, extract_match_data, load_finished_archive  # noqa: E402
 from live_cache import get_live_scores_cached  # noqa: E402
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
@@ -249,18 +249,87 @@ def _date_range(start: str, end: str, max_days: int = 14) -> list:
     return days or [start]
 
 
-def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, settle: bool = True) -> list:
+# ─ FILTER SHAPE GUARD (P0-6b / forensic-report P0-5) ─────────────────────────
+# A one-day historical save-key fault (2026-09-10) wrote the CORNERS payload
+# under five filter keys — filter_win__safe, filter_win__balanced and
+# filter_over25__{banker,balanced,aggressive} — 26 foreign rows each. The
+# weekly endpoints walk every date in [start_date, end_date], so those rows
+# were still being SERVED inside a 7-day request (they arrive as all-zero /
+# _incomplete rows after ensure_defaults): fabricated picks on a real page.
+#
+# The files are DATA and must not be deleted or rewritten, so the guard runs at
+# the READ boundary, and only for the affected markets.
+#
+# A row is rejected only when BOTH hold:
+#   1. every identity key of the market the key claims is absent, AND
+#   2. a key from another market's signature is present.
+# So a genuine row of the requested market is always kept, and a row with no
+# recognisable signature at all (e.g. an older schema) is also kept — the guard
+# only ever removes rows that provably belong to a DIFFERENT market.
+# Verified against the real files: 09-10 contaminated rows carry the corners
+# signature and zero win/o25 identity keys, while clean win rows carry all four
+# identity keys (09-11/13/14) and GG rows match neither set — which is why this
+# is opt-in per route (`identity=`) and never applied to GG or other markets.
+_FILTER_MARKET_IDENTITY = {
+    "win": {"win_odds", "team_name", "side", "parity_score"},
+    "o25": {"o25_odds", "poisson_over_prob_num", "council_votes", "pos_gap",
+            "kill_switch_pass"},
+}
+_FOREIGN_MARKET_SIGNATURE = {
+    "corner_tier", "expected_total_corners", "team_more_corners",
+    "expected_difference",
+}
+
+
+def _is_foreign_filter_row(row, market: Optional[str]) -> bool:
+    if not market or not isinstance(row, dict):
+        return False
+    identity = _FILTER_MARKET_IDENTITY.get(market)
+    if not identity:
+        return False
+    if identity & set(row.keys()):
+        return False  # a genuine row of this market → always kept
+    return bool(_FOREIGN_MARKET_SIGNATURE & set(row.keys()))
+
+
+def _guard_filter_rows(rows, market: Optional[str]):
+    """Drop provably-foreign rows for `market` (no-op for other markets)."""
+    if not market:
+        return rows
+    kept, dropped = [], 0
+    for row in rows:
+        if _is_foreign_filter_row(row, market):
+            dropped += 1
+            continue
+        kept.append(row)
+    if dropped:
+        print(f"[FILTER SHAPE GUARD] dropped {dropped} foreign {market} row(s) — "
+              f"payload belongs to another market (historical save-key fault); "
+              f"cache file left untouched")
+    return kept
+
+
+def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, settle: bool = True,
+               identity: Optional[str] = None) -> list:
     """
     Reads and concatenates one saved file PER DATE in `dates`, tagging each
     row with the date it came from so a "7-day range" filter route actually
     returns a week of picks instead of silently collapsing to a single day
     (the previous behaviour, inherited unchanged from the old backend).
     `key_prefix_fn(date)` returns the output_store key to load for that date.
+    `identity` (optional) enables the filter-market shape guard above; when
+    omitted the behaviour is byte-identical to before.
     """
     combined = []
     for d in dates:
         data, _ = store.load(key_prefix_fn(d), d, default=[])
-        rows = ensure_defaults(data, defaults)
+        # Guard runs on RAW loaded data so it can see which keys the file
+        # actually contains. ensure_defaults() below injects every missing
+        # schema key (e.g. win_odds=0, team_name=0, side=0, parity_score=0)
+        # into every row regardless of origin, so a contaminated corners row
+        # from 09-10 would otherwise pass the identity check after defaulting.
+        rows = _guard_filter_rows(data, identity)
+        rows = ensure_defaults(rows, defaults)
         if settle:
             rows = _settled(rows, market_type, d)
         for row in rows:
@@ -270,12 +339,18 @@ def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, set
     return combined
 
 
-def read(key: str, date: Optional[str], defaults: dict, market_type: str = "win", settle: bool = True):
+def read(key: str, date: Optional[str], defaults: dict, market_type: str = "win", settle: bool = True,
+         identity: Optional[str] = None):
     """The one helper every picks route uses: load from disk, fill defaults,
     optionally settle against live/finished scores. No engine is ever called
-    here — a cache miss is just an empty list, not a live recompute."""
+    here — a cache miss is just an empty list, not a live recompute.
+    `identity` (optional) enables the filter-market shape guard; when omitted
+    the behaviour is byte-identical to before."""
     data, _generated_at = store.load(key, date, default=[])
-    rows = ensure_defaults(data, defaults)
+    # Same ordering rationale as read_range above: inspect raw data before
+    # ensure_defaults injects schema-wide defaults.
+    rows = _guard_filter_rows(data, identity)
+    rows = ensure_defaults(rows, defaults)
     if settle and date:
         rows = _settled(rows, market_type, date)
     return rows
@@ -901,21 +976,77 @@ def _read_json(path: str, default=None):
         return default
 
 
+def _fixture_name_index() -> dict:
+    """P0-5: disk-only {fixture_id: "Team A vs Team B"} resolver.
+
+    `incoming_predictions.json` is keyed by fixture id and its values are pick
+    lists, so the feed itself carries no team names — the route used to fill
+    `fixture` with the id, which the Incoming page rendered next to the
+    `fixture_id` column as two identical numbers.
+
+    Every id the incoming feed can contain is ALREADY present locally in the
+    in-play cache (canonical "Home vs Away" name), the danger audit and the
+    aggregator report (both carry a `fixture` name field), so the name is
+    resolved at read time with zero extra SportMonks calls and without
+    touching any engine, file or file schema.
+    """
+    index = {}
+
+    # 1. In-play cache — highest priority: `name` is the canonical fixture name.
+    live = _read_json(os.path.join(DATA_DIR, "live_inplay_cache.json"), {})
+    live_rows = live.get("data") if isinstance(live, dict) else None
+    for fx in live_rows or []:
+        if not isinstance(fx, dict):
+            continue
+        fid, name = fx.get("id"), fx.get("name")
+        if fid is not None and name:
+            index.setdefault(str(fid), str(name))
+
+    # 2. Danger audit + 3. aggregator report — both carry `fixture_id`+`fixture`.
+    for fname in ("danger_audit.json", "aggregator_report.json"):
+        raw = _read_json(os.path.join(DATA_DIR, fname), [])
+        if isinstance(raw, dict):
+            raw = list(raw.values())
+        for row in raw if isinstance(raw, list) else []:
+            if not isinstance(row, dict):
+                continue
+            fid, name = row.get("fixture_id"), row.get("fixture")
+            if fid is not None and name:
+                index.setdefault(str(fid), str(name))
+
+    return index
+
+
 def _incoming_rows_from_disk():
     raw = _read_json(os.path.join(DATA_DIR, "incoming_predictions.json"), {})
     if isinstance(raw, list):
         return raw
     if not isinstance(raw, dict):
         return []
+    names = _fixture_name_index()
     rows = []
     for fixture_id, value in raw.items():
         if isinstance(value, list):
-            rows.append({"fixture_id": str(fixture_id), "fixture": str(fixture_id), "picks": value})
+            # Resolve the real name; fall back to the id when nothing local
+            # knows this fixture (never invents a name).
+            fid = str(fixture_id)
+            rows.append({
+                "fixture_id": fid,
+                "fixture": names.get(fid) or fid,
+                "picks": value,
+            })
         elif isinstance(value, dict):
             picks = value.get("picks", [])
+            fid = str(value.get("fixture_id", fixture_id))
+            stored = value.get("fixture")
+            # Priority: local name index -> a stored name that is not just a
+            # copy of the id -> the id itself.
+            resolved = names.get(fid)
+            if not resolved and stored and str(stored) != fid:
+                resolved = str(stored)
             rows.append({
-                "fixture_id": str(value.get("fixture_id", fixture_id)),
-                "fixture": str(value.get("fixture", fixture_id)),
+                "fixture_id": fid,
+                "fixture": resolved or fid,
                 "picks": picks if isinstance(picks, list) else [],
             })
     return rows
@@ -952,19 +1083,158 @@ def get_live_validation():
     }
 
 
+def _live_index() -> dict:
+    """
+    Build a {fixture_id: {score, minute, state, is_finished}} index for the
+    three live read endpoints so each row can carry additive live context.
+
+    Sources (P0-4), all local — no new SportMonks calls:
+      1. get_live_scores_cached()  → the shared 2-minute in-play disk cache
+        (data/live_inplay_cache.json); fresh entries overwrite the archive.
+      2. extract_match_data()      → the existing settlement standardizer, so
+        score/state/minute come out in exactly the shape settlement already
+        uses everywhere else.
+      3. load_finished_archive(_today()) → keeps a finished fixture reported
+        after it leaves the transient in-play feed (FT rows).
+
+    Minute follows the LIVE_SCANNER stage-6 extract_minute() pattern: time →
+    state → periods → events → kickoff-elapsed fallback (HT → 45',
+    second-half → +45).
+    """
+    idx: dict = {}
+    # Finished layer first (lower priority): a fixture that has already ended
+    # is reported from the archive even when it is no longer in the live feed.
+    try:
+        for fid, md in (load_finished_archive(_today()) or {}).items():
+            md = md if isinstance(md, dict) else {}
+            idx[str(fid)] = {
+                "score": md.get("ft_score") or "0-0",
+                "minute": int(md.get("minute", 0) or 0),
+                "state": "FT" if md.get("is_finished") else "",
+                "is_finished": bool(md.get("is_finished")),
+            }
+    except Exception:
+        pass
+    try:
+        live_rows = get_live_scores_cached() or []
+    except Exception:
+        live_rows = []
+    for fx in live_rows:
+        if not isinstance(fx, dict):
+            continue
+        fid = str(fx.get("id") or "")
+        if not fid:
+            continue
+        try:
+            md = extract_match_data(fx)
+        except Exception:
+            continue
+
+        # ---- minute (existing local _live_minute approach: time.minute →
+        # state.minute → periods[].minutes, with the canonical half mapping
+        # HT → 45 and second-half → +45, then the kickoff-elapsed fallback) ---
+        st_obj = fx.get("state") if isinstance(fx.get("state"), dict) else {}
+        sd_up = str(st_obj.get("state") or st_obj.get("short_name") or "").upper()
+        periods = fx.get("periods") if isinstance(fx.get("periods"), list) else []
+        active = next((p for p in periods if isinstance(p, dict) and p.get("ticking")), None)
+        found = [0]
+        if fx.get("time") and isinstance(fx.get("time"), dict):
+            found.append(int(fx["time"].get("minute", 0) or 0))
+        found.append(int(st_obj.get("minute", 0) or 0))
+        for p in periods:
+            if not isinstance(p, dict):
+                continue
+            m = (p.get("time", {}).get("minute") if isinstance(p.get("time"), dict) else None) \
+                or p.get("minute") or p.get("length")
+            if m:
+                found.append(int(m))
+        if fx.get("events"):
+            emins = [int(e.get("minute", 0)) for e in fx["events"] if e.get("minute")]
+            if emins:
+                found.append(max(emins))
+        if fx.get("starting_at_timestamp"):
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            elapsed = (now_ts - int(fx["starting_at_timestamp"])) // 60
+            if 0 < elapsed <= 50:
+                found.append(elapsed)
+            elif 60 < elapsed <= 110:
+                found.append(elapsed - 15)
+            elif elapsed > 110:
+                found.append(90)
+        if sd_up == "HT":
+            minute = 45  # canonical half-time minute
+        elif active is not None:
+            cf = int(active.get("counts_from", 0) or 0)
+            if "2ND" in str(active.get("description", "")).upper() and cf < 45:
+                cf = 45  # the second half always counts from minute 45
+            minute = cf + int(active.get("minutes", 0) or 0)
+        else:
+            minute = max(found) if found else 0
+
+        entry = {
+            "score": md.get("ft_score") or "0-0",
+            "minute": minute,
+            "state": (fx.get("state") or {}).get("state", "") if isinstance(fx.get("state"), dict) else "",
+            "is_finished": bool(md.get("is_finished")),
+        }
+        idx[fid] = entry  # fresh live rows overwrite the finished layer
+    return idx
+
+
+_LIVE_INDEX_CACHE = {"sig": None, "idx": {}}
+
+
+def _live_index_cached() -> dict:
+    """Read-time memo for _live_index(): one rebuild per cache-file generation
+    instead of once per row-serving request. The signature is the in-play
+    cache file's (mtime_ns, size) — identical to settlement's archive-cache
+    invalidation. Falls back to rebuilding when the stat fails (missing file,
+    unreadable dir) so a changed feed is never served stale."""
+    raw = os.path.join(DATA_DIR, "live_inplay_cache.json")
+    try:
+        st = os.stat(raw)
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None
+    if _LIVE_INDEX_CACHE["sig"] != sig or not _LIVE_INDEX_CACHE["idx"]:
+        try:
+            _LIVE_INDEX_CACHE["idx"] = _live_index()
+        except Exception:
+            _LIVE_INDEX_CACHE["idx"] = {}
+        _LIVE_INDEX_CACHE["sig"] = sig
+    return _LIVE_INDEX_CACHE["idx"]
+
+
 @app.get("/api/live/incoming", tags=["Live"])
 def get_live_incoming():
-    return _incoming_rows_from_disk()
+    rows = _incoming_rows_from_disk()
+    live_idx = _live_index_cached()
+    for r in rows:
+        if isinstance(r, dict):
+            r["live"] = live_idx.get(str(r.get("fixture_id") or ""))
+    return rows
 
 
 @app.get("/api/live/danger", tags=["Live"])
 def get_live_danger():
-    return _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
+    rows = _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
+    if isinstance(rows, list):
+        live_idx = _live_index_cached()
+        for r in rows:
+            if isinstance(r, dict):
+                r["live"] = live_idx.get(str(r.get("fixture_id") or ""))
+    return rows
 
 
 @app.get("/api/live/aggregator", tags=["Live"])
 def get_live_aggregator():
-    return _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
+    rows = _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
+    if isinstance(rows, list):
+        live_idx = _live_index_cached()
+        for r in rows:
+            if isinstance(r, dict):
+                r["live"] = live_idx.get(str(r.get("fixture_id") or ""))
+    return rows
 
 
 @app.get("/api/live/orchestrator", tags=["Live"])
@@ -1011,7 +1281,25 @@ _O25_RISK_LEVELS = {"banker", "balanced", "aggressive"}
 
 
 @app.get("/api/filter/gg/weekly", tags=["Filters"])
-def filter_gg_weekly(mode: str = "public"):
+def filter_gg_weekly(
+    mode: str = "public",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    anchor_date: Optional[str] = None,
+):
+    """
+    7-day rolling GG cross-verification.
+
+    Range supplied (start_date + end_date) → read every date in the range via
+    read_range() and concatenate, giving a true week of picks. Dates the
+    pipeline hasn't run yet contribute 0 rows.
+
+    No range supplied → preserve backward compatibility: read today's
+    dateless "__latest" snapshot (same behaviour as before).
+    """
+    if start_date and end_date:
+        dates = _date_range(start_date, end_date)
+        return read_range(lambda d: "filter_gg", dates, GG_CROSS_DEFAULTS, "gg")
     return get_gg_cross_verify()
 
 
@@ -1047,13 +1335,15 @@ def filter_win_weekly(
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: f"filter_win__{risk}", dates, WIN_FORECAST_DEFAULTS, "win")
+    return read_range(lambda d: f"filter_win__{risk}", dates, WIN_FORECAST_DEFAULTS, "win",
+                      identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/win/{date}", tags=["Filters"])
 def filter_win_single(date: str, mode: str = "public", risk_level: str = "balanced"):
     risk = risk_level if risk_level in _WIN_RISK_LEVELS else "balanced"
-    return read(f"filter_win__{risk}", date, WIN_FORECAST_DEFAULTS, "win")
+    return read(f"filter_win__{risk}", date, WIN_FORECAST_DEFAULTS, "win",
+                identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/over25/weekly", tags=["Filters"])
@@ -1070,13 +1360,15 @@ def filter_over25_weekly(
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: f"filter_over25__{risk}", dates, O25_FORECAST_DEFAULTS, "o25")
+    return read_range(lambda d: f"filter_over25__{risk}", dates, O25_FORECAST_DEFAULTS, "o25",
+                      identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/over25/{date}", tags=["Filters"])
 def filter_over25_single(date: str, mode: str = "public", risk_level: str = "balanced"):
     risk = risk_level if risk_level in _O25_RISK_LEVELS else "balanced"
-    return read(f"filter_over25__{risk}", date, O25_FORECAST_DEFAULTS, "o25")
+    return read(f"filter_over25__{risk}", date, O25_FORECAST_DEFAULTS, "o25",
+                identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/win/precision/weekly", tags=["Filters"])
@@ -1089,9 +1381,11 @@ def filter_win_precision_weekly(
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: "filter_win__safe", dates, WIN_FORECAST_DEFAULTS, "win")
+    return read_range(lambda d: "filter_win__safe", dates, WIN_FORECAST_DEFAULTS, "win",
+                      identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/win/precision/{date}", tags=["Filters"])
 def filter_win_precision_single(date: str):
-    return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win")
+    return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win",
+                identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)

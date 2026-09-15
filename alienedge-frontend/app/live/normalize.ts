@@ -28,10 +28,12 @@ export function normalizeIncoming(
       if (value && typeof value === "object" && !Array.isArray(value)) {
         const obj = value as Record<string, unknown>;
         const picks = Array.isArray(obj.picks) ? obj.picks : [];
+        const live = obj.live as LiveIncomingPick["live"] | undefined;
         return {
           fixture_id: String(obj.fixture_id ?? fixture_id),
           fixture: String(obj.fixture ?? fixture_id),
           picks: picks as LiveIncomingPick["picks"],
+          live,
         };
       }
       return {
@@ -72,7 +74,11 @@ export function normalizeDashboard(
 export function normalizeDanger(
   res: AxiosResponse<LiveDangerReport[] | Record<string, unknown>>
 ): AxiosResponse<LiveDangerReport[]> {
-  return { ...res, data: asArray<LiveDangerReport>(res.data) };
+  const raw = res.data;
+  if (Array.isArray(raw)) {
+    return { ...res, data: raw.map((r) => ({ ...r })) };
+  }
+  return { ...res, data: asArray<LiveDangerReport>(raw) };
 }
 
 export function normalizeAggregator(
@@ -82,5 +88,6 @@ export function normalizeAggregator(
   if (raw && typeof raw === "object" && !Array.isArray(raw) && "error" in raw) {
     return { ...res, data: [] };
   }
-  return { ...res, data: asArray<LiveAggregatorReport>(raw) };
+  const arr = asArray<LiveAggregatorReport>(raw);
+  return { ...res, data: arr.map((r) => ({ ...r })) };
 }
