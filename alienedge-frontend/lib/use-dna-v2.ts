@@ -1,9 +1,9 @@
 "use client";
 
+import { useCallback, useEffect, useState } from "react";
 import { dnaV2Api, type DnaV2Response } from "@/lib/api";
 import { useApi, type UseApiResult } from "@/lib/use-api";
 import { useSelectedDate } from "@/lib/date-context";
-import { getTodayDate } from "@/lib/date-utils";
 import { MOCK_DNA_V2 } from "@/lib/mock-dna-v2";
 
 /**
@@ -34,14 +34,36 @@ import { MOCK_DNA_V2 } from "@/lib/mock-dna-v2";
 export function useDnaV2(dateOverride?: string): UseApiResult<DnaV2Response> {
   const { date: selectedDate } = useSelectedDate();
   const date = dateOverride || selectedDate;
-  // Default/today: the pipeline may not have generated a snapshot for the
-  // current calendar date yet, so fall back to the newest AVAILABLE snapshot
-  // via the existing /api/dna/v2/latest endpoint. A deliberately selected
-  // historical date is always fetched exactly (honest empty if none exists).
-  const isToday = date === getTodayDate();
-  const fetcher = isToday ? () => dnaV2Api.getLatest() : () => dnaV2Api.get(date);
-  return useApi(fetcher, [isToday, date], {
-    cacheKey: isToday ? "dna-v2:latest" : `dna-v2:${date}`,
+  // Date-first with latest-fallback: ALWAYS request the explicitly selected
+  // date's snapshot first so a next-day pipeline landing mid-evening can
+  // never replace today's DNA view while the user is still on today's
+  // fixtures. The `dna-v2:latest` endpoint is only consulted when the dated
+  // file genuinely does not exist (pipeline hasn't run for that date yet).
+  // Implemented as two stable fetchers selected by whether the dated fetch
+  // already resolved — no polling loop, no extra renders.
+  const [useLatestFallback, setUseLatestFallback] = useState(false);
+  useEffect(() => {
+    setUseLatestFallback(false);
+  }, [date]);
+  const fetcher = useCallback(() => {
+    if (useLatestFallback) return dnaV2Api.getLatest();
+    return dnaV2Api.get(date).then((res) => {
+      const d = res.data as DnaV2Response | null | undefined;
+      const empty =
+        !d ||
+        (Object.keys(d.dna_profiles ?? {}).length === 0 &&
+          (d.fixture_clashes ?? []).length === 0 &&
+          Object.keys(d.market_factors ?? {}).length === 0);
+      if (empty) {
+        // Dated snapshot genuinely absent — fall back to newest available.
+        setUseLatestFallback(true);
+        return dnaV2Api.getLatest();
+      }
+      return res;
+    });
+  }, [date, useLatestFallback]);
+  return useApi(fetcher, [date, useLatestFallback], {
+    cacheKey: useLatestFallback ? `dna-v2:${date}:via-latest` : `dna-v2:${date}`,
     fallback: MOCK_DNA_V2,
   });
 }
