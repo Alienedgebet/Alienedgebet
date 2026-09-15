@@ -9,6 +9,9 @@ export interface VerificationData {
   verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
   badge_text: string;
   note?: string;
+  h_corners?: number;
+  a_corners?: number;
+  total_corners?: number;
 }
 
 export function VerifyCell({ data }: { data?: VerificationData }) {
@@ -36,25 +39,31 @@ export function VerifyCell({ data }: { data?: VerificationData }) {
 
   // 2. FINISHED: WON STATE
   if (data.verdict === "WON") {
+    const displayScore = data.h_corners !== undefined && data.a_corners !== undefined
+      ? `${data.h_corners}+${data.a_corners}=${data.total_corners}`
+      : data.score;
     return (
       <div
         className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-950/50 px-2 py-0.5 font-mono text-xs font-bold text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
         title={data.note}
       >
         <Check className="h-3 w-3 text-emerald-400 stroke-[3]" />
-        <span>{data.score}</span>
+        <span>{displayScore}</span>
       </div>
     );
   }
 
   // 3. FINISHED: LOST STATE
+  const displayScore = data.h_corners !== undefined && data.a_corners !== undefined
+    ? `${data.h_corners}+${data.a_corners}=${data.total_corners}`
+    : data.score;
   return (
     <div
       className="inline-flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-950/50 px-2 py-0.5 font-mono text-xs font-bold text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.2)]"
       title={data.note}
     >
       <X className="h-3 w-3 text-rose-400 stroke-[3]" />
-      <span>{data.score}</span>
+      <span>{displayScore}</span>
     </div>
   );
 }

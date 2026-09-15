@@ -44,14 +44,40 @@ function pickLabel(p: LiveIncomingPick["picks"][number]): string {
 
 const incomingColumns: PredictionColumn<LiveIncomingPick>[] = [
   {
+    // P0-5: one column instead of two. `fixture` is now the real
+    // "Home vs Away" name resolved server-side (api/main.py
+    // _fixture_name_index); the numeric id, which used to be rendered a
+    // second time in its own column, is demoted to the cell tooltip.
     key: "fixture",
     header: "fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => (
+      <span className="font-medium text-text-primary" title={`fixture_id ${r.fixture_id}`}>
+        {r.fixture}
+      </span>
+    ),
   },
   {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
+    // P0-4: live score/minute/state from the in-play cache (data/live_inplay_cache.json).
+    // Additive only — rows without a matching live entry render "—". `live_data` is a
+    // duck-typed alias so the column type doesn't need to know the optional shape.
+    key: "live",
+    header: "live",
+    className: "w-24 shrink-0",
+    render: (r) => {
+      const live = (r as unknown as Record<string, unknown>).live as LiveIncomingPick["live"] | undefined;
+      if (!live) return <span className="font-mono text-2xs text-text-dim">—</span>;
+      const stateLabel =
+        live.is_finished ? "FT" : live.state.replace(/^INPLAY_/, "").replace(/_/g, " ");
+      return (
+        <span className="flex items-center gap-1.5">
+          <span className="font-mono text-2xs text-text-secondary">{live.score}</span>
+          <span className="text-2xs text-text-dim">{live.minute}'</span>
+          <span className="text-2xs text-text-dim truncate max-w-[60px]" title={live.state}>
+            {stateLabel}
+          </span>
+        </span>
+      );
+    },
   },
   {
     key: "picks",
@@ -86,6 +112,27 @@ const dangerColumns: PredictionColumn<LiveDangerReport>[] = [
     key: "fixture",
     header: "fixture",
     render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+  },
+  {
+    // P0-4: live score/minute/state from the in-play cache.
+    key: "live",
+    header: "live",
+    className: "w-24 shrink-0",
+    render: (r) => {
+      const live = (r as unknown as Record<string, unknown>).live as LiveDangerReport["live"] | undefined;
+      if (!live) return <span className="font-mono text-2xs text-text-dim">—</span>;
+      const stateLabel =
+        live.is_finished ? "FT" : live.state.replace(/^INPLAY_/, "").replace(/_/g, " ");
+      return (
+        <span className="flex items-center gap-1.5">
+          <span className="font-mono text-2xs text-text-secondary">{live.score}</span>
+          <span className="text-2xs text-text-dim">{live.minute}'</span>
+          <span className="text-2xs text-text-dim truncate max-w-[60px]" title={live.state}>
+            {stateLabel}
+          </span>
+        </span>
+      );
+    },
   },
   {
     key: "align",
@@ -139,6 +186,10 @@ function DangerSideCell({
 
 function AggregatorCard({ row }: { row: LiveAggregatorReport }) {
   const chem = Object.entries(row.match_chemistry_list);
+  const live = (row as unknown as Record<string, unknown>).live as LiveAggregatorReport["live"] | undefined;
+  const stateLabel = live
+    ? (live.is_finished ? "FT" : live.state.replace(/^INPLAY_/, "").replace(/_/g, " "))
+    : null;
   return (
     <article className="rounded-xl border border-border/70 bg-bg-elevated/25 shadow-panel">
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border/60 px-4 py-3">
@@ -151,6 +202,17 @@ function AggregatorCard({ row }: { row: LiveAggregatorReport }) {
           <SyncChip label="A" report={row.danger_report.away} />
         </div>
       </div>
+
+      {/* P0-4: live score/minute/state */}
+      {live && (
+        <div className="border-b border-border/50 px-4 py-2">
+          <span className="flex items-center gap-1.5 font-mono text-2xs">
+            <span className="text-text-secondary">{live.score}</span>
+            <span className="text-text-dim">{live.minute}'</span>
+            <span className="text-text-dim">{stateLabel}</span>
+          </span>
+        </div>
+      )}
 
       <div className="border-b border-border/50 px-4 py-2.5">
         <p className="mb-1.5 text-2xs uppercase tracking-wide text-text-dim">
