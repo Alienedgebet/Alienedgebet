@@ -311,7 +311,13 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
                                           error=f"{engine_name}: returned None (no disk fallback)")
                 print(f"   ⚠️ recorded failure -> {path}")
             else:
-                path = store.save(save_key, save_date, res)
+                # SNAPSHOT GUARD (Batch A): date-scoped writes are guarded so a
+                # run that fetched a suspiciously collapsed fixture universe
+                # (the 2026-09-15 evening run saw 3 fixtures instead of 63) can
+                # never replace a good same-date snapshot. `guard=bool(save_date)`
+                # keeps the two '__latest' keys (save_date=None) unguarded, since
+                # a non-date file has no date universe to compare.
+                path = store.save(save_key, save_date, res, guard=bool(save_date))
                 print(f"   💾 saved -> {path}")
         return res
     except Exception as e:
@@ -323,7 +329,7 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
             recovered = _recover_engine_output_from_disk(save_key, save_date, engine_name, func)
             if recovered is not None:
                 recovered = _normalize_fixture_schema(recovered)
-                path = store.save(save_key, save_date, recovered)
+                path = store.save(save_key, save_date, recovered, guard=bool(save_date))
                 print(f"   💾 rescued from disk -> {path}")
                 return recovered
 
@@ -456,7 +462,7 @@ def alienedge_master_system(cli_date_override: str = None):
     # last actually ran relative to the date being viewed.
     win_apex_result = _safe_exec("Win Apex Aggregator", run_win_apex_aggregator, save_key="win_apex", save_date=None)
     if win_apex_result is not None:
-        store.save("win_apex", d, win_apex_result)
+        store.save("win_apex", d, win_apex_result, guard=True)
     _safe_exec("SH Master Vortex", run_sh_master_vortex, target_date, save_key="sh_master", save_date=d)
     _safe_exec("SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, target_date, save_key="sh_8goal", save_date=d)
     _safe_exec("Win Raw Probability Engine", run_win_raw_engine, target_date, save_key="win_raw", save_date=d)
@@ -471,7 +477,11 @@ def alienedge_master_system(cli_date_override: str = None):
     gg_filter_result = _safe_exec("Filter GG Precision Filter", run_gg_precision_filter,
                                    save_key="filter_gg", save_date=None)
     if gg_filter_result is not None:
-        store.save("filter_gg", d, gg_filter_result)
+        # `guard=True` is inert here: output_store.COLLAPSE_GUARD_EXEMPT_KEYS
+        # excludes filter_gg because its rows are a 7-day rolling cross-day
+        # universe, not this date's fixture universe. Passed explicitly so the
+        # exemption is visible at the call site rather than implied.
+        store.save("filter_gg", d, gg_filter_result, guard=True)
 
     for risk in ("banker", "balanced", "aggressive"):
         _safe_exec(f"Filter Over 2.5 Aggregator ({risk})", run_over25_filter_aggregator,
@@ -496,3 +506,17 @@ def alienedge_master_system(cli_date_override: str = None):
 
 if __name__ == "__main__":
     alienedge_master_system()
+
+    # SNAPSHOT GUARD (Batch A): a run that had to REJECT collapsed same-date
+    # snapshots must not look green. exit 2 marks the unit failed so
+    # `systemctl is-failed alienedge-pipeline.service` and the log both surface
+    # it, instead of a run that silently preserved old data looking successful.
+    _rejected = store.guard_rejections()
+    if _rejected:
+        print(f"\n⚠️ [SNAPSHOT GUARD] {len(_rejected)} same-date snapshot write(s) "
+              f"rejected as suspiciously collapsed and preserved:")
+        for _r in _rejected:
+            print(f"   • {_r['date']}/{_r['key']}: existing_fixtures="
+                  f"{_r['existing_fixtures']} new_fixtures={_r['new_fixtures']} "
+                  f"({_r['reason']})")
+        sys.exit(2)
