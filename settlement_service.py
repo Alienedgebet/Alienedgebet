@@ -42,6 +42,54 @@ def _extract_match_date(fx):
             return None
     return None
 
+def _is_finished_state(value):
+    """Final-state detection (Batch C): explicit allowlist rooted in what the
+    existing system already accepted (``FT``, ``AET``, ``AP``, ``FT_PEN``,
+    ``PEN``, ``FINISHED``, ``ENDED``, ``FULL-TIME``, ``FULL TIME``) plus the
+    canonical SportMonks terse variants not previously handled (``FULL_TIME``,
+    ``FT_PEN`` as a terse code). Unknown or in-progress states are never
+    treated as finished."""
+    if not value:
+        return False
+    token = str(value).strip().upper()
+    if token in _EXPLICIT_FINAL_TOKENS:
+        return True
+    return token.startswith("FT_")
+
+
+def _usable_fixture_id(val) -> str:
+    """A fixture identity usable for matching. Placeholder ids (``"N/A"``,
+    ``""``, ``"0"``, …) return ``""``, so they count as "no identity" and fall
+    through to the name fallback instead of blocking the row under an unusable
+    key."""
+    if val is None:
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() in _PLACEHOLDER_FIXTURE_IDS else s
+
+
+# ---- helpers referenced by extract_match_data() and the matching layer ----
+
+_STATE_CODE_KEYS = ("state", "short_name", "developer_name", "name")
+
+_EXPLICIT_FINAL_TOKENS = frozenset((
+    "FT", "AET", "AP", "FT_PEN", "PEN", "FINISHED", "ENDED",
+    "FULL-TIME", "FULL TIME", "FULL_TIME",
+))
+
+_PLACEHOLDER_FIXTURE_IDS = frozenset({"n/a", "na", "none", "0", ""})
+
+
+def get_strict_match_key(name):
+    """Qualifier-preserving identity — distinguishes "Napoli U19 vs Arsenal U19"
+    from "Napoli vs Arsenal" so the strict fallback selects exactly one of two
+    same-loose-key candidates instead of silently cross-matching youth vs senior."""
+    n = str(name).lower()
+    parts = n.split('vs') if 'vs' in n else (n.split('-') if '-' in n else [n])
+    parts = [p.strip() for p in parts]
+    parts.sort()
+    return "".join(parts)
+
 def extract_match_data(fx):
     """
     Parses a raw SportMonks fixture object into standardized match data
@@ -62,15 +110,26 @@ def extract_match_data(fx):
     # terse canonical code, and accept the common finished spellings.
     st = fx.get("state") or {}
     if isinstance(st, dict):
-        state_desc = str(
-            st.get("state") or st.get("short_name") or st.get("developer_name")
-            or st.get("name") or st.get("description") or ""
-        ).upper()
+        # Batch C: accept a canonical finished code from ANY of the code-bearing
+        # fields (a value may also carry a human suffix, e.g.
+        # "FT_PEN: Home won on penalties"). Explicit allowlist only — an unknown
+        # or in-progress state is never treated as finished.
+        is_finished = any(_is_finished_state(st.get(k)) for k in _STATE_CODE_KEYS)
     else:
-        state_desc = str(st).upper()
-    if state_desc in ["FT", "AET", "AP", "FT_PEN", "PEN", "FINISHED", "ENDED",
-                      "FULL-TIME", "FULL TIME"]:
-        is_finished = True
+        is_finished = _is_finished_state(st)
+
+    # Batch C: track whether a REAL final score was actually read for BOTH
+    # sides. h_ft/a_ft default to 0, so grading a finished fixture whose score
+    # entries are absent would invent a 0-0 result out of thin air. Settlement
+    # uses this to stay PENDING instead (see grade_row). A genuine 0-0 still
+    # reports both sides, so real goalless draws are unaffected.
+    saw_home_final = False
+    saw_away_final = False
+
+    # A finished match must have started — this lets grade_row reach the
+    # "FINISHED BUT RESULT UNUSABLE" check even when no score entries exist.
+    if is_finished:
+        has_started = True
 
     for s in scores:
         desc = str(s.get("description", "")).upper()
@@ -87,8 +146,12 @@ def extract_match_data(fx):
             elif p == "away": a_ht = g
         if desc in ["CURRENT", "2ND_HALF", "2ND HALF", "FULL_TIME", "FT"]:
             has_started = True
-            if p == "home": h_ft = max(h_ft, g)
-            elif p == "away": a_ft = max(a_ft, g)
+            if p == "home":
+                h_ft = max(h_ft, g)
+                saw_home_final = True
+            elif p == "away":
+                a_ft = max(a_ft, g)
+                saw_away_final = True
 
     # Extract team names & IDs
     parts = fx.get("participants", [])
@@ -129,6 +192,11 @@ def extract_match_data(fx):
         "h_corners": h_c, "a_corners": a_c, "total_corners": h_c + a_c,
         "has_started": has_started,
         "is_finished": is_finished,
+        # Batch C (additive field): True only when a final-score entry was read
+        # for BOTH sides. Legacy payloads (archives written before this field
+        # existed) have no key at all and settlement defaults it to True, so
+        # their verdicts stay byte-identical.
+        "score_available": bool(saw_home_final and saw_away_final),
         "minute": minute,
         # ISO kickoff date when the raw fixture carries one. Archives are
         # written per-date so this is redundant for them, but the live in-play
@@ -239,6 +307,23 @@ def grade_row(market_type, row, actual_match):
     is_finished = actual_match.get("is_finished", False)
     ft_score = actual_match.get("ft_score", "0-0")
     minute = actual_match.get("minute", 0)
+
+    # 2b. FINISHED BUT RESULT UNUSABLE (Batch C)
+    # The state says the match is over, but no final-score entry could be read.
+    # h_ft/a_ft default to 0, so grading here would fabricate a 0-0 result and a
+    # verdict from it. Stay PENDING instead. `score_available` defaults to True
+    # for legacy payloads (archives written before the field existed), so every
+    # pre-existing verdict is unchanged; the frontend already renders verdict
+    # PENDING as an em-dash, so no client contract changes.
+    if is_finished and not actual_match.get("score_available", True):
+        return {
+            "status": "FINISHED",
+            "score": "—",
+            "minute": minute,
+            "verdict": "PENDING",
+            "badge_text": "—",
+            "note": "Full time — result not available yet"
+        }
 
     # 2. LIVE IN-PLAY STATE
     if not is_finished:
@@ -422,6 +507,112 @@ def grade_row(market_type, row, actual_match):
         "note": note
     }
 
+def _fixture_identity(fx) -> str:
+    """Authoritative fixture identity: the fixture id as a string ("" when the
+    entry carries none)."""
+    return _usable_fixture_id(fx.get("fixture_id"))
+
+
+def _same_result(a, b) -> bool:
+    """True when two entries describe the identical outcome."""
+    return (bool(a.get("is_finished")) == bool(b.get("is_finished"))
+            and str(a.get("ft_score") or "") == str(b.get("ft_score") or "")
+            and int(a.get("h_ft") or 0) == int(b.get("h_ft") or 0)
+            and int(a.get("a_ft") or 0) == int(b.get("a_ft") or 0))
+
+
+def _merge_identified_fixture(id_map, ambiguous_ids, fid, fx):
+    """Insert one result under its FIXTURE ID, keeping the existing
+    archive/live merge priority and never silently choosing between two
+    contradictory finished results.
+
+      * new id                     -> insert
+      * finished vs unfinished     -> the FINISHED entry wins (archive priority,
+                                      exactly as before)
+      * two unfinished             -> newest wins (the fresher live snapshot —
+                                      identical to the previous dict behaviour)
+      * two finished, same result  -> keep the existing entry (no conflict)
+      * two finished, DIFFERENT    -> AMBIGUOUS: the id is dropped, so the row
+                                      stays unmatched/PENDING instead of being
+                                      graded against an arbitrary result
+    """
+    if not fid or fid in ambiguous_ids:
+        return
+    current = id_map.get(fid)
+    if current is None:
+        id_map[fid] = fx
+        return
+    cur_fin, new_fin = bool(current.get("is_finished")), bool(fx.get("is_finished"))
+    if cur_fin != new_fin:
+        id_map[fid] = fx if new_fin else current
+        return
+    if cur_fin and new_fin and not _same_result(current, fx):
+        id_map.pop(fid, None)
+        ambiguous_ids.add(fid)
+        return
+    id_map[fid] = fx
+
+
+def _add_name_candidate(name_map, strict_map, fx):
+    """Index one merged result under BOTH its loose (qualifier-stripped) and
+    strict (qualifier-preserving) identity key.
+
+    Lists, not single values: one loose key can legitimately cover two different
+    fixtures (a U19 and a senior match between the same clubs on the same day).
+    """
+    home = str(fx.get("home_team") or "")
+    away = str(fx.get("away_team") or "")
+    if not home and not away:
+        return
+    pair = f"{home} vs {away}"
+    name_map.setdefault(get_match_key(pair), []).append(fx)
+    strict_map.setdefault(get_strict_match_key(pair), []).append(fx)
+
+
+def _match_by_name(name_map, strict_map, fix_name, row_fid, row, date_str):
+    """Date-scoped name fallback — used ONLY when fixture identity is missing on
+    at least one side. Never second-guesses two different known fixture ids, and
+    never picks arbitrarily between two same-named candidates."""
+    candidates = name_map.get(get_match_key(fix_name)) or []
+    if not candidates:
+        return None
+
+    row_date = str(row.get("match_date") or date_str or "")[:10]
+    dated = []
+    for cand in candidates:
+        m_date = cand.get("match_date")
+        # Existing rule, unchanged: the name key is not unique across dates, so
+        # when both sides carry a kickoff date they must agree. A date-less
+        # legacy entry keeps the historical permissive behaviour, so no
+        # previously-working match is weakened.
+        if not m_date or not row_date or m_date == row_date:
+            dated.append(cand)
+    if not dated:
+        return None
+
+    # Two different KNOWN fixture ids are two different fixtures, even when the
+    # team names are identical. A row that carries a real id may therefore only
+    # be completed by an entry whose id agrees (or by a legacy entry with no id
+    # at all).
+    if row_fid:
+        dated = [c for c in dated
+                 if not _fixture_identity(c) or _fixture_identity(c) == row_fid]
+        if not dated:
+            return None
+
+    if len(dated) == 1:
+        return dated[0]
+
+    # Same loose name key with several candidates (U19 vs senior, two matches
+    # between the same clubs on one day): break the tie with the
+    # qualifier-preserving key. Exactly one survivor is a confident match;
+    # anything else is genuinely ambiguous and returns PENDING rather than an
+    # arbitrary pick.
+    exact = strict_map.get(get_strict_match_key(fix_name)) or []
+    survivors = [c for c in dated if any(c is s for s in exact)]
+    return survivors[0] if len(survivors) == 1 else None
+
+
 def settle_predictions(predictions, live_matches_db, market_type="win", date_str=None):
     """
     Settles a list of prediction rows against actual live/finished matches.
@@ -455,6 +646,23 @@ def settle_predictions(predictions, live_matches_db, market_type="win", date_str
     fixture from another date can never satisfy this request; without a
     valid `date_str` the archive layer is skipped entirely and behaviour is
     identical to the pre-archive system.
+
+    MATCHING PRIORITY (Batch D — fixture id is the authoritative identity):
+      1. EXACT fixture id (globally unique; no date check needed). If two
+         contradictory FINISHED results share one id the id is declared
+         ambiguous and the row stays unmatched rather than being graded
+         against an arbitrary result.
+      2. NAME FALLBACK, only when identity is missing on at least one side
+         (the row has no usable id, or the candidate entry has none) AND the
+         dates agree when both are known. Within the fallback:
+           2a. one candidate surviving the date/id filter -> match
+           2b. several candidates (e.g. "Napoli U19 vs Arsenal U19" and
+               "Napoli vs Arsenal" share one qualifier-stripped key) -> the
+               qualifier-preserving key must select exactly one, otherwise
+               the row is AMBIGUOUS -> unmatched
+      3. Otherwise UNMATCHED -> the row settles to SCHEDULED/PENDING. A
+         fixture from another date, or a different fixture id, is never
+         accepted merely because the team names match.
     """
     # ── LIVE IN-PLAY LAYER (unchanged behaviour, including pass-through) ──
     std_db = []
@@ -466,8 +674,13 @@ def settle_predictions(predictions, live_matches_db, market_type="win", date_str
         else:
             std_db.append(extract_match_data(fx))
 
-    id_map = {str(fx.get("fixture_id")): fx for fx in std_db if fx.get("fixture_id")}
-    name_map = {get_match_key(f"{fx.get('home_team', '')} vs {fx.get('away_team', '')}"): fx for fx in std_db if fx.get("home_team")}
+    # ── UNIVERSE INDEXED BY FIXTURE ID (authoritative identity) ───────────
+    # `_merge_identified_fixture` keeps the archive/live priority below and
+    # refuses to silently choose between two contradictory finished results.
+    id_map = {}
+    ambiguous_ids = set()
+    for fx in std_db:
+        _merge_identified_fixture(id_map, ambiguous_ids, _fixture_identity(fx), fx)
 
     # ── PERSISTENT FINISHED LAYER (archive for this exact date) ────────────
     # Merge priority (authoritative → stale):
@@ -482,34 +695,49 @@ def settle_predictions(predictions, live_matches_db, market_type="win", date_str
         for fid, fx in finished_db.items():
             live_fx = id_map.get(fid)
             if fx.get("is_finished") or live_fx is None:
-                id_map[fid] = fx
-                name_map[get_match_key(f"{fx.get('home_team', '')} vs {fx.get('away_team', '')}")] = fx
+                _merge_identified_fixture(id_map, ambiguous_ids,
+                                          _fixture_identity(fx) or fid, fx)
+
+    # ── NAME INDEX (fallback identity only) ────────────────────────────────
+    # Built from the MERGED, id-deduplicated universe so a fixture can never be
+    # indexed twice under its own name, plus any live entry that carries no
+    # fixture id at all (names are the only identity those rows have).
+    name_map = {}
+    strict_map = {}
+    for fx in id_map.values():
+        _add_name_candidate(name_map, strict_map, fx)
+    for fx in std_db:
+        if not _fixture_identity(fx):
+            _add_name_candidate(name_map, strict_map, fx)
 
     enriched = []
     for row in predictions:
         rec = dict(row)
-        fid = str(rec.get("fixture_id") or rec.get("id") or "")
+        fid = _usable_fixture_id(rec.get("fixture_id") or rec.get("id"))
         fix_name = str(rec.get("fixture") or rec.get("Fixture") or rec.get("Match") or "")
 
-        # 1. Match by fixture_id first (globally unique — no date check needed)
-        matched = id_map.get(fid)
+        # 1. Match by fixture_id first (globally unique — no date check needed).
+        #    A placeholder id ("N/A") counts as NO identity, which keeps those
+        #    rows on the name fallback instead of blocking them.
+        matched = id_map.get(fid) if fid else None
 
-        # 2. Fallback to clean_n match key — DATE-CONSTRAINED.
+        # 2. Fallback to clean_n match key — DATE-CONSTRAINED and
+        #    identity-guarded.
         #    The name key is not unique across dates, so a historical row must
         #    never be satisfied by an identically named fixture of another day
         #    (same clubs meet weekly, and the live feed only ever contains
-        #    *today's* matches). When both sides carry a kickoff date, require
-        #    exact agreement with the requested date; entries without a date
-        #    (legacy cached payloads) keep the legacy permissive behaviour so
-        #    the 3ffe1f5 name matching is never weakened for existing data.
-        if not matched and fix_name:
-            key = get_match_key(fix_name)
-            cand = name_map.get(key)
-            if cand is not None:
-                m_date = cand.get("match_date")
-                row_date = str(rec.get("match_date") or date_str or "")[:10]
-                if not m_date or not row_date or m_date == row_date:
-                    matched = cand
+        #    *today's* matches). When both sides carry a kickoff date, exact
+        #    agreement is required; entries without a date (legacy cached
+        #    payloads) keep the permissive behaviour so the 3ffe1f5 name
+        #    matching is never weakened for existing data. Inside
+        #    `_match_by_name` a row that HAS a real fixture id can no longer be
+        #    completed by an entry carrying a DIFFERENT id, and a name key with
+        #    two candidates (a U19 and a senior match between the same clubs) is
+        #    only accepted when the qualifier-preserving key selects exactly one
+        #    — otherwise the row stays unmatched/PENDING. A row whose own id was
+        #    declared ambiguous never falls back to a name guess.
+        if not matched and fix_name and not (fid and fid in ambiguous_ids):
+            matched = _match_by_name(name_map, strict_map, fix_name, fid, rec, date_str)
 
         # Attach verification object to row
         rec["verification"] = grade_row(market_type, rec, matched)
