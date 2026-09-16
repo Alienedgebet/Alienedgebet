@@ -106,15 +106,26 @@ def to_jsonable(x):
     return sanitize_non_finite(x)
 
 
-def save(key: str, date: str, data, status: str = "ok", error: str = None) -> str:
+def save(key: str, date: str, data, status: str = "ok", error: str = None,
+         guard: bool = False) -> str:
     """Atomically writes one engine's result. `date=None` for the two
     no-date engines (win_apex, gg_precision_filter) — those save under
     the '__latest' suffix instead.
 
     `status`/`error` let a caller record a FAILED run explicitly (see
     `save_failure()` below) instead of a failure looking identical to an
-    engine that legitimately returned zero rows for a quiet day."""
+    engine that legitimately returned zero rows for a quiet day.
+
+    `guard=True` is OPT-IN and only meaningful for date-scoped writes: it
+    refuses to replace an existing same-date snapshot with a suspiciously
+    collapsed fixture universe (see the SNAPSHOT GUARD block above). On REJECT
+    the existing file is left byte-for-byte untouched and its path is returned
+    unchanged, so callers keep the exact same contract."""
     path = _path(key, date)
+    if (guard and status == "ok" and data is not None and date
+            and key not in COLLAPSE_GUARD_EXEMPT_KEYS):
+        if guard_same_date_snapshot(key, date, data)["decision"] == "REJECT":
+            return path  # existing snapshot preserved; nothing rewritten
     payload = {
         "engine_key": key,
         "date": date,
@@ -146,6 +157,135 @@ def _row_count(data) -> int:
     if isinstance(j, dict):
         return sum(_row_count(v) for v in j.values() if isinstance(v, (list, dict))) or len(j)
     return 0 if j is None else 1
+
+
+# ─ SAME-DATE SNAPSHOT COLLAPSE GUARD (Batch A) ──────────────────────────────
+# A date-scoped cache file IS that date's universe for every reader. On
+# 2026-09-15 the evening run fetched only the 3 fixtures the date endpoint still
+# returned after the day's other ~60 matches had finished, and each engine's
+# save() then unconditionally replaced the 63-fixture morning snapshot with a
+# 3-fixture one — same key, same filename — while the run still reported SUCCESS.
+# The good snapshot was unrecoverable.
+#
+# The guard compares FIXTURE IDENTITY (unique fixture ids), never row counts.
+# Row counts are meaningless as a universe measure: win forecast emits two rows
+# per fixture (home + away), an aggregator emits one, corners may emit none on a
+# quiet day, and the rolling GG filter spans 7 days. Fixture ids are the one
+# identity every layer already agrees on, so a collapse is judged only by id sets.
+#
+# It is OPT-IN via save(..., guard=True), it only can fire when a same-date file
+# already exists, and it never invents storage: on REJECT the existing file is
+# left exactly as it is and the rejection is logged.
+UNIVERSE_MIN_EXISTING = 8     # an existing universe below this is never "known-good"
+UNIVERSE_REJECT_RATIO = 0.25  # a new universe must exceed existing * ratio to be kept
+
+# Keys that are intentionally CROSS-DAY. filter_gg's rows are aggregated from the
+# last 7 days of GG master history (FILTER/gg_precision_filter.py) rather than
+# from the requested date, so its fixture set is NOT the run's date universe and
+# comparing it against a same-date file would be meaningless. Skipped entirely —
+# its row count/fixture count is never used as a date universe measure.
+COLLAPSE_GUARD_EXEMPT_KEYS = {"filter_gg"}
+
+_COLLAPSE_GUARD_REJECTIONS = []  # in-process diagnostics for the current run only
+
+
+def _norm_field_name(name) -> str:
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def fixture_universe(data) -> set:
+    """Unique fixture ids anywhere in an engine payload — the primary identity.
+
+    Only keys normalising to 'fixtureid'/'fixtureids' count. Team names are
+    deliberately NOT used: normalised names collide across dates, which is the
+    same collision that mis-graded a historical Falkirk v Hearts row. A payload
+    carrying no fixture identity at all (dna, psychology tables, ...) yields an
+    EMPTY set, which makes the guard a no-op for that key instead of guessing.
+    """
+    found = set()
+
+    def _take(value):
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                _take(item)
+        elif value is None or isinstance(value, (dict, bool)):
+            return
+        else:
+            text = str(value).strip()
+            if text:
+                found.add(text)
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if _norm_field_name(key) in ("fixtureid", "fixtureids"):
+                    _take(value)
+                else:
+                    _walk(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                _walk(item)
+
+    _walk(data)
+    return found
+
+
+def existing_fixture_universe(key: str, date: str = None) -> set:
+    """Fixture ids already stored in this key's same-date snapshot. Reads through
+    load(), so a missing / failed / unreadable file yields an empty set (guard
+    ALLOW) rather than raising."""
+    data, _ = load(key, date)
+    return fixture_universe(data)
+
+
+def collapse_decision(existing_ids, new_ids) -> dict:
+    """The single definition of 'suspiciously collapsed'. Pure — no I/O — so the
+    cache writer (save) and the archiver (daily_archiver.py) share one rule and
+    cannot drift apart."""
+    existing_n, new_n = len(existing_ids), len(new_ids)
+    base = {"existing_fixtures": existing_n, "new_fixtures": new_n}
+    if existing_n == 0:
+        return dict(base, decision="ALLOW", reason="no existing fixture universe to protect")
+    if existing_n < UNIVERSE_MIN_EXISTING:
+        return dict(base, decision="ALLOW",
+                    reason=f"existing universe below protection floor ({UNIVERSE_MIN_EXISTING})")
+    if new_n <= int(existing_n * UNIVERSE_REJECT_RATIO):
+        return dict(base, decision="REJECT", reason="suspicious fixture-universe collapse")
+    return dict(base, decision="ALLOW", reason="new universe is not a collapse")
+
+
+def guard_rejections() -> list:
+    """Rejections recorded in THIS process (empty for a clean run). main.py uses
+    this to exit non-zero so a run that had to discard collapsed snapshots can
+    never look green in systemd."""
+    return list(_COLLAPSE_GUARD_REJECTIONS)
+
+
+def guard_same_date_snapshot(key, date, data) -> dict:
+    """Guard decision for one prospective same-date write; save() only skips the
+    write when it says REJECT. Returns ALLOW without inspecting `data` whenever
+    the existing snapshot holds no protectable fixture universe, so a genuinely
+    small date still snapshots normally and no engine is ever judged on row
+    count."""
+    existing_ids = existing_fixture_universe(key, date)
+    if len(existing_ids) < UNIVERSE_MIN_EXISTING:
+        return {"decision": "ALLOW", "existing_fixtures": len(existing_ids),
+                "new_fixtures": None,
+                "reason": f"existing universe below protection floor ({UNIVERSE_MIN_EXISTING})"}
+    decision = collapse_decision(existing_ids, fixture_universe(to_jsonable(data)))
+    if decision["decision"] == "REJECT":
+        _COLLAPSE_GUARD_REJECTIONS.append({
+            "date": date, "key": key,
+            "existing_fixtures": decision["existing_fixtures"],
+            "new_fixtures": decision["new_fixtures"],
+            "reason": decision["reason"],
+        })
+        print(f"[SNAPSHOT GUARD] date={date} key={key} "
+              f"existing_fixtures={decision['existing_fixtures']} "
+              f"new_fixtures={decision['new_fixtures']} "
+              f"decision=REJECT reason={decision['reason']} "
+              f"existing_snapshot_preserved=true")
+    return decision
 
 
 def load(key: str, date: str = None, default=None):
