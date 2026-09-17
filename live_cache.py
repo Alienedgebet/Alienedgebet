@@ -64,6 +64,20 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
             with open(LIVE_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, indent=2)
 
+            # FT RESULT SNAPSHOT: persist finished fixtures so settlement can
+            # use them after the fixture leaves the inplay feed (before nightly archive)
+            from settlement_service import extract_match_data, write_ft_snapshot
+            finished_by_date = {}
+            for fx in raw_data:
+                if not isinstance(fx, dict):
+                    continue
+                std = extract_match_data(fx)
+                if std.get("is_finished"):
+                    fx_date = std.get("match_date") or datetime.now().strftime("%Y-%m-%d")
+                    finished_by_date.setdefault(fx_date, []).append(std)
+            if finished_by_date:
+                write_ft_snapshot(finished_by_date)
+
             return raw_data
     except Exception as e:
         print(f"[CACHE EXCEPTION] Live in-play fetch failed: {e}")

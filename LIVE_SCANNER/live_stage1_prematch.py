@@ -58,6 +58,53 @@ PERSONNEL_WEIGHTS = {
 }
 
 # ==============================================================================
+# ODDS CACHE (reduces API calls and 429 errors)
+# ==============================================================================
+# Odds don't change frequently for pre-match fixtures. Cache them for 10 minutes
+# to dramatically reduce API calls. This is the primary fix for the 429 issue.
+ODDS_CACHE = {}
+ODDS_CACHE_FILE = os.path.join(DATA_DIR, "odds_cache.json")
+ODDS_CACHE_TTL = 600  # 10 minutes
+
+def _load_odds_cache():
+    global ODDS_CACHE
+    if os.path.exists(ODDS_CACHE_FILE):
+        try:
+            with open(ODDS_CACHE_FILE, 'r') as f:
+                ODDS_CACHE = json.load(f)
+        except Exception:
+            ODDS_CACHE = {}
+
+def _save_odds_cache():
+    try:
+        tmp = f"{ODDS_CACHE_FILE}.tmp"
+        with open(tmp, 'w') as f:
+            json.dump(ODDS_CACHE, f)
+        os.replace(tmp, ODDS_CACHE_FILE)
+    except Exception:
+        pass
+
+def _get_cached_odds(fixture_id):
+    """Return (odds_dict, is_fresh) for a fixture_id."""
+    key = str(fixture_id)
+    entry = ODDS_CACHE.get(key)
+    if entry:
+        age = time.time() - entry.get("timestamp", 0)
+        if age < ODDS_CACHE_TTL:
+            return entry.get("data"), True
+        # Stale but usable
+        return entry.get("data"), False
+    return None, False
+
+def _cache_odds(fixture_id, odds_data):
+    """Cache odds for a fixture."""
+    key = str(fixture_id)
+    ODDS_CACHE[key] = {
+        "timestamp": time.time(),
+        "data": odds_data
+    }
+
+# ==============================================================================
 # PERSISTENT CACHE MANAGERS
 # ==============================================================================
 def load_cache():
@@ -78,6 +125,86 @@ def save_cache():
             json.dump(SQUAD_CACHE, f)
     except Exception as e:
         print(f"Error saving cache: {e}")
+
+
+# ==============================================================================
+# FIXTURE DATE CACHE — resolves HTTP 429 on /fixtures/date/{date}
+# ==============================================================================
+# Stage 1 calls /fixtures/date/{date} every cycle with NO cache between calls.
+# At ~27 cycles/hour that consumes a large share of the API budget for data
+# that changes slowly (fixtures for a given date are fixed once published).
+# A 15-minute disk cache with stale-fallback on 429 removes the majority of
+# these calls and guarantees that a rate-limit rejection can never empty the
+# Stage 1 output — there is always a last-known-good fixture list to process.
+# ==============================================================================
+FIXTURE_CACHE_FILE = os.path.join(DATA_DIR, "fixture_date_cache.json")
+FIXTURE_CACHE_TTL = 15 * 60  # 15 minutes
+
+
+def _load_fixture_cache():
+    """Load the fixture date cache from disk. Returns dict {date: entry}."""
+    if os.path.exists(FIXTURE_CACHE_FILE):
+        try:
+            with open(FIXTURE_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_fixture_cache_entry(target_date, fixtures, acquisition_ok=True):
+    """Atomically save a fixture date listing to the cache.
+
+    A FAILED acquisition (acquisition_ok=False) must never overwrite a
+    previously cached non-empty fixture list — the last-known-good data is
+    preserved so a 429 can never empty the Stage 1 output.
+    """
+    cache = _load_fixture_cache()
+    existing = cache.get(target_date, {})
+
+    if not acquisition_ok and existing.get("data"):
+        age = int(time.time() - existing.get("timestamp", 0))
+        print(
+            f"[FIXTURE CACHE] {target_date}: acquisition FAILED — "
+            f"existing cache ({len(existing.get('data', []))} entries, "
+            f"age {age}s) PRESERVED."
+        )
+        return False
+
+    cache[target_date] = {
+        "timestamp": time.time(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(fixtures) if isinstance(fixtures, list) else 0,
+        "data": fixtures if isinstance(fixtures, list) else [],
+        "_acquisition_ok": acquisition_ok,
+    }
+    try:
+        tmp = f"{FIXTURE_CACHE_FILE}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, FIXTURE_CACHE_FILE)
+    except Exception as e:
+        print(f"[FIXTURE CACHE ERROR] {e}")
+        return False
+    return True
+
+
+def _get_fixture_cache(target_date):
+    """Return (fixtures_list, is_fresh) for a date.
+
+    - Fresh cache hit:  (list_of_fixtures, True)
+    - Stale cache:      (list_of_fixtures_or_empty, False)
+    - No cache:         ([], False)
+    """
+    cache = _load_fixture_cache()
+    entry = cache.get(target_date, {})
+    if not entry:
+        return [], False
+    age = time.time() - entry.get("timestamp", 0)
+    data = entry.get("data", [])
+    if data and age < FIXTURE_CACHE_TTL:
+        return data, True
+    return data, False
 
 # ==============================================================================
 # UTILITIES & ENGINE ENGINE (100% UNTOUCHED)
@@ -300,18 +427,97 @@ def run_prematch_engine():
     acq_failed = False   # an acquisition that FAILED must never empty the feed
 
     for target_date in dates_to_check:
-        current_page = 1; has_more_pages = True
-        while has_more_pages:
-            resp = GET(f"/fixtures/date/{target_date}", params={"include": "participants;lineups.details.type;lineups.player.position;lineups.player.detailedPosition", "page": current_page})
-            if acquisition_failed(resp) and not acq_failed:
-                acq_failed = True
-                print(f"[ACQUISITION] /fixtures/date/{target_date} FAILED — "
-                      f"reason={resp.get('_failure')} | http_status={resp.get('_http_status')} "
-                      f"| empty feed will NOT overwrite an existing feed.")
-            fixtures = resp.get("data",[])
-            if not fixtures: break
+        # ── FIXTURE DATE CACHE ──────────────────────────────────────────────
+        # Serve the fixture listing from a 15-minute disk cache. A cache miss
+        # fetches fresh from SportMonks and persists the result for the next
+        # cycle, so consecutive cycles never hammer the same endpoint.
+        # ──────────────────────────────────────────────────────────────────────
+        cached_fixtures, is_fresh = _get_fixture_cache(target_date)
 
-            for fx in fixtures:
+        if is_fresh:
+            fixtures = cached_fixtures
+            fetch_from_api = False
+            print(f"[FIXTURE CACHE] {target_date}: cache HIT ({len(fixtures)} entries)")
+        else:
+            # Cache miss or stale — fetch fresh, then cache the result.
+            fetch_from_api = True
+
+        if fetch_from_api:
+            # Fetch ALL pages for this date (pagination loop).
+            page = 1
+            has_more_pages = True
+            all_fixtures = []
+            page_acq_failed = False
+
+            while has_more_pages:
+                resp = GET(
+                    f"/fixtures/date/{target_date}",
+                    params={
+                        "include": "participants;lineups.details.type;"
+                                   "lineups.player.position;"
+                                   "lineups.player.detailedPosition",
+                        "page": page,
+                    },
+                )
+
+                if acquisition_failed(resp):
+                    page_acq_failed = True
+                    if not acq_failed:
+                        acq_failed = True
+                        print(
+                            f"[ACQUISITION] /fixtures/date/{target_date} page {page} "
+                            f"FAILED — reason={resp.get('_failure')} | "
+                            f"http_status={resp.get('_http_status')} "
+                            f"| will attempt cache fallback."
+                        )
+                    # Stop paginating on acquisition failure — use whatever
+                    # we have (cache if available, else empty).
+                    break
+
+                page_fixtures = resp.get("data", [])
+                if not page_fixtures:
+                    break
+
+                all_fixtures.extend(page_fixtures)
+                pagination = resp.get("pagination", {})
+                has_more_pages = pagination.get("has_more", False)
+                page += 1
+
+            fixtures = all_fixtures
+
+            # Persist to cache (only a successful acquisition overwrites a
+            # previously cached non-empty list).
+            _save_fixture_cache_entry(target_date, fixtures, acquisition_ok=not page_acq_failed)
+
+            # ── STALE-FALLBACK ON FAILED FETCH ─────────────────────────────
+            # If SportMonks rejected every page, fall back to the last-known-
+            # good cached fixture list so a 429 can never empty the Stage 1
+            # output. If no cache exists either, process nothing (the write
+            # guard will preserve whatever the previous run left on disk).
+            # ────────────────────────────────────────────────────────────────
+            if not fixtures and not page_acq_failed is False:
+                pass  # empty result from API with no cache fallback available
+            elif not fixtures and page_acq_failed:
+                cached_fallback, _ = _get_fixture_cache(target_date)
+                if cached_fallback:
+                    fixtures = cached_fallback
+                    print(
+                        f"[FIXTURE CACHE] {target_date}: 429/empty — "
+                        f"falling back to {len(fixtures)} cached entries."
+                    )
+                else:
+                    print(
+                        f"[FIXTURE CACHE] {target_date}: acquisition FAILED — "
+                        f"no cached data available, processing none."
+                    )
+
+        if not fixtures:
+            continue
+
+        # ── Process fixtures (unchanged logic) ─────────────────────────────
+        current_page = 1; has_more_pages = True
+
+        for fx in fixtures:
                 f_id = str(fx.get("id"))
                 if f_id in processed_fixtures: continue
                 
@@ -502,9 +708,6 @@ def run_prematch_engine():
                             "players": a.get('players', []),
                         },
                     }
-
-            pagination = resp.get("pagination", {})
-            has_more_pages = pagination.get("has_more", False); current_page += 1
 
     write_feed(PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED,
                acquisition_ok=not acq_failed, label="live_predictions.json")

@@ -288,6 +288,135 @@ def load_finished_archive(date_str):
     return fixtures_map
 
 
+# ── FT RESULT SNAPSHOT (persistent results captured at FT detection) ─────────
+# Fills the gap: LIVE → FT → SportMonks removes fixture from inplay feed →
+# nightly archive hasn't run yet → snapshot preserves the result for settlement.
+# Written by live_cache.get_live_scores_cached() when it detects a finished fixture.
+# Loaded by settle_predictions() as an additional persistent source alongside the
+# live feed and the nightly archive.
+#
+# Location: data/ft_result_snapshot.json (alongside live_inplay_cache.json)
+# Shape: {fixtures: {date_str: {fixture_id: standardized}}} — only finished fixtures.
+FT_SNAPSHOT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ft_result_snapshot.json")
+
+_FT_SNAPSHOT_CACHE = {}  # {date_str: (mtime_or_None, size_or_None, {fixture_id: standardized})}
+_FT_SNAPSHOT_MISSING_RECHECK_S = 60
+_FT_SNAPSHOT_MISSING_LAST_CHECK = {}
+
+
+def load_ft_snapshot(date_str):
+    """Load data/ft_result_snapshot.json into a {fixture_id: standardized} map.
+
+    - Returns {} when the snapshot is missing or unreadable: settlement then
+      behaves exactly as before (live in-play + archive only) and never crashes.
+    - The per-process cache is invalidated by the file's mtime/size.
+    - Only finished fixtures (is_finished=True) are loaded.
+    - Every entry carries match_date for date isolation.
+    """
+    import time as _time
+
+    if not date_str:
+        return {}
+    try:
+        st = os.stat(FT_SNAPSHOT_FILE)
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        now = _time.monotonic()
+        last = _FT_SNAPSHOT_MISSING_LAST_CHECK.get(date_str)
+        if last is not None and (now - last) < _FT_SNAPSHOT_MISSING_RECHECK_S:
+            cached = _FT_SNAPSHOT_CACHE.get(date_str)
+            if cached is not None:
+                return cached[2]
+            return {}
+        _FT_SNAPSHOT_MISSING_LAST_CHECK[date_str] = now
+        _FT_SNAPSHOT_CACHE[date_str] = (None, None, {})
+        return {}
+    cached = _FT_SNAPSHOT_CACHE.get(date_str)
+    if cached is not None and (cached[0], cached[1]) == sig:
+        return cached[2]
+    fixtures_map = {}
+    try:
+        with open(FT_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        raw = payload.get("fixtures", {}) if isinstance(payload, dict) else {}
+        if isinstance(raw, dict):
+            date_fixtures = raw.get(date_str, {})
+            if isinstance(date_fixtures, dict):
+                for fid, fx in date_fixtures.items():
+                    if not isinstance(fx, dict):
+                        continue
+                    if not fx.get("is_finished"):
+                        continue
+                    if all(k in fx for k in ("fixture_id", "home_team", "has_started")):
+                        std = fx
+                    else:
+                        std = extract_match_data(fx)
+                    if fid:
+                        fixtures_map[fid] = std
+    except Exception:
+        fixtures_map = {}
+
+    _FT_SNAPSHOT_CACHE[date_str] = (sig[0], sig[1], fixtures_map)
+    _FT_SNAPSHOT_MISSING_LAST_CHECK.pop(date_str, None)
+    return fixtures_map
+
+
+def write_ft_snapshot(fixtures_by_date):
+    """Write/update the FT result snapshot.
+
+    `fixtures_by_date` is a dict: {date_str: [standardized_fixture, ...]}.
+    Only finished fixtures (is_finished=True) are written.
+    Existing entries are preserved (merge, not replace).
+    Atomic write via tmp+replace.
+    """
+    import os as _os
+
+    existing = {}
+    if _os.path.exists(FT_SNAPSHOT_FILE):
+        try:
+            with open(FT_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            if not isinstance(existing, dict) or "fixtures" not in existing:
+                existing = {}
+        except Exception:
+            existing = {}
+
+    if not isinstance(existing, dict):
+        existing = {}
+    if "fixtures" not in existing:
+        existing["fixtures"] = {}
+    if "updated_at" not in existing:
+        existing["updated_at"] = None
+
+    for date_str, fixtures in fixtures_by_date.items():
+        if not isinstance(fixtures, list):
+            continue
+        date_fixtures = existing["fixtures"].setdefault(date_str, {})
+        if not isinstance(date_fixtures, dict):
+            date_fixtures = {}
+            existing["fixtures"][date_str] = date_fixtures
+        for fx in fixtures:
+            if not isinstance(fx, dict):
+                continue
+            if not fx.get("is_finished"):
+                continue
+            std = fx
+            if not all(k in fx for k in ("fixture_id", "home_team", "has_started")):
+                std = extract_match_data(fx)
+            fid = str(std.get("fixture_id") or "")
+            if fid:
+                date_fixtures[fid] = std
+
+    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+    existing["date"] = datetime.now().strftime("%Y-%m-%d")
+
+    _os.makedirs(_os.path.dirname(FT_SNAPSHOT_FILE), exist_ok=True)
+    tmp = f"{FT_SNAPSHOT_FILE}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+    _os.replace(tmp, FT_SNAPSHOT_FILE)
+
+
 def grade_row(market_type, row, actual_match):
     """
     Evaluates an individual prediction row against actual match data.
@@ -681,6 +810,18 @@ def settle_predictions(predictions, live_matches_db, market_type="win", date_str
     ambiguous_ids = set()
     for fx in std_db:
         _merge_identified_fixture(id_map, ambiguous_ids, _fixture_identity(fx), fx)
+
+    # ── FT RESULT SNAPSHOT (new layer between live and archive) ────────────
+    # This fills the gap: LIVE → FT → SportMonks removes fixture from feed →
+    # nightly archive hasn't run yet → snapshot preserves the result.
+    # Priority: FT snapshot FINISHED > live UNFINISHED (same as archive priority)
+    if date_str:
+        ft_snapshot = load_ft_snapshot(date_str)
+        for fid, fx in ft_snapshot.items():
+            live_fx = id_map.get(fid)
+            if fx.get("is_finished") or live_fx is None:
+                _merge_identified_fixture(id_map, ambiguous_ids,
+                                          _fixture_identity(fx) or fid, fx)
 
     # ── PERSISTENT FINISHED LAYER (archive for this exact date) ────────────
     # Merge priority (authoritative → stale):
