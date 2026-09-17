@@ -28,6 +28,14 @@ CACHE_FILE = os.path.join(DATA_DIR, "squad_cache_stage1_prematch.json")
 # already reads.
 PREMATCH_TEAM_AUDIT_FILE = os.path.join(DATA_DIR, "prematch_team_audit.json")
 
+# FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
+# this helper so a FAILED SportMonks acquisition can never empty a good feed.
+try:
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+except ImportError:  # running this file directly rather than via the package
+    sys.path.insert(0, BASE_DIR)
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+
 # ==============================================================================
 # CONFIGURATION & WORLD STANDARDS (100% UNTOUCHED)
 # ==============================================================================
@@ -85,16 +93,27 @@ def GET(path, params=None, max_retries=3):
     if params is None: params = {}
     params.setdefault("api_token", API_TOKEN)
     url = f"{BASE_URL}{path}"
+    problem = None
     for attempt in range(max_retries):
         try:
             r = requests.get(url, params=params, timeout=20)
-            if r.status_code == 200: return r.json()
+            if r.status_code == 200:
+                body = r.json()
+                # A 200 carrying an empty payload AND a provider message is the
+                # subscription/quota shape ("...you don't have access ... via your
+                # current subscription"). Tag it so an empty feed can never be
+                # mistaken for a genuinely quiet day. (See live_cache.write_feed.)
+                if isinstance(body, dict) and not body.get("data") and body.get("message"):
+                    return note_acquisition(body, r.status_code, body.get("message"))
+                return body
             if r.status_code == 429:
+                problem = "HTTP 429 rate limit"
                 time.sleep((2 ** attempt) + random.random()); continue
-            return {"data":[]}
-        except:
+            return note_acquisition({"data":[]}, r.status_code, f"HTTP {r.status_code}")
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
             time.sleep((2 ** attempt) + random.random())
-    return {"data":[]}
+    return note_acquisition({"data":[]}, None, f"retries exhausted ({problem})")
 
 def normalize_odd_value(value):
     try:
@@ -278,11 +297,17 @@ def run_prematch_engine():
 
     print(f"\nMASTER ENGINE A: STRATEGIC AUDIT - {now_aware.strftime('%Y-%m-%d %H:%M')} UTC\n")
     processed_fixtures = set()
+    acq_failed = False   # an acquisition that FAILED must never empty the feed
 
     for target_date in dates_to_check:
         current_page = 1; has_more_pages = True
         while has_more_pages:
             resp = GET(f"/fixtures/date/{target_date}", params={"include": "participants;lineups.details.type;lineups.player.position;lineups.player.detailedPosition", "page": current_page})
+            if acquisition_failed(resp) and not acq_failed:
+                acq_failed = True
+                print(f"[ACQUISITION] /fixtures/date/{target_date} FAILED — "
+                      f"reason={resp.get('_failure')} | http_status={resp.get('_http_status')} "
+                      f"| empty feed will NOT overwrite an existing feed.")
             fixtures = resp.get("data",[])
             if not fixtures: break
 
@@ -481,14 +506,14 @@ def run_prematch_engine():
             pagination = resp.get("pagination", {})
             has_more_pages = pagination.get("has_more", False); current_page += 1
 
-    with open(PREDICTIONS_FILE, 'w') as f: 
-        json.dump(FINAL_PREDICTIONS_FEED, f)
+    write_feed(PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED,
+               acquisition_ok=not acq_failed, label="live_predictions.json")
 
     # NEW: save the GK liability + missing-player audit to its own file.
     # PREDICTIONS_FILE above is untouched — this is a second, independent
     # write, for Code 6 to read.
-    with open(PREMATCH_TEAM_AUDIT_FILE, 'w') as f:
-        json.dump(TEAM_AUDIT_FEED, f)
+    write_feed(PREMATCH_TEAM_AUDIT_FILE, TEAM_AUDIT_FEED,
+               acquisition_ok=not acq_failed, label="prematch_team_audit.json")
 
     save_cache()
     print(f"\n--- SCAN COMPLETE: {len(FINAL_PREDICTIONS_FEED)} FEED SYNCED IN DATA DIR ---")

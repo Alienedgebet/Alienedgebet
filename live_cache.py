@@ -132,3 +132,96 @@ def get_prematch_fixtures_cached(target_date: str, force_refresh: bool = False) 
         except Exception: pass
 
     return all_fixtures
+
+
+# ── GATE 3: FEED WRITE GUARD (an empty acquisition must never destroy a good feed) ──
+# On 2026-09-17 a subscription/quota failure made every Live stage read {"data": []}
+# from SportMonks (which answers HTTP 200 with an empty array and a "you don't have
+# access ... via your current subscription" message) and the stages then overwrote
+# the last good feeds with {} / [] — live_predictions.json, incoming_predictions.json
+# and danger_audit.json were all emptied while the provider was answering. A FAILED
+# acquisition and a genuinely quiet day are different facts and must produce
+# different writes.
+#
+# The acquiring stage tags its provider response via note_acquisition() (the local
+# GET() wrappers do this). An UNTAGGED {"data": []} stays a legitimate zero — no
+# matches today — and is still written exactly as before.
+
+def _log(msg):
+    """Emit a guard/acquisition message where the OPERATOR will actually see it.
+
+    Under systemd, stdout is a pipe, so plain print() is block-buffered (8KB) and
+    these messages would sit invisible for minutes — the same buffering that hid
+    earlier Live diagnostics. When the process has a logging configuration (the
+    24/7 service does) log through it, because logging flushes per record; when it
+    does not (ad-hoc scripts) fall back to print()."""
+    import logging
+    if logging.getLogger().handlers:
+        logging.getLogger("alienedge.live_cache").warning(msg)
+    else:
+        print(msg)
+
+
+def note_acquisition(result, status_code=None, reason=None):
+    """Tag a provider response dict IN PLACE with why it is empty, then return it.
+    The extra keys are ignored by every existing `resp.get("data", [])` caller."""
+    if isinstance(result, dict):
+        if status_code is not None:
+            result["_http_status"] = status_code
+        if reason:
+            result["_failure"] = str(reason)[:200]
+    return result
+
+
+def acquisition_failed(resp) -> bool:
+    """True only when an acquiring GET() wrapper recorded a FAILURE. A plain
+    {"data": []} is a legitimate empty result, never a failure."""
+    return isinstance(resp, dict) and bool(resp.get("_failure"))
+
+
+def _read_feed(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def write_feed(path, payload, acquisition_ok=True, label=None):
+    """Write one Live feed without ever replacing a good feed with the result of a
+    FAILED acquisition.
+
+    * acquisition_ok=False AND the new payload is EMPTY AND the file already holds a
+      non-empty feed  ->  the existing feed is preserved untouched and "preserved" is
+      returned (the failure is logged, with the feed's age).
+    * anything else (successful acquisition, or a legitimate empty day) -> the payload
+      is written atomically, exactly as every writer did before.
+
+    Returns "written" or "preserved".
+    """
+    label = label or os.path.basename(path)
+    if not payload and not acquisition_ok:
+        existing = _read_feed(path)
+        if existing:
+            try:
+                age = int(time.time() - os.path.getmtime(path))
+                age_txt = f"{age // 60}m{age % 60}s" if age >= 60 else f"{age}s"
+            except OSError:
+                age_txt = "unknown"
+            _log(f"[FEED GUARD] {label}: acquisition FAILED — existing feed "
+                 f"({len(existing)} entries, age {age_txt}) PRESERVED; the empty "
+                 f"result was NOT written.")
+            return "preserved"
+
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)  # atomic — readers never see a half-written feed
+    if not payload:
+        if acquisition_ok:
+            _log(f"[FEED GUARD] {label}: acquisition OK and genuinely empty — written "
+                 f"as empty (intended behaviour, unchanged).")
+        else:
+            _log(f"[FEED GUARD] {label}: acquisition FAILED but there was no existing "
+                 f"feed to protect — wrote empty (nothing to preserve).")
+    return "written"

@@ -785,10 +785,17 @@ def get_gg_supreme(date: str):
 
 @app.get("/api/gg/cross-verify", tags=["GG"])
 def get_gg_cross_verify():
-    # This route has no date param by design (7-day rolling cross-verify) —
-    # correctly reads the dateless "__latest" snapshot main.py always writes.
-    data, _ = store.load("filter_gg", None, default=[])
-    return _settled(ensure_defaults(data, GG_CROSS_DEFAULTS), "gg")
+    # This route has no date param by design: it IS the 7-day rolling GG
+    # cross-verification, so it composes the last 7 DATED snapshots through
+    # read_range() — the same date-scoped read every other market filter uses.
+    # It must NOT read the dateless "__latest" key: main.py snapshots filter_gg
+    # per date (store.save("filter_gg", d, ...)), so nothing refreshes
+    # "__latest" any more and that read served one frozen payload for every
+    # later date. read_range() also settles each row against its own date, so an
+    # older row is graded from its own archive instead of the latest live feed.
+    end = _today()
+    start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
+    return read_range(lambda d: "filter_gg", _date_range(start, end), GG_CROSS_DEFAULTS, "gg")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1294,8 +1301,9 @@ def filter_gg_weekly(
     read_range() and concatenate, giving a true week of picks. Dates the
     pipeline hasn't run yet contribute 0 rows.
 
-    No range supplied → preserve backward compatibility: read today's
-    dateless "__latest" snapshot (same behaviour as before).
+    No range supplied → the rolling window: the last 7 dates ending today, via
+    get_gg_cross_verify(). Both branches are date-scoped reads; neither touches
+    the dateless "__latest" key (nothing writes it for filter_gg any more).
     """
     if start_date and end_date:
         dates = _date_range(start_date, end_date)
@@ -1305,16 +1313,16 @@ def filter_gg_weekly(
 
 @app.get("/api/filter/gg/{date}", tags=["Filters"])
 def filter_gg_single(date: str, mode: str = "public"):
-    # FIX: main.py saves filter_gg under BOTH the dateless "__latest" key
-    # AND a per-date snapshot (store.save("filter_gg", d, ...) in main.py).
-    # This route previously always read "__latest" regardless of the date
-    # requested, so picking a different date silently returned today's data.
-    # Now: prefer the exact date's snapshot; fall back to "__latest" only if
-    # that specific date was never snapshotted (e.g. pipeline hasn't run yet).
-    data, generated_at = store.load("filter_gg", date, default=None)
-    if data is None:
-        data, generated_at = store.load("filter_gg", None, default=[])
-    return _settled(ensure_defaults(data, GG_CROSS_DEFAULTS), "gg", date)
+    # GG is a dated snapshot exactly like WIN / O2.5 (main.py calls
+    # store.save("filter_gg", d, ...) for the run's date), so this reads ONLY the
+    # requested date's snapshot, through the same shared read() helper those two
+    # markets use. The old dateless "__latest" fallback is gone: nothing writes
+    # that key for filter_gg any more, so falling back to it served one frozen
+    # cross-day payload for every date the pipeline had not reached yet — a page
+    # that looks populated while showing another date's picks. A date with no
+    # snapshot now honestly returns [] (identical to filter_win_single /
+    # filter_over25_single).
+    return read("filter_gg", date, GG_CROSS_DEFAULTS, "gg")
 
 
 @app.get("/api/filter/win/weekly", tags=["Filters"])

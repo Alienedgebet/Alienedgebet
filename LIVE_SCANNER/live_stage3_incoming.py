@@ -27,6 +27,15 @@ PREDICTIONS_FILE = os.path.join(DATA_DIR, "incoming_predictions.json")
 # silently skipped the incoming feed write. Give stage 3 its own cache file.
 CACHE_FILE       = os.path.join(DATA_DIR, "squad_cache_stage3_incoming.json")
 
+# FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
+# this helper so a FAILED SportMonks acquisition can never empty a good feed.
+try:
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+except ImportError:  # running this file directly rather than via the package
+    import sys as _sys
+    _sys.path.insert(0, BASE_DIR)
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+
 # ==============================================================================
 # SYSTEM CONFIGURATION
 # ==============================================================================
@@ -113,17 +122,28 @@ def GET(path, params=None):
     if not path.startswith("/"): path = "/" + path
     url = BASE_URL.rstrip("/") + path
     backoff = 2.0
+    problem = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 200: return r.json()
+            if r.status_code == 200:
+                body = r.json()
+                # 200 + empty + provider message = subscription/quota shape. Tag it
+                # (live_cache.write_feed) so an empty feed is never mistaken for a
+                # genuinely quiet day.
+                if isinstance(body, dict) and not body.get("data") and body.get("message"):
+                    return note_acquisition(body, r.status_code, body.get("message"))
+                return body
             if r.status_code == 429:
+                problem = "HTTP 429 rate limit"
                 time.sleep(backoff * attempt); continue
-            return {"data": []}
-        except:
-            if attempt == MAX_RETRIES: return {"data": []}
+            return note_acquisition({"data": []}, r.status_code, f"HTTP {r.status_code}")
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
+            if attempt == MAX_RETRIES:
+                return note_acquisition({"data": []}, None, f"retries exhausted ({problem})")
             time.sleep(backoff); backoff *= 1.5
-    return {"data": []}
+    return note_acquisition({"data": []}, None, f"retries exhausted ({problem})")
 
 def normalize_odd_value(value):
     try:
@@ -368,6 +388,7 @@ def run_incoming_forensic_engine():
     has_more      = True
     match_index   = 0
     skipped_thin  = 0   # counter so you can see how many were skipped
+    acq_failed    = False   # a FAILED acquisition must never empty the feed
 
     while has_more:
         resp = GET(
@@ -377,6 +398,11 @@ def run_incoming_forensic_engine():
                 "page":     current_page
             }
         )
+        if acquisition_failed(resp) and not acq_failed:
+            acq_failed = True
+            print(f"[ACQUISITION] /fixtures/date/{today} FAILED — "
+                  f"reason={resp.get('_failure')} | http_status={resp.get('_http_status')} "
+                  f"| empty feed will NOT overwrite an existing feed.")
         data = resp.get("data", [])
         if not data: break
 
@@ -696,9 +722,9 @@ def run_incoming_forensic_engine():
         has_more      = pagination.get("has_more", False)
         current_page += 1
 
-    # ── SAVE TO FILE ─────────────────────────────────────────────────────
-    with open(PREDICTIONS_FILE, 'w') as f:
-        json.dump(FINAL_PREDICTIONS_FEED, f, indent=2)
+    # ─ SAVE TO FILE ─────────────────────────────────────────────────────
+    write_feed(PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED,
+               acquisition_ok=not acq_failed, label="incoming_predictions.json")
 
     save_cache()
 

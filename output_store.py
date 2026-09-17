@@ -108,9 +108,10 @@ def to_jsonable(x):
 
 def save(key: str, date: str, data, status: str = "ok", error: str = None,
          guard: bool = False) -> str:
-    """Atomically writes one engine's result. `date=None` for the two
-    no-date engines (win_apex, gg_precision_filter) — those save under
-    the '__latest' suffix instead.
+    """Atomically writes one engine's result. `date=None` is only for engines
+    whose payload is genuinely cross-day (win_apex) — those save under the
+    '__latest' suffix instead. Every date-scoped engine (every market filter,
+    including filter_gg) passes its own date, so its snapshot is guarded.
 
     `status`/`error` let a caller record a FAILED run explicitly (see
     `save_failure()` below) instead of a failure looking identical to an
@@ -179,12 +180,15 @@ def _row_count(data) -> int:
 UNIVERSE_MIN_EXISTING = 8     # an existing universe below this is never "known-good"
 UNIVERSE_REJECT_RATIO = 0.25  # a new universe must exceed existing * ratio to be kept
 
-# Keys that are intentionally CROSS-DAY. filter_gg's rows are aggregated from the
-# last 7 days of GG master history (FILTER/gg_precision_filter.py) rather than
-# from the requested date, so its fixture set is NOT the run's date universe and
-# comparing it against a same-date file would be meaningless. Skipped entirely —
-# its row count/fixture count is never used as a date universe measure.
-COLLAPSE_GUARD_EXEMPT_KEYS = {"filter_gg"}
+# Keys exempt from the guard — currently EMPTY: every key the pipeline writes is
+# date-scoped, so every same-date snapshot is protectable. filter_gg was listed
+# here because its rows were once aggregated from the last 7 days of GG master
+# history instead of from the requested date. FILTER/gg_precision_filter.py is
+# now a single-date layer over ALIENEDGE_GG_PICKS_{date}.csv, so its rows ARE the
+# run's date universe — skipping it would let a collapsed/empty GG run replace a
+# good dated snapshot. Kept as a named constant (rather than deleted) so a future
+# genuinely cross-day key has one obvious, reviewed place to be declared.
+COLLAPSE_GUARD_EXEMPT_KEYS = set()
 
 _COLLAPSE_GUARD_REJECTIONS = []  # in-process diagnostics for the current run only
 
