@@ -475,12 +475,10 @@ def alienedge_master_system(cli_date_override: str = None):
     # needs a live engine call at request time either.
     print("\n> 🎯 Running FILTER/ Precision Engines...")
     gg_filter_result = _safe_exec("Filter GG Precision Filter", run_gg_precision_filter,
-                                   save_key="filter_gg", save_date=None)
+                                   target_date, save_key="filter_gg", save_date=d)
     if gg_filter_result is not None:
-        # `guard=True` is inert here: output_store.COLLAPSE_GUARD_EXEMPT_KEYS
-        # excludes filter_gg because its rows are a 7-day rolling cross-day
-        # universe, not this date's fixture universe. Passed explicitly so the
-        # exemption is visible at the call site rather than implied.
+        # Conforms to the WIN / O2.5 daily-snapshot model: rows are this date's
+        # fixture universe, so the collapse guard is NOT exempted for filter_gg.
         store.save("filter_gg", d, gg_filter_result, guard=True)
 
     for risk in ("banker", "balanced", "aggressive"):
