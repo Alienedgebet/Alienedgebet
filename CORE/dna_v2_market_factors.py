@@ -1,39 +1,3 @@
-"""
-AlienEdge DNA Engine V2 — Market Factor Mapper
-════════════════════════════════════════════════════════════════════════════
-This module does NOT recompute any DNA statistic, heuristic, or formula.
-It only reads the numbers already produced by CORE/dna_engine_v2.py
-(data/team_dna_v2_profiles.json + data/fixture_style_clashes_v2.json) and
-compares Home vs Away for a curated set of fields per prediction market,
-counting which side "wins" each factor.
-
-This is the server-side source for the fixture-list "DNA count" column
-(e.g. "9 : 3") and for the per-market factor breakdown shown on the
-full-screen DNA Analysis page. The frontend never performs this comparison
-itself — it only renders what this module returns.
-
-Output file: data/dna_v2_market_factors.json
-Shape:
-{
-  "<fixture_id>": {
-    "fixture_id": "...",
-    "fixture": "Home vs Away",
-    "home_team": "...",
-    "away_team": "...",
-    "markets": {
-      "win":     { "home_count": 6, "away_count": 2, "factors": [ {...} ] },
-      "gg":      { ... },
-      "over25":  { ... },
-      "over15":  { ... },
-      "unders":  { ... },
-      "draw":    { ... },
-      "corners": { ... }
-    }
-  },
-  ...
-}
-"""
-
 import os
 import json
 
@@ -139,6 +103,7 @@ def build_market_counts_for_fixture(home_profile, away_profile):
     """
     Returns the full per-market breakdown for a single fixture's two
     already-computed DNA v2 profiles. Pure comparison — no new math.
+    UNCHANGED — every formula here is identical to before this fix.
     """
     markets = {}
     for market_key, factor_defs in MARKET_FACTORS.items():
@@ -156,14 +121,36 @@ def build_market_counts_for_fixture(home_profile, away_profile):
     return markets
 
 
+def _resolve_profile(profiles, team_id, team_name):
+    """
+    TEAM-ID-AUTHORITATIVE lookup (the fix): `profiles` is already keyed by
+    team_id string, so this is a direct dict lookup — no ambiguity, no risk
+    of two differently-named clubs sharing a display name colliding.
+
+    Falls back to the OLD name-matching behaviour only when `team_id` is
+    missing/empty, which only happens for a clash record written by the
+    pre-fix version of dna_engine_v2.py (before home_id/away_id existed).
+    Once main.py has run once under the new engine, every fresh clash file
+    carries real IDs and this fallback is never exercised again — nothing
+    needs to be deleted or migrated for that to happen naturally.
+    """
+    if team_id:
+        profile = profiles.get(str(team_id))
+        if profile is not None:
+            return profile
+    # Legacy fallback — old behaviour, unchanged, only reached for old files.
+    return next((p for p in profiles.values() if p.get("team_name") == team_name), None)
+
+
 def build_market_factor_counts(target_date):
     """
     Callable entrypoint (mirrors the engine's run_* signature) so it can be
     wired into main.py / api/main.py the same way as every other engine.
 
     Reads the DNA v2 profiles + style clashes already written to disk by
-    run_dna_engine_v2(target_date), joins them per fixture, and writes the
-    per-market factor-count breakdown to data/dna_v2_market_factors.json.
+    run_dna_engine_v2(target_date), joins them per fixture BY TEAM ID (see
+    _resolve_profile), and writes the per-market factor-count breakdown to
+    data/dna_v2_market_factors.json.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -183,16 +170,11 @@ def build_market_factor_counts(target_date):
         fixture_id = str(clash.get("fixture_id"))
         home_name  = clash.get("home_team")
         away_name  = clash.get("away_team")
+        home_id    = clash.get("home_id")   # present on clashes written by the fixed engine
+        away_id    = clash.get("away_id")
 
-        # Profiles are keyed by team_id, not team_name — resolve by name match
-        # against the two profiles referenced in this clash (cheap, since the
-        # clash was itself built from exactly these two team profiles).
-        home_profile = next(
-            (p for p in profiles.values() if p.get("team_name") == home_name), None
-        )
-        away_profile = next(
-            (p for p in profiles.values() if p.get("team_name") == away_name), None
-        )
+        home_profile = _resolve_profile(profiles, home_id, home_name)
+        away_profile = _resolve_profile(profiles, away_id, away_name)
 
         result[fixture_id] = {
             "fixture_id": fixture_id,
