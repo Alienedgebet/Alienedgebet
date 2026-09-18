@@ -55,7 +55,7 @@ def _has_minimum_fields(fixture, min_fields=ARCHIVE_MIN_EXPECTED_FIELDS):
 #   2. Retry-After / X-RateLimit-Reset are honoured;
 #   3. a small cross-process cooldown file lets the archiver, the pipeline and
 #      the live stages stop piling onto the API during a storm.
-_MAX_429_RETRIES = 4
+_MAX_429_RETRIES = 8
 _API_GATE_LOCK_FILE = os.path.join(BASE_DIR, "data", "api_429_cooldown.lock")
 
 
