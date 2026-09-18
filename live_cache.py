@@ -42,25 +42,38 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
         print("[CACHE WARNING] SPORTMONKS_API_KEY is missing!")
         return []
 
-    # Pacing: wait out an ACTIVE shared 429 cooldown before hitting the API,
-    # so the 2-minute cache does not stampede the provider right after a burst
-    # limit rejection broadcast by the archiver or a live stage. Self-contained
-    # helper (importing a live stage from here would be circular — stage1
-    # imports live_cache) reading the SAME data/api_429_cooldown.lock file.
+    # Pacing is a BACKGROUND-only concern now. This function runs inside
+    # USER-FACING API requests (the in-play fetch feeds /api/win/apex,
+    # /api/corners, settlement, ...). The old behaviour — time.sleep() up to
+    # 10s when a shared 429 cooldown gate was active — stalled every request
+    # behind the gate (measured live: 10.1s per endpoint → browser
+    # "timeout of 10000ms exceeded" on SHVI/FHVI/Underdog) and made date
+    # switching lag badly. New policy, in order:
+    #   1. fresh cache            → returned above, no API call at all
+    #   2. cooldown gate active   → serve the STALE cache immediately
+    #                               (any age), or [] if none exists —
+    #                               never sleep, never hammer the provider
+    #   3. no gate                → normal single fetch
+    # Long gate-aware pacing still happens where it belongs: scanner stages,
+    # the daily archiver and the pipeline are background jobs.
     _gate_file = os.path.join(DATA_DIR, "api_429_cooldown.lock")
     try:
         with open(_gate_file, "r") as _f:
             _gate = json.load(_f)
-        _remaining = float(_gate.get("until", 0)) - time.time()
-        if _remaining > 0:
-            # 10s cap: this code runs inside USER-FACING API requests (the
-            # in-play fetch feeds /api/win/apex, corners, etc.). A long sleep
-            # here would hang a browser request; a short pace still prevents
-            # stampeding the provider the instant a 429 storm is broadcast.
-            _sleep_for = min(_remaining, 10.0)
-            print(f"[API GATE] live_cache: shared cooldown active — pacing "
-                  f"{_sleep_for:.1f}s")
-            time.sleep(_sleep_for)
+        if float(_gate.get("until", 0)) > time.time():
+            if os.path.exists(LIVE_CACHE_FILE):
+                try:
+                    with open(LIVE_CACHE_FILE, "r", encoding="utf-8") as _f2:
+                        _stale = json.load(_f2)
+                    if _stale.get("data"):
+                        print("[API GATE] live_cache: shared cooldown active — "
+                              "serving stale cache without refetch")
+                        return _stale["data"]
+                except Exception:
+                    pass
+            print("[API GATE] live_cache: shared cooldown active — no cache "
+                  "available, returning [] without refetch")
+            return []
     except Exception:
         pass
 

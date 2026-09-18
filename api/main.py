@@ -192,6 +192,8 @@ SUPPORTED_SETTLEMENT_MARKETS = {
     "u35", "u3.5", "under35", "under 3.5",
     "corners",
     "shvi", "sh_goal",
+    "sot",
+    "fhvi", "fh_goal",
     "u2s",
 }
 
@@ -214,7 +216,18 @@ def _settled(data, market_type: str = "win", date_str: Optional[str] = None):
         return [({**row, "verification": dict(pending)} if isinstance(row, dict) else row)
                 for row in data]
     try:
-        live_db = get_live_scores_cached()
+        # Historical dates settle entirely from output/archive_{date}.json +
+        # FT snapshots. Fetching the live in-play feed for a PAST date is pure
+        # waste — and while a shared 429 cooldown gate is active it used to
+        # stall every historical request ~10s server-side (the "date switching
+        # lags behind" regression). An empty live db is CORRECT here:
+        # settle_predictions(date_str=...) loads the archive layer itself and
+        # keeps WON/LOST verdicts permanent; today (or undated) keeps the
+        # live-feed behaviour unchanged.
+        if date_str and str(date_str) < _today():
+            live_db = []
+        else:
+            live_db = get_live_scores_cached()
         # date_str (the date of the picks being verified) is what activates
         # the persistent finished-results layer: settlement additionally
         # loads output/archive_{date_str}.json so WON/LOST survives after a
@@ -704,7 +717,56 @@ def get_underdog_audit(date: str):
 
 @app.get("/api/underdog/apex/{date}", tags=["Foundation"])
 def get_underdog_apex(date: str):
-    return read("underdog_apex", date, UD_APEX_DEFAULTS, "u2s")
+    # The apex engine's output carries NO underdog-team column (verified:
+    # keys are DNA/Engine/Fav_Vuln/Fixture/Handshake/Monte_UD_Prob/Rule/
+    # SH_GG_Label), so the u2s grader had nothing to match against and every
+    # row degraded to PENDING "Underdog '?' not identifiable". The
+    # psychology feed (u2s_psychology, same pipeline date) DOES carry the
+    # dog name in its `Underdog` column — merge it in by fixture name
+    # BEFORE settlement (read() settles internally, so this endpoint loads
+    # with the same building blocks but in merge-first order).
+    data, _generated_at = store.load("underdog_apex", date, default=[])
+    rows = ensure_defaults(_guard_filter_rows(data, None), UD_APEX_DEFAULTS)
+    try:
+        psych_rows, _ = store.load("u2s_psychology", date, default=[])
+        if isinstance(psych_rows, dict):
+            psych_rows = next((v for v in psych_rows.values()
+                               if isinstance(v, list)), [])
+        dog_by_fixture = {}
+        for pr in psych_rows or []:
+            if not isinstance(pr, dict):
+                continue
+            fx_name = str(pr.get("fixture") or pr.get("Fixture") or "").strip()
+            dog = str(pr.get("Underdog") or "").strip()
+            if fx_name and dog:
+                dog_by_fixture[fx_name.lower()] = dog
+        for r in rows:
+            if not isinstance(r, dict) or r.get("underdog_team"):
+                continue
+            fx_name = str(r.get("fixture") or r.get("Fixture") or "").strip().lower()
+            if not fx_name:
+                continue
+            if fx_name in dog_by_fixture:
+                r["underdog_team"] = dog_by_fixture[fx_name]
+                continue
+            # Team-level match: the two engines spell team names
+            # differently ("OFI" vs "OFI Crete"), so full fixture-string
+            # containment fails. A psych row matches when BOTH of the
+            # apex row's team names appear in the psych fixture string.
+            teams = [t.strip() for t in fx_name.split(" vs ") if t.strip()]
+            if len(teams) == 2:
+                for k_fx, k_dog in dog_by_fixture.items():
+                    if teams[0] in k_fx and teams[1] in k_fx:
+                        r["underdog_team"] = k_dog
+                        break
+    except Exception as _e:
+        print(f"[u2s] psychology merge skipped: {_e}")
+    if date:
+        rows = _settled(rows, "u2s", date)
+    for row in rows:
+        if isinstance(row, dict) and "match_date" not in row:
+            row["match_date"] = date
+    return rows
 
 
 @app.get("/api/calibration/{date}", tags=["Foundation"])
@@ -946,7 +1008,9 @@ def get_sot(date: str):
 
 @app.get("/api/fhvi/{date}", tags=["Specials"])
 def get_fhvi(date: str):
-    return read("fhvi", date, FHVI_DEFAULTS, "shvi")
+    # "fhvi" (not "shvi") — FHVI is FIRST-half goals. The old "shvi" key
+    # graded it with the second-half branch: wrong half of the match.
+    return read("fhvi", date, FHVI_DEFAULTS, "fhvi")
 
 
 @app.get("/api/shvi/{date}", tags=["Specials"])

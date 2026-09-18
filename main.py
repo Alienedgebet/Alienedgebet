@@ -311,6 +311,26 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
                                           error=f"{engine_name}: returned None (no disk fallback)")
                 print(f"   ⚠️ recorded failure -> {path}")
             else:
+                # ── 429-DEGRADED GUARD ────────────────────────────────────
+                # A critical engine returning a 0-row result while the shared
+                # 429 cooldown gate is active means the run was starved, not
+                # that tomorrow has no football. Retry (gate-aware), and only
+                # persist as "degraded" — never as a green "ok" empty day —
+                # when the retries cannot recover rows.
+                if (save_key in CRITICAL_MARKET_KEYS
+                        and res is not None and not res
+                        and _429_gate_remaining() > 0):
+                    recovered = _retry_starved_engine(engine_name, func, args, kwargs)
+                    if recovered is not None:
+                        res = _normalize_fixture_schema(recovered)
+                    else:
+                        path = store.save(save_key, save_date, res,
+                                          status="degraded",
+                                          error=(f"{engine_name}: 0 rows while 429 "
+                                                 f"cooldown gate active"),
+                                          guard=bool(save_date))
+                        print(f"   ⚠️ saved DEGRADED (0 rows under 429 gate) -> {path}")
+                        return res
                 # SNAPSHOT GUARD (Batch A): date-scoped writes are guarded so a
                 # run that fetched a suspiciously collapsed fixture universe
                 # (the 2026-09-15 evening run saw 3 fixtures instead of 63) can
@@ -343,6 +363,94 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
             store.save_failure(save_key, save_date, error=f"{engine_name}: {e}")
         return None
 
+# ==============================================================================
+# 4. 429-DEGRADED RUN GUARD — never persist a starved empty day as "ok"
+# ==============================================================================
+# The 2026-09-18 outage: the 23:30 pipeline ran while the shared SportMonks 429
+# cooldown gate was active. Starved feeds returned "Feed is empty" and every
+# critical engine legitimately saved a 0-row snapshot with status "ok" — which
+# the API then served all day as an honest-but-blank market page.
+#
+# Fix: a CRITICAL engine that returns a 0-row result while a 429 gate window is
+# ACTIVE is (a) retried up to twice with gate-aware waits (this is a background
+# job — waiting is free) and, if every retry stays empty, (b) persisted with
+# status "degraded" instead of "ok" so /api/status and the 06:00 second-chance
+# re-run can tell a genuinely quiet day from a starved one.
+CRITICAL_MARKET_KEYS = {
+    "dna", "dna_v2", "dna_market_factors",
+    "underdog_base", "underdog_audit", "calibration", "underdog_apex",
+    "win_forecast", "sh_gg_winner",
+    "corners_stage1", "corners_stage2", "corners_psychology",
+    "corners_catalyst", "corners_aggregator",
+    "gg_o15", "gg_forensics", "gg_psychology", "gg_supreme",
+    "over25_stage1", "over25_stage2", "over25_stage3", "over25_psychology",
+    "over25_gold", "over25_apex", "over25_forecast",
+    "over15_stage3", "over15_psychology", "over15_apex",
+    "unders", "draw", "sot", "fhvi", "shvi", "u2s_psychology",
+    "win_psychology", "win_apex", "sh_master", "sh_8goal", "win_raw",
+    "filter_gg",
+    "filter_win__safe", "filter_win__balanced", "filter_win__aggressive",
+    "filter_over25__banker", "filter_over25__balanced",
+    "filter_over25__aggressive",
+}
+
+_GATE_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "data", "api_429_cooldown.lock")
+_DEGRADED_RETRY_DELAYS = (180.0, 300.0)  # 3 min, then 5 min
+_RETRY_BUDGET_S = 2700.0                 # total retry wait budget per run (45 min)
+_retry_budget_used = 0.0
+
+
+def _429_gate_remaining() -> float:
+    """Seconds left in an ACTIVE shared 429 cooldown window, else 0."""
+    try:
+        with open(_GATE_LOCK_FILE, "r") as f:
+            gate = json.load(f)
+        return max(0.0, float(gate.get("until", 0)) - time.time())
+    except Exception:
+        return 0.0
+
+
+def _retry_starved_engine(engine_name, func, args, kwargs):
+    """Gate-aware retry of a critical engine that returned 0 rows while a 429
+    cooldown gate was active. Returns the recovered result, or None when every
+    attempt stayed empty (caller then records status='degraded')."""
+    global _retry_budget_used
+    for attempt, wait_s in enumerate(_DEGRADED_RETRY_DELAYS, start=1):
+        if _retry_budget_used + wait_s > _RETRY_BUDGET_S:
+            print(f"   ⏳ [{engine_name}] retry wait budget exhausted "
+                  f"({_retry_budget_used:.0f}s used) — recording degraded")
+            return None
+        _retry_budget_used += wait_s
+        print(f"   ⏳ [{engine_name}] 0 rows under active 429 gate — retry "
+              f"{attempt}/{len(_DEGRADED_RETRY_DELAYS)} in {wait_s:.0f}s")
+        time.sleep(wait_s)
+        gate_left = _429_gate_remaining()
+        if gate_left > 0:
+            pace = min(gate_left, 300.0)
+            if _retry_budget_used + pace > _RETRY_BUDGET_S:
+                print(f"   ⏳ [{engine_name}] retry wait budget exhausted — "
+                      f"recording degraded")
+                return None
+            _retry_budget_used += pace
+            print(f"   ⏳ [{engine_name}] gate still active — pacing {pace:.0f}s")
+            time.sleep(pace)
+        try:
+            retry_res = func(*args, **kwargs)
+        except Exception as e:
+            print(f"   ⚠️ [{engine_name}] retry {attempt} threw: {e}")
+            continue
+        if retry_res:
+            print(f"   ✅ [{engine_name}] retry {attempt} recovered "
+                  f"{len(retry_res) if hasattr(retry_res, '__len__') else 'data'} rows")
+            return retry_res
+        print(f"   ⚠️ [{engine_name}] retry {attempt} still empty")
+    return None
+
+
+# ==============================================================================
+# 5. THE SUPREME MASTER PIPELINE (PURE PRE-MATCH ARCHITECTURE)
+# ==============================================================================
 
 # ==============================================================================
 # 4. THE SUPREME MASTER PIPELINE (PURE PRE-MATCH ARCHITECTURE)
@@ -502,8 +610,155 @@ def alienedge_master_system(cli_date_override: str = None):
     return target_date
 
 
+def _needs_second_chance(key: str, date_str: str) -> bool:
+    """True when a critical engine key for this date is missing, failed,
+    degraded, or a list-key that ran 'ok' but produced zero rows. Composite
+    dict payloads always carry a non-zero row_count (their dict length), so a
+    starved composite is caught by its 'degraded' status instead."""
+    try:
+        st = store.load_status(key, date_str)
+    except Exception:
+        return True
+    status = st.get("status", "missing")
+    if status in ("missing", "failed", "degraded", "unreadable"):
+        return True
+    if status == "ok" and int(st.get("row_count", 0) or 0) == 0:
+        return True
+    return False
+
+
+def alienedge_second_chance(target_date: str) -> int:
+    """06:00 safety net: re-run ONLY the critical keys that are missing,
+    failed, degraded, or empty for the target date. Full runs stay on the
+    23:30 timer; this catches whatever that run starved (429) or failed."""
+    print("\n" + "█" * 115)
+    print(f"{'🛟 ALIENEDGE SECOND-CHANCE RECOVERY':^115}")
+    print(f"{f'Target Date: {target_date}':^115}")
+    print("█" * 115)
+
+    stale = []
+    seen = set()
+    for key, label, func, extra in _second_chance_runners(target_date):
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if _needs_second_chance(key, target_date):
+                stale.append((key, label, func, extra))
+        except Exception as e:
+            print(f"   ⚠️ status check failed for {key}: {e}")
+            stale.append((key, label, func, extra))
+
+    if not stale:
+        print("✅ All critical keys healthy for this date — nothing to do.")
+        return 0
+
+    print(f"🔎 {len(stale)} key(s) need a re-run: "
+          + ", ".join(k for k, *_ in stale))
+    for key, label, func, extra in stale:
+        _safe_exec(label, func, target_date, save_key=key, save_date=target_date, **extra)
+        flush_system_ram()
+
+    print("\n✅ SECOND-CHANCE PASS COMPLETE")
+    return 0
+
+
+def _second_chance_runners(td: str):
+    """(engine_key, label, callable, extra kwargs) for every critical key.
+    Same phase imports the full pipeline uses, so the 429-degraded retry
+    guard in _safe_exec applies here too. `td` keeps the signature parallel
+    to the full pipeline; the current engines take only (date, ...)."""
+    return [
+        ("dna", "DNA Profiler", run_dna_profiler, {}),
+        ("dna_v2", "DNA Engine V2", run_dna_engine_v2, {}),
+        ("dna_market_factors", "DNA Market Factors", build_market_factor_counts, {}),
+        ("underdog_base", "Underdog Base Engine", run_underdog_engine, {}),
+        ("underdog_audit", "Underdog Master Engine", run_underdog_master_engine, {}),
+        ("calibration", "Total Visibility Merger", run_total_visibility_merger, {}),
+        ("underdog_apex", "Apex Underdog Aggregator", run_apex_underdog_aggregator, {}),
+        ("win_forecast", "Win Forecast Base Engine", run_win_forecast_engine, {}),
+        ("sh_gg_winner", "SH-GG Winner Engine", run_sh_gg_winner_engine, {}),
+        ("corners_stage1", "Corner Stage 1 (Miner)", run_corner_engine_stage1, {}),
+        ("corners_stage2", "Corner Stage 2 (Refiner)", run_corner_engine_stage2, {}),
+        ("corners_psychology", "Corner Stage 3 (Psychology)", run_corner3_psychology_engine, {}),
+        ("corners_catalyst", "Corner Catalyst Engine", run_catalyst_corner_engine, {}),
+        ("corners_aggregator", "Corner Stage 4 Aggregator", run_corner4_aggregator_engine, {}),
+        ("gg_o15", "Unified GG & O1.5 Head Engine", run_gg_o15_engine, {"verbose": False}),
+        ("gg_forensics", "GG Forensic Aggregator", run_gg_forensic_aggregator, {}),
+        ("gg_psychology", "GG Psychology Engine", run_gg_psychology_engine, {}),
+        ("gg_supreme", "Supreme GG VIP Aggregator", run_supreme_gg_aggregator, {}),
+        ("over25_stage1", "Over 2.5 Stage 1 (Probabilistic)", run_over25_stage1, {}),
+        ("over25_stage2", "Over 2.5 Stage 2 (Council)", run_over25_stage2, {}),
+        ("over25_stage3", "Over 2.5 Stage 3 (Killswitch)", run_over25_stage3, {}),
+        ("over25_psychology", "Over 2.5 Psychology Engine", run_o25_psychology_engine, {}),
+        ("over25_gold", "Gold Over 2.5 Engine", run_gold_over_25_engine, {}),
+        ("over25_apex", "Over 2.5 Apex Aggregator", run_over25_aggregator, {}),
+        ("over25_forecast", "Over 2.5 Forecast Engine", run_over25_forecast_engine, {}),
+        ("over15_stage3", "Over 1.5 Stage 3", run_over15_stage3, {}),
+        ("over15_psychology", "Over 1.5 Psychology Engine", run_o15_psychology_engine, {}),
+        ("over15_apex", "Over 1.5 Apex Aggregator", run_o15_apex_engine, {}),
+        ("unders", "Unders Engine (U2.5 / U3.5)", run_unders_engine, {"verbose": False}),
+        ("draw", "Draw Magnet Engine", run_draw_engine, {"verbose": False}),
+        ("sot", "SOT Cerberus Engine", run_sot_engine, {"verbose": False}),
+        ("fhvi", "FHVI First Half Engine", run_fhvi_engine, {"verbose": False}),
+        ("shvi", "SHVI Second Half Engine", run_shvi_engine, {"verbose": False}),
+        ("u2s_psychology", "U2S Psychology Engine", run_u2s_psychology_engine, {}),
+        ("win_psychology", "Win Psychology Engine", run_win_psychology_engine, {}),
+        ("sh_master", "SH Master Vortex", run_sh_master_vortex, {}),
+        ("sh_8goal", "SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, {}),
+        ("win_raw", "Win Raw Probability Engine", run_win_raw_engine, {}),
+        ("filter_gg", "Filter GG Precision Filter", run_gg_precision_filter, {}),
+        ("filter_over25__banker", "Filter Over 2.5 Aggregator (banker)",
+         run_over25_filter_aggregator, {"mode": "public", "risk_level": "banker"}),
+        ("filter_over25__balanced", "Filter Over 2.5 Aggregator (balanced)",
+         run_over25_filter_aggregator, {"mode": "public", "risk_level": "balanced"}),
+        ("filter_over25__aggressive", "Filter Over 2.5 Aggregator (aggressive)",
+         run_over25_filter_aggregator, {"mode": "public", "risk_level": "aggressive"}),
+        ("filter_win__safe", "Filter Win Service (safe)",
+         run_win_filter_service, {"mode": "public", "risk_level": "safe"}),
+        ("filter_win__balanced", "Filter Win Service (balanced)",
+         run_win_filter_service, {"mode": "public", "risk_level": "balanced"}),
+        ("filter_win__aggressive", "Filter Win Service (aggressive)",
+         run_win_filter_service, {"mode": "public", "risk_level": "aggressive"}),
+    ]
+
+
 if __name__ == "__main__":
+    # --second-chance=<date>: 06:00 safety net — re-run only failed/empty/
+    # degraded critical keys for the date, then exit. No argument (or
+    # --date=...): the full 23:30 pipeline as before.
+    _second_chance_date = None
+    for _arg in sys.argv[1:]:
+        if _arg.startswith("--second-chance="):
+            _second_chance_date = _arg.split("=", 1)[1].strip()
+            break
+
+    if _second_chance_date:
+        _rc = alienedge_second_chance(_second_chance_date)
+        _rejected = store.guard_rejections()
+        if _rejected:
+            print(f"\n⚠️ [SNAPSHOT GUARD] {len(_rejected)} same-date snapshot write(s) "
+                  f"rejected as suspiciously collapsed and preserved.")
+            _rc = 2
+        sys.exit(_rc)
+
     alienedge_master_system()
+
+    # ── 06:00 SECOND-CHANCE HANDOFF ──────────────────────────────────────────
+    # The full run generates TOMORROW's picks. If tonight's upstream 429 storm
+    # starved any critical engine, tomorrow 06:00's second-chance timer must
+    # know which date to heal — recorded here so the timer's EnvironmentFile
+    # picks it up (bash falls back to today when the file is absent/stale).
+    try:
+        _tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "data", "second_chance.env")
+        os.makedirs(os.path.dirname(_env_path), exist_ok=True)
+        with open(_env_path, "w") as _ef:
+            _ef.write(f"SC_DATE={_tomorrow}\n")
+        print(f"🛟 second-chance target recorded: {_tomorrow} -> {_env_path}")
+    except Exception as _env_err:
+        print(f"⚠️ second-chance env write skipped: {_env_err}")
 
     # SNAPSHOT GUARD (Batch A): a run that had to REJECT collapsed same-date
     # snapshots must not look green. exit 2 marks the unit failed so
