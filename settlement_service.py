@@ -176,6 +176,23 @@ def extract_match_data(fx):
                 elif pid == a_id: a_c += int(float(val))
             except Exception: pass
 
+    # Extract Shots On Target (SOT) — same statistics feed and same
+    # participant-id matching as corners. SportMonks exposes the per-team
+    # count as "Shots On Target" (older feeds: "Shots On Goal"); both
+    # spellings are accepted. Feeds the SOT verify branch (combined SOT
+    # of both teams > 6 → WON) for both live in-play snapshots and the
+    # nightly archives, which already carry statistics.
+    h_sot = a_sot = 0
+    for stat in fx.get("statistics", []):
+        _type_name = str(stat.get("type", {}).get("name", "")).lower()
+        if "shots on target" in _type_name or "shots on goal" in _type_name:
+            pid = str(stat.get("participant_id"))
+            val = stat.get("data", {}).get("value", stat.get("value", 0))
+            try:
+                if pid == h_id: h_sot += int(float(val))
+                elif pid == a_id: a_sot += int(float(val))
+            except Exception: pass
+
     sh_h = max(0, h_ft - h_ht)
     sh_a = max(0, a_ft - a_ht)
     minute = fx.get("state", {}).get("minute") or fx.get("time", {}).get("minute") or 0
@@ -190,6 +207,7 @@ def extract_match_data(fx):
         "total_goals": h_ft + a_ft,
         "sh_goals_home": sh_h, "sh_goals_away": sh_a, "sh_goals": sh_h + sh_a,
         "h_corners": h_c, "a_corners": a_c, "total_corners": h_c + a_c,
+        "h_sot": h_sot, "a_sot": a_sot, "total_sot": h_sot + a_sot,
         "has_started": has_started,
         "is_finished": is_finished,
         # Batch C (additive field): True only when a final-score entry was read
@@ -582,6 +600,46 @@ def grade_row(market_type, row, actual_match):
         won = sh_g > 0
         note = f"{sh_g} SH goals ({ft_score})"
 
+    # --- SHOTS ON TARGET (SOT) — corners method, fixed line 6 ---
+    # Exactly mirrors the corners branch: read the per-team SOT counts that
+    # extract_match_data() pulled from the statistics feed, guard against
+    # grading a finished fixture with no shot stats (0+0 would fabricate a
+    # LOST), then grade the COMBINED total. User-confirmed rule: combined
+    # SOT strictly greater than 6 wins the pick; <= 6 loses. The SOT payload
+    # stores no per-row projected line (unlike corners), so the line is the
+    # fixed AlienEdge threshold of 6.
+    elif m in ["sot"]:
+        h_s = int(actual_match.get("h_sot", 0))
+        a_s = int(actual_match.get("a_sot", 0))
+        tot_s = int(actual_match.get("total_sot", h_s + a_s))
+        if tot_s <= 0:
+            return {
+                "status": "FINISHED",
+                "score": ft_score,
+                "minute": None,
+                "verdict": "PENDING",
+                "badge_text": ft_score,
+                "note": "SOT stats unavailable",
+                "h_sot": h_s,
+                "a_sot": a_s,
+                "total_sot": tot_s,
+            }
+        line = 6  # combined both-teams SOT line (strictly over 6 wins)
+        won = tot_s > line
+        note = f"{h_s}+{a_s}={tot_s} SOT vs {line} → {'OVER' if won else 'UNDER'}"
+
+    # --- FIRST HALF GOALS (FHVI) ---
+    # FHVI is graded on FIRST-half goals. It previously routed through the
+    # SHVI (second-half) branch via get_fhvi()'s market key — the wrong half
+    # of the match. h_ht/a_ht are the 1st-half score entries read from the
+    # same "1ST_HALF" score rows that feed sh_goals; the condition mirrors
+    # SHVI's (sh_goals > 0) applied to the correct half.
+    elif m in ["fhvi", "fh_goal"]:
+        fh_g = int(actual_match.get("h_ht", 0)) + int(actual_match.get("a_ht", 0))
+        won = fh_g > 0
+        note = (f"{fh_g} FH goals "
+                f"(HT {actual_match.get('h_ht', 0)}-{actual_match.get('a_ht', 0)}, FT {ft_score})")
+
     # --- UNDERDOG TO SCORE (U2S) ---
     # Verify against the STORED underdog selection (the engine's pick at
     # prediction time — preferred over re-deriving from current odds, which
@@ -615,6 +673,18 @@ def grade_row(market_type, row, actual_match):
             f"({goals}g, {ft_score})"
         )
 
+    if m == "sot":
+        return {
+            "status": "FINISHED",
+            "score": ft_score,
+            "minute": None,
+            "verdict": "WON" if won else "LOST",
+            "badge_text": f"{'✅' if won else '❌'} {ft_score}",
+            "note": note,
+            "h_sot": h_s,
+            "a_sot": a_s,
+            "total_sot": tot_s,
+        }
     if m == "corners":
         return {
             "status": "FINISHED",

@@ -12,16 +12,29 @@ export interface VerificationData {
   h_corners?: number;
   a_corners?: number;
   total_corners?: number;
+  h_sot?: number;
+  a_sot?: number;
+  total_sot?: number;
 }
 
 export function VerifyCell({ data }: { data?: VerificationData }) {
   if (!data || data.status === "SCHEDULED" || data.verdict === "PENDING") {
     return (
       <div className="flex items-center justify-center font-mono text-xs text-slate-500">
-        <span title="Awaiting Kickoff">—</span>
+        <span title={data?.note || "Awaiting Kickoff"}>—</span>
       </div>
     );
   }
+
+  // Corners rows expose the per-team split; SOT rows expose theirs. Prefer
+  // whichever split this row actually carries so the cell reads e.g.
+  // "5+4=9" instead of a bare FT score.
+  const splitScore =
+    data.h_corners !== undefined && data.a_corners !== undefined
+      ? `${data.h_corners}+${data.a_corners}=${data.total_corners}`
+      : data.h_sot !== undefined && data.a_sot !== undefined
+        ? `${data.h_sot}+${data.a_sot}=${data.total_sot}`
+        : data.score;
 
   // 1. LIVE IN-PLAY STATE
   if (data.status === "LIVE" || data.verdict === "IN_PLAY") {

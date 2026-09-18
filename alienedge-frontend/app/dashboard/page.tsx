@@ -173,6 +173,7 @@ function DashboardOverview() {
           suffix: pick.prob != null ? "%" : "/100",
           isMock,
           odds: pick.odds,
+          verification: pick.verification,
           dnaMarketKey: DNA_SUPPORTED_MARKET_KEYS.has(config.key)
             ? (config.key as DnaV2MarketKey)
             : undefined,

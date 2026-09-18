@@ -286,6 +286,15 @@ export function useApi<T>(
         })
         .catch((err: unknown) => {
           if (cancelled) return;
+          const isTimeout = isAxiosError(err)
+            && (err.code === "ECONNABORTED"
+              || /timeout/i.test(err.message || ""));
+          if (isTimeout && attempts < 1) {
+            attempts += 1;
+            console.warn("[useApi] request timed out — retrying once");
+            t2 = window.setTimeout(run, 1500);
+            return;
+          }
           const message = isAxiosError(err)
             ? extractErrorDetail(err) ?? err.message
             : err instanceof Error
@@ -295,12 +304,19 @@ export function useApi<T>(
         });
     };
 
-    // Defer network work one tick so first paint wins on slow disks.
+    // Single automatic retry on timeout: a transient backend stall (e.g. a
+    // burst landing while an upstream cooldown clears) used to surface as a
+    // hard error/blank page. One quiet retry 1.5s later self-heals it without
+    // changing any endpoint's real timeout budget (10s normal / 45s heavy) —
+    // a genuinely down backend still surfaces its error after the retry.
+    let attempts = 0;
+    let t2: number | undefined;
     const t = window.setTimeout(run, 0);
 
     return () => {
       cancelled = true;
       window.clearTimeout(t);
+      if (t2 !== undefined) window.clearTimeout(t2);
     };
     // cacheKey is a derived string that changes when deps change, so it is
     // intentionally included in the spread without being listed separately.

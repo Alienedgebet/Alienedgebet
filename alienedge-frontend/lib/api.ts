@@ -19,7 +19,7 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 // including 0 = no timeout) always wins.
 const DEFAULT_TIMEOUT_MS = 10_000; // normal endpoints
 const HEAVY_TIMEOUT_MS = 45_000; // corners stage 1/2, GG, Win, Over 1.5 / Over 2.5 chains
-const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25)\//;
+const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25|sot|fhvi|shvi|underdog|draw|unders|alerts|weekly)\//;
 
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
