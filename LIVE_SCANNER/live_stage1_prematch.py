@@ -7,6 +7,41 @@ import requests
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
+# ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
+# The archiver broadcasts a cooldown window into data/api_429_cooldown.lock
+# whenever it sees an HTTP 429. Every GET() wrapper here paces itself through
+# that window before firing, so the three components stop triggering each
+# other's burst limits. The gate file lives in the backend root so all stages
+# and the archiver share one canonical path.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _api_gate_pace(tag=""):
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise)."""
+    try:
+        with open(_GATE_FILE, "r") as f:
+            gate = json.load(f)
+        until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
+        remaining = until - time.time()
+        if remaining > 0:
+            print(f"[API GATE] {tag}: shared cooldown active — pacing {min(remaining, 15.0):.1f}s")
+            time.sleep(min(remaining, 15.0))
+    except Exception:
+        pass
+
+
+def _api_gate_broadcast(wait_s, tag=""):
+    """Record a shared cooldown so sibling processes also back off."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 load_dotenv()
 
@@ -221,6 +256,7 @@ def GET(path, params=None, max_retries=3):
     params.setdefault("api_token", API_TOKEN)
     url = f"{BASE_URL}{path}"
     problem = None
+    _api_gate_pace("stage1")
     for attempt in range(max_retries):
         try:
             r = requests.get(url, params=params, timeout=20)
@@ -235,7 +271,15 @@ def GET(path, params=None, max_retries=3):
                 return body
             if r.status_code == 429:
                 problem = "HTTP 429 rate limit"
-                time.sleep((2 ** attempt) + random.random()); continue
+                try:
+                    gate_wait = float(r.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    gate_wait = 0.0
+                gate_wait = max(gate_wait, (2 ** attempt) + random.random())
+                # CAP the shared window (see stage3): giant Retry-After values
+                # (~20 min) must not freeze every sibling process.
+                _api_gate_broadcast(min(gate_wait, 120.0), "stage1")
+                time.sleep(min(gate_wait, 30.0) + random.random() * 2); continue
             return note_acquisition({"data":[]}, r.status_code, f"HTTP {r.status_code}")
         except Exception as e:
             problem = f"{type(e).__name__}: {e}"

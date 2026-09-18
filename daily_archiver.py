@@ -46,11 +46,79 @@ def _has_minimum_fields(fixture, min_fields=ARCHIVE_MIN_EXPECTED_FIELDS):
     return len(keys) >= min_fields
 
 
+# ── SHARED 429 COOLDOWN GATE (archiver side) ─────────────────────────────────
+# Root cause of the empty nightly archives: page 1 hit HTTP 429 (a burst limit,
+# NOT quota exhaustion — probes show X-RateLimit-Remaining ≈ 2998/3000) and the
+# old loop had NO retry for the archiver, so "Fetched 0 fixtures" was merged and
+# the archive was written as an empty shell. Root causes fixed here:
+#   1. page 1 is retried with backoff instead of silently breaking;
+#   2. Retry-After / X-RateLimit-Reset are honoured;
+#   3. a small cross-process cooldown file lets the archiver, the pipeline and
+#      the live stages stop piling onto the API during a storm.
+_MAX_429_RETRIES = 4
+_API_GATE_LOCK_FILE = os.path.join(BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _429_gate_wait(retry_after=None, limit_reset=None, attempt=1, who="", broadcast=False):
+    """Wait out a SportMonks 429 using the best available signal.
+
+    Priority: server Retry-After > X-RateLimit-Reset > shared cooldown file >
+    jittered exponential floor (2s, 4s, 8s, 16s… capped at 30s). With
+    broadcast=True the caller records the cooldown so OTHER processes wait
+    instead of instantly re-triggering the burst limit. A pacing call
+    (attempt<=0, no hints) only sleeps when a shared cooldown is actually
+    active — otherwise it returns immediately.
+    """
+    import random as _random
+
+    now = time.time()
+    wait = 0.0
+    shared_active = False
+    if retry_after:
+        try:
+            wait = max(wait, float(retry_after))
+        except (TypeError, ValueError):
+            pass
+    try:
+        os.makedirs(os.path.dirname(_API_GATE_LOCK_FILE), exist_ok=True)
+        with open(_API_GATE_LOCK_FILE, "r") as f:
+            shared = json.load(f)
+        if isinstance(shared, dict) and shared.get("until", 0) > now:
+            shared_active = True
+            wait = max(wait, shared["until"] - now)
+    except Exception:
+        shared = None
+    if isinstance(limit_reset, str) and limit_reset.isdigit():
+        wait = max(wait, min(max(float(limit_reset) - now, 0.0), 60.0))
+    if attempt > 0:
+        wait = max(wait, min(2.0 * (2 ** (attempt - 1)), 30.0))
+        wait += _random.random() * 1.5
+    # CLAMP: SportMonks sometimes sends Retry-After values of ~20 minutes.
+    # Sleeping that long (or broadcasting it) would freeze the nightly run and
+    # every sibling process; bursts clear in seconds, so never wait longer
+    # than 45s per attempt regardless of what the server suggests.
+    wait = min(wait, 45.0)
+    if attempt <= 0 and retry_after is None and not shared_active:
+        return
+    if broadcast:
+        try:
+            with open(_API_GATE_LOCK_FILE + ".tmp", "w") as f:
+                json.dump({"until": now + wait, "by": who or "unknown"}, f)
+            os.replace(_API_GATE_LOCK_FILE + ".tmp", _API_GATE_LOCK_FILE)
+        except Exception:
+            pass
+    print(f"[API GATE] {who or 'caller'}: cooling down {wait:.1f}s (attempt {attempt})")
+    time.sleep(wait)
+
+
 def fetch_day_results(date_str):
     """Fetches all played fixtures for a specific date from SportMonks.
 
     Implements pagination with safety limits to prevent infinite loops or
-    incomplete fetches from destroying existing archives.
+    incomplete fetches from destroying existing archives. 429-aware: every
+    rate-limited page is retried with server-honouring backoff; a page-1
+    failure aborts the run so the merge's existing-empty guard keeps the
+    previous archive intact (a truncated fetch must never overwrite it).
     """
     if not API_KEY:
         print("[ERROR] SPORTMONKS_API_KEY is missing.")
@@ -69,30 +137,57 @@ def fetch_day_results(date_str):
 
     while page <= max_pages:
         params["page"] = page
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            if r.status_code != 200:
-                print(f"[ARCHIVER WARNING] Non-200 response on page {page}: {r.status_code}")
+        if page == 1:
+            # Pacing: wait out an ACTIVE shared cooldown before the first hit.
+            _429_gate_wait(who="archiver", attempt=0)
+        data = None
+        attempt = 0
+        while True:
+            try:
+                r = requests.get(url, params=params, timeout=20)
+            except Exception as e:
+                print(f"[ARCHIVER ERROR] Fetch failed on page {page}: {e}")
                 break
-            data = r.json().get("data", [])
-            if not data:
-                consecutive_empty += 1
-                if consecutive_empty >= 2:
-                    # Two consecutive empty pages = end of results
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                break
+            if r.status_code == 429:
+                attempt += 1
+                _429_gate_wait(retry_after=r.headers.get("Retry-After"),
+                               limit_reset=r.headers.get("X-RateLimit-Reset"),
+                               attempt=attempt, who="archiver", broadcast=True)
+                if attempt >= _MAX_429_RETRIES:
+                    print(f"[ARCHIVER ERROR] HTTP 429 persisted after "
+                          f"{attempt} retries on page {page}")
                     break
-                page += 1
                 continue
-            consecutive_empty = 0
-            for fx in data:
-                standardized = extract_match_data(fx)
-                if _has_minimum_fields(standardized):
-                    all_fixtures.append(standardized)
-                else:
-                    print(f"[ARCHIVER WARNING] Skipping suspiciously incomplete fixture on page {page}")
-            page += 1
-        except Exception as e:
-            print(f"[ARCHIVER ERROR] Fetch failed on page {page}: {e}")
+            print(f"[ARCHIVER WARNING] Non-200 response on page {page}: {r.status_code}")
             break
+        if data is None:
+            if page == 1:
+                # A truncated first page must never silently produce an empty
+                # archive; abort — the merge only ever ADDS to what exists.
+                print("[ARCHIVER ERROR] First-page fetch failed — aborting run "
+                      "(existing archive preserved by merge).")
+            else:
+                print(f"[ARCHIVER WARNING] Page {page} fetch failed — results "
+                      f"may be incomplete (partial data kept).")
+            break
+        if not data:
+            consecutive_empty += 1
+            if consecutive_empty >= 2:
+                # Two consecutive empty pages = end of results
+                break
+            page += 1
+            continue
+        consecutive_empty = 0
+        for fx in data:
+            standardized = extract_match_data(fx)
+            if _has_minimum_fields(standardized):
+                all_fixtures.append(standardized)
+            else:
+                print(f"[ARCHIVER WARNING] Skipping suspiciously incomplete fixture on page {page}")
+        page += 1
 
     return all_fixtures
 
@@ -307,6 +402,25 @@ def archive_date(target_date):
         print(f"   Existing preserved: {len(existing_ids)} | New added: {len(merged_fixtures) - len(existing_ids) if existing_ids else len(merged_fixtures)}")
         print(f"   Conflicts resolved by preserving existing: {len(conflicts)}")
         print(f"⚡ Future requests for {target_date} will now execute at 0 API cost.")
+
+        # ── FT RESULT SNAPSHOT EMISSION ──────────────────────────────────────
+        # Settlement's `load_ft_snapshot()` reads data/ft_result_snapshot.json,
+        # but until now NO writer existed: the file was always absent and the
+        # primary FT layer sat empty (verdicts frozen at PENDING whenever the
+        # in-play feed missed the fixture). Every finished fixture of this
+        # archive — fresh or preserved — is merged into the snapshot here, so
+        # the snapshot self-heals on every archive run.
+        try:
+            from settlement_service import write_ft_snapshot
+            finished = [fx for fx in merged_fixtures
+                        if isinstance(fx, dict) and fx.get("is_finished")]
+            if finished:
+                write_ft_snapshot({target_date: finished})
+                print(f"📸 FT snapshot updated: {len(finished)} finished fixtures "
+                      f"for {target_date}")
+        except Exception as _snap_err:
+            # Snapshot emission must never fail the archive itself.
+            print(f"[ARCHIVER WARNING] FT snapshot update failed: {_snap_err}")
     else:
         print(f"❌ FAILED: Could not write archive to {archive_file}")
         return {"decision": "ERROR", "reason": "atomic write failed"}

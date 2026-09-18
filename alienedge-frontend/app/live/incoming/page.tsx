@@ -283,17 +283,17 @@ export default function LiveIncomingPage() {
   const incoming = useApi(
     () => liveApi.getIncoming().then(normalizeIncoming),
     [],
-    { fallback: MOCK_LIVE_INCOMING, cacheKey: "live-incoming-incoming" }
+    { fallback: MOCK_LIVE_INCOMING, cacheKey: "live-incoming-incoming", refreshMs: 45_000 }
   );
   const danger = useApi(
     () => liveApi.getDanger().then(normalizeDanger),
     [],
-    { fallback: MOCK_LIVE_DANGER, cacheKey: "live-incoming-danger" }
+    { fallback: MOCK_LIVE_DANGER, cacheKey: "live-incoming-danger", refreshMs: 45_000 }
   );
   const aggregator = useApi(
     () => liveApi.getAggregator().then(normalizeAggregator),
     [],
-    { fallback: MOCK_LIVE_AGG, cacheKey: "live-incoming-aggregator" }
+    { fallback: MOCK_LIVE_AGG, cacheKey: "live-incoming-aggregator", refreshMs: 45_000 }
   );
 
   const incomingRows = liveRows(incoming.data);

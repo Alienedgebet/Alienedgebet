@@ -11,6 +11,39 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import re
 from dotenv import load_dotenv
 
+# ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
+# Mirrors live_stage1_prematch: the archiver/stages broadcast cooldown windows
+# into data/api_429_cooldown.lock; GET() paces itself through them so the
+# components stop re-triggering each other's burst limits.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _api_gate_pace(tag=""):
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise)."""
+    try:
+        with open(_GATE_FILE, "r") as f:
+            gate = json.load(f)
+        until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
+        remaining = until - time.time()
+        if remaining > 0:
+            print(f"[API GATE] {tag}: shared cooldown active — pacing {min(remaining, 15.0):.1f}s")
+            time.sleep(min(remaining, 15.0))
+    except Exception:
+        pass
+
+
+def _api_gate_broadcast(wait_s, tag=""):
+    """Record a shared cooldown so sibling processes also back off."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 load_dotenv()
 
@@ -123,6 +156,7 @@ def GET(path, params=None):
     url = BASE_URL.rstrip("/") + path
     backoff = 2.0
     problem = None
+    _api_gate_pace("stage3")
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
@@ -136,7 +170,18 @@ def GET(path, params=None):
                 return body
             if r.status_code == 429:
                 problem = "HTTP 429 rate limit"
-                time.sleep(backoff * attempt); continue
+                try:
+                    gate_wait = float(r.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    gate_wait = 0.0
+                gate_wait = max(gate_wait, backoff * attempt)
+                # CAP: SportMonks has been observed sending Retry-After values
+                # of ~20 minutes. Honouring those verbatim froze the whole
+                # scanner (and every process reading the shared gate) for tens
+                # of minutes — worse than continued polite retries, since
+                # bursts here clear within seconds. Cap the SHARED window.
+                _api_gate_broadcast(min(gate_wait, 120.0), "stage3")
+                time.sleep(min(gate_wait, 30.0) + random.random() * 2); continue
             return note_acquisition({"data": []}, r.status_code, f"HTTP {r.status_code}")
         except Exception as e:
             problem = f"{type(e).__name__}: {e}"
