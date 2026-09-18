@@ -13,92 +13,35 @@ import output_store as store
 # ==============================================================================
 # 1. THE HIJACK (GLOBAL TRAFFIC WARDEN & CONTROLLED CACHE)
 # ==============================================================================
-GLOBAL_API_CACHE = {}
-original_get = requests.get
-
-class CachedResponseWrapper:
-    """
-    Mimics enough of requests.Response that a cache HIT behaves the same as
-    a real HTTP response to whatever engine code consumes it. The original
-    version only implemented .json()/.status_code/.raise_for_status() — any
-    engine calling .text, .content, .headers, .ok, or .elapsed on a cached
-    response would hit an AttributeError deep inside engine code on a cache
-    hit only (never on a cache miss), which is a nasty intermittent bug to
-    chase. This version covers every commonly-used Response attribute.
-    """
-    def __init__(self, json_data, status_code=200):
-        self._json_data = json_data
-        self.status_code = status_code
-        self.ok = 200 <= status_code < 400
-        self.headers = {}
-        self.elapsed = None
-        self.reason = "OK" if self.ok else "Cached-Error"
-        self.url = None
-        try:
-            self._text = json.dumps(json_data)
-        except Exception:
-            self._text = str(json_data)
-
-    def json(self):
-        return self._json_data
-
-    @property
-    def text(self):
-        return self._text
-
-    @property
-    def content(self):
-        return self._text.encode("utf-8")
-
-    def raise_for_status(self):
-        if not self.ok:
-            raise requests.exceptions.HTTPError(
-                f"{self.status_code} Error (cached)", response=self
-            )
+# The traffic warden now lives in api_cache.py so BOTH the pipeline and the
+# shared future-fixture window use one implementation. Every name this module
+# used to expose is re-exported here with identical semantics:
+#   GLOBAL_API_CACHE        — the same dict object (raw JSON payloads)
+#   CachedResponseWrapper   — the same class
+#   smart_get(url, params=None, **kwargs) — the same signature and cache key
+#   requests.get = smart_get — the same process-wide hijack
+#   flush_system_ram()      — the same memory reset between phases (OOM guard)
+# The layer is still the umbrella protecting EVERY engine and EVERY acquisition
+# path; nothing is bypassed, removed or weakened.
+import api_cache
+from api_cache import (GLOBAL_API_CACHE, CachedResponseWrapper, smart_get,
+                       original_get)
 
 def flush_system_ram():
     """
     Clears the in-memory response cache and runs explicit garbage collection
     between pipeline phases to permanently eliminate Out-Of-Memory (OOM) kills.
+
+    Now delegates to api_cache.flush_memory(), which clears exactly the same
+    GLOBAL_API_CACHE plus the layer's own metadata/alias index (so no stale alias
+    can survive a flush) and releases the window's single in-RAM day copy. The
+    on-disk shared window is untouched — it is the durable store, which is why a
+    post-flush fixture request is still served with ZERO API calls.
     """
-    GLOBAL_API_CACHE.clear()
+    api_cache.flush_memory()
     gc.collect()
 
-def smart_get(url, params=None, **kwargs):
-    safe_params = dict(params) if params else {}
-    param_string = "&".join([f"{k}={v}" for k, v in sorted(safe_params.items()) if k != "api_token"])
-    cache_key = f"{url}?{param_string}"
-
-    if cache_key in GLOBAL_API_CACHE:
-        print("🟨", end="", flush=True)
-        return CachedResponseWrapper(GLOBAL_API_CACHE[cache_key])
-
-    backoff = 3.0
-    for attempt in range(5):
-        try:
-            resp = original_get(url, params=params, **kwargs)
-            if resp.status_code == 200:
-                data = resp.json()
-                GLOBAL_API_CACHE[cache_key] = data
-                print("🟩", end="", flush=True)
-                # Deliberate pacing to respect SportMonks per-minute burst boundaries
-                time.sleep(0.25)
-                return CachedResponseWrapper(data, 200)
-            elif resp.status_code == 429:
-                print(f"[API BURST: Cooling {backoff}s] ", end="", flush=True)
-                time.sleep(backoff)
-                backoff *= 1.5
-                continue
-            else:
-                return resp
-        except Exception:
-            time.sleep(1.5)
-            continue
-
-    return original_get(url, params=params, **kwargs)
-
-requests.get = smart_get
-print("✅ TRAFFIC WARDEN ACTIVE: Global API Hijack & Managed Cache Synchronized.")
+api_cache.install()
 
 
 # ==============================================================================
@@ -449,6 +392,74 @@ def _retry_starved_engine(engine_name, func, args, kwargs):
 
 
 # ==============================================================================
+# 4b. SHARED FUTURE FIXTURE ACQUISITION + WEEKLY FAMILY WIRING
+# ==============================================================================
+# PHASE 0 (below) prepares the reusable future-fixture window BEFORE any consumer
+# runs, so PREMATCH and WEEKLY share the same seven future dates and no engine
+# re-acquires a fixture list another consumer already has. The window itself sits
+# UNDER the global API cache: every fetch it makes goes through smart_get.
+#
+# Both switches are additive — the default nightly run keeps its existing
+# behaviour and phase order, and every failure here is non-fatal:
+#   ALIENEDGE_FUTURE_WINDOW=0 / --no-window   disable the PHASE 0 window fill
+#   ALIENEDGE_WEEKLY=1        / --weekly      also run the Weekly family (phase 12)
+#   --weekly-only                             fill window + Weekly family, exit
+WINDOW_HORIZON_DAYS = 7
+
+
+def _env_flag(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def window_enabled():
+    return _env_flag("ALIENEDGE_FUTURE_WINDOW", True) and "--no-window" not in sys.argv
+
+
+def weekly_enabled():
+    return _env_flag("ALIENEDGE_WEEKLY", False) or "--weekly" in sys.argv
+
+
+def fill_shared_future_window(target_date, horizon=WINDOW_HORIZON_DAYS):
+    """PHASE 0 — acquire/roll the canonical 7-day future-fixture window.
+
+    Rolling (never a full refetch): dates that left the horizon are evicted and
+    only the newly required day is acquired. Non-fatal by design — if this fails
+    (e.g. a 429 storm) every consumer simply falls through to its normal cached
+    SportMonks call, i.e. exactly the pre-existing behaviour.
+    """
+    print(f"\n[PHASE 0] SHARED FUTURE FIXTURE ACQUISITION — 7-day window "
+          f"anchored on {target_date}...")
+    try:
+        import shared_fixture_window as window
+        return window.fill_window(target_date, horizon=horizon)
+    except Exception as e:
+        print(f"   ⚠️ [WINDOW] fill failed (non-fatal, pipeline continues): {e}")
+        return None
+
+
+def run_weekly_phase(target_date, horizon=WINDOW_HORIZON_DAYS):
+    """PHASE 12 — the Weekly engine family (GG / WIN / O2.5) over the window.
+
+    Composes the EXISTING AlienEdge intelligence (see WEEKLY/weekly_engine.py) and
+    persists each date's rows through output_store under the same keys the
+    existing Weekly API routes already read. Non-fatal by design.
+    """
+    print("\n" + "=" * 115)
+    print(f"{'📅 PHASE 12: WEEKLY ENGINE FAMILY (GG / WIN / O2.5)':^115}")
+    print("=" * 115)
+    try:
+        from WEEKLY.weekly_engine import run_weekly_family
+        return run_weekly_family(target_date, horizon=horizon)
+    except Exception as e:
+        print(f"   ⚠️ [WEEKLY] family failed (non-fatal): {e}")
+        traceback.print_exc()
+        return None
+
+
+# ==============================================================================
 # 5. THE SUPREME MASTER PIPELINE (PURE PRE-MATCH ARCHITECTURE)
 # ==============================================================================
 
@@ -483,6 +494,16 @@ def alienedge_master_system(cli_date_override: str = None):
     d = target_date  # shorthand used below in save_date=
 
     start_time = time.time()
+
+    # ── PHASE 0: SHARED FUTURE FIXTURE ACQUISITION ───────────────────────────
+    # Prepares the reusable 7-day future-fixture window BEFORE any consumer, so
+    # PREMATCH (whose target date is the window's first day) and WEEKLY read the
+    # same future fixture data instead of each acquiring it. Fixture identity for
+    # the window's dates is then served to every engine by the global API cache
+    # with zero extra API calls. Failure is non-fatal: engines fall back to their
+    # normal cached calls.
+    if window_enabled():
+        fill_shared_future_window(target_date)
 
     # ── PHASE 1: FOUNDATION & DNA IDENTITY ───────────────────────────────────
     print(f"\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH for {target_date}...")
@@ -599,6 +620,14 @@ def alienedge_master_system(cli_date_override: str = None):
                     target_date, mode="public", risk_level=risk,
                     save_key=f"filter_win__{risk}", save_date=d)
     flush_system_ram()
+
+    # ── PHASE 12: WEEKLY ENGINE FAMILY (opt-in) ──────────────────────────────
+    # Runs the SAME existing GG / WIN / O2.5 intelligence over the shared 7-day
+    # future window (PHASE 0) and writes each date's snapshots under the keys the
+    # existing /api/filter/*/weekly routes already read. Opt-in so the default
+    # nightly run is unchanged until it is switched on.
+    if weekly_enabled():
+        run_weekly_phase(target_date)
 
     # ── PIPELINE COMPLETION ──────────────────────────────────────────────────
     duration = round((time.time() - start_time) / 60, 2)
@@ -741,6 +770,34 @@ if __name__ == "__main__":
                   f"rejected as suspiciously collapsed and preserved.")
             _rc = 2
         sys.exit(_rc)
+
+    # --weekly-only=<date> (or --weekly-only --date=<date>): fill the shared
+    # future window and run ONLY the Weekly family (GG / WIN / O2.5). This is the
+    # ops/validation path: it never runs the pre-match pipeline, never touches the
+    # Live scanner and never writes outside the existing output_store keys.
+    _weekly_only_date = None
+    for _arg in sys.argv[1:]:
+        if _arg.startswith("--weekly-only="):
+            _weekly_only_date = _arg.split("=", 1)[1].strip()
+            break
+    if "--weekly-only" in sys.argv and not _weekly_only_date:
+        for _arg in sys.argv[1:]:
+            if _arg.startswith("--date="):
+                _weekly_only_date = _arg.split("=", 1)[1].strip()
+                break
+        if not _weekly_only_date:
+            from datetime import timedelta as _td
+            _weekly_only_date = (datetime.now() + _td(days=1)).strftime("%Y-%m-%d")
+
+    if _weekly_only_date:
+        fill_shared_future_window(_weekly_only_date)
+        run_weekly_phase(_weekly_only_date)
+        _rejected = store.guard_rejections()
+        if _rejected:
+            print(f"\n⚠️ [SNAPSHOT GUARD] {len(_rejected)} snapshot write(s) rejected "
+                  f"as suspiciously collapsed and preserved.")
+            sys.exit(2)
+        sys.exit(0)
 
     alienedge_master_system()
 
