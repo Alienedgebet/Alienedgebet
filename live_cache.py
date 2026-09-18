@@ -42,6 +42,28 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
         print("[CACHE WARNING] SPORTMONKS_API_KEY is missing!")
         return []
 
+    # Pacing: wait out an ACTIVE shared 429 cooldown before hitting the API,
+    # so the 2-minute cache does not stampede the provider right after a burst
+    # limit rejection broadcast by the archiver or a live stage. Self-contained
+    # helper (importing a live stage from here would be circular — stage1
+    # imports live_cache) reading the SAME data/api_429_cooldown.lock file.
+    _gate_file = os.path.join(DATA_DIR, "api_429_cooldown.lock")
+    try:
+        with open(_gate_file, "r") as _f:
+            _gate = json.load(_f)
+        _remaining = float(_gate.get("until", 0)) - time.time()
+        if _remaining > 0:
+            # 10s cap: this code runs inside USER-FACING API requests (the
+            # in-play fetch feeds /api/win/apex, corners, etc.). A long sleep
+            # here would hang a browser request; a short pace still prevents
+            # stampeding the provider the instant a 429 storm is broadcast.
+            _sleep_for = min(_remaining, 10.0)
+            print(f"[API GATE] live_cache: shared cooldown active — pacing "
+                  f"{_sleep_for:.1f}s")
+            time.sleep(_sleep_for)
+    except Exception:
+        pass
+
     # 2. Fetch SportMonks ONCE
     url = "https://api.sportmonks.com/v3/football/livescores/inplay"
     params = {

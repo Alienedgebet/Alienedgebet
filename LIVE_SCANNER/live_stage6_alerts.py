@@ -12,6 +12,40 @@ from datetime import datetime, timezone, timedelta
 from collections import deque
 from dotenv import load_dotenv
 
+# ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
+# Mirrors live_stage1_prematch: the archiver/stages broadcast cooldown windows
+# into data/api_429_cooldown.lock; GET() paces itself through them so the
+# components stop re-triggering each other's burst limits.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _api_gate_pace(tag=""):
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise)."""
+    try:
+        with open(_GATE_FILE, "r") as f:
+            gate = json.load(f)
+        until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
+        remaining = until - time.time()
+        if remaining > 0:
+            logging.getLogger("alienedge.stage6").info(
+                f"[API GATE] {tag}: shared cooldown active — pacing {min(remaining, 15.0):.1f}s")
+            time.sleep(min(remaining, 15.0))
+    except Exception:
+        pass
+
+
+def _api_gate_broadcast(wait_s, tag=""):
+    """Record a shared cooldown so sibling processes also back off."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
 from LIVE_SCANNER.user_rules_store import list_rules, evaluate_rule_for_match
 
 # --- 1. HOSTING & ENVIRONMENT SETUP ---
@@ -31,6 +65,9 @@ SH_GG_WINNER_FILE        = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json")
 # API (a separate process) can read it. print_orchestrator_board() only
 # wrote to console/system.log (plain text) — this is the missing JSON twin.
 ORCHESTRATOR_BOARD_FILE  = os.path.join(OUTPUT_DIR, "orchestrator_board.json")
+# Live dashboard board for /api/live/dashboard (previously read a file that no
+# component ever wrote — the endpoint always returned []).
+LIVE_DASHBOARD_FILE      = os.path.join(OUTPUT_DIR, "live_dashboard.json")
 # NEW: Stage 1's GK liability + missing-key-player audit, written by the
 # additive patch to live_stage1_prematch.py. Third prematch source, merged
 # into the same `db` dict as the other two — never overwrites their fields.
@@ -139,13 +176,24 @@ def safe_get(d, *keys, default=None):
 def GET(url, params=None):
     if params is None: params = {}
     params.setdefault("api_token", API_TOKEN)
+    _api_gate_pace("stage6")
     backoff = 2.0
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             r = requests.get(url, params=params, timeout=25)
             if r.status_code == 200: return r.json()
             elif r.status_code == 429:
-                time.sleep(backoff); backoff *= 2; continue
+                try:
+                    gate_wait = float(r.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    gate_wait = 0.0
+                gate_wait = max(gate_wait, backoff)
+                # CAP the shared window (see stage3): giant Retry-After values
+                # (~20 min) must not freeze every sibling process.
+                _api_gate_broadcast(min(gate_wait, 120.0), "stage6")
+                time.sleep(min(gate_wait, 30.0))
+                backoff *= 2
+                continue
             r.raise_for_status()
         except Exception:
             time.sleep(1); continue
@@ -677,6 +725,9 @@ class SupremeOrchestrator:
             self.save_orchestrator_board(
                 cycle_matches, len(live_data), len(db)
             )
+            self.save_live_dashboard(
+                cycle_matches, len(live_data), len(db)
+            )
 
         except Exception as e:
             logging.error(f"Engine Loop Failure: {e}")
@@ -737,6 +788,26 @@ class SupremeOrchestrator:
         return {"h_lost": track["h_lost"], "a_lost": track["a_lost"]}
 
     # ── ORCHESTRATOR BOARD ────────────────────────────────────────────────
+    # ── LIVE DASHBOARD WRITER ────────────────────────────────────────────────
+    # /api/live/dashboard reads output/live_dashboard.json, which NO component
+    # wrote — the endpoint always returned []. This board is a compact snapshot
+    # of the orchestrator cycle (same data the console prints), so persist it
+    # here for the API to serve.
+    def save_live_dashboard(self, cycle_matches, total_live, total_db):
+        try:
+            payload = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "total_live": total_live,
+                "total_db": total_db,
+                "matches": cycle_matches,
+            }
+            tmp_path = LIVE_DASHBOARD_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str)
+            os.replace(tmp_path, LIVE_DASHBOARD_FILE)  # atomic swap
+        except Exception as e:
+            logging.error(f"[DASHBOARD] Failed to save live dashboard: {e}")
+
     def print_orchestrator_board(self, cycle_matches, total_live, total_db):
         now = datetime.now().strftime("%H:%M:%S")
         print(f"\n{'═'*80}")

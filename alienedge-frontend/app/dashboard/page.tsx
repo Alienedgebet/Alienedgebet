@@ -64,49 +64,66 @@ function DashboardOverview() {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
 
+  // 60s auto-refresh: verdicts (PENDING → IN_PLAY → WON/LOST) must appear
+  // without a manual re-navigation. Cheap for the API — market reads for an
+  // archived date never touch SportMonks, and the in-play feed fetch is
+  // shared and disk-cached (2-min TTL) behind all twelve endpoints.
+  const REFRESH_MS = 60_000;
+
   const win = useApi(() => WIN_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.win,
     cacheKey: marketCacheKey(WIN_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const gg = useApi(() => GG_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.gg,
     cacheKey: marketCacheKey(GG_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const over25 = useApi(() => OVER25_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.over25,
     cacheKey: marketCacheKey(OVER25_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const over15 = useApi(() => OVER15_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.over15,
     cacheKey: marketCacheKey(OVER15_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const draw = useApi(() => DRAW_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.draw,
     cacheKey: marketCacheKey(DRAW_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const unders = useApi(() => UNDERS_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.unders,
     cacheKey: marketCacheKey(UNDERS_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const corners = useApi(() => CORNERS_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.corners,
     cacheKey: marketCacheKey(CORNERS_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const sot = useApi(() => SOT_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.sot,
     cacheKey: marketCacheKey(SOT_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const fhvi = useApi(() => FHVI_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.fhvi,
     cacheKey: marketCacheKey(FHVI_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const shvi = useApi(() => SHVI_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.shvi,
     cacheKey: marketCacheKey(SHVI_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
   const underdog = useApi(() => UNDERDOG_MARKET.fetcher(date), [date], {
     fallback: MOCK_PICKS.underdog,
     cacheKey: marketCacheKey(UNDERDOG_MARKET.key, date),
+    refreshMs: REFRESH_MS,
   });
 
   const rawResults = [

@@ -7,6 +7,40 @@ import requests
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
+# ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
+# Mirrors live_stage1_prematch: the archiver/stages broadcast cooldown windows
+# into data/api_429_cooldown.lock; GET() paces itself through them so the
+# components stop re-triggering each other's burst limits.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _api_gate_pace(tag=""):
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise)."""
+    try:
+        with open(_GATE_FILE, "r") as f:
+            gate = json.load(f)
+        until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
+        remaining = until - time.time()
+        if remaining > 0:
+            print(f"[API GATE] {tag}: shared cooldown active — pacing {min(remaining, 15.0):.1f}s",
+                  file=sys.stderr)
+            time.sleep(min(remaining, 15.0))
+    except Exception:
+        pass
+
+
+def _api_gate_broadcast(wait_s, tag=""):
+    """Record a shared cooldown so sibling processes also back off."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 load_dotenv()
 
@@ -91,14 +125,28 @@ def safe_get(d, *keys, default=None):
 def GET(url, params=None):
     if params is None: params = {}
     params.setdefault("api_token", API_TOKEN)
-    try:
-        r = requests.get(url, params=params, timeout=25)
-        if r.status_code == 200: return r.json()
-        if r.status_code == 429:
-            time.sleep(5)
-            return GET(url, params)
-    except Exception as e:
-        print(f"[ERR] Connection: {e}", file=sys.stderr)
+    _api_gate_pace("stage2")
+    for attempt in range(4):
+        try:
+            r = requests.get(url, params=params, timeout=25)
+            if r.status_code == 200: return r.json()
+            if r.status_code == 429:
+                try:
+                    gate_wait = float(r.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    gate_wait = 0.0
+                gate_wait = max(gate_wait, min(5 * (2 ** attempt), 60.0))
+                # CAP the shared window (see stage3): giant Retry-After values
+                # (~20 min) must not freeze every sibling process.
+                _api_gate_broadcast(min(gate_wait, 120.0), "stage2")
+                time.sleep(min(gate_wait, 30.0))
+                continue
+            print(f"[WARN] HTTP {r.status_code} from {url}", file=sys.stderr)
+            return {"data": []}
+        except Exception as e:
+            print(f"[ERR] Connection: {e}", file=sys.stderr)
+            time.sleep(2)
+    print(f"[ERR] Retries exhausted after repeated 429s: {url}", file=sys.stderr)
     return {"data": []}
 
 # ==============================================================================
