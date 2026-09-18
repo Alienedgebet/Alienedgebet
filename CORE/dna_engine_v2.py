@@ -68,6 +68,37 @@ def run_dna_engine_v2(target_date):
 
     NO NEW API CALLS — everything uses only what get_team_history_stats
     already returns from the existing Sportmonks subscription.
+
+    ─────────────────────────────────────────────────────────────────────────────
+    FRESHNESS FIX (this revision)
+    ─────────────────────────────────────────────────────────────────────────────
+    PREVIOUS BEHAVIOUR (bug): once a team_id existed anywhere in the on-disk
+    global cache, it was reused FOREVER — `if tid_str in dna_profiles: continue`
+    — with no expiry, so a team's DNA could silently go weeks stale even as
+    they played match after match. This revision replaces that permanent
+    shield with a bounded, per-team freshness check:
+
+      - Every profile now carries `computed_at` (UTC ISO timestamp) and a
+        `history` block: {last_fixture_id, last_match_date, matches_used}.
+      - If a cached profile is younger than DNA_FRESHNESS_HOURS, it is reused
+        with ZERO API calls (same cost as before for the common case).
+      - Once stale, ONE lightweight history call checks whether the team's
+        latest FINISHED fixture has actually changed:
+          * unchanged  → the cached profile is kept as-is, only `computed_at`
+                          is bumped (no full recompute — the underlying data
+                          didn't change, so nothing would be different).
+          * changed    → the profile is fully recomputed from the fresh
+                          8-match history, exactly as before.
+      - Legacy profiles saved before this change (no `computed_at`) are
+        treated as stale on first sight and go through the same one-call
+        check above — no mass rebuild, no deletion, each team is handled
+        independently the first time it's seen after upgrading.
+
+    This is a bounded, safe trade: at most one extra API call per *stale*
+    team per pipeline run, never a full-library refetch, and a fresh team
+    costs nothing at all. Every existing formula in
+    calculate_comprehensive_dna() is untouched — this only changes WHEN that
+    function gets called, never WHAT it calculates.
     ─────────────────────────────────────────────────────────────────────────────
     """
 
@@ -82,6 +113,13 @@ def run_dna_engine_v2(target_date):
     HISTORY_LOOKBACK = 8       # professional forensic sample size
     LOOKBACK_DAYS    = 365
     PAGINATION_PER_PAGE = 50
+
+    # How long a cached team profile is trusted before we spend one API call
+    # re-checking whether their latest finished match has changed. A team
+    # rarely plays more than once a day, so this comfortably avoids re-
+    # checking the same team multiple times within one matchday's worth of
+    # pipeline runs, while still catching newly-played matches within a day.
+    DNA_FRESHNESS_HOURS = 20
 
     if not API_KEY:
         print("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
@@ -188,7 +226,9 @@ def run_dna_engine_v2(target_date):
     def get_team_history_stats(team_id):
         """
         Fetches the last 8 finished matches with deep statistics for a team.
-        Unchanged from v1 — same endpoint, same parameters.
+        Unchanged from v1 — same endpoint, same parameters. Sorted newest
+        first, so result[0] is always the team's most recent finished match
+        — this is what the freshness check below keys off.
         """
         t_date_obj = datetime.strptime(target_date, "%Y-%m-%d").date()
         end_dt     = (t_date_obj - timedelta(days=1)).isoformat()
@@ -203,6 +243,25 @@ def run_dna_engine_v2(target_date):
         }
         resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{team_id}", params=params)
         return resp.get("data", [])
+
+    def _is_profile_fresh(profile):
+        """
+        True if this cached profile was computed within DNA_FRESHNESS_HOURS
+        and can be reused with zero API calls. Legacy profiles (saved before
+        this fix, with no `computed_at`) are treated as NOT fresh so they
+        get exactly one freshness-check call the first time they're seen —
+        never deleted, never mass-rebuilt.
+        """
+        computed_at = profile.get("computed_at")
+        if not computed_at:
+            return False
+        try:
+            ts = datetime.fromisoformat(computed_at)
+        except (ValueError, TypeError):
+            return False
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts) < timedelta(hours=DNA_FRESHNESS_HOURS)
 
     # ─────────────────────────────────────────────────────────────────────────
     # THE TACTICAL BRAIN — UPGRADED HEURISTIC ENGINE (v2)
@@ -220,6 +279,10 @@ def run_dna_engine_v2(target_date):
         - Shot Quality Index added (Insidebox vs Outsidebox ratio)
         - Transition Pressure Score added (ball recovery → attack)
         - All heuristic fallbacks preserved exactly from v1
+
+        UNCHANGED by the freshness fix — this function's math is untouched.
+        `computed_at` / `history` metadata is attached by the CALLER after
+        this returns, not inside here, so the calculation itself stays pure.
         """
         if not fixtures:
             return None
@@ -661,12 +724,15 @@ def run_dna_engine_v2(target_date):
           f"{len(fixture_pairs)} fixtures to profile.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Step 3 — compute DNA for every team (UPGRADED: PERSISTENT DISK CACHE)
+    # Step 3 — compute DNA for every team (FRESHNESS-AWARE PERSISTENT CACHE)
     # ─────────────────────────────────────────────────────────────────────────
     output_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
     dna_profiles = {}
 
-    # Check if we already have teams cached on disk from previous runs
+    # Check if we already have teams cached on disk from previous runs.
+    # This is the GLOBAL, multi-date library — every team ever profiled,
+    # across every date main.py has run — and stays that way (requirement:
+    # global libraries are preserved, never rebuilt or converted).
     if os.path.exists(output_path) and os.path.getsize(output_path) > 100:
         try:
             with open(output_path, "r", encoding="utf-8") as f:
@@ -676,35 +742,76 @@ def run_dna_engine_v2(target_date):
             dna_profiles = {}
 
     count = 1
-    newly_fetched = 0
+    newly_fetched = 0       # true recomputes only (formula actually re-ran)
+    reused_fresh  = 0       # zero-API-call reuses (within freshness window)
+    reused_stale_unchanged = 0   # one-call check confirmed no change
 
     for team_id, team_name in unique_teams.items():
         tid_str = str(team_id)
+        cached = dna_profiles.get(tid_str)
 
-        # ── PERMANENT API SHIELD: SKIP IF TEAM ALREADY CACHED (0 API CALLS) ──
-        if tid_str in dna_profiles:
+        # ── PATH 1: fresh cache hit — zero API calls, same cost as before ──
+        if cached and _is_profile_fresh(cached):
+            reused_fresh += 1
             count += 1
             continue
 
-        print(f"   ({count}/{len(unique_teams)}) Fetching New DNA: {team_name}...",
+        print(f"   ({count}/{len(unique_teams)}) Checking DNA freshness: {team_name}...",
               end=" ", flush=True)
 
+        # Stale (or legacy/never-cached) — one lightweight history call to
+        # find out whether the team's latest FINISHED match has changed.
         match_history = get_team_history_stats(team_id)
-        profile       = calculate_comprehensive_dna(team_id, team_name, match_history)
+        latest_fixture_id = match_history[0].get("id") if match_history else None
+
+        # ── PATH 2: stale, but the latest finished match is unchanged ──────
+        # The underlying data this team's DNA was computed from hasn't
+        # moved, so recomputing would produce an identical result — just
+        # bump the freshness timestamp instead of redoing the math.
+        if (cached is not None and latest_fixture_id is not None
+                and cached.get("history", {}).get("last_fixture_id") == latest_fixture_id):
+            cached["computed_at"] = datetime.now(timezone.utc).isoformat()
+            dna_profiles[tid_str] = cached
+            reused_stale_unchanged += 1
+            print("Unchanged — reused ✅")
+            count += 1
+            continue
+
+        # ── PATH 3: new team, or latest finished match genuinely changed ──
+        profile = calculate_comprehensive_dna(team_id, team_name, match_history)
 
         if profile:
+            profile["history"] = {
+                "last_fixture_id": latest_fixture_id,
+                "last_match_date": (
+                    str(match_history[0].get("starting_at", ""))[:10]
+                    if match_history else None
+                ),
+                "matches_used": len(match_history),
+            }
+            profile["computed_at"] = datetime.now(timezone.utc).isoformat()
             dna_profiles[tid_str] = profile
             newly_fetched += 1
-            print("Done ✅")
+            print("Refreshed ✅")
         else:
             print("Skipped (No Stats) ⚠️")
 
         count += 1
         time.sleep(REQUEST_DELAY)
 
-    print(f"   [⚡ CACHE SUMMARY] Reused {len(dna_profiles) - newly_fetched} teams from disk | Fetched {newly_fetched} new teams.")
+    print(
+        f"   [⚡ CACHE SUMMARY] Fresh reuse (0 calls): {reused_fresh} | "
+        f"Stale-but-unchanged (1 call, no recompute): {reused_stale_unchanged} | "
+        f"Recomputed: {newly_fetched} | Total teams today: {len(unique_teams)}"
+    )
 
     # Step 4 — compute style clashes for every fixture (NEW in v2)
+    # home_id / away_id are ADDED here (additive only — no field removed or
+    # renamed) so downstream consumers (dna_profiler.py, dna_v2_market_
+    # factors.py) can join on team ID instead of team NAME, which avoids
+    # duplicate-name collisions. Nothing that already reads this file by its
+    # existing fields (fixture / home_team / away_team / fixture_id /
+    # fixture_date / pillar_clash / ...) is affected.
     print("\n[2.5/3] Computing fixture-level style clashes...")
     fixture_clashes = []
 
@@ -720,39 +827,59 @@ def run_dna_engine_v2(target_date):
         if clash:
             clash["fixture_id"]   = fp["fixture_id"]
             clash["fixture_date"] = fp["fixture_date"]
+            clash["home_id"]      = h_id     # NEW — authoritative join key
+            clash["away_id"]      = a_id     # NEW — authoritative join key
             fixture_clashes.append(clash)
             print(f"   ✅ Clash: {clash['fixture']} → Edge: {clash['overall_structural_edge']}")
 
-    # Step 5 — save DNA profiles (v2-specific path)
+    # Step 5 — save DNA profiles (v2-specific path) — FULL GLOBAL LIBRARY,
+    # unchanged behaviour: every team ever profiled stays in this file.
     output_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
     print(f"\n[3/3] Saving DNA library to {output_path}...")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(dna_profiles, f, indent=4)
 
-    # Step 6 — save style clashes (separate file)
+    # Step 6 — save style clashes (separate file) — unchanged behaviour:
+    # this file always reflects only the most recently processed date.
     clashes_path = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
     print(f"[3/3] Saving style clashes to {clashes_path}...")
     with open(clashes_path, "w", encoding="utf-8") as f:
         json.dump(fixture_clashes, f, indent=4)
 
-    # Step 7 — save v1 compatibility copy (Feeds older engines automatically, 0 API calls)
+    # Step 7 — save v1 compatibility copy (Feeds older engines automatically,
+    # 0 API calls) — unchanged behaviour, full global library.
     v1_path = os.path.join(DATA_DIR, "team_dna_profiles.json")
     with open(v1_path, "w", encoding="utf-8") as f:
         json.dump(dna_profiles, f, indent=4)
 
     print("\n" + "=" * 60)
     print(f"🏆 ALIENEDGE DNA ENGINE v2: COMPLETE ({target_date})")
-    print(f"   Teams profiled:      {len(dna_profiles)}")
-    print(f"   Fixture clashes:     {len(fixture_clashes)}")
-    print(f"   New pillars active:  Box Dominance, Shot Quality, Transition Pressure")
-    print(f"   Previously wasted:   Tackles, Big Chances Created, Shots Insidebox,")
-    print(f"                        Shots Outsidebox — ALL NOW ACTIVATED")
+    print(f"   Teams profiled today:  {len(unique_teams)}")
+    print(f"   Global library size:   {len(dna_profiles)}")
+    print(f"   Fixture clashes:       {len(fixture_clashes)}")
+    print(f"   New pillars active:    Box Dominance, Shot Quality, Transition Pressure")
+    print(f"   Previously wasted:     Tackles, Big Chances Created, Shots Insidebox,")
+    print(f"                          Shots Outsidebox — ALL NOW ACTIVATED")
     print("=" * 60)
 
-    # Return both to Master Aggregator memory
+    # ─────────────────────────────────────────────────────────────────────────
+    # DATE-SCOPED RETURN VALUE (this is the fix for the second half of the
+    # bug — the function used to return the ENTIRE global `dna_profiles`
+    # dict here, so output_store's "dna_v2" snapshot for a single date could
+    # silently contain every team from every date ever processed. The files
+    # written above (Steps 5-7) are still the full, unscoped global library
+    # — only what gets handed back to the caller (and therefore what
+    # output_store saves under output/cache/dna_v2__{date}.json) is now
+    # filtered down to just today's fixture participants.
+    # ─────────────────────────────────────────────────────────────────────────
+    todays_team_ids = {str(tid) for tid in unique_teams.keys()}
+    scoped_profiles_for_return = {
+        tid: prof for tid, prof in dna_profiles.items() if tid in todays_team_ids
+    }
+
     return {
-        "dna_profiles":     dna_profiles,
-        "fixture_clashes":  fixture_clashes,
+        "dna_profiles":    scoped_profiles_for_return,
+        "fixture_clashes": fixture_clashes,
     }
 
 
