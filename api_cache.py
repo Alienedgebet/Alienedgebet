@@ -416,6 +416,8 @@ def _lookup_window(path, params):
 #   3. shared future window       🟪   0 API calls (fixtures/date only)
 #   4. real SportMonks call       🟩   the only path that spends quota
 BURST_FLOOR_BASE = 3.0      # >= the old 3.0/4.5/6.75/10.1/15.2 s ladder
+GATE_PACING_CAP = 60.0      # max seconds smart_get sleeps waiting out a shared
+                            # cooldown before it attempts the request anyway
 
 
 def smart_get(url, params=None, **kwargs):
@@ -447,9 +449,19 @@ def smart_get(url, params=None, **kwargs):
     _count("miss", path)
 
     # Pacing: wait out an ACTIVE shared cooldown before spending a request.
+    # Two guards keep a storm from starving the pipeline to death:
+    #   * JITTER — every process used to read the same gate expiry and wake on
+    #     the same second, re-firing in lockstep and re-arming the gate forever
+    #     (the observed "cooling circle": one 12h run logged 1,352 × 30s
+    #     pacing sleeps ≈ 11h of pure sleep). A small per-call random offset
+    #     staggers the wake-ups so siblings no longer collide.
+    #   * CAP — at most GATE_PACING_CAP seconds per request; after that the
+    #     request is attempted anyway and the server's 429 (with its own
+    #     server-side backoff) decides, instead of this process sleeping
+    #     forever without ever reaching the wire.
     left = gate_remaining()
     if left > 0:
-        pace = min(left, 30.0)
+        pace = min(left, GATE_PACING_CAP) + random.random() * 4.0
         print(f"[API GATE] smart_get: shared cooldown active — pacing {pace:.0f}s ",
               end="", flush=True)
         time.sleep(pace)
@@ -458,6 +470,10 @@ def smart_get(url, params=None, **kwargs):
         try:
             resp = _original_get(url, params=params, **kwargs)
             if resp.status_code == 200:
+                # GATE HYGIENE: a 200 proves the burst window is over — disarm
+                # the shared cooldown so sibling processes stop pacing against
+                # a stale expiry the moment the provider is serving again.
+                broadcast_gate(0, f"cleared:{os.getpid()}")
                 data = resp.json()
                 try:
                     headers = dict(getattr(resp, "headers", None) or {})
@@ -479,6 +495,14 @@ def smart_get(url, params=None, **kwargs):
                     floor_base=BURST_FLOOR_BASE)
                 print(f"[API BURST: Cooling {wait:.1f}s] ", end="", flush=True)
                 continue
+            elif resp.status_code in (401, 403):
+                # Auth/subscription failure: retrying cannot help and would
+                # only hammer the provider; return the failure as-is (callers
+                # treat a non-200 as a FAILED acquisition, which the feed
+                # write guard keeps from destroying good data).
+                print(f"[API AUTH] provider returned {resp.status_code} for {path} "
+                      "— subscription/quota problem, not retrying")
+                return resp
             else:
                 return resp
         except Exception:

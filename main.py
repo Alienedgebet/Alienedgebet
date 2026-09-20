@@ -4,9 +4,10 @@ import time
 import gc
 import json
 import csv
+import random
 import requests
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import output_store as store
 
@@ -370,7 +371,13 @@ def _retry_starved_engine(engine_name, func, args, kwargs):
         time.sleep(wait_s)
         gate_left = _429_gate_remaining()
         if gate_left > 0:
-            pace = min(gate_left, 300.0)
+            # Jittered + capped pacing (was a bare sleep of the full remaining
+            # window, up to 300s): stagger the wake-up so the retry does not
+            # collide with every sibling, and never wait more than 60s before
+            # attempting the wire anyway — a live 429 with its server-provided
+            # backoff is far better information than another blind sleep.
+            import random as _random
+            pace = min(gate_left, 60.0) + _random.random() * 5.0
             if _retry_budget_used + pace > _RETRY_BUDGET_S:
                 print(f"   ⏳ [{engine_name}] retry wait budget exhausted — "
                       f"recording degraded")
@@ -752,7 +759,91 @@ def _second_chance_runners(td: str):
     ]
 
 
+# ==============================================================================
+# 🤝 LIVE SCANNER INTERLOCK (2026-09-20)
+# ==============================================================================
+# main.py is a ONE-SHOT batch job (nightly pipeline / second-chance / manual).
+# While it runs, the 24/7 live scanner must be PAUSED: both are memory-heavy,
+# the box has 3.8GB RAM, and concurrent runs caused the Sep 19/20 OOM kill-loop
+# (5 scanner kills + 1 API worker death). The scanner is restarted the moment
+# this process exits — normal completion, sys.exit(), unhandled exception or
+# SIGTERM (atexit) — and alienedge-livekeeper.timer backstops a hard SIGKILL.
+import atexit as _atexit
+import signal as _signal
+import subprocess as _sub
+
+LIVE_UNIT = "alienedge-live.service"
+_LIVE_PROC_PATTERN = "run_live_scanner_24_7.py"
+
+
+def _systemctl(*args: str, timeout: float = 90.0) -> bool:
+    try:
+        _r = _sub.run(["systemctl", *args], timeout=timeout,
+                      stdout=_sub.DEVNULL, stderr=_sub.DEVNULL)
+        return _r.returncode == 0
+    except Exception:
+        return False
+
+
+def live_scanner_pause(reason: str = "pipeline start") -> None:
+    """Stop the 24/7 live scanner and wait until it is fully gone.
+
+    Bounded: never blocks more than ~3.5 min even if the old process is
+    swap-thrashing (as observed during the OOM loop)."""
+    if not _systemctl("is-active", "--quiet", LIVE_UNIT, timeout=15.0):
+        print(f"🤝 [INTERLOCK] live scanner already down ({reason}) — nothing to pause",
+              flush=True)
+        return
+    print(f"🤝 [INTERLOCK] pausing 24/7 live scanner ({reason}) ...", flush=True)
+    _systemctl("stop", LIVE_UNIT, timeout=150.0)
+    # Belt & braces: SIGTERM any straggler, then SIGKILL, waiting for exit.
+    for _sig in ("-TERM", "-KILL"):
+        _sub.run(["pkill", _sig, "-f", _LIVE_PROC_PATTERN],
+                 stdout=_sub.DEVNULL, stderr=_sub.DEVNULL)
+        for _ in range(30):
+            _probe = _sub.run(["pgrep", "-f", _LIVE_PROC_PATTERN],
+                              stdout=_sub.DEVNULL, stderr=_sub.DEVNULL)
+            if _probe.returncode != 0:
+                print("🤝 [INTERLOCK] live scanner fully stopped — RAM freed",
+                      flush=True)
+                return
+            time.sleep(3)
+    print("⚠️ [INTERLOCK] live scanner still alive after stop — continuing anyway",
+          flush=True)
+
+
+def live_scanner_resume(reason: str = "pipeline finished") -> None:
+    """(Re)start the 24/7 live scanner. Idempotent."""
+    if _systemctl("is-active", "--quiet", LIVE_UNIT, timeout=15.0):
+        return
+    _ok = _systemctl("start", LIVE_UNIT, timeout=90.0)
+    print(f"🤝 [INTERLOCK] live scanner "
+          f"{'restarted' if _ok else 'FAILED to restart'} ({reason})", flush=True)
+
+
+def _resume_live_scanner_on_exit() -> None:
+    try:
+        live_scanner_resume("main.py exiting")
+    except Exception as _e:
+        print(f"⚠️ [INTERLOCK] resume-on-exit failed: {_e}", flush=True)
+
+
+def _sigterm_to_systemexit(_signum, _frame) -> None:
+    # SystemExit (a BaseException) is NOT swallowed by engine `except Exception`
+    # blocks; the interpreter unwinds and atexit still fires.
+    raise SystemExit(143)
+
+
 if __name__ == "__main__":
+    # 🤝 LIVE SCANNER INTERLOCK: pause the 24/7 scanner for the whole run and
+    # always restart it on exit.
+    _atexit.register(_resume_live_scanner_on_exit)
+    try:
+        _signal.signal(_signal.SIGTERM, _sigterm_to_systemexit)
+    except Exception:
+        pass
+    live_scanner_pause("main.py run starting")
+
     # --second-chance=<date>: 06:00 safety net — re-run only failed/empty/
     # degraded critical keys for the date, then exit. No argument (or
     # --date=...): the full 23:30 pipeline as before.
@@ -763,6 +854,15 @@ if __name__ == "__main__":
             break
 
     if _second_chance_date:
+        # 2026-09-20 guard: the timer previously resolved %T to "/tmp" and the
+        # recovery then tried to heal a bogus "date", re-running every engine
+        # against garbage. Validate the format; anything that isn't YYYY-MM-DD
+        # falls back to TODAY so the recovery always heals a real day.
+        import re as _re
+        if not _re.fullmatch(r"\d{4}-\d{2}-\d{2}", _second_chance_date):
+            print(f"⚠️ [SECOND-CHANCE] invalid target '{_second_chance_date}' "
+                  f"— falling back to TODAY", flush=True)
+            _second_chance_date = datetime.now().strftime("%Y-%m-%d")
         _rc = alienedge_second_chance(_second_chance_date)
         _rejected = store.guard_rejections()
         if _rejected:

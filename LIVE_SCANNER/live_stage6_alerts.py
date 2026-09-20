@@ -7,6 +7,8 @@ import requests
 import threading
 import logging
 import math
+import random
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from collections import deque
@@ -21,16 +23,20 @@ _GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
 
 
 def _api_gate_pace(tag=""):
-    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise)."""
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise).
+    A few seconds of JITTER stagger the wake-up: without it every process
+    reads the same gate expiry and fires its next request on the same second,
+    re-triggering the burst limit and re-arming the gate (the cooling circle)."""
     try:
         with open(_GATE_FILE, "r") as f:
             gate = json.load(f)
         until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
         remaining = until - time.time()
         if remaining > 0:
+            sleep_s = min(remaining, 15.0) + random.random() * 3.0
             logging.getLogger("alienedge.stage6").info(
-                f"[API GATE] {tag}: shared cooldown active — pacing {min(remaining, 15.0):.1f}s")
-            time.sleep(min(remaining, 15.0))
+                f"[API GATE] {tag}: shared cooldown active — pacing {sleep_s:.1f}s")
+            time.sleep(sleep_s)
     except Exception:
         pass
 
@@ -41,6 +47,20 @@ def _api_gate_broadcast(wait_s, tag=""):
         os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
         with open(_GATE_FILE + ".tmp", "w") as f:
             json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
+def _api_gate_clear(tag=""):
+    """A 200 just came back from the provider — the burst window is clearly
+    over, so DISARM the shared cooldown instead of letting every sibling keep
+    pacing until the old expiry (gate hygiene; prevents the hours-long
+    cooling circle a single broadcast used to cause)."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": 0, "by": f"cleared:{tag or 'live-stage'}"}, f)
         os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
     except Exception:
         pass
@@ -181,7 +201,9 @@ def GET(url, params=None):
     for attempt in range(4):
         try:
             r = requests.get(url, params=params, timeout=25)
-            if r.status_code == 200: return r.json()
+            if r.status_code == 200:
+                _api_gate_clear("stage6")
+                return r.json()
             elif r.status_code == 429:
                 try:
                     gate_wait = float(r.headers.get("Retry-After") or 0)

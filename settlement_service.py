@@ -423,6 +423,14 @@ def write_ft_snapshot(fixtures_by_date):
                 std = extract_match_data(fx)
             fid = str(std.get("fixture_id") or "")
             if fid:
+                # Never let a score-less write (the 429-storm shape) DOWNGRADE
+                # a stored entry that already carries a usable final score:
+                # keep the richer existing one and overwrite only when the
+                # new row is scored, the old one was not, or both are equal.
+                prev = date_fixtures.get(fid)
+                if isinstance(prev, dict) and prev.get("score_available", True) \
+                        and not std.get("score_available", True):
+                    continue
                 date_fixtures[fid] = std
 
     existing["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -463,6 +471,66 @@ def grade_row(market_type, row, actual_match):
     # pre-existing verdict is unchanged; the frontend already renders verdict
     # PENDING as an em-dash, so no client contract changes.
     if is_finished and not actual_match.get("score_available", True):
+        # Batch D — "live source saw the final whistle": the archive row says
+        # the match is over but the archived payload carries no usable score
+        # (the 429-storm shape). BEFORE falling back to PENDING, check the
+        # persistent FT snapshot (data/ft_result_snapshot.json), which the
+        # live scanner writes the moment it sees the finished fixture and the
+        # archiver tops up on every run. A snapshot entry for the SAME
+        # fixture on the SAME date (or, lacking the id, the single FINISHED
+        # score-available entry under the same strict match key) is
+        # authoritative — the row is graded from it immediately instead of
+        # waiting for the next night's archive.
+        _cand = None
+        try:
+            _snap_date = actual_match.get("match_date")
+            _snap = load_ft_snapshot(_snap_date) if _snap_date else {}
+            if _snap:
+                _fid = str(actual_match.get("fixture_id") or "")
+                _cand = _snap.get(_fid)
+                # A score-less snapshot entry for the same id adds nothing —
+                # promoting it would grade a fabricated 0-0. Require a usable
+                # score on ANY promoted candidate, direct-id or fallback.
+                if _cand is not None and (
+                        _cand is actual_match
+                        or not _cand.get("score_available", True)):
+                    _cand = None
+                    _key = get_strict_match_key(
+                        f"{actual_match.get('home_team', '')} vs "
+                        f"{actual_match.get('away_team', '')}")
+                    _fallbacks = []
+                    for _fx in _snap.values():
+                        if _fx is actual_match or not _fx.get("is_finished") \
+                                or not _fx.get("score_available", True):
+                            continue
+                        if _key and get_strict_match_key(
+                                f"{_fx.get('home_team', '')} vs "
+                                f"{_fx.get('away_team', '')}") != _key:
+                            continue
+                        _fallbacks.append(_fx)
+                    if len(_fallbacks) == 1:
+                        _cand = _fallbacks[0]
+        except Exception:
+            _cand = None
+        if _cand is not None:
+            # Promote: live snapshot wins over the score-less archive row.
+            promoted = dict(actual_match)
+            promoted["h_ft"] = _cand.get("h_ft", 0)
+            promoted["a_ft"] = _cand.get("a_ft", 0)
+            promoted["ft_score"] = _cand.get(
+                "ft_score", f"{promoted['h_ft']}-{promoted['a_ft']}")
+            promoted["total_goals"] = promoted["h_ft"] + promoted["a_ft"]
+            promoted["h_sot"] = _cand.get("h_sot", 0)
+            promoted["a_sot"] = _cand.get("a_sot", 0)
+            promoted["total_sot"] = _cand.get("total_sot",
+                                              promoted["h_sot"] + promoted["a_sot"])
+            promoted["h_corners"] = _cand.get("h_corners", 0)
+            promoted["a_corners"] = _cand.get("a_corners", 0)
+            promoted["total_corners"] = _cand.get("total_corners",
+                                                  promoted["h_corners"] + promoted["a_corners"])
+            promoted["score_available"] = True
+            return grade_row(market_type, row, promoted)
+
         return {
             "status": "FINISHED",
             "score": "—",

@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import gc
 import logging
 
 # Ensure root paths are accessible
@@ -86,7 +87,11 @@ def live_scanner_master_loop():
             logging.error(f"[Stage 6 Orchestrator] Error: {e}")
 
         duration = round(time.time() - cycle_start, 2)
-        logging.info(f"Cycle #{cycle_count} completed in {duration}s. Sleeping 45s...")
+        # 2026-09-20 OOM guard: free per-cycle garbage (payload dicts, cache
+        # reload copies) BEFORE the 45s sleep so RSS returns toward baseline
+        # every cycle instead of creeping toward the OOM line.
+        gc.collect()
+        logging.info(f"Cycle #{cycle_count} completed in {duration}s (gc done). Sleeping 45s...")
         time.sleep(45)
 
 

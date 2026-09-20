@@ -98,20 +98,76 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
             }
             with open(LIVE_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, indent=2)
+            print(f"[LIVE CACHE] refreshed: {len(raw_data)} in-play fixture(s)")
+
+            # GATE 2b (FT-SNAPSHOT RECOVERY): a 200 + EMPTY payload is still a
+            # successful acquisition — of "nothing is in-play right now" — and
+            # an empty list means every fixture that WAS live has left it
+            # (finished). If the scanner missed the whistle in a 429 storm,
+            # this is the LAST chance to keep the result: merge any finished
+            # fixtures still missing from the snapshot in from today's archive
+            # (and yesterday's, for past-midnight runs). The snapshot merge is
+            # additive and id-preserving; we only pull rows the snapshot lacks
+            # and only rows with a usable score, so a good live-captured
+            # result can never be downgraded by an archive row.
+            if not raw_data:
+                try:
+                    from settlement_service import write_ft_snapshot, load_ft_snapshot
+                    _today = datetime.now().strftime("%Y-%m-%d")
+                    _dates = {_today, (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")}
+                    _have = set()
+                    for _d in _dates:
+                        _have |= set(load_ft_snapshot(_d).keys())
+                    _pull = {}
+                    for _d in _dates:
+                        _missing = []
+                        for _fid, _fx in load_finished_archive(_d).items():
+                            if _fid in _have:
+                                continue
+                            if not _fx.get("score_available", True):
+                                continue  # a score-less row adds nothing
+                            _missing.append(_fx)
+                        if _missing:
+                            _pull[_d] = _missing
+                    if _pull:
+                        write_ft_snapshot(_pull)
+                        _n = sum(len(v) for v in _pull.values())
+                        print(f"[FT SNAPSHOT] empty in-play feed — recovered "
+                              f"{_n} finished result(s) from archive")
+                    else:
+                        print(f"[FT SNAPSHOT] empty in-play feed — snapshot already "
+                              f"holds {len(_have)} result(s)")
+                except Exception as _rec_err:
+                    print(f"[FT SNAPSHOT] empty-feed recovery failed (non-fatal): {_rec_err}")
+                return []
 
             # FT RESULT SNAPSHOT: persist finished fixtures so settlement can
-            # use them after the fixture leaves the inplay feed (before nightly archive)
-            from settlement_service import extract_match_data, write_ft_snapshot
-            finished_by_date = {}
-            for fx in raw_data:
-                if not isinstance(fx, dict):
-                    continue
-                std = extract_match_data(fx)
-                if std.get("is_finished"):
-                    fx_date = std.get("match_date") or datetime.now().strftime("%Y-%m-%d")
-                    finished_by_date.setdefault(fx_date, []).append(std)
-            if finished_by_date:
-                write_ft_snapshot(finished_by_date)
+            # use them after the fixture leaves the inplay feed (before the
+            # nightly archive runs). Hardened:
+            #   * A 200 + empty data response (the 429-storm shape) now MERGES
+            #     into the snapshot instead of being ignored — the merge keeps
+            #     existing entries, so this is additive and safe.
+            #   * On a real fetch, finished fixtures are captured EVEN when
+            #     extract_match_data could not read a final score (they carry
+            #     score_available=False and are upgraded later — dropping them
+            #     made the match invisible to settlement forever).
+            try:
+                from settlement_service import extract_match_data, write_ft_snapshot
+                finished_by_date = {}
+                for fx in raw_data:
+                    if not isinstance(fx, dict):
+                        continue
+                    std = extract_match_data(fx)
+                    if std.get("is_finished"):
+                        fx_date = std.get("match_date") or datetime.now().strftime("%Y-%m-%d")
+                        finished_by_date.setdefault(fx_date, []).append(std)
+                if finished_by_date:
+                    write_ft_snapshot(finished_by_date)
+                    n = sum(len(v) for v in finished_by_date.values())
+                    print(f"[FT SNAPSHOT] {n} finished fixture(s) persisted from in-play feed")
+            except Exception as _ft_err:
+                # Snapshot emission must never break the live cache write.
+                print(f"[FT SNAPSHOT] update failed (non-fatal): {_ft_err}")
 
             return raw_data
     except Exception as e:

@@ -98,8 +98,17 @@ def _429_gate_wait(retry_after=None, limit_reset=None, attempt=1, who="", broadc
     # every sibling process; bursts clear in seconds, so never wait longer
     # than 45s per attempt regardless of what the server suggests.
     wait = min(wait, 45.0)
-    if attempt <= 0 and retry_after is None and not shared_active:
-        return
+    if attempt <= 0:
+        # Pacing call (no 429 received): sleep only when a shared cooldown is
+        # actually active, and STAGGER the sleep with a few seconds of jitter.
+        # Without jitter every component reads the same gate expiry and wakes
+        # on the SAME second, firing their next requests in lockstep — which
+        # re-triggers the burst limit, re-arms the gate, and kept background
+        # jobs pacing for hours (the observed "cooling circle").
+        if retry_after is None and not shared_active:
+            return
+        if wait > 0:
+            wait = min(wait + _random.random() * 5.0, 50.0)
     if broadcast:
         try:
             with open(_API_GATE_LOCK_FILE + ".tmp", "w") as f:
@@ -395,6 +404,19 @@ def archive_date(target_date):
         "total_fixtures": len(merged_fixtures),
         "fixtures": merged_fixtures
     }
+    # FRESHNESS: preserve a previous run's archived_at unless this run
+    # actually ADDED fixtures. A merge-only re-run rewrites the file (and its
+    # mtime) without changing its content — without this the 15-minute
+    # "is the archive fresh?" check in settlement would be fooled by mtime
+    # and a 12h-stale archive would look 15 minutes old.
+    if not new_results and existing_fixtures and os.path.exists(archive_file):
+        try:
+            with open(archive_file, "r", encoding="utf-8") as _prev_f:
+                _prev = json.load(_prev_f)
+            if isinstance(_prev, dict) and _prev.get("archived_at"):
+                archive_payload["archived_at"] = _prev["archived_at"]
+        except Exception:
+            pass
 
     # Atomic write
     if _write_archive_atomic(archive_file, archive_payload):
