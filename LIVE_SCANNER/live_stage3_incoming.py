@@ -1,4 +1,5 @@
 import os
+import random
 import requests
 import time
 import math
@@ -20,15 +21,18 @@ _GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
 
 
 def _api_gate_pace(tag=""):
-    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise)."""
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise).
+    A few seconds of JITTER stagger the wake-up so siblings stop firing in
+    lockstep and re-triggering the burst limit (the cooling circle)."""
     try:
         with open(_GATE_FILE, "r") as f:
             gate = json.load(f)
         until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
         remaining = until - time.time()
         if remaining > 0:
-            print(f"[API GATE] {tag}: shared cooldown active — pacing {min(remaining, 15.0):.1f}s")
-            time.sleep(min(remaining, 15.0))
+            sleep_s = min(remaining, 15.0) + random.random() * 3.0
+            print(f"[API GATE] {tag}: shared cooldown active — pacing {sleep_s:.1f}s")
+            time.sleep(sleep_s)
     except Exception:
         pass
 
@@ -39,6 +43,19 @@ def _api_gate_broadcast(wait_s, tag=""):
         os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
         with open(_GATE_FILE + ".tmp", "w") as f:
             json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
+def _api_gate_clear(tag=""):
+    """A 200 just came back from the provider — the burst window is clearly
+    over, so DISARM the shared cooldown instead of letting every sibling keep
+    pacing until the old expiry (gate hygiene)."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": 0, "by": f"cleared:{tag or 'live-stage'}"}, f)
         os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
     except Exception:
         pass
@@ -161,6 +178,7 @@ def GET(path, params=None):
         try:
             r = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             if r.status_code == 200:
+                _api_gate_clear("stage3")
                 body = r.json()
                 # 200 + empty + provider message = subscription/quota shape. Tag it
                 # (live_cache.write_feed) so an empty feed is never mistaken for a

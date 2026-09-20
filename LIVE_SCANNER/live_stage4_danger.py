@@ -29,7 +29,11 @@ OUTPUT_FILE = os.path.join(DATA_DIR, "danger_audit.json")
 # squad_cache_stage1_prematch.json / squad_cache_stage3_incoming.json.
 HISTORY_CACHE_FILE = os.path.join(DATA_DIR, "danger_history_cache.json")
 HISTORY_TTL = 6 * 3600      # 6h: a team is refetched at most 4x/day, not ~1900x
-HISTORY_CACHE_MAX_TEAMS = 400   # hard bound; expired entries are pruned on save
+# 2026-09-20: 400 teams x full raw payloads (lineups incl.) reached 932MB on
+# disk and ~2.5GB+ RSS on every cycle load -> the OOM-kill loop that killed the
+# scanner 5x (Sep 19/20) and an API worker. 60 teams keeps the file ~250MB and
+# the live scanner comfortably under 1GB.
+HISTORY_CACHE_MAX_TEAMS = 60    # hard bound; expired entries are pruned on save
 _history_cache: Dict[str, Any] = {}
 
 # FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
