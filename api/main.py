@@ -51,6 +51,27 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 import output_store as store  # noqa: E402  (same module main.py writes through)
 
+# Intelligent Pass Count — pure read-only second-level audit over the same
+# cache snapshots. Display/audit only: it never changes predictions,
+# settlement or Verify. Wrapped in try/except so a missing/moved module can
+# never take the picks API down (column simply renders empty).
+try:  # noqa: E402
+    from INTELLIGENT_PASS import pass_count as intelligent_pass
+except Exception:  # pragma: no cover
+    intelligent_pass = None
+
+
+def _with_intelligent_pass(market_key: str, rows, date: Optional[str]):
+    """Attach the additive `intelligent_pass_count` audit object to each row
+    (no existing key is removed, renamed or re-ordered). No-op unless the
+    evaluator module imported cleanly — the API contract is unchanged then."""
+    if intelligent_pass is None or not date or not rows:
+        return rows
+    try:
+        return intelligent_pass.evaluate_market_safe(market_key, rows, date)
+    except Exception:
+        return rows
+
 # ── APP INIT ──────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="AlienEdge Prediction API",
@@ -707,12 +728,28 @@ def get_dna_v2(date: str):
 
 @app.get("/api/underdog/{date}", tags=["Foundation"])
 def get_underdog(date: str):
-    return read("underdog_base", date, UD_BASE_DEFAULTS, "u2s")
+    return _with_intelligent_pass(
+        "u2s", read("underdog_base", date, UD_BASE_DEFAULTS, "u2s"), date)
+
+
+@app.get("/api/team-intelligence/{date}/{team_name}", tags=["Foundation"])
+def get_team_intelligence(date: str, team_name: str):
+    """Team Intelligence page feed — the team's per-check intelligence across
+    every market AlienEdge already produced for this date. Read-only local
+    composition (INTELLIGENT_PASS/pass_count.py): NO new SportMonks calls, no
+    duplicate fixture requests, no duplicate intelligence calculations."""
+    if intelligent_pass is None:
+        raise HTTPException(status_code=503, detail="Intelligent Pass evaluator unavailable")
+    try:
+        return intelligent_pass.get_team_intelligence(team_name, date)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Team intelligence not available")
 
 
 @app.get("/api/underdog/audit/{date}", tags=["Foundation"])
 def get_underdog_audit(date: str):
-    return read("underdog_audit", date, UD_AUDIT_DEFAULTS, "u2s")
+    return _with_intelligent_pass(
+        "u2s", read("underdog_audit", date, UD_AUDIT_DEFAULTS, "u2s"), date)
 
 
 @app.get("/api/underdog/apex/{date}", tags=["Foundation"])
@@ -777,7 +814,8 @@ def get_calibration(date: str):
 
 @app.get("/api/win/forecast/{date}", tags=["Win"])
 def get_win_forecast(date: str):
-    return read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win")
+    return _with_intelligent_pass(
+        "win_apex", read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win"), date)
 
 
 @app.get("/api/sh-gg-winner/{date}", tags=["Specials"])
@@ -790,12 +828,14 @@ def get_sh_gg_winner(date: str):
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/win/psychology/{date}", tags=["Win"])
 def get_win_psychology(date: str):
-    return read("win_psychology", date, WIN_PSYCH_DEFAULTS, "win")
+    return _with_intelligent_pass(
+        "win_psychology", read("win_psychology", date, WIN_PSYCH_DEFAULTS, "win"), date)
 
 
 @app.get("/api/win/u2s/{date}", tags=["Win"])
 def get_u2s(date: str):
-    return read("u2s_psychology", date, WIN_U2S_DEFAULTS, "u2s")
+    return _with_intelligent_pass(
+        "u2s", read("u2s_psychology", date, WIN_U2S_DEFAULTS, "u2s"), date)
 
 
 @app.get("/api/win/apex/{date}", tags=["Win"])
@@ -809,7 +849,8 @@ def get_win_apex(date: str):
     data, _generated_at = store.load("win_apex", date, default=None)
     if data is None:
         data = []
-    return _settled(ensure_defaults(data, WIN_APEX_DEFAULTS), "win", date)
+    rows = _settled(ensure_defaults(data, WIN_APEX_DEFAULTS), "win", date)
+    return _with_intelligent_pass("win_apex", rows, date)
 
 
 @app.get("/api/win/raw/{date}", tags=["Win"])
@@ -827,7 +868,10 @@ def get_gg_precision(date: str):
     o15_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     gg = ensure_defaults(gg_raw, GG_PRECISION_DEFAULTS)
     o15 = ensure_defaults(o15_raw, GG_O15_DEFAULTS)
-    return {"gg": _settled(gg, "gg", date), "o15": _settled(o15, "o15", date)}
+    return {
+        "gg": _with_intelligent_pass("gg_precision", _settled(gg, "gg", date), date),
+        "o15": _with_intelligent_pass("gg_o15", _settled(o15, "o15", date), date),
+    }
 
 
 @app.get("/api/gg/forensics/{date}", tags=["GG"])
@@ -842,7 +886,8 @@ def get_gg_psychology(date: str):
 
 @app.get("/api/gg/supreme/{date}", tags=["GG"])
 def get_gg_supreme(date: str):
-    return read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg")
+    return _with_intelligent_pass(
+        "gg_supreme", read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg"), date)
 
 
 @app.get("/api/gg/cross-verify", tags=["GG"])
@@ -907,12 +952,14 @@ def get_over25_gold(date: str):
 
 @app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
 def get_over25_apex(date: str):
-    return read("over25_apex", date, O25_APEX_DEFAULTS, "o25")
+    return _with_intelligent_pass(
+        "over25_apex", read("over25_apex", date, O25_APEX_DEFAULTS, "o25"), date)
 
 
 @app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
 def get_over25_forecast(date: str):
-    return read("over25_forecast", date, O25_FORECAST_DEFAULTS, "o25")
+    return _with_intelligent_pass(
+        "over25_forecast", read("over25_forecast", date, O25_FORECAST_DEFAULTS, "o25"), date)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -920,17 +967,20 @@ def get_over25_forecast(date: str):
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/over15/stage3/{date}", tags=["Over 1.5"])
 def get_over15_stage3(date: str):
-    return read("over15_stage3", date, O15_STAGE3_DEFAULTS, "o15")
+    return _with_intelligent_pass(
+        "over15", read("over15_stage3", date, O15_STAGE3_DEFAULTS, "o15"), date)
 
 
 @app.get("/api/over15/psychology/{date}", tags=["Over 1.5"])
 def get_over15_psychology(date: str):
-    return read("over15_psychology", date, O15_PSYCH_DEFAULTS, "o15")
+    return _with_intelligent_pass(
+        "over15", read("over15_psychology", date, O15_PSYCH_DEFAULTS, "o15"), date)
 
 
 @app.get("/api/over15/apex/{date}", tags=["Over 1.5"])
 def get_over15_apex(date: str):
-    return read("over15_apex", date, O15_APEX_DEFAULTS, "o15")
+    return _with_intelligent_pass(
+        "over15", read("over15_apex", date, O15_APEX_DEFAULTS, "o15"), date)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -958,7 +1008,9 @@ def get_corners_catalyst(date: str):
 
 @app.get("/api/corners/aggregator/{date}", tags=["Corners"])
 def get_corners_aggregator(date: str):
-    return read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners")
+    return _with_intelligent_pass(
+        "corners_aggregator",
+        read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners"), date)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -971,7 +1023,10 @@ def get_draw(date: str):
     parity_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     amateurs_raw = raw[2] if isinstance(raw, list) and len(raw) > 2 else []
     return {
-        "draws": _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "draw", date),
+        "draws": _with_intelligent_pass(
+            "draw",
+            _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "draw", date),
+            date),
         # HIGH PARITY LIST: expected close match. Settlement is the High-Parity
         # rule (|home - away| <= 2, user-confirmed) — a DIFFERENT condition from
         # the conventional Draw branch above (home_goals == away_goals), so
@@ -987,7 +1042,10 @@ def get_unders(date: str):
     u25_raw = raw[0] if isinstance(raw, list) and len(raw) > 0 else []
     u35_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     return {
-        "u25": _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "u25", date),
+        "u25": _with_intelligent_pass(
+            "unders_u25",
+            _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "u25", date),
+            date),
         # u35 was the only list in this composite payload never routed
         # through _settled(): grade_row already holds the correct branch
         # (total goals <= 3 -> WON, >= 4 -> LOST) and "u35" is already in
@@ -1010,14 +1068,16 @@ def get_sot(date: str):
 def get_fhvi(date: str):
     # "fhvi" (not "shvi") — FHVI is FIRST-half goals. The old "shvi" key
     # graded it with the second-half branch: wrong half of the match.
-    return read("fhvi", date, FHVI_DEFAULTS, "fhvi")
+    return _with_intelligent_pass(
+        "fhvi", read("fhvi", date, FHVI_DEFAULTS, "fhvi"), date)
 
 
 @app.get("/api/shvi/{date}", tags=["Specials"])
 def get_shvi(date: str):
     # Strictly keyed on (shvi, date) — this is the fix for the old
     # "shows real data but wrong date" bug. No undated fallback exists here.
-    return read("shvi", date, SHVI_DEFAULTS, "shvi")
+    return _with_intelligent_pass(
+        "shvi", read("shvi", date, SHVI_DEFAULTS, "shvi"), date)
 
 
 @app.get("/api/sh-master/{date}", tags=["Specials"])
@@ -1461,3 +1521,18 @@ def filter_win_precision_weekly(
 def filter_win_precision_single(date: str):
     return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win",
                 identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TEAM INTELLIGENCE PAGE (display/audit only — pure reuse of the same
+# per-date cache snapshots the market pages already read; ZERO new API calls)
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/team/{team_name}/intelligence/{date}", tags=["Foundation"])
+def get_team_intelligence(team_name: str, date: str):
+    if intelligent_pass is None:
+        raise HTTPException(status_code=503, detail="Intelligent Pass evaluator unavailable")
+    try:
+        return intelligent_pass.get_team_intelligence(team_name, date)
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Team intelligence evaluation failed")

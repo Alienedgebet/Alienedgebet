@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 
 export interface PredictionColumn<T> {
   key: string;
-  header: string;
+  header: string | ReactNode;
   align?: "left" | "right" | "center";
   className?: string;
   render: (row: T, index: number) => ReactNode;
