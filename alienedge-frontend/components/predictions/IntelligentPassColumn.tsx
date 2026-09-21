@@ -107,6 +107,19 @@ export function createIntelligentPassColumn<T>(
     className?: string;
   } = { date: "" }
 ): PredictionColumn<T> {
+  /**
+   * GG-style rows carry only a fixture label ("Jeonbuk Motors vs Gwangju").
+   * The team-intelligence endpoint resolves TEAM names, not composite
+   * labels — so split the label and pass the HOME side. Both sides of a
+   * fixture resolve to the same per-fixture audit.
+   */
+  const teamFromRow = (r: T): string | undefined => {
+    const explicit = opts.getTeam?.(r);
+    if (explicit) return explicit;
+    const label = opts.getLabel?.(r) || "";
+    const home = label.split(/\s+vs\.?\s+/i)[0]?.trim();
+    return home || undefined;
+  };
   return {
     key: "intelligent_pass_count",
     header: <IntelligentPassHeader />,
@@ -116,7 +129,7 @@ export function createIntelligentPassColumn<T>(
       <IntelligentPassCell
         data={(r as { intelligent_pass_count?: IntelligentPassData | null })
           .intelligent_pass_count}
-        team={opts.getTeam?.(r) ?? opts.getLabel?.(r)}
+        team={teamFromRow(r)}
         date={opts.date}
       />
     ),
