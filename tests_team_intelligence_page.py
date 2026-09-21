@@ -94,8 +94,8 @@ check("win section has Parity +10 PASS with the raw signed value",
 check("win Goal Intent uses the DNA LEAN OVER per-side cut (72 > 55 = PASS)",
       any(c["name"] == "Goal Intent" and c["result"] == pc.PASS and c["value"] == 72
           for c in win["checks"]))
-check("win denominator is dynamic (applicable checks only)",
-      win["total"] == 4 and win["passed"] == 3)
+check("win denominator is FIXED at the full 8-rule set (N/A included)",
+      win["total"] == 8 and win["passed"] == 3)
 # 3/4 is CORRECT here: this fixture IS a live draw candidate per the draw
 # engine's own floor (mc_draw 0.30 >= 0.22), so the WIN-side "Draw
 # Probability" check legitimately FAILs while the DRAW section PASSes the

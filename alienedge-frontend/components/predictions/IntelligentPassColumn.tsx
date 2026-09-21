@@ -122,9 +122,13 @@ function ReportLink({
   const searchParams = useSearchParams();
   const from = searchParams.toString();
   const marketKey = market || data.market;
+  // usePathname() already includes the leading slash — prefixing another
+  // produced "//win?date=...", which browsers parse as host "win"
+  // (ERR_NAME_NOT_RESOLVED). Normalize instead of prepending.
+  const cleanPath = `/${pathname.replace(/^\/+/, "")}`;
   const href = `/team/${encodeURIComponent(team || "")}?date=${date || ""}${
     marketKey ? `&market=${encodeURIComponent(marketKey)}` : ""
-  }${from ? `&from=${encodeURIComponent(`/${pathname}?${from}`)}` : ""}`;
+  }${from ? `&from=${encodeURIComponent(`${cleanPath}?${from}`)}` : ""}`;
   return (
     <Link
       href={href}
