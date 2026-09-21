@@ -9,6 +9,7 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_O15_PSYCH, MOCK_O15_S3 } from "@/lib/mock-chains";
@@ -55,13 +56,29 @@ export default function Over15Page() {
 
   // 1. Psychology (Verify -> Rest)
   const psychologyColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<Over15PsychologyPick>(), ...psychologyColumns],
+    () => [
+      createVerifyColumn<Over15PsychologyPick>(),
+      createIntelligentPassColumn<Over15PsychologyPick>({
+        market: "over15",
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
+      ...psychologyColumns,
+    ],
     []
   );
 
   // 2. Stage 3 Base (Verify -> Rest)
   const stage3ColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<Over15Stage3Pick>(), ...stage3Columns],
+    () => [
+      createVerifyColumn<Over15Stage3Pick>(),
+      createIntelligentPassColumn<Over15Stage3Pick>({
+        market: "over15",
+        getLabel: (r) => r.Match,
+        date,
+      }),
+      ...stage3Columns,
+    ],
     []
   );
 
