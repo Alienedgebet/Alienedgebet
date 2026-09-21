@@ -26,3 +26,7 @@ fs*.txt
 # ── OS / editor ─────────────────────────────────────────────
 Thumbs.db
 .vscode/
+
+# ── pyc caches (redundant but explicit) ──
+__pycache__/
+*.py[cod]

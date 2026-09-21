@@ -86,10 +86,10 @@ function pickReason(
     return "High structural rotation.";
   }
   if (p.type === "TO_SCORE" && p.target_loc === "away") {
-    return `${row.home.team_name} Keeper Liability.`;
+    return `${row.home?.team_name ?? "HOME"} Keeper Liability.`;
   }
   if (p.type === "TO_SCORE" && p.target_loc === "home") {
-    return `${row.away.team_name} Keeper Liability.`;
+    return `${row.away?.team_name ?? "AWAY"} Keeper Liability.`;
   }
   if (p.type === "GG") return "Both teams starting vulnerable keepers.";
   return p.type;
@@ -157,6 +157,21 @@ type MetricTooltipKey = "kmv" | "rv" | "gk" | "miss" | "odds" | null;
 function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
   const [activeTooltip, setActiveTooltip] = useState<MetricTooltipKey>(null);
 
+  // Defensive accessors for potentially-missing fields on stale/old audit rows
+  const _loc = team.loc ?? "unknown";
+  const _teamName = team.team_name ?? "?";
+  const _miss = team.miss ?? 0;
+  const _kmv = team.kmv ?? 0;
+  const _rv = team.rv ?? 0;
+  const _gkOut = team.gk_out ?? false;
+  const _gkStatus = team.gk_status ?? "";
+  const _defMiss = team.def_miss ?? 0;
+  const _midMiss = team.mid_miss ?? 0;
+  const _attMiss = team.att_miss ?? 0;
+  const _lWingMiss = team.l_wing_miss ?? false;
+  const _rWingMiss = team.r_wing_miss ?? false;
+  const _players = team.players ?? [];
+
   const getExplanation = (key: MetricTooltipKey) => {
     switch (key) {
       case "kmv":
@@ -178,8 +193,8 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
     <div className="rounded-lg border border-border/70 bg-bg-elevated/30 relative">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
         <div>
-          <p className="text-2xs uppercase tracking-wide text-text-dim">{team.loc}</p>
-          <p className="text-sm font-semibold text-text-primary">{team.team_name}</p>
+          <p className="text-2xs uppercase tracking-wide text-text-dim">{_loc}</p>
+          <p className="text-sm font-semibold text-text-primary">{_teamName}</p>
         </div>
         <div className="flex flex-wrap gap-1.5 font-mono text-2xs">
           <button
@@ -188,7 +203,7 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
             className="rounded border border-border-bright px-1.5 py-0.5 text-text-secondary transition-colors hover:border-accent-indigo"
             title="Tap to reveal definition"
           >
-            miss {team.miss}
+            miss {_miss}
           </button>
           <button
             type="button"
@@ -196,7 +211,7 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
             className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1.5 py-0.5 text-accent-amber transition-colors hover:bg-accent-amber/20"
             title="Tap to reveal definition"
           >
-            KMV {team.kmv.toFixed(1)}%
+            KMV {_kmv.toFixed(1)}%
           </button>
           <button
             type="button"
@@ -204,20 +219,20 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
             className="rounded border border-accent-red/30 bg-accent-red/10 px-1.5 py-0.5 text-accent-red transition-colors hover:bg-accent-red/20"
             title="Tap to reveal definition"
           >
-            RV {team.rv.toFixed(1)}%
+            RV {_rv.toFixed(1)}%
           </button>
           <button
             type="button"
             onClick={() => setActiveTooltip(activeTooltip === "gk" ? null : "gk")}
             className={cn(
               "rounded border px-1.5 py-0.5 transition-colors font-bold",
-              team.gk_out
+              _gkOut
                 ? "border-accent-red/40 bg-accent-red/10 text-accent-red hover:bg-accent-red/20"
                 : "border-accent-green/30 bg-accent-green/10 text-accent-green hover:bg-accent-green/20"
             )}
             title="Tap to reveal definition"
           >
-            GK {team.gk_out ? "LIABILITY" : "OK"}
+            GK {_gkOut ? "LIABILITY" : "OK"}
           </button>
         </div>
       </div>
@@ -239,10 +254,10 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
         </div>
       )}
       <p className="border-b border-border/50 px-3 py-1.5 text-2xs text-text-secondary">
-        GK status: {team.gk_status} · Def {team.def_miss} · Mid {team.mid_miss} · Att{" "}
-        {team.att_miss}
-        {(team.l_wing_miss || team.r_wing_miss) &&
-          ` · Wings L${team.l_wing_miss ? "✗" : "✓"}/R${team.r_wing_miss ? "✗" : "✓"}`}
+        GK status: {_gkStatus} · Def {_defMiss} · Mid {_midMiss} · Att{" "}
+        {_attMiss}
+        {(_lWingMiss || _rWingMiss) &&
+          ` · Wings L${_lWingMiss ? "✗" : "✓"}/R${_rWingMiss ? "✗" : "✓"}`}
       </p>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[520px] text-left text-2xs">
@@ -257,7 +272,7 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-border/40">
-            {team.players.map((p, i) => (
+            {_players.map((p, i) => (
               <tr key={`${p.name}-${p.pos}-${i}`} className="hover:bg-bg-elevated/40">
                 <td className="px-3 py-1.5 font-medium text-text-primary">{p.name}</td>
                 <td className="px-2 py-1.5 text-text-secondary">{p.pos}</td>
@@ -349,9 +364,9 @@ function PrematchAuditCard({
             [PRE-MATCH STRATEGIC PREDICTIONS]
           </p>
           <ul className="space-y-1">
-            {row.picks.map((p, i) => (
+            {(row.picks ?? []).map((p, i) => (
               <li key={i} className="font-mono text-2xs text-cyan-300">
-                - [PICK] {formatPick(p, row.home.team_name, row.away.team_name)}
+                - [PICK] {formatPick(p, row.home?.team_name ?? "HOME", row.away?.team_name ?? "AWAY")}
                 {typeof p !== "string" && (
                   <span className="text-text-dim">: {pickReason(p, row)}</span>
                 )}
@@ -359,13 +374,13 @@ function PrematchAuditCard({
             ))}
           </ul>
         </div>
-        {row.killer_rules.length > 0 && (
+        {(row.killer_rules ?? []).length > 0 && (
           <div>
             <p className="mb-1 text-2xs font-semibold uppercase tracking-wide text-accent-red">
               [ADVANCED KILLER RULES TRIGGERED]
             </p>
             <ul className="space-y-0.5">
-              {row.killer_rules.map((r) => (
+              {(row.killer_rules ?? []).map((r) => (
                 <li key={r} className="font-mono text-2xs text-accent-amber">
                   *** {r}
                 </li>

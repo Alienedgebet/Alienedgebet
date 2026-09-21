@@ -20,6 +20,31 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 OUTPUT_FILE = os.path.join(DATA_DIR, "danger_audit.json")
 
+# ── 150-DAY HISTORY CACHE (item: Stage 4 was the single largest quota consumer) ──
+# get_key_players_forensics() pulled a 150-day finished-match history for BOTH
+# sides of EVERY fixture on EVERY 45s cycle with no reuse whatsoever. The window
+# only changes when a team plays, so a finished-match pull is safe to reuse inside
+# HISTORY_TTL. Only the RAW provider payload is cached — every parsing, weighting
+# and scoring line in this file is untouched. Same JSON-per-stage convention as
+# squad_cache_stage1_prematch.json / squad_cache_stage3_incoming.json.
+HISTORY_CACHE_FILE = os.path.join(DATA_DIR, "danger_history_cache.json")
+HISTORY_TTL = 6 * 3600      # 6h: a team is refetched at most 4x/day, not ~1900x
+# 2026-09-20: 400 teams x full raw payloads (lineups incl.) reached 932MB on
+# disk and ~2.5GB+ RSS on every cycle load -> the OOM-kill loop that killed the
+# scanner 5x (Sep 19/20) and an API worker. 60 teams keeps the file ~250MB and
+# the live scanner comfortably under 1GB.
+HISTORY_CACHE_MAX_TEAMS = 60    # hard bound; expired entries are pruned on save
+_history_cache: Dict[str, Any] = {}
+
+# FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
+# this helper so a FAILED SportMonks acquisition can never empty a good feed.
+try:
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+except ImportError:  # running this file directly rather than via the package
+    import sys as _sys
+    _sys.path.insert(0, BASE_DIR)
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+
 # ==============================================================================
 # ⚙️ SYSTEM CONFIGURATION (WORLD STANDARD)
 # ==============================================================================
@@ -58,17 +83,28 @@ def GET(path: str, params: Optional[Dict[str,Any]] = None) -> Dict[str,Any]:
     if not path.startswith("/"): path = "/" + path
     url = BASE_URL.rstrip("/") + path
     backoff = 2.0
+    problem = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = _session.get(url, params=params, timeout=REQUEST_TIMEOUT)
             if r.status_code == 429:
+                problem = "HTTP 429 rate limit"
                 time.sleep(backoff * attempt); continue
             r.raise_for_status()
-            return r.json()
-        except:
-            if attempt == MAX_RETRIES: return {"data":[]}
+            body = r.json()
+            # 200 + empty + provider message = subscription/quota shape. Tag it so a
+            # failed pull is never read as "this team has no history".
+            if isinstance(body, dict) and not body.get("data") and body.get("message"):
+                return note_acquisition(body, r.status_code, body.get("message"))
+            return body
+        except Exception as e:
+            resp_obj = getattr(e, "response", None)
+            problem = (f"HTTP {resp_obj.status_code} ({type(e).__name__})" if resp_obj is not None
+                       else f"{type(e).__name__}: {e}")
+            if attempt == MAX_RETRIES:
+                return note_acquisition({"data":[]}, None, f"retries exhausted ({problem})")
             time.sleep(backoff); backoff *= 1.5
-    return {"data":[]}
+    return note_acquisition({"data":[]}, None, f"retries exhausted ({problem})")
 
 def safe_int(x: Any, default: Optional[int] = 0) -> int:
     try: return int(float(str(x).strip().replace(",", "")))
@@ -101,19 +137,86 @@ def extract_stat_entries(fx: Dict[str,Any], team_id: int) -> Dict[str, float]:
 # ------------------------------------------------------------------------------
 # 🧠 FORENSIC SQUAD ENGINES (FULL IMPLEMENTATION)
 # ------------------------------------------------------------------------------
+def _load_history_cache():
+    """Best-effort load of the per-team history cache; expired entries are dropped."""
+    global _history_cache
+    _history_cache = {}
+    try:
+        with open(HISTORY_CACHE_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return
+    now = time.time()
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(v, dict) and (now - v.get("at", 0)) < HISTORY_TTL and v.get("data"):
+                _history_cache[k] = v
+    print(f"[HISTORY CACHE] loaded {len(_history_cache)} team histories "
+          f"(TTL {HISTORY_TTL // 3600}h)")
+
+
+def _save_history_cache():
+    """Persist ONLY unexpired entries, hard-capped so the file stays bounded.
+
+    Same guard principle as write_feed: an empty in-memory cache (e.g. a freshly
+    started process whose pulls all failed on this cycle) must NEVER overwrite a
+    non-empty disk cache — otherwise the cache is emptied exactly when the quota
+    situation needs it most (observed live: 32 histories wiped to 0)."""
+    try:
+        now = time.time()
+        items = [(k, v) for k, v in _history_cache.items()
+                 if isinstance(v, dict) and (now - v.get("at", 0)) < HISTORY_TTL and v.get("data")]
+        items.sort(key=lambda kv: kv[1].get("at", 0), reverse=True)
+        items = items[:HISTORY_CACHE_MAX_TEAMS]
+        if not items:
+            try:
+                with open(HISTORY_CACHE_FILE, "r", encoding="utf-8") as f:
+                    if json.load(f):
+                        print("[HISTORY CACHE] in-memory cache empty — existing disk "
+                              "cache PRESERVED (not overwritten).")
+                        return
+            except Exception:
+                pass
+        with open(HISTORY_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(dict(items), f)
+        print(f"[HISTORY CACHE] saved {len(items)} team histories "
+              f"-> {os.path.basename(HISTORY_CACHE_FILE)}")
+    except Exception as e:
+        print(f"[HISTORY CACHE] save skipped: {e}")
+
+
 def get_key_players_forensics(team_id: int):
     end_dt = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     start_dt = (datetime.now(timezone.utc).date() - timedelta(days=HISTORICAL_RECALL_DAYS)).isoformat()
     t_id = int(team_id)
-    
-    resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{t_id}", params={
-        "include": "lineups.details.type;lineups.player.position;scores;participants",
-        "filter": "fixtureStates:5", 
-        "per_page": 50 
-    })
-    
+
+    # ── HISTORY CACHE ───────────────────────────────────────────────────────────
+    # Reuse a team's 150-day finished-match pull inside HISTORY_TTL instead of
+    # refetching it for BOTH sides of EVERY fixture on EVERY 45s cycle (the largest
+    # single quota consumer in the Live system). Only the RAW payload is cached —
+    # every parsing/weighting/scoring line below this block is unchanged.
     player_stats = {}
-    history = resp.get("data",[])
+    cached = _history_cache.get(str(t_id))
+    if cached and (time.time() - cached.get("at", 0)) < HISTORY_TTL:
+        history = cached.get("data") or []
+    else:
+        resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{t_id}", params={
+            "include": "lineups.details.type;lineups.player.position;scores;participants",
+            "filter": "fixtureStates:5",
+            "per_page": 50
+        })
+        history = resp.get("data",[])
+        if acquisition_failed(resp):
+            # A failed pull must neither be cached nor read as "this team has no
+            # history" — fall back to the last known-good window when we have one.
+            if cached and cached.get("data"):
+                history = cached["data"]
+                print(f"[HISTORY CACHE] team {t_id}: acquisition FAILED "
+                      f"({resp.get('_failure')}) — reusing cached history "
+                      f"({len(history)} fixtures).")
+        elif history:
+            _history_cache[str(t_id)] = {"at": time.time(), "data": history}
+
     for fx in history:
         # Keeper Conceded Calculation Fallback
         hid, aid = None, None
@@ -197,6 +300,7 @@ def run_danger_forensic_aggregator():
         return[]
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _load_history_cache()
     print(f"\n{'='*120}")
     print(f"{'ALIENEDGE SUPREME DANGER FORENSIC AGGREGATOR':^120}")
     print(f"{today:^120}")
@@ -205,13 +309,19 @@ def run_danger_forensic_aggregator():
     all_fixtures =[]
     current_page = 1
     has_more_pages = True
+    acq_failed = False   # a FAILED acquisition must never empty the audit
     
     while has_more_pages:
-        # 🚨 FIX: Added 'statistics' to include array so we actually get DA!
+        #  FIX: Added 'statistics' to include array so we actually get DA!
         resp = GET(f"/fixtures/date/{today}", params={
             "include": "participants;lineups.player;metadata;formations;statistics;statistics.type;scores",
             "page": current_page
         })
+        if acquisition_failed(resp) and not acq_failed:
+            acq_failed = True
+            print(f"[ACQUISITION] /fixtures/date/{today} FAILED — "
+                  f"reason={resp.get('_failure')} | http_status={resp.get('_http_status')} "
+                  f"| empty audit will NOT overwrite an existing audit.")
         data = resp.get("data",[])
         if not data: break
         
@@ -324,9 +434,10 @@ def run_danger_forensic_aggregator():
             
         except Exception as e: continue
 
-    # 💾 SAVE TO JSON FOR THE MASTER AGGREGATOR
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(output_pool, f, indent=4, ensure_ascii=False)
+    # 💾 SAVE TO JSON FOR THE MASTER AGGREGATOR (never emptied by a FAILED pull)
+    write_feed(OUTPUT_FILE, output_pool,
+               acquisition_ok=not acq_failed, label="danger_audit.json")
+    _save_history_cache()
     
     print(f"\n[🏆] SUPREME AUDIT COMPLETE: {processed_count} PROFILES SAVED TO DATA DIR")
     

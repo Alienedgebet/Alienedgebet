@@ -7,10 +7,64 @@ import requests
 import threading
 import logging
 import math
+import random
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from dotenv import load_dotenv
+
+# ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
+# Mirrors live_stage1_prematch: the archiver/stages broadcast cooldown windows
+# into data/api_429_cooldown.lock; GET() paces itself through them so the
+# components stop re-triggering each other's burst limits.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _api_gate_pace(tag=""):
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise).
+    A few seconds of JITTER stagger the wake-up: without it every process
+    reads the same gate expiry and fires its next request on the same second,
+    re-triggering the burst limit and re-arming the gate (the cooling circle)."""
+    try:
+        with open(_GATE_FILE, "r") as f:
+            gate = json.load(f)
+        until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
+        remaining = until - time.time()
+        if remaining > 0:
+            sleep_s = min(remaining, 15.0) + random.random() * 3.0
+            logging.getLogger("alienedge.stage6").info(
+                f"[API GATE] {tag}: shared cooldown active — pacing {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+    except Exception:
+        pass
+
+
+def _api_gate_broadcast(wait_s, tag=""):
+    """Record a shared cooldown so sibling processes also back off."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
+def _api_gate_clear(tag=""):
+    """A 200 just came back from the provider — the burst window is clearly
+    over, so DISARM the shared cooldown instead of letting every sibling keep
+    pacing until the old expiry (gate hygiene; prevents the hours-long
+    cooling circle a single broadcast used to cause)."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": 0, "by": f"cleared:{tag or 'live-stage'}"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
 
 from LIVE_SCANNER.user_rules_store import list_rules, evaluate_rule_for_match
 
@@ -31,6 +85,9 @@ SH_GG_WINNER_FILE        = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json")
 # API (a separate process) can read it. print_orchestrator_board() only
 # wrote to console/system.log (plain text) — this is the missing JSON twin.
 ORCHESTRATOR_BOARD_FILE  = os.path.join(OUTPUT_DIR, "orchestrator_board.json")
+# Live dashboard board for /api/live/dashboard (previously read a file that no
+# component ever wrote — the endpoint always returned []).
+LIVE_DASHBOARD_FILE      = os.path.join(OUTPUT_DIR, "live_dashboard.json")
 # NEW: Stage 1's GK liability + missing-key-player audit, written by the
 # additive patch to live_stage1_prematch.py. Third prematch source, merged
 # into the same `db` dict as the other two — never overwrites their fields.
@@ -139,13 +196,26 @@ def safe_get(d, *keys, default=None):
 def GET(url, params=None):
     if params is None: params = {}
     params.setdefault("api_token", API_TOKEN)
+    _api_gate_pace("stage6")
     backoff = 2.0
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             r = requests.get(url, params=params, timeout=25)
-            if r.status_code == 200: return r.json()
+            if r.status_code == 200:
+                _api_gate_clear("stage6")
+                return r.json()
             elif r.status_code == 429:
-                time.sleep(backoff); backoff *= 2; continue
+                try:
+                    gate_wait = float(r.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    gate_wait = 0.0
+                gate_wait = max(gate_wait, backoff)
+                # CAP the shared window (see stage3): giant Retry-After values
+                # (~20 min) must not freeze every sibling process.
+                _api_gate_broadcast(min(gate_wait, 120.0), "stage6")
+                time.sleep(min(gate_wait, 30.0))
+                backoff *= 2
+                continue
             r.raise_for_status()
         except Exception:
             time.sleep(1); continue
@@ -260,14 +330,27 @@ class StructuralDetective:
             # If it is the old flat format, return it directly but also
             # migrate it so next access is correct.
             if isinstance(entry, dict) and "players" in entry:
-                return entry["players"]
+                # FIX 6 (squad coverage): an EMPTY players dict is the
+                # poisoned residue of a failed/empty fetch (e.g. Huracán
+                # id 410 had 16 fixtures in its 150-day window yet an
+                # empty vault entry that could never recover, because
+                # both this guard and maintenance_thread's
+                # `str(tid) in SQUAD_VAULT` check treated it as valid
+                # data forever → INSUFFICIENT_SQUAD_DATA permanently).
+                # Treat empty as a cache MISS and refetch. Non-empty
+                # entries keep the exact same short-circuit as before.
+                if entry["players"]:
+                    return entry["players"]
+                # empty → fall through to a fresh fetch below
             else:
                 # Old flat format — migrate in place
-                SQUAD_VAULT[tid_str] = {
-                    "players":       entry,
-                    "team_avg_leak": 1.2
-                }
-                return entry
+                if entry:
+                    SQUAD_VAULT[tid_str] = {
+                        "players":       entry,
+                        "team_avg_leak": 1.2
+                    }
+                    return entry
+                # empty flat dict → fall through to a fresh fetch below
 
         start_dt = (datetime.now(timezone.utc).date()
                     - timedelta(days=150)).isoformat()
@@ -491,6 +574,39 @@ class SupremeOrchestrator:
         self.UserLogic = UserRuleEvaluator()
         self.executor  = ThreadPoolExecutor(max_workers=5)
         self.cycle     = 0
+        # FIX: seed ALERT_HISTORY from the persisted on-disk alert log so a
+        # restart cannot re-fire alerts that already went out. fire_alert()
+        # appends every record as one JSONL line in ready_to_push.json while
+        # run_single_cycle()/process_ai_gates() track the same keys only in
+        # the in-memory ALERT_HISTORY set — a restart wiped that set and the
+        # same fixture/rule pair could alert users twice. Rebuild keys:
+        #   user-rule alerts  -> "{f_id}_{rule_id}"   (exact match)
+        #   system 45' alerts -> "{f_id}_SUPREME_45"  (best-effort, matched
+        #   via the stable "45' Verified" msg emitted by process_ai_gates)
+        try:
+            if os.path.exists(OUTPUT_ALERTS_FILE):
+                with open(OUTPUT_ALERTS_FILE, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        rec_fid = rec.get('f_id')
+                        if not rec_fid:
+                            continue
+                        if rec.get('rule_id'):
+                            ALERT_HISTORY.add(f"{rec_fid}_{rec['rule_id']}")
+                        elif "45' Verified" in str(rec.get('msg', '')):
+                            ALERT_HISTORY.add(f"{rec_fid}_SUPREME_45")
+                logging.info(
+                    f"ALERT_HISTORY seeded from disk: "
+                    f"{len(ALERT_HISTORY)} previously fired alert keys"
+                )
+        except Exception as e:
+            logging.error(f"ALERT_HISTORY seed failed: {e}")
 
     def run(self):
         logging.info("═" * 70)
@@ -503,131 +619,142 @@ class SupremeOrchestrator:
         logging.info("═" * 70)
 
         while True:
-            self.cycle += 1
-            db = self.load_all_prematch_data()
-
-            if not db:
-                logging.info(
-                    "[MOCK MODE] No prematch report found. "
-                    "Live-only monitoring active."
-                )
-
-            self.maintenance_thread(db)
-
-            try:
-                live_data = self.fetch_live_scores()
-                live_ids  = {str(fx['id']) for fx in live_data}
-
-                self.cleanup_stale_memory(live_ids)
-
-                # ── FIX: Build name→fixture_id map for fallback matching ──
-                # Code 2's live_predictions.json uses fixture IDs from the
-                # scheduled endpoint. The inplay endpoint may return the
-                # same fixture under a different ID in some competitions.
-                # We build a name-based lookup as a fallback.
-                live_name_map = {}
-                for fx in live_data:
-                    name_key = self._name_key(fx.get('name', ''))
-                    live_name_map[name_key] = str(fx['id'])
-
-                cycle_matches = []
-
-                for fx in live_data:
-                    f_id     = str(fx['id'])
-                    pre      = db.get(f_id, {})
-
-                    # ── FIX: Name-based fallback for prematch context ──────
-                    # If the scheduled fixture ID doesn't match the live ID,
-                    # try matching by team names
-                    if not pre and db:
-                        name_key = self._name_key(fx.get('name', ''))
-                        for db_fid, db_entry in db.items():
-                            db_name = self._name_key(
-                                db_entry.get('fixture',
-                                db_entry.get('name', ''))
-                            )
-                            if db_name and db_name == name_key:
-                                pre = db_entry
-                                break
-
-                    minute   = self.extract_minute(fx)
-                    if not minute or minute <= 0: continue
-
-                    self.update_market_settlement(f_id, fx)
-
-                    h_s, a_s = self.extract_stats(fx)
-                    intel    = self.Brain.analyze_match_state(
-                        f_id, h_s, a_s, minute, fx.get('events', [])
-                    )
-                    ctx        = self.extract_impact_context(fx)
-                    structural = self.Detective.investigate(ctx, pre)
-
-                    # NEW: real live key-player-lost tracking, ported from
-                    # the same idea as live_stage2_verification.py — but
-                    # self-contained here so Code 6 doesn't depend on Stage
-                    # 2 running. Key-11 sets are built lazily once both
-                    # squads are cached, then substitution events are
-                    # checked against those sets every cycle.
-                    key_loss = self._track_key_player_loss(f_id, ctx, fx)
-
-                    fixture_name = fx.get('name', f_id)
-
-                    active_rules = list_rules(active_only=True)
-
-                    user_alerts   = self.UserLogic.evaluate(
-                        f_id, intel, structural, pre, minute, key_loss, active_rules
-                    )
-                    fired_this    = []
-
-                    for ua in user_alerts:
-                        if (ua['tier'] in ["🔥 PREMIUM","✅ STANDARD"] and
-                                ua['id'] not in ALERT_HISTORY):
-                            self.fire_alert(
-                                f_id, fixture_name,
-                                ua['tier'], ua['msg'], ua['conf'], minute,
-                                user_id=ua.get('user_id'),
-                                rule_id=ua.get('rule_id'),
-                                rule_label=ua.get('rule_label'),
-                            )
-                            ALERT_HISTORY.add(ua['id'])
-                            fired_this.append(ua)
-                        elif ua['tier'] == "📊 MONITOR":
-                            fired_this.append(ua)
-
-                    self.process_ai_gates(
-                        f_id, fixture_name, minute,
-                        intel, structural, pre
-                    )
-
-                    cycle_matches.append({
-                        "name":       fixture_name,
-                        "id":         f_id,
-                        "minute":     minute,
-                        "conf":       intel['match']['confidence_score'],
-                        "h_pressure": intel['match']['h_pressure_share'],
-                        "a_pressure": intel['match']['a_pressure_share'],
-                        "chaos":      intel['match']['chaos_index'],
-                        "h_xg":       intel['home']['live_xg'],
-                        "a_xg":       intel['away']['live_xg'],
-                        "h_sot":      intel['home']['sot'],
-                        "a_sot":      intel['away']['sot'],
-                        "structural": structural.get('status','OK'),
-                        "key_loss":   key_loss,
-                        "alerts":     fired_this,
-                        "in_db":      bool(pre)
-                    })
-
-                self.print_orchestrator_board(
-                    cycle_matches, len(live_data), len(db)
-                )
-                self.save_orchestrator_board(
-                    cycle_matches, len(live_data), len(db)
-                )
-
-            except Exception as e:
-                logging.error(f"Engine Loop Failure: {e}")
-
+            self.run_single_cycle()
             time.sleep(45)
+
+    def run_single_cycle(self):
+        """One full analysis pass: prematch load, live context, alerts,
+        and orchestrator-board save. Called by run() and by the 24/7
+        runner so Stage 6 does not block the shared scheduler with its
+        own infinite loop."""
+        self.cycle += 1
+        db = self.load_all_prematch_data()
+
+        if not db:
+            logging.info(
+                "[MOCK MODE] No prematch report found. "
+                "Live-only monitoring active."
+            )
+
+        self.maintenance_thread(db)
+
+        try:
+            live_data = self.fetch_live_scores()
+            live_ids  = {str(fx['id']) for fx in live_data}
+
+            self.cleanup_stale_memory(live_ids)
+
+            # ── FIX: Build name→fixture_id map for fallback matching ──
+            # Code 2's live_predictions.json uses fixture IDs from the
+            # scheduled endpoint. The inplay endpoint may return the
+            # same fixture under a different ID in some competitions.
+            # We build a name-based lookup as a fallback.
+            live_name_map = {}
+            for fx in live_data:
+                name_key = self._name_key(fx.get('name', ''))
+                live_name_map[name_key] = str(fx['id'])
+
+            cycle_matches = []
+
+            for fx in live_data:
+                f_id     = str(fx['id'])
+                pre      = db.get(f_id, {})
+
+                # ── FIX: Name-based fallback for prematch context ──────
+                # If the scheduled fixture ID doesn't match the live ID,
+                # try matching by team names
+                if not pre and db:
+                    name_key = self._name_key(fx.get('name', ''))
+                    for db_fid, db_entry in db.items():
+                        db_name = self._name_key(
+                            db_entry.get('fixture',
+                            db_entry.get('name', ''))
+                        )
+                        if db_name and db_name == name_key:
+                            pre = db_entry
+                            break
+
+                minute   = self.extract_minute(fx)
+                if not minute or minute <= 0: continue
+
+                self.update_market_settlement(f_id, fx)
+
+                h_s, a_s = self.extract_stats(fx)
+                intel    = self.Brain.analyze_match_state(
+                    f_id, h_s, a_s, minute, fx.get('events', [])
+                )
+                ctx        = self.extract_impact_context(fx)
+                structural = self.Detective.investigate(ctx, pre)
+
+                # NEW: real live key-player-lost tracking, ported from
+                # the same idea as live_stage2_verification.py — but
+                # self-contained here so Code 6 doesn't depend on Stage
+                # 2 running. Key-11 sets are built lazily once both
+                # squads are cached, then substitution events are
+                # checked against those sets every cycle.
+                key_loss = self._track_key_player_loss(f_id, ctx, fx)
+
+                fixture_name = fx.get('name', f_id)
+
+                active_rules = list_rules(active_only=True)
+
+                user_alerts   = self.UserLogic.evaluate(
+                    f_id, intel, structural, pre, minute, key_loss, active_rules
+                )
+                fired_this    = []
+
+                for ua in user_alerts:
+                    if (ua['tier'] in ["🔥 PREMIUM","✅ STANDARD"] and
+                            ua['id'] not in ALERT_HISTORY):
+                        self.fire_alert(
+                            f_id, fixture_name,
+                            ua['tier'], ua['msg'], ua['conf'], minute,
+                            user_id=ua.get('user_id'),
+                            rule_id=ua.get('rule_id'),
+                            rule_label=ua.get('rule_label'),
+                        )
+                        ALERT_HISTORY.add(ua['id'])
+                        fired_this.append(ua)
+                    elif ua['tier'] == "📊 MONITOR":
+                        fired_this.append(ua)
+
+                self.process_ai_gates(
+                    f_id, fixture_name, minute,
+                    intel, structural, pre
+                )
+
+                cycle_matches.append({
+                    "name":       fixture_name,
+                    "id":         f_id,
+                    "minute":     minute,
+                    "conf":       intel['match']['confidence_score'],
+                    "h_pressure": intel['match']['h_pressure_share'],
+                    "a_pressure": intel['match']['a_pressure_share'],
+                    "chaos":      intel['match']['chaos_index'],
+                    "h_xg":       intel['home']['live_xg'],
+                    "a_xg":       intel['away']['live_xg'],
+                    "h_sot":      intel['home']['sot'],
+                    "a_sot":      intel['away']['sot'],
+                    "structural": structural.get('status','OK'),
+                    "key_loss":   key_loss,
+                    "alerts":     fired_this,
+                    "in_db":      bool(pre)
+                })
+
+            self.print_orchestrator_board(
+                cycle_matches, len(live_data), len(db)
+            )
+            self.save_orchestrator_board(
+                cycle_matches, len(live_data), len(db)
+            )
+            self.save_live_dashboard(
+                cycle_matches, len(live_data), len(db)
+            )
+
+        except Exception as e:
+            logging.error(f"Engine Loop Failure: {e}")
+
+
 
     # ── HELPER: normalise fixture name for matching ───────────────────────
     def _name_key(self, name):
@@ -683,6 +810,26 @@ class SupremeOrchestrator:
         return {"h_lost": track["h_lost"], "a_lost": track["a_lost"]}
 
     # ── ORCHESTRATOR BOARD ────────────────────────────────────────────────
+    # ── LIVE DASHBOARD WRITER ────────────────────────────────────────────────
+    # /api/live/dashboard reads output/live_dashboard.json, which NO component
+    # wrote — the endpoint always returned []. This board is a compact snapshot
+    # of the orchestrator cycle (same data the console prints), so persist it
+    # here for the API to serve.
+    def save_live_dashboard(self, cycle_matches, total_live, total_db):
+        try:
+            payload = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "total_live": total_live,
+                "total_db": total_db,
+                "matches": cycle_matches,
+            }
+            tmp_path = LIVE_DASHBOARD_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str)
+            os.replace(tmp_path, LIVE_DASHBOARD_FILE)  # atomic swap
+        except Exception as e:
+            logging.error(f"[DASHBOARD] Failed to save live dashboard: {e}")
+
     def print_orchestrator_board(self, cycle_matches, total_live, total_db):
         now = datetime.now().strftime("%H:%M:%S")
         print(f"\n{'═'*80}")
@@ -882,6 +1029,44 @@ class SupremeOrchestrator:
             except Exception as e:
                 logging.warning(f"SH-GG file error: {e}")
 
+        # NEW: Gold Over 2.5 engine feed — fourth prematch source, same
+        # fixture_id-keyed merge pattern as SH-GG above. Some fixtures carry
+        # their prematch flags ONLY here (e.g. h2h_o25_100 from the gold
+        # engine), so without this merge user rules referencing those flags
+        # could never fire. flags/metrics are dict-merged so a fixture present
+        # in both feeds keeps the union of flags instead of being clobbered.
+        GOLD_O25_FILE = os.path.join(OUTPUT_DIR, "gold_over_25_feed.json")
+        if os.path.exists(GOLD_O25_FILE):
+            try:
+                with open(GOLD_O25_FILE, 'r', encoding='utf-8') as f:
+                    data  = json.load(f)
+                    items = data if isinstance(data, list) else data.values()
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        fid = str(item.get('fixture_id'))
+                        if not fid or fid == 'None':
+                            continue
+                        if fid not in db:
+                            db[fid] = item
+                        else:
+                            for k, v in item.items():
+                                if (k in ("flags", "metrics")
+                                        and isinstance(v, dict)
+                                        and isinstance(db[fid].get(k), dict)):
+                                    db[fid][k].update(v)
+                                else:
+                                    db[fid].setdefault(k, v)
+                        if 'h_id' not in db[fid]:
+                            db[fid]['h_id'] = str(
+                                safe_get(item,'teams','home','id') or ''
+                            )
+                            db[fid]['a_id'] = str(
+                                safe_get(item,'teams','away','id') or ''
+                            )
+            except Exception as e:
+                logging.warning(f"Gold O2.5 file error: {e}")
+
         # NEW: Stage 1's GK liability + missing-key-player audit — third
         # prematch source. Keyed by fixture_id like the other two. Uses
         # dict.update() so it never overwrites flags/chemistry already
@@ -928,9 +1113,22 @@ class SupremeOrchestrator:
         for f_id, data in db.items():
             for tid in [data.get('h_id'), data.get('a_id')]:
                 if tid:
+                    # FIX 6 (squad coverage): an empty {"players": {}} vault
+                    # entry is the residue of a failed/empty fetch, not valid
+                    # squad data. The old `str(tid) in SQUAD_VAULT` check
+                    # treated it as cached forever, so a poisoned team was
+                    # never re-fetched and investigate() returned
+                    # INSUFFICIENT_SQUAD_DATA permanently. Only entries with
+                    # actual players count as cached.
+                    vault_entry = SQUAD_VAULT.get(str(tid))
+                    has_data = bool(
+                        vault_entry.get("players")
+                        if isinstance(vault_entry, dict)
+                        and "players" in vault_entry
+                        else vault_entry
+                    )
                     with FETCHING_LOCK:
-                        already = (tid in FETCHING_TEAMS or
-                                   str(tid) in SQUAD_VAULT)
+                        already = (tid in FETCHING_TEAMS or has_data)
                     if not already:
                         with FETCHING_LOCK:
                             FETCHING_TEAMS.add(tid)

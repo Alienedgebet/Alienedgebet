@@ -32,7 +32,7 @@ import json
 import math
 import subprocess
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Header
@@ -50,6 +50,27 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 import output_store as store  # noqa: E402  (same module main.py writes through)
+
+# Intelligent Pass Count — pure read-only second-level audit over the same
+# cache snapshots. Display/audit only: it never changes predictions,
+# settlement or Verify. Wrapped in try/except so a missing/moved module can
+# never take the picks API down (column simply renders empty).
+try:  # noqa: E402
+    from INTELLIGENT_PASS import pass_count as intelligent_pass
+except Exception:  # pragma: no cover
+    intelligent_pass = None
+
+
+def _with_intelligent_pass(market_key: str, rows, date: Optional[str]):
+    """Attach the additive `intelligent_pass_count` audit object to each row
+    (no existing key is removed, renamed or re-ordered). No-op unless the
+    evaluator module imported cleanly — the API contract is unchanged then."""
+    if intelligent_pass is None or not date or not rows:
+        return rows
+    try:
+        return intelligent_pass.evaluate_market_safe(market_key, rows, date)
+    except Exception:
+        return rows
 
 # ── APP INIT ──────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -85,7 +106,7 @@ from api.user_rules_router import router as user_rules_router  # noqa: E402
 app.include_router(user_rules_router)
 
 # ── SETTLEMENT / LIVE SCORES (independent of the pre-match pipeline) ──────────
-from settlement_service import settle_predictions  # noqa: E402
+from settlement_service import settle_predictions, extract_match_data, load_finished_archive  # noqa: E402
 from live_cache import get_live_scores_cached  # noqa: E402
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
@@ -171,12 +192,70 @@ def ensure_defaults(rows, defaults: dict) -> list:
     return out
 
 
+# Market keys grade_row() actually implements. Any market outside this set has
+# no verdict math — routing it through grade_row would fabricate a LOST verdict
+# (grade_row's default is won=False), the same class of silent error the
+# "win"-keyed draw rows suffered. Those rows get an explicit PENDING payload
+# instead, so the UI never shows a false ❌ for an ungradeable market.
+SUPPORTED_SETTLEMENT_MARKETS = {
+    "win", "1x2",
+    "gg", "btts",
+    "o25", "over25", "over 2.5",
+    "o15", "over15", "over 1.5",
+    "draw", "draws",
+    "u25", "under25", "under 2.5",
+    # High Parity List (score gap <= 2 — user-confirmed; NOT the exact-draw
+    # "draw" branch) and Under 3.5 (total goals <= 3 — NOT the u25 <= 2
+    # branch). Both were previously absent here, so /api/draw parity_list and
+    # /api/unders u35 rows got the blanket-PENDING path and Verify stayed
+    # blank even when grade_row had the math.
+    "parity", "high_parity",
+    "u35", "u3.5", "under35", "under 3.5",
+    "corners",
+    "shvi", "sh_goal",
+    "sot",
+    "fhvi", "fh_goal",
+    "u2s",
+}
+
+
 def _settled(data, market_type: str = "win", date_str: Optional[str] = None):
     if not isinstance(data, list) or len(data) == 0:
         return data
+    if str(market_type).lower() not in SUPPORTED_SETTLEMENT_MARKETS:
+        # No grading branch for this market (e.g. "sot"): PENDING, never a
+        # fabricated verdict. Shape mirrors grade_row's SCHEDULED payload so
+        # the frontend contract is unchanged.
+        pending = {
+            "status": "SCHEDULED",
+            "score": "—",
+            "minute": None,
+            "verdict": "PENDING",
+            "badge_text": "—",
+            "note": "Awaiting Kickoff",
+        }
+        return [({**row, "verification": dict(pending)} if isinstance(row, dict) else row)
+                for row in data]
     try:
-        live_db = get_live_scores_cached()
-        return settle_predictions(data, live_db, market_type=market_type)
+        # Historical dates settle entirely from output/archive_{date}.json +
+        # FT snapshots. Fetching the live in-play feed for a PAST date is pure
+        # waste — and while a shared 429 cooldown gate is active it used to
+        # stall every historical request ~10s server-side (the "date switching
+        # lags behind" regression). An empty live db is CORRECT here:
+        # settle_predictions(date_str=...) loads the archive layer itself and
+        # keeps WON/LOST verdicts permanent; today (or undated) keeps the
+        # live-feed behaviour unchanged.
+        if date_str and str(date_str) < _today():
+            live_db = []
+        else:
+            live_db = get_live_scores_cached()
+        # date_str (the date of the picks being verified) is what activates
+        # the persistent finished-results layer: settlement additionally
+        # loads output/archive_{date_str}.json so WON/LOST survives after a
+        # fixture leaves the in-play feed, and historical dates settle from
+        # their own archive instead of staying PENDING forever. Without it
+        # settlement behaves exactly as before (live feed only).
+        return settle_predictions(data, live_db, market_type=market_type, date_str=date_str)
     except Exception:
         print(f"[SETTLEMENT WARNING] {market_type}: {traceback.format_exc()}")
         return data
@@ -204,18 +283,87 @@ def _date_range(start: str, end: str, max_days: int = 14) -> list:
     return days or [start]
 
 
-def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, settle: bool = True) -> list:
+# ─ FILTER SHAPE GUARD (P0-6b / forensic-report P0-5) ─────────────────────────
+# A one-day historical save-key fault (2026-09-10) wrote the CORNERS payload
+# under five filter keys — filter_win__safe, filter_win__balanced and
+# filter_over25__{banker,balanced,aggressive} — 26 foreign rows each. The
+# weekly endpoints walk every date in [start_date, end_date], so those rows
+# were still being SERVED inside a 7-day request (they arrive as all-zero /
+# _incomplete rows after ensure_defaults): fabricated picks on a real page.
+#
+# The files are DATA and must not be deleted or rewritten, so the guard runs at
+# the READ boundary, and only for the affected markets.
+#
+# A row is rejected only when BOTH hold:
+#   1. every identity key of the market the key claims is absent, AND
+#   2. a key from another market's signature is present.
+# So a genuine row of the requested market is always kept, and a row with no
+# recognisable signature at all (e.g. an older schema) is also kept — the guard
+# only ever removes rows that provably belong to a DIFFERENT market.
+# Verified against the real files: 09-10 contaminated rows carry the corners
+# signature and zero win/o25 identity keys, while clean win rows carry all four
+# identity keys (09-11/13/14) and GG rows match neither set — which is why this
+# is opt-in per route (`identity=`) and never applied to GG or other markets.
+_FILTER_MARKET_IDENTITY = {
+    "win": {"win_odds", "team_name", "side", "parity_score"},
+    "o25": {"o25_odds", "poisson_over_prob_num", "council_votes", "pos_gap",
+            "kill_switch_pass"},
+}
+_FOREIGN_MARKET_SIGNATURE = {
+    "corner_tier", "expected_total_corners", "team_more_corners",
+    "expected_difference",
+}
+
+
+def _is_foreign_filter_row(row, market: Optional[str]) -> bool:
+    if not market or not isinstance(row, dict):
+        return False
+    identity = _FILTER_MARKET_IDENTITY.get(market)
+    if not identity:
+        return False
+    if identity & set(row.keys()):
+        return False  # a genuine row of this market → always kept
+    return bool(_FOREIGN_MARKET_SIGNATURE & set(row.keys()))
+
+
+def _guard_filter_rows(rows, market: Optional[str]):
+    """Drop provably-foreign rows for `market` (no-op for other markets)."""
+    if not market:
+        return rows
+    kept, dropped = [], 0
+    for row in rows:
+        if _is_foreign_filter_row(row, market):
+            dropped += 1
+            continue
+        kept.append(row)
+    if dropped:
+        print(f"[FILTER SHAPE GUARD] dropped {dropped} foreign {market} row(s) — "
+              f"payload belongs to another market (historical save-key fault); "
+              f"cache file left untouched")
+    return kept
+
+
+def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, settle: bool = True,
+               identity: Optional[str] = None) -> list:
     """
     Reads and concatenates one saved file PER DATE in `dates`, tagging each
     row with the date it came from so a "7-day range" filter route actually
     returns a week of picks instead of silently collapsing to a single day
     (the previous behaviour, inherited unchanged from the old backend).
     `key_prefix_fn(date)` returns the output_store key to load for that date.
+    `identity` (optional) enables the filter-market shape guard above; when
+    omitted the behaviour is byte-identical to before.
     """
     combined = []
     for d in dates:
         data, _ = store.load(key_prefix_fn(d), d, default=[])
-        rows = ensure_defaults(data, defaults)
+        # Guard runs on RAW loaded data so it can see which keys the file
+        # actually contains. ensure_defaults() below injects every missing
+        # schema key (e.g. win_odds=0, team_name=0, side=0, parity_score=0)
+        # into every row regardless of origin, so a contaminated corners row
+        # from 09-10 would otherwise pass the identity check after defaulting.
+        rows = _guard_filter_rows(data, identity)
+        rows = ensure_defaults(rows, defaults)
         if settle:
             rows = _settled(rows, market_type, d)
         for row in rows:
@@ -225,12 +373,18 @@ def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, set
     return combined
 
 
-def read(key: str, date: Optional[str], defaults: dict, market_type: str = "win", settle: bool = True):
+def read(key: str, date: Optional[str], defaults: dict, market_type: str = "win", settle: bool = True,
+         identity: Optional[str] = None):
     """The one helper every picks route uses: load from disk, fill defaults,
     optionally settle against live/finished scores. No engine is ever called
-    here — a cache miss is just an empty list, not a live recompute."""
+    here — a cache miss is just an empty list, not a live recompute.
+    `identity` (optional) enables the filter-market shape guard; when omitted
+    the behaviour is byte-identical to before."""
     data, _generated_at = store.load(key, date, default=[])
-    rows = ensure_defaults(data, defaults)
+    # Same ordering rationale as read_range above: inspect raw data before
+    # ensure_defaults injects schema-wide defaults.
+    rows = _guard_filter_rows(data, identity)
+    rows = ensure_defaults(rows, defaults)
     if settle and date:
         rows = _settled(rows, market_type, date)
     return rows
@@ -574,17 +728,82 @@ def get_dna_v2(date: str):
 
 @app.get("/api/underdog/{date}", tags=["Foundation"])
 def get_underdog(date: str):
-    return read("underdog_base", date, UD_BASE_DEFAULTS, "u2s")
+    return _with_intelligent_pass(
+        "u2s", read("underdog_base", date, UD_BASE_DEFAULTS, "u2s"), date)
+
+
+@app.get("/api/team-intelligence/{date}/{team_name}", tags=["Foundation"])
+def get_team_intelligence(date: str, team_name: str):
+    """Team Intelligence page feed — the team's per-check intelligence across
+    every market AlienEdge already produced for this date. Read-only local
+    composition (INTELLIGENT_PASS/pass_count.py): NO new SportMonks calls, no
+    duplicate fixture requests, no duplicate intelligence calculations."""
+    if intelligent_pass is None:
+        raise HTTPException(status_code=503, detail="Intelligent Pass evaluator unavailable")
+    try:
+        return intelligent_pass.get_team_intelligence(team_name, date)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Team intelligence not available")
 
 
 @app.get("/api/underdog/audit/{date}", tags=["Foundation"])
 def get_underdog_audit(date: str):
-    return read("underdog_audit", date, UD_AUDIT_DEFAULTS, "u2s")
+    return _with_intelligent_pass(
+        "u2s", read("underdog_audit", date, UD_AUDIT_DEFAULTS, "u2s"), date)
 
 
 @app.get("/api/underdog/apex/{date}", tags=["Foundation"])
 def get_underdog_apex(date: str):
-    return read("underdog_apex", date, UD_APEX_DEFAULTS, "u2s")
+    # The apex engine's output carries NO underdog-team column (verified:
+    # keys are DNA/Engine/Fav_Vuln/Fixture/Handshake/Monte_UD_Prob/Rule/
+    # SH_GG_Label), so the u2s grader had nothing to match against and every
+    # row degraded to PENDING "Underdog '?' not identifiable". The
+    # psychology feed (u2s_psychology, same pipeline date) DOES carry the
+    # dog name in its `Underdog` column — merge it in by fixture name
+    # BEFORE settlement (read() settles internally, so this endpoint loads
+    # with the same building blocks but in merge-first order).
+    data, _generated_at = store.load("underdog_apex", date, default=[])
+    rows = ensure_defaults(_guard_filter_rows(data, None), UD_APEX_DEFAULTS)
+    try:
+        psych_rows, _ = store.load("u2s_psychology", date, default=[])
+        if isinstance(psych_rows, dict):
+            psych_rows = next((v for v in psych_rows.values()
+                               if isinstance(v, list)), [])
+        dog_by_fixture = {}
+        for pr in psych_rows or []:
+            if not isinstance(pr, dict):
+                continue
+            fx_name = str(pr.get("fixture") or pr.get("Fixture") or "").strip()
+            dog = str(pr.get("Underdog") or "").strip()
+            if fx_name and dog:
+                dog_by_fixture[fx_name.lower()] = dog
+        for r in rows:
+            if not isinstance(r, dict) or r.get("underdog_team"):
+                continue
+            fx_name = str(r.get("fixture") or r.get("Fixture") or "").strip().lower()
+            if not fx_name:
+                continue
+            if fx_name in dog_by_fixture:
+                r["underdog_team"] = dog_by_fixture[fx_name]
+                continue
+            # Team-level match: the two engines spell team names
+            # differently ("OFI" vs "OFI Crete"), so full fixture-string
+            # containment fails. A psych row matches when BOTH of the
+            # apex row's team names appear in the psych fixture string.
+            teams = [t.strip() for t in fx_name.split(" vs ") if t.strip()]
+            if len(teams) == 2:
+                for k_fx, k_dog in dog_by_fixture.items():
+                    if teams[0] in k_fx and teams[1] in k_fx:
+                        r["underdog_team"] = k_dog
+                        break
+    except Exception as _e:
+        print(f"[u2s] psychology merge skipped: {_e}")
+    if date:
+        rows = _settled(rows, "u2s", date)
+    for row in rows:
+        if isinstance(row, dict) and "match_date" not in row:
+            row["match_date"] = date
+    return rows
 
 
 @app.get("/api/calibration/{date}", tags=["Foundation"])
@@ -595,7 +814,8 @@ def get_calibration(date: str):
 
 @app.get("/api/win/forecast/{date}", tags=["Win"])
 def get_win_forecast(date: str):
-    return read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win")
+    return _with_intelligent_pass(
+        "win_apex", read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win"), date)
 
 
 @app.get("/api/sh-gg-winner/{date}", tags=["Specials"])
@@ -608,12 +828,14 @@ def get_sh_gg_winner(date: str):
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/win/psychology/{date}", tags=["Win"])
 def get_win_psychology(date: str):
-    return read("win_psychology", date, WIN_PSYCH_DEFAULTS, "win")
+    return _with_intelligent_pass(
+        "win_psychology", read("win_psychology", date, WIN_PSYCH_DEFAULTS, "win"), date)
 
 
 @app.get("/api/win/u2s/{date}", tags=["Win"])
 def get_u2s(date: str):
-    return read("u2s_psychology", date, WIN_U2S_DEFAULTS, "u2s")
+    return _with_intelligent_pass(
+        "u2s", read("u2s_psychology", date, WIN_U2S_DEFAULTS, "u2s"), date)
 
 
 @app.get("/api/win/apex/{date}", tags=["Win"])
@@ -627,7 +849,8 @@ def get_win_apex(date: str):
     data, _generated_at = store.load("win_apex", date, default=None)
     if data is None:
         data = []
-    return _settled(ensure_defaults(data, WIN_APEX_DEFAULTS), "win", date)
+    rows = _settled(ensure_defaults(data, WIN_APEX_DEFAULTS), "win", date)
+    return _with_intelligent_pass("win_apex", rows, date)
 
 
 @app.get("/api/win/raw/{date}", tags=["Win"])
@@ -645,7 +868,10 @@ def get_gg_precision(date: str):
     o15_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     gg = ensure_defaults(gg_raw, GG_PRECISION_DEFAULTS)
     o15 = ensure_defaults(o15_raw, GG_O15_DEFAULTS)
-    return {"gg": _settled(gg, "gg", date), "o15": _settled(o15, "o15", date)}
+    return {
+        "gg": _with_intelligent_pass("gg_precision", _settled(gg, "gg", date), date),
+        "o15": _with_intelligent_pass("gg_o15", _settled(o15, "o15", date), date),
+    }
 
 
 @app.get("/api/gg/forensics/{date}", tags=["GG"])
@@ -660,15 +886,23 @@ def get_gg_psychology(date: str):
 
 @app.get("/api/gg/supreme/{date}", tags=["GG"])
 def get_gg_supreme(date: str):
-    return read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg")
+    return _with_intelligent_pass(
+        "gg_supreme", read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg"), date)
 
 
 @app.get("/api/gg/cross-verify", tags=["GG"])
 def get_gg_cross_verify():
-    # This route has no date param by design (7-day rolling cross-verify) —
-    # correctly reads the dateless "__latest" snapshot main.py always writes.
-    data, _ = store.load("filter_gg", None, default=[])
-    return _settled(ensure_defaults(data, GG_CROSS_DEFAULTS), "gg")
+    # This route has no date param by design: it IS the 7-day rolling GG
+    # cross-verification, so it composes the last 7 DATED snapshots through
+    # read_range() — the same date-scoped read every other market filter uses.
+    # It must NOT read the dateless "__latest" key: main.py snapshots filter_gg
+    # per date (store.save("filter_gg", d, ...)), so nothing refreshes
+    # "__latest" any more and that read served one frozen payload for every
+    # later date. read_range() also settles each row against its own date, so an
+    # older row is graded from its own archive instead of the latest live feed.
+    end = _today()
+    start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
+    return read_range(lambda d: "filter_gg", _date_range(start, end), GG_CROSS_DEFAULTS, "gg")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -694,20 +928,38 @@ def get_over25_psychology(date: str):
     return read("over25_psychology", date, O25_PSYCH_DEFAULTS, "o25")
 
 
+# Gold Over 2.5 rows are NESTED ({teams:{home,away}, metrics:{...}, flags}) —
+# unlike every other market's flat rows. Defaults only fill flat scalar fields;
+# nested structures are preserved untouched by ensure_defaults. Verification
+# identity is the flat fixture_id, which grade_row/settle_predictions already
+# match on — no team-name matching needed for this market.
+O25_GOLD_DEFAULTS = dict(
+    fixture_id="", engine="", league="", kickoff_datetime="", kickoff_timestamp="",
+    flags={},
+)
+
+
 @app.get("/api/over25/gold/{date}", tags=["Over 2.5"])
 def get_over25_gold(date: str):
     data, _ = store.load("over25_gold", date, default=[])
-    return to_records(data)
+    # Gold O2.5 rows were returned raw (no verification payload at all) while
+    # every sibling over25 route settles with market key "o25" — the exact
+    # total-goals rule (>= 3 WON / <= 2 LOST) the Gold engine predicts. Settle
+    # identically to the rest of the Over 2.5 family; rows carry fixture_id so
+    # finished matches resolve through the persistent archive layer.
+    return _settled(ensure_defaults(data, O25_GOLD_DEFAULTS), "o25", date)
 
 
 @app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
 def get_over25_apex(date: str):
-    return read("over25_apex", date, O25_APEX_DEFAULTS, "o25")
+    return _with_intelligent_pass(
+        "over25_apex", read("over25_apex", date, O25_APEX_DEFAULTS, "o25"), date)
 
 
 @app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
 def get_over25_forecast(date: str):
-    return read("over25_forecast", date, O25_FORECAST_DEFAULTS, "o25")
+    return _with_intelligent_pass(
+        "over25_forecast", read("over25_forecast", date, O25_FORECAST_DEFAULTS, "o25"), date)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -715,17 +967,20 @@ def get_over25_forecast(date: str):
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/over15/stage3/{date}", tags=["Over 1.5"])
 def get_over15_stage3(date: str):
-    return read("over15_stage3", date, O15_STAGE3_DEFAULTS, "o15")
+    return _with_intelligent_pass(
+        "over15", read("over15_stage3", date, O15_STAGE3_DEFAULTS, "o15"), date)
 
 
 @app.get("/api/over15/psychology/{date}", tags=["Over 1.5"])
 def get_over15_psychology(date: str):
-    return read("over15_psychology", date, O15_PSYCH_DEFAULTS, "o15")
+    return _with_intelligent_pass(
+        "over15", read("over15_psychology", date, O15_PSYCH_DEFAULTS, "o15"), date)
 
 
 @app.get("/api/over15/apex/{date}", tags=["Over 1.5"])
 def get_over15_apex(date: str):
-    return read("over15_apex", date, O15_APEX_DEFAULTS, "o15")
+    return _with_intelligent_pass(
+        "over15", read("over15_apex", date, O15_APEX_DEFAULTS, "o15"), date)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -753,7 +1008,9 @@ def get_corners_catalyst(date: str):
 
 @app.get("/api/corners/aggregator/{date}", tags=["Corners"])
 def get_corners_aggregator(date: str):
-    return read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners")
+    return _with_intelligent_pass(
+        "corners_aggregator",
+        read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners"), date)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -766,8 +1023,15 @@ def get_draw(date: str):
     parity_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     amateurs_raw = raw[2] if isinstance(raw, list) and len(raw) > 2 else []
     return {
-        "draws": _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "win", date),
-        "parity_list": ensure_defaults(parity_raw, DRAW_DEFAULTS),
+        "draws": _with_intelligent_pass(
+            "draw",
+            _settled(ensure_defaults(draws_raw, DRAW_DEFAULTS), "draw", date),
+            date),
+        # HIGH PARITY LIST: expected close match. Settlement is the High-Parity
+        # rule (|home - away| <= 2, user-confirmed) — a DIFFERENT condition from
+        # the conventional Draw branch above (home_goals == away_goals), so
+        # these rows are graded with market key "parity", never "draw".
+        "parity_list": _settled(ensure_defaults(parity_raw, DRAW_DEFAULTS), "parity", date),
         "amateurs_list": ensure_defaults(amateurs_raw, DRAW_DEFAULTS),
     }
 
@@ -778,8 +1042,17 @@ def get_unders(date: str):
     u25_raw = raw[0] if isinstance(raw, list) and len(raw) > 0 else []
     u35_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     return {
-        "u25": _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "o25", date),
-        "u35": ensure_defaults(u35_raw, UNDERS_DEFAULTS),
+        "u25": _with_intelligent_pass(
+            "unders_u25",
+            _settled(ensure_defaults(u25_raw, UNDERS_DEFAULTS), "u25", date),
+            date),
+        # u35 was the only list in this composite payload never routed
+        # through _settled(): grade_row already holds the correct branch
+        # (total goals <= 3 -> WON, >= 4 -> LOST) and "u35" is already in
+        # SUPPORTED_SETTLEMENT_MARKETS, so Verify stayed blank purely
+        # because settlement was never invoked for this head. u25 above is
+        # unchanged.
+        "u35": _settled(ensure_defaults(u35_raw, UNDERS_DEFAULTS), "u35", date),
     }
 
 
@@ -793,14 +1066,18 @@ def get_sot(date: str):
 
 @app.get("/api/fhvi/{date}", tags=["Specials"])
 def get_fhvi(date: str):
-    return read("fhvi", date, FHVI_DEFAULTS, "shvi")
+    # "fhvi" (not "shvi") — FHVI is FIRST-half goals. The old "shvi" key
+    # graded it with the second-half branch: wrong half of the match.
+    return _with_intelligent_pass(
+        "fhvi", read("fhvi", date, FHVI_DEFAULTS, "fhvi"), date)
 
 
 @app.get("/api/shvi/{date}", tags=["Specials"])
 def get_shvi(date: str):
     # Strictly keyed on (shvi, date) — this is the fix for the old
     # "shows real data but wrong date" bug. No undated fallback exists here.
-    return read("shvi", date, SHVI_DEFAULTS, "shvi")
+    return _with_intelligent_pass(
+        "shvi", read("shvi", date, SHVI_DEFAULTS, "shvi"), date)
 
 
 @app.get("/api/sh-master/{date}", tags=["Specials"])
@@ -830,21 +1107,77 @@ def _read_json(path: str, default=None):
         return default
 
 
+def _fixture_name_index() -> dict:
+    """P0-5: disk-only {fixture_id: "Team A vs Team B"} resolver.
+
+    `incoming_predictions.json` is keyed by fixture id and its values are pick
+    lists, so the feed itself carries no team names — the route used to fill
+    `fixture` with the id, which the Incoming page rendered next to the
+    `fixture_id` column as two identical numbers.
+
+    Every id the incoming feed can contain is ALREADY present locally in the
+    in-play cache (canonical "Home vs Away" name), the danger audit and the
+    aggregator report (both carry a `fixture` name field), so the name is
+    resolved at read time with zero extra SportMonks calls and without
+    touching any engine, file or file schema.
+    """
+    index = {}
+
+    # 1. In-play cache — highest priority: `name` is the canonical fixture name.
+    live = _read_json(os.path.join(DATA_DIR, "live_inplay_cache.json"), {})
+    live_rows = live.get("data") if isinstance(live, dict) else None
+    for fx in live_rows or []:
+        if not isinstance(fx, dict):
+            continue
+        fid, name = fx.get("id"), fx.get("name")
+        if fid is not None and name:
+            index.setdefault(str(fid), str(name))
+
+    # 2. Danger audit + 3. aggregator report — both carry `fixture_id`+`fixture`.
+    for fname in ("danger_audit.json", "aggregator_report.json"):
+        raw = _read_json(os.path.join(DATA_DIR, fname), [])
+        if isinstance(raw, dict):
+            raw = list(raw.values())
+        for row in raw if isinstance(raw, list) else []:
+            if not isinstance(row, dict):
+                continue
+            fid, name = row.get("fixture_id"), row.get("fixture")
+            if fid is not None and name:
+                index.setdefault(str(fid), str(name))
+
+    return index
+
+
 def _incoming_rows_from_disk():
     raw = _read_json(os.path.join(DATA_DIR, "incoming_predictions.json"), {})
     if isinstance(raw, list):
         return raw
     if not isinstance(raw, dict):
         return []
+    names = _fixture_name_index()
     rows = []
     for fixture_id, value in raw.items():
         if isinstance(value, list):
-            rows.append({"fixture_id": str(fixture_id), "fixture": str(fixture_id), "picks": value})
+            # Resolve the real name; fall back to the id when nothing local
+            # knows this fixture (never invents a name).
+            fid = str(fixture_id)
+            rows.append({
+                "fixture_id": fid,
+                "fixture": names.get(fid) or fid,
+                "picks": value,
+            })
         elif isinstance(value, dict):
             picks = value.get("picks", [])
+            fid = str(value.get("fixture_id", fixture_id))
+            stored = value.get("fixture")
+            # Priority: local name index -> a stored name that is not just a
+            # copy of the id -> the id itself.
+            resolved = names.get(fid)
+            if not resolved and stored and str(stored) != fid:
+                resolved = str(stored)
             rows.append({
-                "fixture_id": str(value.get("fixture_id", fixture_id)),
-                "fixture": str(value.get("fixture", fixture_id)),
+                "fixture_id": fid,
+                "fixture": resolved or fid,
                 "picks": picks if isinstance(picks, list) else [],
             })
     return rows
@@ -860,28 +1193,179 @@ def get_live_prematch():
 def get_live_validation():
     alerts = _read_json(os.path.join(DATA_DIR, "validated_picks.json"), {})
     state = _read_json(os.path.join(DATA_DIR, "validation_state.json"), {})
+    board = _read_json(os.path.join(DATA_DIR, "validation_board.json"), {})
     alert_list = list(alerts.values()) if isinstance(alerts, dict) else alerts
+    if not isinstance(alert_list, list):
+        alert_list = []
+    # The frontend LiveValidationBoard expects `total_live`, `cycle` and a real
+    # `matches` list. Those previously defaulted to hardcoded empties because
+    # the stage-2 console board was printed but never persisted; it is now
+    # written to validation_board.json by run_live_validator_once().
     return {
-        "cycle": 1,
-        "total_tracked": len(state) if isinstance(state, (list, dict)) else 0,
-        "alerts": alert_list if isinstance(alert_list, list) else [],
-        "matches": [],
+        "cycle": board.get("cycle", 1) if isinstance(board, dict) else 1,
+        "total_live": board.get("total_live", 0) if isinstance(board, dict) else 0,
+        "total_tracked": (
+            board.get("total_tracked")
+            if isinstance(board, dict) and board.get("total_tracked") is not None
+            else (len(state) if isinstance(state, (list, dict)) else 0)
+        ),
+        "alerts": alert_list,
+        "matches": board.get("matches", []) if isinstance(board, dict) else [],
     }
+
+
+def _live_index() -> dict:
+    """
+    Build a {fixture_id: {score, minute, state, is_finished}} index for the
+    three live read endpoints so each row can carry additive live context.
+
+    Sources (P0-4), all local — no new SportMonks calls:
+      1. get_live_scores_cached()  → the shared 2-minute in-play disk cache
+        (data/live_inplay_cache.json); fresh entries overwrite the archive.
+      2. extract_match_data()      → the existing settlement standardizer, so
+        score/state/minute come out in exactly the shape settlement already
+        uses everywhere else.
+      3. load_finished_archive(_today()) → keeps a finished fixture reported
+        after it leaves the transient in-play feed (FT rows).
+
+    Minute follows the LIVE_SCANNER stage-6 extract_minute() pattern: time →
+    state → periods → events → kickoff-elapsed fallback (HT → 45',
+    second-half → +45).
+    """
+    idx: dict = {}
+    # Finished layer first (lower priority): a fixture that has already ended
+    # is reported from the archive even when it is no longer in the live feed.
+    try:
+        for fid, md in (load_finished_archive(_today()) or {}).items():
+            md = md if isinstance(md, dict) else {}
+            idx[str(fid)] = {
+                "score": md.get("ft_score") or "0-0",
+                "minute": int(md.get("minute", 0) or 0),
+                "state": "FT" if md.get("is_finished") else "",
+                "is_finished": bool(md.get("is_finished")),
+            }
+    except Exception:
+        pass
+    try:
+        live_rows = get_live_scores_cached() or []
+    except Exception:
+        live_rows = []
+    for fx in live_rows:
+        if not isinstance(fx, dict):
+            continue
+        fid = str(fx.get("id") or "")
+        if not fid:
+            continue
+        try:
+            md = extract_match_data(fx)
+        except Exception:
+            continue
+
+        # ---- minute (existing local _live_minute approach: time.minute →
+        # state.minute → periods[].minutes, with the canonical half mapping
+        # HT → 45 and second-half → +45, then the kickoff-elapsed fallback) ---
+        st_obj = fx.get("state") if isinstance(fx.get("state"), dict) else {}
+        sd_up = str(st_obj.get("state") or st_obj.get("short_name") or "").upper()
+        periods = fx.get("periods") if isinstance(fx.get("periods"), list) else []
+        active = next((p for p in periods if isinstance(p, dict) and p.get("ticking")), None)
+        found = [0]
+        if fx.get("time") and isinstance(fx.get("time"), dict):
+            found.append(int(fx["time"].get("minute", 0) or 0))
+        found.append(int(st_obj.get("minute", 0) or 0))
+        for p in periods:
+            if not isinstance(p, dict):
+                continue
+            m = (p.get("time", {}).get("minute") if isinstance(p.get("time"), dict) else None) \
+                or p.get("minute") or p.get("length")
+            if m:
+                found.append(int(m))
+        if fx.get("events"):
+            emins = [int(e.get("minute", 0)) for e in fx["events"] if e.get("minute")]
+            if emins:
+                found.append(max(emins))
+        if fx.get("starting_at_timestamp"):
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            elapsed = (now_ts - int(fx["starting_at_timestamp"])) // 60
+            if 0 < elapsed <= 50:
+                found.append(elapsed)
+            elif 60 < elapsed <= 110:
+                found.append(elapsed - 15)
+            elif elapsed > 110:
+                found.append(90)
+        if sd_up == "HT":
+            minute = 45  # canonical half-time minute
+        elif active is not None:
+            cf = int(active.get("counts_from", 0) or 0)
+            if "2ND" in str(active.get("description", "")).upper() and cf < 45:
+                cf = 45  # the second half always counts from minute 45
+            minute = cf + int(active.get("minutes", 0) or 0)
+        else:
+            minute = max(found) if found else 0
+
+        entry = {
+            "score": md.get("ft_score") or "0-0",
+            "minute": minute,
+            "state": (fx.get("state") or {}).get("state", "") if isinstance(fx.get("state"), dict) else "",
+            "is_finished": bool(md.get("is_finished")),
+        }
+        idx[fid] = entry  # fresh live rows overwrite the finished layer
+    return idx
+
+
+_LIVE_INDEX_CACHE = {"sig": None, "idx": {}}
+
+
+def _live_index_cached() -> dict:
+    """Read-time memo for _live_index(): one rebuild per cache-file generation
+    instead of once per row-serving request. The signature is the in-play
+    cache file's (mtime_ns, size) — identical to settlement's archive-cache
+    invalidation. Falls back to rebuilding when the stat fails (missing file,
+    unreadable dir) so a changed feed is never served stale."""
+    raw = os.path.join(DATA_DIR, "live_inplay_cache.json")
+    try:
+        st = os.stat(raw)
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None
+    if _LIVE_INDEX_CACHE["sig"] != sig or not _LIVE_INDEX_CACHE["idx"]:
+        try:
+            _LIVE_INDEX_CACHE["idx"] = _live_index()
+        except Exception:
+            _LIVE_INDEX_CACHE["idx"] = {}
+        _LIVE_INDEX_CACHE["sig"] = sig
+    return _LIVE_INDEX_CACHE["idx"]
 
 
 @app.get("/api/live/incoming", tags=["Live"])
 def get_live_incoming():
-    return _incoming_rows_from_disk()
+    rows = _incoming_rows_from_disk()
+    live_idx = _live_index_cached()
+    for r in rows:
+        if isinstance(r, dict):
+            r["live"] = live_idx.get(str(r.get("fixture_id") or ""))
+    return rows
 
 
 @app.get("/api/live/danger", tags=["Live"])
 def get_live_danger():
-    return _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
+    rows = _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
+    if isinstance(rows, list):
+        live_idx = _live_index_cached()
+        for r in rows:
+            if isinstance(r, dict):
+                r["live"] = live_idx.get(str(r.get("fixture_id") or ""))
+    return rows
 
 
 @app.get("/api/live/aggregator", tags=["Live"])
 def get_live_aggregator():
-    return _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
+    rows = _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
+    if isinstance(rows, list):
+        live_idx = _live_index_cached()
+        for r in rows:
+            if isinstance(r, dict):
+                r["live"] = live_idx.get(str(r.get("fixture_id") or ""))
+    return rows
 
 
 @app.get("/api/live/orchestrator", tags=["Live"])
@@ -928,22 +1412,41 @@ _O25_RISK_LEVELS = {"banker", "balanced", "aggressive"}
 
 
 @app.get("/api/filter/gg/weekly", tags=["Filters"])
-def filter_gg_weekly(mode: str = "public"):
+def filter_gg_weekly(
+    mode: str = "public",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    anchor_date: Optional[str] = None,
+):
+    """
+    7-day rolling GG cross-verification.
+
+    Range supplied (start_date + end_date) → read every date in the range via
+    read_range() and concatenate, giving a true week of picks. Dates the
+    pipeline hasn't run yet contribute 0 rows.
+
+    No range supplied → the rolling window: the last 7 dates ending today, via
+    get_gg_cross_verify(). Both branches are date-scoped reads; neither touches
+    the dateless "__latest" key (nothing writes it for filter_gg any more).
+    """
+    if start_date and end_date:
+        dates = _date_range(start_date, end_date)
+        return read_range(lambda d: "filter_gg", dates, GG_CROSS_DEFAULTS, "gg")
     return get_gg_cross_verify()
 
 
 @app.get("/api/filter/gg/{date}", tags=["Filters"])
 def filter_gg_single(date: str, mode: str = "public"):
-    # FIX: main.py saves filter_gg under BOTH the dateless "__latest" key
-    # AND a per-date snapshot (store.save("filter_gg", d, ...) in main.py).
-    # This route previously always read "__latest" regardless of the date
-    # requested, so picking a different date silently returned today's data.
-    # Now: prefer the exact date's snapshot; fall back to "__latest" only if
-    # that specific date was never snapshotted (e.g. pipeline hasn't run yet).
-    data, generated_at = store.load("filter_gg", date, default=None)
-    if data is None:
-        data, generated_at = store.load("filter_gg", None, default=[])
-    return _settled(ensure_defaults(data, GG_CROSS_DEFAULTS), "gg", date)
+    # GG is a dated snapshot exactly like WIN / O2.5 (main.py calls
+    # store.save("filter_gg", d, ...) for the run's date), so this reads ONLY the
+    # requested date's snapshot, through the same shared read() helper those two
+    # markets use. The old dateless "__latest" fallback is gone: nothing writes
+    # that key for filter_gg any more, so falling back to it served one frozen
+    # cross-day payload for every date the pipeline had not reached yet — a page
+    # that looks populated while showing another date's picks. A date with no
+    # snapshot now honestly returns [] (identical to filter_win_single /
+    # filter_over25_single).
+    return read("filter_gg", date, GG_CROSS_DEFAULTS, "gg")
 
 
 @app.get("/api/filter/win/weekly", tags=["Filters"])
@@ -964,13 +1467,15 @@ def filter_win_weekly(
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: f"filter_win__{risk}", dates, WIN_FORECAST_DEFAULTS, "win")
+    return read_range(lambda d: f"filter_win__{risk}", dates, WIN_FORECAST_DEFAULTS, "win",
+                      identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/win/{date}", tags=["Filters"])
 def filter_win_single(date: str, mode: str = "public", risk_level: str = "balanced"):
     risk = risk_level if risk_level in _WIN_RISK_LEVELS else "balanced"
-    return read(f"filter_win__{risk}", date, WIN_FORECAST_DEFAULTS, "win")
+    return read(f"filter_win__{risk}", date, WIN_FORECAST_DEFAULTS, "win",
+                identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/over25/weekly", tags=["Filters"])
@@ -987,13 +1492,15 @@ def filter_over25_weekly(
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: f"filter_over25__{risk}", dates, O25_FORECAST_DEFAULTS, "o25")
+    return read_range(lambda d: f"filter_over25__{risk}", dates, O25_FORECAST_DEFAULTS, "o25",
+                      identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/over25/{date}", tags=["Filters"])
 def filter_over25_single(date: str, mode: str = "public", risk_level: str = "balanced"):
     risk = risk_level if risk_level in _O25_RISK_LEVELS else "balanced"
-    return read(f"filter_over25__{risk}", date, O25_FORECAST_DEFAULTS, "o25")
+    return read(f"filter_over25__{risk}", date, O25_FORECAST_DEFAULTS, "o25",
+                identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/win/precision/weekly", tags=["Filters"])
@@ -1006,9 +1513,26 @@ def filter_win_precision_weekly(
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: "filter_win__safe", dates, WIN_FORECAST_DEFAULTS, "win")
+    return read_range(lambda d: "filter_win__safe", dates, WIN_FORECAST_DEFAULTS, "win",
+                      identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
 
 
 @app.get("/api/filter/win/precision/{date}", tags=["Filters"])
 def filter_win_precision_single(date: str):
-    return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win")
+    return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win",
+                identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TEAM INTELLIGENCE PAGE (display/audit only — pure reuse of the same
+# per-date cache snapshots the market pages already read; ZERO new API calls)
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/team/{team_name}/intelligence/{date}", tags=["Foundation"])
+def get_team_intelligence(team_name: str, date: str):
+    if intelligent_pass is None:
+        raise HTTPException(status_code=503, detail="Intelligent Pass evaluator unavailable")
+    try:
+        return intelligent_pass.get_team_intelligence(team_name, date)
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Team intelligence evaluation failed")
