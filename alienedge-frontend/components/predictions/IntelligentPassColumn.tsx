@@ -1,6 +1,8 @@
 "use client";
 
+import { Suspense } from "react";
 import Link from "next/link";
+import { usePathname, useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
 import type { PredictionColumn } from "@/components/predictions";
 
@@ -24,6 +26,8 @@ import type { PredictionColumn } from "@/components/predictions";
  */
 
 export interface IntelligentPassData {
+  /** The market/pick this audit belongs to (the report's primary identity). */
+  market?: string;
   passed: number;
   total: number;
   checks: Array<{
@@ -61,10 +65,12 @@ function IntelligentPassCell({
   data,
   team,
   date,
+  market,
 }: {
   data?: IntelligentPassData | null;
   team?: string;
   date?: string;
+  market?: string;
 }) {
   if (!data || data.total === 0) {
     return <span className="font-mono text-2xs text-text-dim">–</span>;
@@ -76,15 +82,59 @@ function IntelligentPassCell({
         ? "border-amber-500/40 text-amber-300"
         : "border-rose-500/40 text-rose-300";
   return (
+    <Suspense
+      fallback={
+        <span className="font-mono text-[11px] font-black text-text-dim">
+          {data.passed}/{data.total}
+        </span>
+      }
+    >
+      <ReportLink
+        data={data}
+        team={team}
+        date={date}
+        market={market}
+        className={cn(cls)}
+      />
+    </Suspense>
+  );
+}
+
+/**
+ * THE PICK IS THE PRIMARY OBJECT: every click carries the MARKET of the
+ * table it came from (?market=…) plus the origin page (?from=…) so the
+ * report opens ONLY that market's checks and Back returns to the source.
+ */
+function ReportLink({
+  data,
+  team,
+  date,
+  market,
+  className,
+}: {
+  data: IntelligentPassData;
+  team?: string;
+  date?: string;
+  market?: string;
+  className?: string;
+}) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const from = searchParams.toString();
+  const marketKey = market || data.market;
+  const href = `/team/${encodeURIComponent(team || "")}?date=${date || ""}${
+    marketKey ? `&market=${encodeURIComponent(marketKey)}` : ""
+  }${from ? `&from=${encodeURIComponent(`/${pathname}?${from}`)}` : ""}`;
+  return (
     <Link
-      href={`/team/${encodeURIComponent(team || "")}?date=${date || ""}`}
+      href={href}
       prefetch
       className={cn(
         "inline-flex items-center justify-center rounded-md border bg-[#0c1526]/90 px-1.5 py-0.5 font-mono text-[11px] font-black tabular-nums shadow-[0_0_8px_rgba(16,185,129,0.12)] transition-all hover:border-cyan-400 hover:text-white active:scale-95",
-        cls
+        className
       )}
-      title={`${data.passed}/${data.total} intelligence checks passed\n${tooltipText(data)}\n\nTap to open Team Intelligence`}
-      aria-label={`Intelligent pass count ${data.passed} of ${data.total}. Open team intelligence.`}
+      title={`${data.passed}/${data.total} intelligence checks passed\n${tooltipText(data)}\n\nTap to open this pick's intelligence report`}
+      aria-label={`Intelligent pass count ${data.passed} of ${data.total}. Open this pick's intelligence report.`}
     >
       {data.passed}/{data.total}
     </Link>
@@ -103,6 +153,10 @@ export function createIntelligentPassColumn<T>(
     getTeam?: (r: T) => string | undefined;
     /** Fixture label fallback for rows that carry no team identity. */
     getLabel?: (r: T) => string | undefined;
+    /** The market/pick this table represents — REQUIRED for a correct
+     * single-market report (e.g. "win", "over25", "gg"). Falls back to the
+     * row audit's own `market` tag when omitted. */
+    market?: string;
     date: string;
     className?: string;
   } = { date: "" }
@@ -131,6 +185,7 @@ export function createIntelligentPassColumn<T>(
           .intelligent_pass_count}
         team={teamFromRow(r)}
         date={opts.date}
+        market={opts.market}
       />
     ),
   };

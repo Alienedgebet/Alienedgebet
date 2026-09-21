@@ -13,6 +13,7 @@ import {
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
@@ -317,6 +318,11 @@ export default function CornersPage() {
         date,
         (r) => r.Fixture
       ),
+      createIntelligentPassColumn<CornerAggregatorPick>({
+        market: "corners",
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
       ...aggregatorColumns,
     ],
     [dnaV2, date]

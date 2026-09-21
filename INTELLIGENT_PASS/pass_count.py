@@ -168,6 +168,45 @@ DISPLAY_ONLY_MARKETS = frozenset({
     "corners_psychology", "corners_catalyst", "sot", "sh_gg_winner",
     "underdog_apex_display", "cross_verify",
 })
+
+# ── MARKET-KEYED REPORT ARCHITECTURE ────────────────────────────────────────
+# The PICK is the primary object: the Team Intelligence page is a
+# MARKET-SPECIFIC audit (team+date+market = the report identity), never a
+# generic all-markets dashboard. Canonical keys below are what the report
+# URL/API accept; aliases map them onto the evaluator's internal engine keys
+# so a click from ANY table opens the report of the market that was clicked.
+TEAM_INTELLIGENCE_MARKETS = {
+    # canonical report key -> label shown by the report page
+    "win": "Win",
+    "win_psychology": "Win Psychology",
+    "gg": "GG / BTTS Supreme",
+    "gg_precision": "GG Precision",
+    "gg_o15": "GG / Over 1.5 Composite",
+    "over25": "Over 2.5",
+    "over15": "Over 1.5",
+    "corners": "Corners",
+    "draw": "Draw",
+    "unders": "Under 2.5",
+    "u2s": "Underdog-to-Score",
+    "fhvi": "FHVI",
+    "shvi": "SHVI",
+}
+_MARKET_EVALUATOR_ALIASES = {
+    # canonical report key -> the evaluator engine key(s) that market audits with
+    "win": ("win_apex", "win_forecast"),
+    "win_psychology": ("win_psychology",),
+    "gg": ("gg_supreme",),
+    "gg_precision": ("gg_precision",),
+    "gg_o15": ("gg_o15",),
+    "over25": ("over25_apex", "over25_forecast"),
+    "over15": ("over15", "over15_stage3", "over15_apex"),
+    "corners": ("corners_aggregator",),
+    "draw": ("draw",),
+    "unders": ("unders_u25",),
+    "u2s": ("u2s",),
+    "fhvi": ("fhvi",),
+    "shvi": ("shvi",),
+}
 # ══════════════════════════════════════════════════════════════════════════════
 # LOW-LEVEL HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1203,6 +1242,9 @@ def evaluate_market(market_key, rows, date):
         checks = _checks_for_market(market_key, snap, row, fid, fxn)
         applicable = [c for c in checks if c["result"] != NOT_AVAILABLE]
         row["intelligent_pass_count"] = {
+            # The market key travels with the audit so the drill-down can
+            # open THIS pick's report (pick = the primary object).
+            "market": market_key,
             "passed": sum(1 for c in applicable if c["result"] == PASS),
             "total": len(applicable),
             "checks": checks,
@@ -1352,11 +1394,86 @@ def _team_context(snap, fid_s, fxn, team_name):
     return ctx
 
 
-def get_team_intelligence(team_name, date):
-    """Read-only composition for the Team Intelligence page: the team's
-    intelligence across every market that already exists on disk for the
-    date. ZERO network calls — pure local file reads of the same snapshots
-    the fixture pages use."""
+def _get_market_intelligence(team_name, date, market):
+    """SINGLE-MARKET report payload — the pick is the primary object.
+
+    Identity: fixture/date + team + market. Only the requested market's
+    evaluator branch runs, so no other market's checks can appear here (the
+    payload carries `score` + `checks`, never a `markets` map). Reads the
+    SAME on-disk snapshots as the market pages — zero new data acquisition,
+    zero fabricated values (missing intelligence stays NOT_AVAILABLE and
+    never grows the denominator)."""
+    snap = _snapshot(date)
+
+    # Locate the team's fixture via the WIN side rows (win_raw/win_forecast
+    # carry fixture_id + both team names, 2 rows per fixture) — the same
+    # fixture registry the all-markets view uses.
+    fixture_id, side_rows_hit, fxn = "", [], ""
+    for fid, side_rows in sorted((snap.get("win_by_id") or {}).items()):
+        hit = next((r for r in side_rows
+                    if _norm(r.get("team_name") or "") == _norm(team_name or "")), None)
+        if hit:
+            fixture_id, side_rows_hit, fxn = fid, side_rows, _fixture_label(hit)
+            break
+    base = {"team": team_name, "date": date, "market": market,
+            "market_label": TEAM_INTELLIGENCE_MARKETS[market]}
+    if not fxn:
+        return dict(base, fixture="", fixture_id="", fixture_found=False,
+                    opponent="", prediction=None, score=None, checks=[])
+
+    fid_s = str(fixture_id)
+    opp_rows = [r for r in side_rows_hit
+                if _norm(r.get("team_name") or "") != _norm(team_name)]
+    opp = opp_rows[0].get("team_name") if opp_rows else ""
+
+    # THE PAGE/MARKET IS AUTHORITATIVE: run ONLY this market's evaluator
+    # branch, seeded with the same per-fixture row shape the market tables use.
+    engine_key = _MARKET_EVALUATOR_ALIASES[market][0]
+    if market == "win":
+        row = {"Target": team_name}          # the pick: {team} to win
+    elif market == "u2s":
+        row = {"fixture_id": fid_s, "fixture": fxn}
+    elif market == "draw":
+        row = _resolve(snap, "draw", fid_s, fxn) or {}
+    elif market == "unders":
+        row = _resolve(snap, "un", fid_s, fxn) or {}
+    elif market == "fhvi":
+        row = _resolve(snap, "fhvi", fid_s, fxn) or {}
+    elif market == "shvi":
+        row = _resolve(snap, "shvi", fid_s, fxn) or {}
+    else:
+        # gg / gg_precision / gg_o15 / over25 / over15 / win_psychology:
+        # their branches join the fixture's own engine rows internally.
+        row = {}
+    checks = _checks_for_market(engine_key, snap, row, fid_s, fxn)
+    applicable = [c for c in checks if c["result"] != NOT_AVAILABLE]
+    score = {
+        "passed": sum(1 for c in applicable if c["result"] == PASS),
+        "total": len(applicable),
+    }
+    return dict(base, fixture=fxn, fixture_id=fixture_id, fixture_found=True,
+                opponent=opp,
+                prediction=team_name if market == "win" else None,
+                score=score, checks=checks)
+
+
+def get_team_intelligence(team_name, date, market=None):
+    """Read-only composition for the Team Intelligence page.
+
+    market=None → legacy all-markets payload (unchanged behaviour).
+    market=<canonical key> → SINGLE-MARKET report (the requested
+    architecture): fixture/date + team + market identity, only that market's
+    checks. An unknown market raises ValueError (API maps it to 400).
+    ZERO network calls — pure local file reads of the same snapshots the
+    fixture pages use."""
+    # MARKET-SPECIFIC REPORT: the pick is the primary object. Only the
+    # requested market's evaluator runs — no cross-market composition.
+    if market is not None:
+        if market not in TEAM_INTELLIGENCE_MARKETS:
+            raise ValueError(
+                "unknown market %r — expected one of %s"
+                % (market, sorted(TEAM_INTELLIGENCE_MARKETS)))
+        return _get_market_intelligence(team_name, date, market)
     snap = _snapshot(date)
 
     # Locate the team's fixture via the WIN side rows (win_raw/win_forecast

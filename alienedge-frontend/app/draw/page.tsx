@@ -7,6 +7,7 @@ import { useSelectedDate } from "@/lib/date-context";
 import { useApi } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
@@ -65,6 +66,12 @@ export default function DrawPage() {
     () => [
       createVerifyColumn<DrawPick>(),
       createDnaColumn<DrawPick>(dnaV2?.market_factors, "draw", date),
+      createIntelligentPassColumn<DrawPick>({
+        market: "draw",
+        getTeam: (r) => r.home_team,
+        getLabel: (r) => r.fixture,
+        date,
+      }),
       ...drawColumns,
     ],
     [dnaV2, date]

@@ -1504,12 +1504,71 @@ export const TEAM_INTELLIGENCE_MARKET_ORDER = [
   "u2s",
   "fhvi",
   "shvi",
+  "gg_o15",
 ] as const;
 
+/** Canonical report markets — mirrors INTELLIGENT_PASS/pass_count.py
+ * TEAM_INTELLIGENCE_MARKETS (the pick/market is the primary object). */
+export const TEAM_INTELLIGENCE_MARKET_LABELS: Record<string, string> = {
+  win: "Win",
+  win_psychology: "Win Psychology",
+  gg: "GG / BTTS Supreme",
+  gg_precision: "GG Precision",
+  gg_o15: "GG / Over 1.5 Composite",
+  over25: "Over 2.5",
+  over15: "Over 1.5",
+  corners: "Corners",
+  draw: "Draw",
+  unders: "Under 2.5",
+  u2s: "Underdog-to-Score",
+  fhvi: "FHVI",
+  shvi: "SHVI",
+};
+
+/** Market → the sidebar page that market's table lives on. Used ONLY as the
+ * Back-navigation fallback when the origin page was not carried in the URL. */
+export const MARKET_SOURCE_PAGE: Record<string, string> = {
+  win: "/win",
+  win_psychology: "/win",
+  gg: "/gg",
+  gg_precision: "/gg",
+  gg_o15: "/gg",
+  over25: "/over25",
+  over15: "/over15",
+  corners: "/corners",
+  draw: "/draw",
+  unders: "/unders",
+  u2s: "/underdog",
+  fhvi: "/fhvi",
+  shvi: "/shvi",
+};
+
+/** SINGLE-MARKET report payload (team+date+market identity). Carries
+ * `score`+`checks` for THE requested pick only — never a markets map. */
+export interface MarketIntelligenceReport {
+  team: string;
+  date: string;
+  market: string;
+  market_label: string;
+  fixture: string;
+  fixture_id: string | number;
+  opponent: string;
+  fixture_found: boolean;
+  /** The audited pick (e.g. "Toluca" for a WIN pick); null for fixture-level markets. */
+  prediction: string | null;
+  score: { passed: number; total: number } | null;
+  checks: IntelligenceCheck[];
+}
+
 export const teamIntelligenceApi = {
-  get: (teamName: string, date: string): Promise<AxiosResponse<TeamIntelligencePage>> =>
+  get: (
+    teamName: string,
+    date: string,
+    market?: string
+  ): Promise<AxiosResponse<TeamIntelligencePage | MarketIntelligenceReport>> =>
     api.get(
-      `/api/team/${encodeURIComponent(teamName)}/intelligence/${encodeURIComponent(date)}`
+      `/api/team/${encodeURIComponent(teamName)}/intelligence/${encodeURIComponent(date)}`,
+      market ? { params: { market } } : undefined
     ),
 };
 

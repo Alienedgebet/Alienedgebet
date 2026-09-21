@@ -15,6 +15,7 @@ import {
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
@@ -197,6 +198,11 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
     () => [
       createVerifyColumn<Over25ApexPick>(),
       createDnaColumn<Over25ApexPick>(dnaV2?.market_factors, "over25", date),
+      createIntelligentPassColumn<Over25ApexPick>({
+        market: "over25",
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
       ...apexColumns,
     ],
     [dnaV2, date]
@@ -210,7 +216,15 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
 
   // 3. Forecast (Verify -> Rest)
   const forecastColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<Over25ForecastPick>(), ...forecastColumns],
+    () => [
+      createVerifyColumn<Over25ForecastPick>(),
+      createIntelligentPassColumn<Over25ForecastPick>({
+        market: "over25",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...forecastColumns,
+    ],
     []
   );
 

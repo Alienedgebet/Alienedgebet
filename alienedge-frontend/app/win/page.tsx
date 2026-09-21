@@ -510,6 +510,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
       createVerifyColumn<WinApexPick>(),
       createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date),
       createIntelligentPassColumn<WinApexPick>({
+        market: "win",
         getTeam: (r) => r.Target,
         getLabel: (r) => r.Fixture,
         date,
@@ -524,6 +525,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     () => [
       createVerifyColumn<WinPsychologyPick>(),
       createIntelligentPassColumn<WinPsychologyPick>({
+        market: "win_psychology",
         getLabel: (r) => r.Fixture,
         date,
       }),
@@ -537,6 +539,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     () => [
       createVerifyColumn<WinU2SPick>(),
       createIntelligentPassColumn<WinU2SPick>({
+        market: "u2s",
         getTeam: (r) => r.Underdog,
         getLabel: (r) => r.Fixture,
         date,
@@ -551,6 +554,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     () => [
       createVerifyColumn<WinForecastPick>(),
       createIntelligentPassColumn<WinForecastPick>({
+        market: "win",
         getTeam: (r) => r.team_name,
         getLabel: (r) => r.fixture,
         date,
@@ -565,6 +569,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     () => [
       createVerifyColumn<WinRawPick>(),
       createIntelligentPassColumn<WinRawPick>({
+        market: "win",
         getTeam: (r) => r.team_name,
         getLabel: (r) => r.fixture,
         date,

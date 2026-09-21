@@ -35,7 +35,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -1528,11 +1528,23 @@ def filter_win_precision_single(date: str):
 # per-date cache snapshots the market pages already read; ZERO new API calls)
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/team/{team_name}/intelligence/{date}", tags=["Foundation"])
-def get_team_intelligence(team_name: str, date: str):
+def get_team_intelligence(
+    team_name: str,
+    date: str,
+    market: Optional[str] = Query(
+        None,
+        description="Optional market key — when present the report is a "
+        "SINGLE-MARKET audit of that pick (e.g. win, over25, gg, u2s, "
+        "corners, draw, unders, over15, fhvi, shvi). Omitted → the legacy "
+        "all-markets composition.",
+    ),
+):
     if intelligent_pass is None:
         raise HTTPException(status_code=503, detail="Intelligent Pass evaluator unavailable")
     try:
-        return intelligent_pass.get_team_intelligence(team_name, date)
+        return intelligent_pass.get_team_intelligence(team_name, date, market=market)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Team intelligence evaluation failed")

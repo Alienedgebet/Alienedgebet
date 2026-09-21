@@ -1,13 +1,16 @@
 "use client";
 
-import { useMemo } from "react";
+import { Suspense, useMemo } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { BrainCircuit, ArrowLeft } from "lucide-react";
 import {
   teamIntelligenceApi,
+  TEAM_INTELLIGENCE_MARKET_LABELS,
   TEAM_INTELLIGENCE_MARKET_ORDER,
+  MARKET_SOURCE_PAGE,
   type TeamIntelligencePage,
+  type MarketIntelligenceReport,
   type MarketIntelligence,
 } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
@@ -16,26 +19,14 @@ import { ErrorState } from "@/components/predictions/ErrorState";
 
 /**
  * TEAM INTELLIGENCE PAGE — the drill-down behind every Intelligent Pass
- * Count cell. Display/audit only: it renders the per-check PASS/FAIL/
- * NOT_AVAILABLE detail the evaluator already computed from the SAME cache
- * snapshots the market pages read (zero new backend calls). Nothing on this
- * page feeds back into predictions, settlement or Verify.
+ * Count cell. THE PICK/MARKET IS THE PRIMARY OBJECT: the URL always carries
+ * ?market=<key> from the table the user clicked, and this page renders ONLY
+ * that market's checks (team + fixture/date + market = the report identity).
+ * A URL without ?market= (legacy/direct) falls back to the all-markets view.
+ * Display/audit only: everything comes from the SAME cache snapshots the
+ * market pages read (zero new backend calls). Nothing here feeds back into
+ * predictions, settlement or Verify.
  */
-
-const MARKET_LABELS: Record<string, string> = {
-  win: "Win",
-  win_psychology: "Win Psychology",
-  gg: "GG / BTTS Supreme",
-  gg_precision: "GG Precision",
-  over25: "Over 2.5",
-  over15: "Over 1.5",
-  corners: "Corners",
-  draw: "Draw",
-  unders: "Under 2.5",
-  u2s: "Underdog-to-Score",
-  fhvi: "FHVI",
-  shvi: "SHVI",
-};
 
 function scoreTone(passed: number, total: number): string {
   if (total === 0) return "text-text-dim border-white/10";
@@ -60,92 +51,167 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
-function MarketCard({
+/** One market's checks — used by the single-market report AND the legacy view. */
+function CheckList({ data }: { data: { checks: MarketIntelligence["checks"] } }) {
+  return (
+    <ul className="flex flex-col gap-1.5">
+      {data.checks.map((c) => (
+        <li
+          key={c.name}
+          className="flex items-baseline justify-between gap-3 border-b border-white/5 pb-1.5 last:border-0 last:pb-0"
+        >
+          <span className="text-[11px] text-text-secondary">{c.name}</span>
+          <span className="shrink-0 text-right">
+            <span
+              className={`font-mono text-[11px] font-black ${checkTone(c.result)}`}
+            >
+              {c.result === "NOT_AVAILABLE" ? "N/A" : c.result}
+            </span>
+            {c.result !== "NOT_AVAILABLE" && formatValue(c.value) && (
+              <span className="ml-2 font-mono text-[10px] text-text-muted">
+                {formatValue(c.value)}
+              </span>
+            )}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** THE REPORT CARD — one market, the clicked pick, nothing else. */
+function MarketReportCard({ report }: { report: MarketIntelligenceReport }) {
+  const score = report.score;
+  return (
+    <div className="glass rounded-xl border border-white/10 bg-[#0c1220]/90 p-4 shadow-panel backdrop-blur-md">
+      <div className="mb-1 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-black uppercase tracking-wider text-text-primary">
+            {report.market_label || TEAM_INTELLIGENCE_MARKET_LABELS[report.market] || report.market}
+          </h2>
+          <p className="text-[11px] text-text-secondary">
+            {report.prediction ? `${report.prediction} — ` : ""}
+            Intelligent Pass Count
+          </p>
+        </div>
+        {score && (
+          <span
+            className={`rounded-lg border bg-black/30 px-3 py-1 font-mono text-base font-black tabular-nums ${scoreTone(score.passed, score.total)}`}
+            title={`${score.passed} of ${score.total} applicable intelligence checks passed`}
+          >
+            {score.total === 0 ? "–" : `${score.passed} / ${score.total}`}
+          </span>
+        )}
+      </div>
+      <p className="mb-3 text-[11px] text-text-muted">
+        {report.fixture || "fixture not found"}
+        {report.opponent ? ` · vs ${report.opponent}` : ""} · {report.date}
+      </p>
+      {report.checks.length > 0 ? (
+        <CheckList data={report} />
+      ) : (
+        <p className="text-[11px] text-text-muted">
+          No applicable intelligence checks for this pick on this date.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Legacy all-markets card (only shown for URLs that carry no ?market=). */
+function LegacyMarketCard({
   market,
   data,
 }: {
   market: string;
   data: MarketIntelligence;
 }) {
-  const tone = scoreTone(data.passed, data.total);
   return (
     <div className="glass rounded-xl border border-white/10 bg-[#0c1220]/90 p-4 shadow-panel backdrop-blur-md">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="text-xs font-black uppercase tracking-wider text-text-primary">
-          {MARKET_LABELS[market] ?? market}
+          {TEAM_INTELLIGENCE_MARKET_LABELS[market] ?? market}
         </h3>
         <span
-          className={`rounded-md border bg-black/30 px-2 py-0.5 font-mono text-xs font-black tabular-nums ${tone}`}
+          className={`rounded-md border bg-black/30 px-2 py-0.5 font-mono text-xs font-black tabular-nums ${scoreTone(data.passed, data.total)}`}
         >
           {data.total === 0 ? "–" : `${data.passed}/${data.total}`}
         </span>
       </div>
-      <ul className="flex flex-col gap-1.5">
-        {data.checks.map((c) => (
-          <li
-            key={c.name}
-            className="flex items-baseline justify-between gap-3 border-b border-white/5 pb-1.5 last:border-0 last:pb-0"
-          >
-            <span className="text-[11px] text-text-secondary">{c.name}</span>
-            <span className="shrink-0 text-right">
-              <span
-                className={`font-mono text-[11px] font-black ${checkTone(c.result)}`}
-              >
-                {c.result === "NOT_AVAILABLE" ? "N/A" : c.result}
-              </span>
-              {c.result !== "NOT_AVAILABLE" && formatValue(c.value) && (
-                <span className="ml-2 font-mono text-[10px] text-text-dim">
-                  {formatValue(c.value)}
-                </span>
-              )}
-            </span>
-          </li>
-        ))}
-      </ul>
+      {data.checks.length > 0 ? (
+        <CheckList data={data} />
+      ) : (
+        <p className="text-[11px] text-text-muted">No applicable checks.</p>
+      )}
     </div>
   );
 }
 
-export default function TeamIntelligencePage() {
-  const params = useParams<{ teamName: string }>();
-  const search = useSearchParams();
-  const teamName = decodeURIComponent(String(params?.teamName ?? ""));
-  // The Intelligent Pass cell links carry ?date=…; fall back to the
-  // globally selected date (DateSelector / QuickHistoryStrip).
-  const urlDate = search.get("date");
-  const { date } = useSelectedDate();
-  const effectiveDate = urlDate || date;
+function ReportInner() {
+  const params = useParams();
+  const searchParams = useSearchParams();
+  const { date: selectedDate } = useSelectedDate();
 
-  const { data, loading, error } = useApi<TeamIntelligencePage>(
-    () => teamIntelligenceApi.get(teamName, effectiveDate),
-    [teamName, effectiveDate],
-    { cacheKey: `team-intelligence:${teamName}:${effectiveDate}` }
+  const teamName = decodeURIComponent(
+    Array.isArray(params.teamName) ? params.teamName[0] : params.teamName || ""
+  );
+  const market = searchParams.get("market") || undefined;
+  const from = searchParams.get("from");
+  const today = new Date().toISOString().slice(0, 10);
+  const effectiveDate = searchParams.get("date") || selectedDate || today;
+
+  const { data, loading, error } = useApi<
+    TeamIntelligencePage | MarketIntelligenceReport
+  >(
+    () => teamIntelligenceApi.get(teamName, effectiveDate, market),
+    [teamName, effectiveDate, market],
+    { cacheKey: `team-intelligence:${teamName}:${effectiveDate}:${market || "all"}` }
   );
 
-  const sections = useMemo(() => {
-    if (!data?.fixture_found) return [];
-    const keys = Object.keys(data.markets);
+  // Back ALWAYS returns to the page the click came from; the market→page map
+  // is only the fallback for URLs that arrived without ?from=.
+  const backHref = useMemo(() => {
+    if (from) return from;
+    const page = (market && MARKET_SOURCE_PAGE[market]) || "/dashboard";
+    return effectiveDate ? `${page}?date=${effectiveDate}` : page;
+  }, [from, market, effectiveDate]);
+
+  const isSingle = Boolean(market);
+  const single = isSingle ? (data as MarketIntelligenceReport | undefined) : undefined;
+  const legacy = !isSingle ? (data as TeamIntelligencePage | undefined) : undefined;
+
+  const legacySections = useMemo(() => {
+    if (!legacy?.fixture_found) return [];
+    const keys = Object.keys(legacy.markets);
     const ordered = [
       ...TEAM_INTELLIGENCE_MARKET_ORDER.filter((k) => keys.includes(k)),
       ...keys.filter((k) => !TEAM_INTELLIGENCE_MARKET_ORDER.includes(k as never)),
     ];
     return ordered
-      .map((k) => [k, data.markets[k]] as const)
+      .map((k) => [k, legacy.markets[k]] as const)
       .filter(([, m]) => m && m.checks.length > 0);
-  }, [data]);
+  }, [legacy]);
 
-  const totalPassed = sections.reduce((acc, [, m]) => acc + m.passed, 0);
-  const totalChecks = sections.reduce((acc, [, m]) => acc + m.total, 0);
+  const unknownMarket =
+    isSingle && !(market && TEAM_INTELLIGENCE_MARKET_LABELS[market]);
+
+  const headerFixture = isSingle
+    ? single?.fixture_found
+      ? `${single.fixture}${single.opponent ? ` · vs ${single.opponent}` : ""}`
+      : `No fixture found for this team on ${effectiveDate}`
+    : legacy?.fixture_found
+      ? `${legacy.fixture} · ${effectiveDate} · vs ${legacy.opponent || "—"}`
+      : `No fixture found for this team on ${effectiveDate}`;
 
   return (
     <div className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6">
-      {/* ── 1. HEADER ────────────────────────────────────────────────── */}
+      {/* ── 1. HEADER — team + THE clicked market ─────────────────────── */}
       <div className="glass flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
         <div className="flex items-center gap-3">
           <Link
-            href="/"
+            href={backHref}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 transition-all hover:border-cyan-400 hover:text-white active:scale-95"
-            aria-label="Back to dashboard"
+            aria-label="Back to the originating page"
           >
             <ArrowLeft className="h-4 w-4" />
           </Link>
@@ -154,46 +220,69 @@ export default function TeamIntelligencePage() {
           </div>
           <div>
             <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
-              {teamName} — Team Intelligence
+              {teamName}
+              {isSingle && single?.market_label
+                ? ` — ${single.market_label}`
+                : isSingle && market
+                  ? ` — ${TEAM_INTELLIGENCE_MARKET_LABELS[market] || market}`
+                  : " — Team Intelligence"}
             </h1>
-            <p className="text-[11px] text-text-secondary">
-              {data?.fixture_found
-                ? `${data.fixture} · ${effectiveDate} · vs ${data.opponent || "—"}`
-                : `No fixture found for this team on ${effectiveDate}`}
-            </p>
+            <p className="text-[11px] text-text-secondary">{headerFixture}</p>
           </div>
         </div>
-        {data?.fixture_found && (
+        {isSingle && single?.fixture_found && single.score && (
           <span
-            className={`rounded-lg border bg-black/30 px-3 py-1 font-mono text-sm font-black tabular-nums ${scoreTone(totalPassed, totalChecks)}`}
-            title={`${totalPassed} of ${totalChecks} intelligence checks passed across all markets`}
+            className={`rounded-lg border bg-black/30 px-3 py-1 font-mono text-sm font-black tabular-nums ${scoreTone(single.score.passed, single.score.total)}`}
+            title={`${single.score.passed} of ${single.score.total} applicable checks passed for this pick`}
           >
-            {totalPassed}/{totalChecks}
+            {single.score.passed}/{single.score.total}
           </span>
         )}
       </div>
 
-      {/* ── 2. BODY ──────────────────────────────────────────────────── */}
+      {/* ── 2. BODY ───────────────────────────────────────────────────── */}
       {loading && (
         <div className="py-10 text-center text-xs text-text-muted">
-          Loading team intelligence…
+          Loading intelligence report…
         </div>
       )}
       {!loading && error && (
-        <ErrorState message={`Team intelligence unavailable: ${error}`} />
+        <ErrorState message={`Intelligence report unavailable: ${error}`} />
       )}
-      {!loading && !error && data && !data.fixture_found && (
+      {!loading && !error && unknownMarket && (
+        <ErrorState message={`Unknown market “${market}”.`} />
+      )}
+      {!loading && !error && !unknownMarket && data && !data.fixture_found && (
         <ErrorState
           message={`No intelligence found for “${teamName}” on ${effectiveDate}. The team may not have a fixture on this date, or the engines have not produced data for it yet.`}
         />
       )}
-      {!loading && !error && data?.fixture_found && (
+      {!loading && !error && !unknownMarket && isSingle && single?.fixture_found && (
+        <div className="mx-auto w-full max-w-2xl">
+          <MarketReportCard report={single} />
+        </div>
+      )}
+      {!loading && !error && !isSingle && legacySections.length > 0 && (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {sections.map(([market, m]) => (
-            <MarketCard key={market} market={market} data={m} />
+          {legacySections.map(([mKey, m]) => (
+            <LegacyMarketCard key={mKey} market={mKey} data={m} />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+export default function TeamIntelligencePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="py-10 text-center text-xs text-text-muted">
+          Loading intelligence report…
+        </div>
+      }
+    >
+      <ReportInner />
+    </Suspense>
   );
 }
