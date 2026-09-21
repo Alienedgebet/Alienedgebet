@@ -15,7 +15,10 @@ HARD ARCHITECTURE RULES (user spec, all binding):
     nothing network-related and never calls an engine.
   • PER-FIXTURE three-state results: every check resolves to PASS / FAIL /
     NOT_AVAILABLE for that exact fixture. A genuinely unavailable intelligence
-    NEVER becomes a fake FAIL and NEVER grows the denominator.
+    NEVER becomes a fake FAIL. The DENOMINATOR IS FIXED per market: it is the
+    market's full rule set (WIN=8, GG=4, …), so N/A outcomes lower the
+    numerator only — the same pick always shows the same total (e.g. x/8),
+    and only x varies (2/8, 5/8, 8/8 …).
   • No new intelligence is invented: each rule reads one pre-existing field or
     one pre-existing verdict/category produced by an existing engine. Where a
     rule cannot be backed by existing data it is intentionally NOT registered
@@ -409,7 +412,13 @@ def _snapshot(date):
     # WIN side rows: win_raw and win_forecast share the win_forecast engine's
     # row shape (same producer) and BOTH store parity_score signed per side —
     # so a row for the selected team is the row whose team_name matches.
+    # win_apex rows are APPENDED to the registry (not the side rows): when a
+    # pipeline run produced apex picks but not the win side (or vice versa),
+    # the team-intelligence fixture locator must still resolve the fixture —
+    # the report page must never say "no fixture" for a fixture the engines
+    # clearly saved. Apex rows carry fixture_id + label (fixture-level).
     win_side_rows = _rows(_load("win_raw", date)) + _rows(_load("win_forecast", date))
+    win_apex_rows = _rows(_load("win_apex", date))
     win_by_id, win_by_name = {}, {}
     for r in win_side_rows:
         fid = r.get("fixture_id")
@@ -418,6 +427,16 @@ def _snapshot(date):
         label = _fixture_label(r)
         if label:
             win_by_name.setdefault(_norm(label), []).append(r)
+    for r in win_apex_rows:
+        fid = r.get("fixture_id")
+        label = _fixture_label(r)
+        if fid in (None, "") or not label:
+            continue
+        if fid not in win_by_id:  # side rows take priority (they carry team_name)
+            win_by_id[str(fid)] = [r]
+        key = _norm(label)
+        if key not in win_by_name:
+            win_by_name[key] = [r]
 
     u2s_rows = _rows(_load("u2s_psychology", date))
     corner_rows = _rows(_load("corners_aggregator", date))
@@ -448,6 +467,9 @@ def _snapshot(date):
     gg_o15_heads = _load_heads("gg_o15", date)
     ggc_rows = _head_n(gg_o15_heads, 0)
     o15c_rows = _head_n(gg_o15_heads, 1)
+    # GG supreme rows themselves — the gg branch's psychology verdict lives
+    # on the supreme row's own Psych_Score field (not on the composite head).
+    gg_rows = _rows(_load("gg_supreme", date))
 
     dna_factors_by_id, dna_factors_by_name = {}, {}
     dna_draw_by_id, dna_draw_by_name = {}, {}
@@ -499,6 +521,10 @@ def _snapshot(date):
         "ggc_by_name": _name_index(ggc_rows),
         "o15c_by_id": _id_index(o15c_rows),
         "o15c_by_name": _name_index(o15c_rows),
+        # GG supreme rows themselves (the gg branch's psychology verdict
+        # lives on the supreme row's own Psych_Score field)
+        "gsup_by_id": _id_index(gg_rows),
+        "gsup_by_name": _name_index(gg_rows),
         # DNA engine's own per-fixture clash verdicts
         "dna_clash_by_id": _id_index(dna_clash_rows),
         "dna_clash_by_name": _name_index(dna_clash_rows),
@@ -515,16 +541,19 @@ def _snapshot(date):
 def _psych_side(snap, prefix, fid, fxn, side):
     """Psychology signed net score for ONE side of a fixture (PSYCHOLOGY
     engines compute H_Base and A_Base per fixture — the net score is signed
-    toward the home or away team, NOT a 0-100 percentage)."""
+    toward the home or away team, NOT a 0-100 percentage). Fixture-level
+    audits (side=None) fall back to the row's OWN psych verdict when the
+    side base pair is absent (e.g. gg_psychology rows carry Psych_Score but
+    no H_Base/A_Base) — the intelligence EXISTS, so it must not read N/A."""
     row = _resolve(snap, prefix, fid, fxn)
     if not row:
         return NOT_AVAILABLE
-    h, a = _num(row.get("H_Base")), _num(row.get("A_Base"))
-    if h is None or a is None:
-        return NOT_AVAILABLE
-    if side == "home":
-        return PASS if (h - a) > 0 else FAIL
-    if side == "away":
+    if side in ("home", "away"):
+        h, a = _num(row.get("H_Base")), _num(row.get("A_Base"))
+        if h is None or a is None:
+            return NOT_AVAILABLE
+        if side == "home":
+            return PASS if (h - a) > 0 else FAIL
         return PASS if (a - h) > 0 else FAIL
     # Market/fixture-level row (no side): its own signed audit score is the
     # verdict. Coerce — psych engines store numeric strings ("+162").
@@ -804,9 +833,11 @@ def _fav_def_eval(snap, fid, fxn):
         return NOT_AVAILABLE
     return PASS if v >= INTELLIGENT_PASS_RULES["UNDERDOG_FAV_DEF_WEAKNESS_THRESHOLD"] else FAIL
 # ══════════════════════════════════════════════════════════════════════════════
-# MARKET CHECKLISTS — the denominator is ALWAYS the number of checks whose
-# inputs exist for that fixture. Missing intelligence → NOT_AVAILABLE and the
-# denominator shrinks; it is never a fake FAIL.
+# MARKET CHECKLISTS — the denominator is FIXED per market: it is ALWAYS the
+# branch's full rule set, regardless of whether a given fixture's inputs exist.
+# Missing intelligence → NOT_AVAILABLE, which lowers the NUMERATOR only (never
+# a fake FAIL and never a smaller denominator): the same market always shows
+# the same total (WIN=x/8, GG=x/4 …) and only x varies per pick.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _checks_for_market(market, snap, row, fid, fxn):
@@ -838,7 +869,15 @@ def _checks_for_market(market, snap, row, fid, fxn):
             side = ("home" if _norm(home) and _norm(home) in _norm(target)
                     else "away" if _norm(away) and _norm(away) in _norm(target) else None)
         if not target or (not side):
+            # FIXED DENOMINATOR: even with no pickable side, the WIN audit
+            # always carries its FULL 8-rule set (see the rule order below) —
+            # the denominator must never depend on row shape.
+            add("SOT", NOT_AVAILABLE)
+            add("Corners", NOT_AVAILABLE)
+            add("Psychology", NOT_AVAILABLE)
+            add("Underdog", NOT_AVAILABLE)
             add("Goal Intent", NOT_AVAILABLE)
+            add("Draw Probability", NOT_AVAILABLE)
             add("Parity +10", NOT_AVAILABLE)
             add("Form", NOT_AVAILABLE)
             return checks
@@ -1217,8 +1256,10 @@ def _checks_for_market(market, snap, row, fid, fxn):
             add(key, PASS if score >= thr else FAIL, value=row.get(field), threshold=">= 7")
         return checks
 
-    # Display-only stages carry no applicable intelligence of their own.
-    add("—", NOT_AVAILABLE)
+    # Display-only stages carry no applicable intelligence of their own — no
+    # checks at all, so the audit is withheld (ipc None) and the frontend
+    # hides the cell. A placeholder check would render "0/1" under the
+    # fixed-denominator rule, which is why none is emitted.
     return checks
 # ══════════════════════════════════════════════════════════════════════════════
 # PUBLIC API
@@ -1230,9 +1271,13 @@ def evaluate_market(market_key, rows, date):
     is ever removed, renamed or re-ordered, so settlement/ensure_defaults and
     the frontend's existing fields are untouched).
 
-    The value is a dict {"passed","total","checks"} or None (stage has no
-    applicable intelligence → the frontend simply hides the cell).
+    The value is a dict {"passed","total","checks"} — the FRONTEND-visible
+    counterpart of this module's fixed-denominator rule (total = the market's
+    full rule set). It is None only when the market is display-only / has no
+    evaluator branch at all, so the frontend simply hides the cell.
     """
+    if market_key in DISPLAY_ONLY_MARKETS:
+        return rows
     snap = _snapshot(date)
     for row in rows:
         if not isinstance(row, dict):
@@ -1240,15 +1285,19 @@ def evaluate_market(market_key, rows, date):
         fxn = _fixture_label(row)
         fid = row.get("fixture_id")
         checks = _checks_for_market(market_key, snap, row, fid, fxn)
-        applicable = [c for c in checks if c["result"] != NOT_AVAILABLE]
+        # FIXED-DENOMINATOR RULE: the denominator is the market's FULL rule
+        # set — every check the branch defines, whether its data exists or
+        # not (WIN=8, GG=4, O2.5=6, …). N/A never shrinks the total; only
+        # the numerator (PASSes) varies. Only a market whose branch emitted
+        # NO rules at all has no audit (ipc None).
         row["intelligent_pass_count"] = {
             # The market key travels with the audit so the drill-down can
             # open THIS pick's report (pick = the primary object).
             "market": market_key,
-            "passed": sum(1 for c in applicable if c["result"] == PASS),
-            "total": len(applicable),
+            "passed": sum(1 for c in checks if c["result"] == PASS),
+            "total": len(checks),
             "checks": checks,
-        } if applicable else None
+        } if checks else None
     return rows
 
 
@@ -1394,6 +1443,51 @@ def _team_context(snap, fid_s, fxn, team_name):
     return ctx
 
 
+def _locate_fixture(snap, team_name):
+    """Find a team's fixture via the WIN-side registry. Strong match: a row
+    naming the team (team_name on side rows, Target on apex rows). Weak
+    fallback: a fixture-level row (no team identity) whose label contains
+    the team — this keeps the report resolvable for fixtures whose ONLY
+    saved rows are fixture-level (e.g. apex-only runs). Returns
+    (fixture_id, rows, fixture_label)."""
+    t = _norm(team_name or "")
+
+    def _row_names(r):
+        return [n for n in (r.get("team_name"), r.get("Target")) if n]
+
+    for fid, rows in sorted((snap.get("win_by_id") or {}).items()):
+        hit = next((r for r in rows
+                    if any(_norm(n) == t for n in _row_names(r))), None)
+        if hit:
+            return fid, rows, _fixture_label(hit)
+    # Second pass: label-side fallback. A fixture-level row names at most
+    # ONE participant (apex rows carry Target); the other side exists only
+    # in the label. Match the fixture label's SIDES (exact normalised
+    # equality) — containment would let 'Arsenal' resolve an
+    # 'Arsenal U21 vs Brighton U21' fixture.
+    for fid, rows in sorted((snap.get("win_by_id") or {}).items()):
+        for r in rows:
+            label = _fixture_label(r) or ""
+            if not label or not t:
+                continue
+            parts = re.split(r"\s+vs\.?\s+", label, flags=re.I)
+            if any(_norm(p) == t for p in parts if p.strip()):
+                return fid, rows, label
+    return "", [], ""
+
+
+def _opponent_from(rows, fxn, team_name):
+    """The other side of the fixture: from side rows when present, else
+    derived from the fixture label."""
+    t = _norm(team_name or "")
+    for r in rows:
+        n = r.get("team_name")
+        if n and _norm(n) != t:
+            return n
+    parts = [p.strip() for p in re.split(r"\s+vs\.?\s+", fxn or "", flags=re.I) if p.strip()]
+    return next((p for p in parts if _norm(p) != t and _norm(t) not in _norm(p)), "")
+
+
 def _get_market_intelligence(team_name, date, market):
     """SINGLE-MARKET report payload — the pick is the primary object.
 
@@ -1401,20 +1495,15 @@ def _get_market_intelligence(team_name, date, market):
     evaluator branch runs, so no other market's checks can appear here (the
     payload carries `score` + `checks`, never a `markets` map). Reads the
     SAME on-disk snapshots as the market pages — zero new data acquisition,
-    zero fabricated values (missing intelligence stays NOT_AVAILABLE and
-    never grows the denominator)."""
+    zero fabricated values (missing intelligence stays NOT_AVAILABLE and can
+    only lower the numerator; the denominator stays the market's full rule
+    set)."""
     snap = _snapshot(date)
 
-    # Locate the team's fixture via the WIN side rows (win_raw/win_forecast
-    # carry fixture_id + both team names, 2 rows per fixture) — the same
-    # fixture registry the all-markets view uses.
-    fixture_id, side_rows_hit, fxn = "", [], ""
-    for fid, side_rows in sorted((snap.get("win_by_id") or {}).items()):
-        hit = next((r for r in side_rows
-                    if _norm(r.get("team_name") or "") == _norm(team_name or "")), None)
-        if hit:
-            fixture_id, side_rows_hit, fxn = fid, side_rows, _fixture_label(hit)
-            break
+    # Locate the team's fixture via the WIN-side fixture registry (side rows
+    # carry team_name; apex rows carry Target; fixture-level-only fixtures
+    # resolve by label containment — the engines saved, so it must resolve).
+    fixture_id, side_rows_hit, fxn = _locate_fixture(snap, team_name)
     base = {"team": team_name, "date": date, "market": market,
             "market_label": TEAM_INTELLIGENCE_MARKETS[market]}
     if not fxn:
@@ -1422,9 +1511,7 @@ def _get_market_intelligence(team_name, date, market):
                     opponent="", prediction=None, score=None, checks=[])
 
     fid_s = str(fixture_id)
-    opp_rows = [r for r in side_rows_hit
-                if _norm(r.get("team_name") or "") != _norm(team_name)]
-    opp = opp_rows[0].get("team_name") if opp_rows else ""
+    opp = _opponent_from(side_rows_hit, fxn, team_name)
 
     # THE PAGE/MARKET IS AUTHORITATIVE: run ONLY this market's evaluator
     # branch, seeded with the same per-fixture row shape the market tables use.
@@ -1441,15 +1528,20 @@ def _get_market_intelligence(team_name, date, market):
         row = _resolve(snap, "fhvi", fid_s, fxn) or {}
     elif market == "shvi":
         row = _resolve(snap, "shvi", fid_s, fxn) or {}
+    elif market == "gg":
+        # The gg branch reads its psychology verdict from the GG supreme row
+        # itself (Psych_Score) — seed it exactly as the GG table rows do.
+        row = _resolve(snap, "gsup", fid_s, fxn) or {}
     else:
-        # gg / gg_precision / gg_o15 / over25 / over15 / win_psychology:
+        # gg_precision / gg_o15 / over25 / over15 / win_psychology:
         # their branches join the fixture's own engine rows internally.
         row = {}
     checks = _checks_for_market(engine_key, snap, row, fid_s, fxn)
-    applicable = [c for c in checks if c["result"] != NOT_AVAILABLE]
+    # FIXED-DENOMINATOR RULE (matches evaluate_market): total is the market's
+    # FULL rule set; N/A never shrinks it — only the numerator varies.
     score = {
-        "passed": sum(1 for c in applicable if c["result"] == PASS),
-        "total": len(applicable),
+        "passed": sum(1 for c in checks if c["result"] == PASS),
+        "total": len(checks),
     }
     return dict(base, fixture=fxn, fixture_id=fixture_id, fixture_found=True,
                 opponent=opp,
@@ -1476,30 +1568,23 @@ def get_team_intelligence(team_name, date, market=None):
         return _get_market_intelligence(team_name, date, market)
     snap = _snapshot(date)
 
-    # Locate the team's fixture via the WIN side rows (win_raw/win_forecast
-    # carry fixture_id + both team names, 2 rows per fixture).
-    fixture_id, side_rows_hit, fxn = "", [], ""
-    for fid, side_rows in sorted((snap.get("win_by_id") or {}).items()):
-        hit = next((r for r in side_rows
-                    if _norm(r.get("team_name") or "") == _norm(team_name or "")), None)
-        if hit:
-            fixture_id, side_rows_hit, fxn = fid, side_rows, _fixture_label(hit)
-            break
+    # Same locator as the single-market report: side rows carry team_name,
+    # apex rows carry Target, fixture-level-only rows resolve by label.
+    fixture_id, side_rows_hit, fxn = _locate_fixture(snap, team_name)
     if not fxn:
         return {"team": team_name, "date": date, "fixture": "",
                 "fixture_id": "", "fixture_found": False, "markets": {}}
 
     fid_s = str(fixture_id)
-    opp_rows = [r for r in side_rows_hit
-                if _norm(r.get("team_name") or "") != _norm(team_name)]
-    opp = opp_rows[0].get("team_name") if opp_rows else ""
+    opp = _opponent_from(side_rows_hit, fxn, team_name)
     markets = {}
 
     def _mark(key, checks):
-        applicable = [c for c in checks if c["result"] != NOT_AVAILABLE]
+        # FIXED-DENOMINATOR RULE: total = the market's full rule set, N/A
+        # checks included; only the numerator (PASSes) varies.
         markets[key] = {
-            "passed": sum(1 for c in applicable if c["result"] == PASS),
-            "total": len(applicable),
+            "passed": sum(1 for c in checks if c["result"] == PASS),
+            "total": len(checks),
             "checks": checks,
         }
 

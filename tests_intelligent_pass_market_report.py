@@ -114,9 +114,11 @@ check("no WIN checks inside GG report", not (WIN_ONLY & set(names("gg"))))
 check("no O2.5 checks inside DRAW report", not (O25_ONLY & set(names("draw"))))
 
 # ── scores differ per pick on the SAME fixture (not one generic number) ────
-check("same fixture, per-pick scores: O2.5 6/6 vs WIN 3/4 vs FHVI 1/1 vs SHVI 0/1",
+# FIXED-DENOMINATOR RULE: totals are each market's FULL rule set
+# (O2.5=6, WIN=8, FHVI/SHVI=1); only the numerator varies per pick.
+check("same fixture, per-pick scores: O2.5 6/6 vs WIN 3/8 vs FHVI 1/1 vs SHVI 0/1",
       report("over25")["score"] == {"passed": 6, "total": 6}
-      and report("win")["score"] == {"passed": 3, "total": 4}
+      and report("win")["score"] == {"passed": 3, "total": 8}
       and report("fhvi")["score"] == {"passed": 1, "total": 1}
       and report("shvi")["score"] == {"passed": 0, "total": 1})
 
@@ -129,13 +131,11 @@ for m in ALL_MARKETS:
           and rep["market"] == m and isinstance(rep["score"], dict)
           and isinstance(rep["checks"], list))
 
-# ── §10: denominator reflects applicable checks only (N/A never counts) ────
+# ── §10: FIXED denominator — every rule the market defines counts, N/A or not
 cor = report("corners")
-check("corners denominator excludes NOT_AVAILABLE checks",
-      all(c["result"] != pc.NOT_AVAILABLE
-          for c in cor["checks"] if True) is False  # N/A rows may exist…
-      and cor["score"]["total"] == sum(
-          1 for c in cor["checks"] if c["result"] != pc.NOT_AVAILABLE))
+check("corners denominator is FIXED at the market's full rule set (N/A included)",
+      cor["score"]["total"] == len(cor["checks"]) and cor["score"]["total"] == 2
+      and cor["score"]["passed"] == 0)
 
 # ── §7: unknown / blank market is rejected, not silently generic ───────────
 try:
@@ -170,5 +170,45 @@ miss = pc.get_team_intelligence("Not A Real Team", DATE, market="win")
 check("unknown team → fixture_found=False with market echoed",
       miss["fixture_found"] is False and miss["markets" if False else "market"] == "win"
       and miss["score"] is None and miss["checks"] == [])
+
+print("OK" if not FAILS else str(len(FAILS)) + " FAILURES", flush=True)
+
+# ── regression: GG psychology verdict AND raw value from the SUPREME row ────
+# (gg_psychology rows carry Psych_Score but no H_Base/A_Base; the branch
+# reads the verdict off the gg_supreme row the GG table rows carry)
+snap["gsup_by_id"] = {"100": {"Fixture": "Arsenal vs Chelsea", "Psych_Score": 75}}
+snap["gsup_by_name"] = {pc._norm("Arsenal vs Chelsea"): snap["gsup_by_id"]["100"]}
+gg_rep = report("gg")
+gps = next((c for c in gg_rep["checks"] if c["name"] == "Psychology"), None)
+check("gg Psychology verdict+value come from the supreme row's own Psych_Score",
+      gps is not None and gps["result"] == pc.PASS and gps.get("value") == 75)
+
+# ── regression: fixtures whose ONLY saved rows are fixture-level (apex-only)
+DATE2 = "2026-09-27"
+snap2 = {k: {} for k in snap}
+snap2["u2s_rows"], snap2["corner_rows"] = [], []
+apex_row = {"fixture_id": 200, "Fixture": "Real Madrid vs Barcelona",
+            "Target": "Real Madrid"}
+snap2["win_by_id"] = {"200": [apex_row]}
+snap2["win_by_name"] = {pc._norm("Real Madrid vs Barcelona"): [apex_row]}
+pc._SNAPSHOTS[DATE2] = snap2
+mad = pc.get_team_intelligence("Real Madrid", DATE2, market="over25")
+check("apex Target match resolves the fixture (strong pass)",
+      mad["fixture_found"] is True
+      and mad["fixture"] == "Real Madrid vs Barcelona"
+      and mad["opponent"] == "Barcelona")
+bar = pc.get_team_intelligence("Barcelona", DATE2, market="over25")
+check("the OTHER side resolves by label containment (apex-only runs)",
+      bar["fixture_found"] is True
+      and bar["fixture"] == "Real Madrid vs Barcelona")
+
+# ── regression: word-boundary guard — an U21 fixture never swallows the team
+snap3 = {k: {} for k in snap}
+snap3["u2s_rows"], snap3["corner_rows"] = [], []
+snap3["win_by_id"] = {"300": [{"fixture_id": 300,
+                               "Fixture": "Arsenal U21 vs Brighton U21"}]}
+check("word-boundary guard: senior team does NOT resolve an U21-only fixture",
+      pc._locate_fixture(snap3, "Arsenal") == ("", [], ""))
+pc._SNAPSHOTS.pop(DATE2, None)
 
 print("OK" if not FAILS else str(len(FAILS)) + " FAILURES", flush=True)

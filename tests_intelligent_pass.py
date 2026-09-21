@@ -19,8 +19,9 @@ def check(label, cond):
 
 def fresh_snapshot(overrides=None):
     """A snapshot where every source index is empty → every check is
-    NOT_AVAILABLE (denominator excludes them). Tests then override only the
-    sources relevant to the rule under test."""
+    NOT_AVAILABLE (the denominator stays FIXED at the market's full rule
+    set; only the numerator varies). Tests override only the sources
+    relevant to the rule under test."""
     snap = {
         "win_by_id": {}, "win_by_name": {},
         "wps_by_id": {}, "wps_by_name": {},
@@ -75,11 +76,12 @@ ipc = evaluate("win_apex", win_row,
 rm = result_map(ipc)
 check("WIN no WIN rows → Parity +10 NOT_AVAILABLE",
       rm.get("Parity +10") == pc.NOT_AVAILABLE)
-check("WIN Parity excluded from the denominator",
-      ipc is not None and ipc["total"] == 1 and ipc["passed"] == 1)
+check("WIN all checks counted — fixed denominator of 8 (only Draw has data)",
+      ipc is not None and ipc["total"] == 8 and ipc["passed"] == 1)
 ipc = evaluate("win_apex", win_row, fresh_snapshot())
-check("WIN all-missing → ipc None (denominator 0, never fake FAIL)",
-      ipc is None)
+check("WIN all-missing → 0/8 (denominator FIXED at 8, no fake PASS)",
+      ipc is not None and ipc["total"] == 8 and ipc["passed"] == 0
+      and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
 # ── 2. DRAW — DNA parity 0/1 PASS, otherwise FAIL ────────────────────────────
 draw_row = {"fixture_id": 200, "fixture": "Iran U23 vs China U23"}
 for balance_home, balance_away, expected in [
@@ -98,8 +100,8 @@ for balance_home, balance_away, expected in [
 ipc = evaluate("draw", {**draw_row, "mc_draw_prob": "12%"}, fresh_snapshot())
 check("DRAW no DNA factors → DNA Parity NOT_AVAILABLE",
       result_map(ipc).get("DNA Parity") == pc.NOT_AVAILABLE)
-check("DRAW DNA Parity excluded from the denominator",
-      ipc is not None and ipc["total"] == 1)
+check("DRAW DNA Parity counted in the FIXED denominator of 4 (0/4: 12% is below the floor)",
+      ipc is not None and ipc["total"] == 4 and ipc["passed"] == 0)
 # ── 3. UNDERDOG — Dixon-Coles multipliers (repo-native >= direction) ─────────
 ud_row = {"fixture_id": 300, "fixture": "Bournemouth vs Liverpool",
           "Underdog": "Bournemouth", "Psych_Score": 78}
@@ -125,18 +127,20 @@ rm = result_map(ipc)
 check("U2S missing multipliers → both NOT_AVAILABLE",
       rm.get("Dog ATT Strength") == pc.NOT_AVAILABLE
       and rm.get("Fav Def Weakness") == pc.NOT_AVAILABLE)
-check("U2S missing multipliers do NOT enter the denominator",
-      ipc is not None and ipc["total"] == 1 and ipc["passed"] == 1)
+check("U2S multipliers count in the FIXED denominator of 3",
+      ipc is not None and ipc["total"] == 3 and ipc["passed"] == 1)
 # ── 4. Per-fixture availability / denominator integrity ──────────────────────
 ipc = evaluate("u2s", ud_row, fresh_snapshot())
-check("U2S all-missing → ipc None (no fake FAIL from missing intelligence)",
-      ipc is None)
+check("U2S all-missing → 0/3 (denominator FIXED at 3, no fake FAIL)",
+      ipc is not None and ipc["total"] == 3 and ipc["passed"] == 0)
 
 ipc = evaluate("u2s", {"fixture_id": 300, "fixture": "Bournemouth vs Liverpool",
                        "Underdog": "Bournemouth", "Psych_Score": "VETOED"},
                fresh_snapshot())
-check("U2S 'VETOED' psychology → NOT_AVAILABLE, ipc None (no fake FAIL)",
-      ipc is None)
+rm = result_map(ipc)
+check("U2S 'VETOED' psychology → NOT_AVAILABLE, 0/3 (no fake FAIL)",
+      ipc is not None and ipc["total"] == 3 and ipc["passed"] == 0
+      and rm.get("Psychology") == pc.NOT_AVAILABLE)
 # ── 5. Display/audit-only guarantee ──────────────────────────────────────────
 snap = fresh_snapshot({"win_by_id": {"100": side_rows},
                        "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows}})
@@ -183,13 +187,13 @@ check("O2.5 apex joins the over25_forecast row (pos_gap 8 → PASS, boundary)",
       rm.get("Position Gap") == pc.PASS)
 snap = fresh_snapshot({"o25f_by_id": {"400": {"pos_gap": 99, "kill_switch_pass": True}}})
 ipc = evaluate("over25_apex", {"fixture_id": 400, "fixture": "Ajax vs Feyenoord"}, snap)
-check("O2.5 pos_gap 99 sentinel → NOT_AVAILABLE (not a fake FAIL)",
+check("O2.5 pos_gap 99 sentinel → NOT_AVAILABLE (fixed denominator of 6)",
       result_map(ipc).get("Position Gap") == pc.NOT_AVAILABLE
-      and ipc["total"] == 1 and ipc["passed"] == 1)
+      and ipc["total"] == 6 and ipc["passed"] == 1)
 ipc = evaluate("over25_apex", {"fixture_id": 999, "fixture": "No Rows vs At All"},
                fresh_snapshot())
-check("O2.5 apex with no forecast row → every gate NOT_AVAILABLE, ipc None",
-      ipc is None)
+check("O2.5 apex with no forecast row → every gate NOT_AVAILABLE, 0/6",
+      ipc is not None and ipc["total"] == 6 and ipc["passed"] == 0)
 
 # ── 8. WIN PSYCHOLOGY rows (fixture-level, side-neutral) ─────────────────────
 wps_row = {"fixture_id": 500, "Fixture": "Roma vs Lazio"}
@@ -201,8 +205,8 @@ ipc = evaluate("win_psychology", dict(wps_row), snap)
 rm = result_map(ipc)
 check("WIN psychology: signed net H>A → PASS, SOT DIAMOND → PASS",
       rm.get("Psychology") == pc.PASS and rm.get("SOT") == pc.PASS)
-check("WIN psychology: missing corners/underdog/draw excluded from denominator",
-      ipc["total"] == 2 and ipc["passed"] == 2)
+check("WIN psychology: missing corners/underdog/draw still counted — fixed denominator of 5",
+      ipc["total"] == 5 and ipc["passed"] == 2)
 
 # ── 9. GG composites (engine signals echo only; no invented thresholds) ──────
 gg_row = {"fixture_id": 600, "fixture": "Basel vs St. Gallen",
@@ -220,8 +224,8 @@ ipc = evaluate("gg_o15", dict(o15_row), fresh_snapshot())
 rm = result_map(ipc)
 check("O1.5 composite: lambda 4.0 >= 2.5 saturation PASS, both lambdas >= 1.0 PASS",
       rm.get("Combined Lambda") == pc.PASS and rm.get("Attacking Intent") == pc.PASS)
-check("O1.5 composite: missing gk flags → NOT_AVAILABLE, denominator 2",
-      ipc["total"] == 2 and ipc["passed"] == 2)
+check("O1.5 composite: missing gk flags → NOT_AVAILABLE, fixed denominator of 4",
+      ipc["total"] == 4 and ipc["passed"] == 2)
 
 # ── 10. FHVI / SHVI Category gate (>= 7 == TIER 2 or better) ─────────────────
 ipc = evaluate("fhvi", {"fixture": "Legia vs Jagiellonia", "fhvi_score": 7.0},
@@ -231,7 +235,8 @@ ipc = evaluate("fhvi", {"fixture": "Legia vs Jagiellonia", "fhvi_score": 6.9},
                fresh_snapshot())
 check("FHVI score 6.9 → FAIL", result_map(ipc).get("FHVI") == pc.FAIL)
 ipc = evaluate("shvi", {"fixture": "A vs B"}, fresh_snapshot())
-check("SHVI missing score → NOT_AVAILABLE, ipc None (no fake FAIL)", ipc is None)
+check("SHVI missing score → NOT_AVAILABLE, 0/1 (fixed denominator, no fake FAIL)",
+      ipc is not None and ipc["total"] == 1 and ipc["passed"] == 0)
 
 print()
 failed = [l for l, ok in RESULTS if not ok]

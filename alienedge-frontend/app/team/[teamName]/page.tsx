@@ -169,9 +169,22 @@ function ReportInner() {
   );
 
   // Back ALWAYS returns to the page the click came from; the market→page map
-  // is only the fallback for URLs that arrived without ?from=.
+  // is only the fallback for URLs that arrived without ?from=. The value is
+  // decoded and sanitized: it must be a same-origin path with exactly one
+  // leading slash (a "//win"-style value would resolve "win" as a hostname —
+  // ERR_NAME_NOT_RESOLVED — so it falls back to the market's own page).
   const backHref = useMemo(() => {
-    if (from) return from;
+    let target = "";
+    if (from) {
+      try {
+        target = decodeURIComponent(from);
+      } catch {
+        target = from;
+      }
+    }
+    if (target.startsWith("/") && !target.startsWith("//")) {
+      return target;
+    }
     const page = (market && MARKET_SOURCE_PAGE[market]) || "/dashboard";
     return effectiveDate ? `${page}?date=${effectiveDate}` : page;
   }, [from, market, effectiveDate]);
