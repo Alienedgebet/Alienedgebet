@@ -286,6 +286,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
       createVerifyColumn<GGSupremePick>(),
       createDnaColumn<GGSupremePick>(dnaV2?.market_factors, "gg", date),
       createIntelligentPassColumn<GGSupremePick>({
+        market: "gg",
         getTeam: (r) => (r as { team_name?: string }).team_name,
         getLabel: (r) => r.Fixture,
         date,
@@ -301,6 +302,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
       createVerifyColumn<GGO15Pick>(),
       createDnaColumn<GGO15Pick>(dnaV2?.market_factors, "over15", date),
       createIntelligentPassColumn<GGO15Pick>({
+        market: "gg_o15",
         getLabel: (r) => r.fixture,
         date,
       }),
@@ -326,6 +328,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
     () => [
       createVerifyColumn<GGPrecisionPick>(),
       createIntelligentPassColumn<GGPrecisionPick>({
+        market: "gg_precision",
         getLabel: (r) => r.fixture,
         date,
       }),

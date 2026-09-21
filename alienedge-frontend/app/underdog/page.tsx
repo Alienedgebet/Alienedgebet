@@ -10,6 +10,7 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UD_APEX, MOCK_UD_AUDIT, MOCK_UD_BASE } from "@/lib/mock-chains";
@@ -107,13 +108,29 @@ export default function UnderdogPage() {
 
   // 2. Audit (Verify -> Rest)
   const auditColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<UnderdogMasterPick>(), ...auditColumns],
+    () => [
+      createVerifyColumn<UnderdogMasterPick>(),
+      createIntelligentPassColumn<UnderdogMasterPick>({
+        market: "u2s",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...auditColumns,
+    ],
     []
   );
 
   // 3. Base (Verify -> Rest)
   const baseColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<UnderdogBasePick>(), ...baseColumns],
+    () => [
+      createVerifyColumn<UnderdogBasePick>(),
+      createIntelligentPassColumn<UnderdogBasePick>({
+        market: "u2s",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...baseColumns,
+    ],
     []
   );
 

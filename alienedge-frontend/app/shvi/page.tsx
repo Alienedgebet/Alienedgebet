@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SH_8GOAL, MOCK_SH_GG, MOCK_SH_MASTER, MOCK_SHVI } from "@/lib/mock-chains";
@@ -134,7 +135,15 @@ export default function SHVIPage() {
 
   // 1. SHVI Streak Miner (Verify -> Rest)
   const shviColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<SHVIPick>(), ...shviColumns],
+    () => [
+      createVerifyColumn<SHVIPick>(),
+      createIntelligentPassColumn<SHVIPick>({
+        market: "shvi",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...shviColumns,
+    ],
     []
   );
 
