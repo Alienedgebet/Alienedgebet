@@ -79,6 +79,7 @@ export interface UseApiOptions<T> {
    * e.g. `"win-apex:2026-08-07"`.
    */
   cacheKey?: string;
+  refreshMs?: number;
   /**
    * Explicit opt-in for demo fallback rendering. When `true`, `fallback`
    * is used as the initial seed, to fill genuinely-empty engine responses,
@@ -172,6 +173,25 @@ export function useApi<T>(
   const [refetchTick, setRefetchTick] = useState(0);
   const fallbackRef = useRef(fallback);
   fallbackRef.current = fallback;
+  // Tick bookkeeping: a refetchTick CHANGE means an explicit refresh (manual
+  // `refetch()` or the refreshMs poller) — such a re-run must BYPASS the
+  // session cache and hit the network, otherwise polling would be swallowed
+  // by a still-fresh cache entry and never actually update anything.
+  const lastTickRef = useRef(0);
+
+  // ── Auto-refresh polling ─────────────────────────────────────
+  // Live pages previously required a manual re-navigation to see updated
+  // verdicts (the session cache + effect only ran on mount/dep change), so a
+  // match's badge lagged behind its real state indefinitely. When
+  // `refreshMs` is set, the effect re-runs on a steady interval (via the
+  // existing refetchTick mechanism, so all cache/demo semantics are
+  // unchanged). 0/undefined = no polling.
+  const refreshMs = options?.refreshMs ?? 0;
+  useEffect(() => {
+    if (!refreshMs || refreshMs <= 0) return;
+    const t = window.setInterval(() => setRefetchTick((v) => v + 1), refreshMs);
+    return () => window.clearInterval(t);
+  }, [refreshMs]);
 
   const refetch = useCallback(() => setRefetchTick((t) => t + 1), []);
 
@@ -180,8 +200,13 @@ export function useApi<T>(
 
     // ── Cache hit ────────────────────────────────────────────
     // When the key changes (e.g. date change) or the component mounts fresh,
-    // check the cache before touching the network.
-    if (cacheKey) {
+    // check the cache before touching the network. An explicit refresh
+    // (manual `refetch()` or the refreshMs poller) bypasses the cache —
+    // otherwise the poll would keep hitting the still-fresh entry and never
+    // reach the network, defeating the whole point of polling.
+    const explicitRefresh = refetchTick !== lastTickRef.current;
+    lastTickRef.current = refetchTick;
+    if (cacheKey && !explicitRefresh) {
       const hit = getCached<T>(cacheKey);
       if (hit !== null) {
         setData(hit);
@@ -261,6 +286,15 @@ export function useApi<T>(
         })
         .catch((err: unknown) => {
           if (cancelled) return;
+          const isTimeout = isAxiosError(err)
+            && (err.code === "ECONNABORTED"
+              || /timeout/i.test(err.message || ""));
+          if (isTimeout && attempts < 1) {
+            attempts += 1;
+            console.warn("[useApi] request timed out — retrying once");
+            t2 = window.setTimeout(run, 1500);
+            return;
+          }
           const message = isAxiosError(err)
             ? extractErrorDetail(err) ?? err.message
             : err instanceof Error
@@ -270,12 +304,19 @@ export function useApi<T>(
         });
     };
 
-    // Defer network work one tick so first paint wins on slow disks.
+    // Single automatic retry on timeout: a transient backend stall (e.g. a
+    // burst landing while an upstream cooldown clears) used to surface as a
+    // hard error/blank page. One quiet retry 1.5s later self-heals it without
+    // changing any endpoint's real timeout budget (10s normal / 45s heavy) —
+    // a genuinely down backend still surfaces its error after the retry.
+    let attempts = 0;
+    let t2: number | undefined;
     const t = window.setTimeout(run, 0);
 
     return () => {
       cancelled = true;
       window.clearTimeout(t);
+      if (t2 !== undefined) window.clearTimeout(t2);
     };
     // cacheKey is a derived string that changes when deps change, so it is
     // intentionally included in the spread without being listed separately.

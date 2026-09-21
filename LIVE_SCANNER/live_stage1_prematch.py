@@ -7,6 +7,57 @@ import requests
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
+# ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
+# The archiver broadcasts a cooldown window into data/api_429_cooldown.lock
+# whenever it sees an HTTP 429. Every GET() wrapper here paces itself through
+# that window before firing, so the three components stop triggering each
+# other's burst limits. The gate file lives in the backend root so all stages
+# and the archiver share one canonical path.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _api_gate_pace(tag=""):
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise).
+    A few seconds of JITTER stagger the wake-up so siblings stop firing in
+    lockstep and re-triggering the burst limit (the cooling circle)."""
+    try:
+        with open(_GATE_FILE, "r") as f:
+            gate = json.load(f)
+        until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
+        remaining = until - time.time()
+        if remaining > 0:
+            sleep_s = min(remaining, 15.0) + random.random() * 3.0
+            print(f"[API GATE] {tag}: shared cooldown active — pacing {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+    except Exception:
+        pass
+
+
+def _api_gate_broadcast(wait_s, tag=""):
+    """Record a shared cooldown so sibling processes also back off."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
+def _api_gate_clear(tag=""):
+    """A 200 just came back from the provider — the burst window is clearly
+    over, so DISARM the shared cooldown instead of letting every sibling keep
+    pacing until the old expiry (gate hygiene)."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": 0, "by": f"cleared:{tag or 'live-stage'}"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 load_dotenv()
 
@@ -16,12 +67,25 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 PREDICTIONS_FILE = os.path.join(DATA_DIR, "live_predictions.json")
-CACHE_FILE = os.path.join(DATA_DIR, "squad_cache.json")
+# Stage 1 keeps its own FLAT squad cache ({pid: {...}}) and must not read the
+# shared squad_cache.json written by stages 3/6 in the NEW
+# {"players": {...}, "team_avg_leak": ...} format — loading that here makes
+# get_squad_data_standardized() return the wrong shape and raises
+# KeyError('pos') for every fixture on subsequent cycles.
+CACHE_FILE = os.path.join(DATA_DIR, "squad_cache_stage1_prematch.json")
 # NEW: persists the GK liability + missing-key-player audit that was
 # previously only printed to console. Additive-only — does not change
 # PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED, or anything Live Match Edges
 # already reads.
 PREMATCH_TEAM_AUDIT_FILE = os.path.join(DATA_DIR, "prematch_team_audit.json")
+
+# FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
+# this helper so a FAILED SportMonks acquisition can never empty a good feed.
+try:
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+except ImportError:  # running this file directly rather than via the package
+    sys.path.insert(0, BASE_DIR)
+    from live_cache import note_acquisition, acquisition_failed, write_feed
 
 # ==============================================================================
 # CONFIGURATION & WORLD STANDARDS (100% UNTOUCHED)
@@ -45,6 +109,53 @@ PERSONNEL_WEIGHTS = {
 }
 
 # ==============================================================================
+# ODDS CACHE (reduces API calls and 429 errors)
+# ==============================================================================
+# Odds don't change frequently for pre-match fixtures. Cache them for 10 minutes
+# to dramatically reduce API calls. This is the primary fix for the 429 issue.
+ODDS_CACHE = {}
+ODDS_CACHE_FILE = os.path.join(DATA_DIR, "odds_cache.json")
+ODDS_CACHE_TTL = 600  # 10 minutes
+
+def _load_odds_cache():
+    global ODDS_CACHE
+    if os.path.exists(ODDS_CACHE_FILE):
+        try:
+            with open(ODDS_CACHE_FILE, 'r') as f:
+                ODDS_CACHE = json.load(f)
+        except Exception:
+            ODDS_CACHE = {}
+
+def _save_odds_cache():
+    try:
+        tmp = f"{ODDS_CACHE_FILE}.tmp"
+        with open(tmp, 'w') as f:
+            json.dump(ODDS_CACHE, f)
+        os.replace(tmp, ODDS_CACHE_FILE)
+    except Exception:
+        pass
+
+def _get_cached_odds(fixture_id):
+    """Return (odds_dict, is_fresh) for a fixture_id."""
+    key = str(fixture_id)
+    entry = ODDS_CACHE.get(key)
+    if entry:
+        age = time.time() - entry.get("timestamp", 0)
+        if age < ODDS_CACHE_TTL:
+            return entry.get("data"), True
+        # Stale but usable
+        return entry.get("data"), False
+    return None, False
+
+def _cache_odds(fixture_id, odds_data):
+    """Cache odds for a fixture."""
+    key = str(fixture_id)
+    ODDS_CACHE[key] = {
+        "timestamp": time.time(),
+        "data": odds_data
+    }
+
+# ==============================================================================
 # PERSISTENT CACHE MANAGERS
 # ==============================================================================
 def load_cache():
@@ -66,6 +177,86 @@ def save_cache():
     except Exception as e:
         print(f"Error saving cache: {e}")
 
+
+# ==============================================================================
+# FIXTURE DATE CACHE — resolves HTTP 429 on /fixtures/date/{date}
+# ==============================================================================
+# Stage 1 calls /fixtures/date/{date} every cycle with NO cache between calls.
+# At ~27 cycles/hour that consumes a large share of the API budget for data
+# that changes slowly (fixtures for a given date are fixed once published).
+# A 15-minute disk cache with stale-fallback on 429 removes the majority of
+# these calls and guarantees that a rate-limit rejection can never empty the
+# Stage 1 output — there is always a last-known-good fixture list to process.
+# ==============================================================================
+FIXTURE_CACHE_FILE = os.path.join(DATA_DIR, "fixture_date_cache.json")
+FIXTURE_CACHE_TTL = 15 * 60  # 15 minutes
+
+
+def _load_fixture_cache():
+    """Load the fixture date cache from disk. Returns dict {date: entry}."""
+    if os.path.exists(FIXTURE_CACHE_FILE):
+        try:
+            with open(FIXTURE_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_fixture_cache_entry(target_date, fixtures, acquisition_ok=True):
+    """Atomically save a fixture date listing to the cache.
+
+    A FAILED acquisition (acquisition_ok=False) must never overwrite a
+    previously cached non-empty fixture list — the last-known-good data is
+    preserved so a 429 can never empty the Stage 1 output.
+    """
+    cache = _load_fixture_cache()
+    existing = cache.get(target_date, {})
+
+    if not acquisition_ok and existing.get("data"):
+        age = int(time.time() - existing.get("timestamp", 0))
+        print(
+            f"[FIXTURE CACHE] {target_date}: acquisition FAILED — "
+            f"existing cache ({len(existing.get('data', []))} entries, "
+            f"age {age}s) PRESERVED."
+        )
+        return False
+
+    cache[target_date] = {
+        "timestamp": time.time(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(fixtures) if isinstance(fixtures, list) else 0,
+        "data": fixtures if isinstance(fixtures, list) else [],
+        "_acquisition_ok": acquisition_ok,
+    }
+    try:
+        tmp = f"{FIXTURE_CACHE_FILE}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, FIXTURE_CACHE_FILE)
+    except Exception as e:
+        print(f"[FIXTURE CACHE ERROR] {e}")
+        return False
+    return True
+
+
+def _get_fixture_cache(target_date):
+    """Return (fixtures_list, is_fresh) for a date.
+
+    - Fresh cache hit:  (list_of_fixtures, True)
+    - Stale cache:      (list_of_fixtures_or_empty, False)
+    - No cache:         ([], False)
+    """
+    cache = _load_fixture_cache()
+    entry = cache.get(target_date, {})
+    if not entry:
+        return [], False
+    age = time.time() - entry.get("timestamp", 0)
+    data = entry.get("data", [])
+    if data and age < FIXTURE_CACHE_TTL:
+        return data, True
+    return data, False
+
 # ==============================================================================
 # UTILITIES & ENGINE ENGINE (100% UNTOUCHED)
 # ==============================================================================
@@ -80,16 +271,37 @@ def GET(path, params=None, max_retries=3):
     if params is None: params = {}
     params.setdefault("api_token", API_TOKEN)
     url = f"{BASE_URL}{path}"
+    problem = None
+    _api_gate_pace("stage1")
     for attempt in range(max_retries):
         try:
             r = requests.get(url, params=params, timeout=20)
-            if r.status_code == 200: return r.json()
+            if r.status_code == 200:
+                _api_gate_clear("stage1")
+                body = r.json()
+                # A 200 carrying an empty payload AND a provider message is the
+                # subscription/quota shape ("...you don't have access ... via your
+                # current subscription"). Tag it so an empty feed can never be
+                # mistaken for a genuinely quiet day. (See live_cache.write_feed.)
+                if isinstance(body, dict) and not body.get("data") and body.get("message"):
+                    return note_acquisition(body, r.status_code, body.get("message"))
+                return body
             if r.status_code == 429:
-                time.sleep((2 ** attempt) + random.random()); continue
-            return {"data":[]}
-        except:
+                problem = "HTTP 429 rate limit"
+                try:
+                    gate_wait = float(r.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    gate_wait = 0.0
+                gate_wait = max(gate_wait, (2 ** attempt) + random.random())
+                # CAP the shared window (see stage3): giant Retry-After values
+                # (~20 min) must not freeze every sibling process.
+                _api_gate_broadcast(min(gate_wait, 120.0), "stage1")
+                time.sleep(min(gate_wait, 30.0) + random.random() * 2); continue
+            return note_acquisition({"data":[]}, r.status_code, f"HTTP {r.status_code}")
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
             time.sleep((2 ** attempt) + random.random())
-    return {"data":[]}
+    return note_acquisition({"data":[]}, None, f"retries exhausted ({problem})")
 
 def normalize_odd_value(value):
     try:
@@ -273,15 +485,100 @@ def run_prematch_engine():
 
     print(f"\nMASTER ENGINE A: STRATEGIC AUDIT - {now_aware.strftime('%Y-%m-%d %H:%M')} UTC\n")
     processed_fixtures = set()
+    acq_failed = False   # an acquisition that FAILED must never empty the feed
 
     for target_date in dates_to_check:
-        current_page = 1; has_more_pages = True
-        while has_more_pages:
-            resp = GET(f"/fixtures/date/{target_date}", params={"include": "participants;lineups.details.type;lineups.player.position;lineups.player.detailedPosition", "page": current_page})
-            fixtures = resp.get("data",[])
-            if not fixtures: break
+        # ── FIXTURE DATE CACHE ──────────────────────────────────────────────
+        # Serve the fixture listing from a 15-minute disk cache. A cache miss
+        # fetches fresh from SportMonks and persists the result for the next
+        # cycle, so consecutive cycles never hammer the same endpoint.
+        # ──────────────────────────────────────────────────────────────────────
+        cached_fixtures, is_fresh = _get_fixture_cache(target_date)
 
-            for fx in fixtures:
+        if is_fresh:
+            fixtures = cached_fixtures
+            fetch_from_api = False
+            print(f"[FIXTURE CACHE] {target_date}: cache HIT ({len(fixtures)} entries)")
+        else:
+            # Cache miss or stale — fetch fresh, then cache the result.
+            fetch_from_api = True
+
+        if fetch_from_api:
+            # Fetch ALL pages for this date (pagination loop).
+            page = 1
+            has_more_pages = True
+            all_fixtures = []
+            page_acq_failed = False
+
+            while has_more_pages:
+                resp = GET(
+                    f"/fixtures/date/{target_date}",
+                    params={
+                        "include": "participants;lineups.details.type;"
+                                   "lineups.player.position;"
+                                   "lineups.player.detailedPosition",
+                        "page": page,
+                    },
+                )
+
+                if acquisition_failed(resp):
+                    page_acq_failed = True
+                    if not acq_failed:
+                        acq_failed = True
+                        print(
+                            f"[ACQUISITION] /fixtures/date/{target_date} page {page} "
+                            f"FAILED — reason={resp.get('_failure')} | "
+                            f"http_status={resp.get('_http_status')} "
+                            f"| will attempt cache fallback."
+                        )
+                    # Stop paginating on acquisition failure — use whatever
+                    # we have (cache if available, else empty).
+                    break
+
+                page_fixtures = resp.get("data", [])
+                if not page_fixtures:
+                    break
+
+                all_fixtures.extend(page_fixtures)
+                pagination = resp.get("pagination", {})
+                has_more_pages = pagination.get("has_more", False)
+                page += 1
+
+            fixtures = all_fixtures
+
+            # Persist to cache (only a successful acquisition overwrites a
+            # previously cached non-empty list).
+            _save_fixture_cache_entry(target_date, fixtures, acquisition_ok=not page_acq_failed)
+
+            # ── STALE-FALLBACK ON FAILED FETCH ─────────────────────────────
+            # If SportMonks rejected every page, fall back to the last-known-
+            # good cached fixture list so a 429 can never empty the Stage 1
+            # output. If no cache exists either, process nothing (the write
+            # guard will preserve whatever the previous run left on disk).
+            # ────────────────────────────────────────────────────────────────
+            if not fixtures and not page_acq_failed is False:
+                pass  # empty result from API with no cache fallback available
+            elif not fixtures and page_acq_failed:
+                cached_fallback, _ = _get_fixture_cache(target_date)
+                if cached_fallback:
+                    fixtures = cached_fallback
+                    print(
+                        f"[FIXTURE CACHE] {target_date}: 429/empty — "
+                        f"falling back to {len(fixtures)} cached entries."
+                    )
+                else:
+                    print(
+                        f"[FIXTURE CACHE] {target_date}: acquisition FAILED — "
+                        f"no cached data available, processing none."
+                    )
+
+        if not fixtures:
+            continue
+
+        # ── Process fixtures (unchanged logic) ─────────────────────────────
+        current_page = 1; has_more_pages = True
+
+        for fx in fixtures:
                 f_id = str(fx.get("id"))
                 if f_id in processed_fixtures: continue
                 
@@ -354,50 +651,28 @@ def run_prematch_engine():
                     rv = max(kmv, kmv * (1 + ((w_l - rep_w) / max(1, w_l)))) if w_l > 0 else 0
                     
                     m_stats.append({
-                        "id": tid, "name": team['name'], "loc": loc, "miss": m_c, "kmv": kmv, "rv": rv, 
+                        "id": tid, "name": team['name'], "loc": loc, "miss": m_c, "kmv": kmv, "rv": rv,
                         "gk_out": gk_m, "def_miss": def_miss, "mid_miss": mid_miss, "att_miss": att_miss,
-                        "l_wing_miss": l_w_m, "r_wing_miss": r_w_m
+                        "l_wing_miss": l_w_m, "r_wing_miss": r_w_m,
+                        "players": [
+                            {
+                                "name": p['name'],
+                                "pos": p.get('pos', 'Unknown'),
+                                "apps": int(p.get('apps', 0) or 0),
+                                "mins": int(p.get('mins', 0) or 0),
+                                "rating": float(p.get('avg_rating', 0.0) or 0.0),
+                                "status": "STARTING" if p['id'] in today_team_ids
+                                    else (f"MISSING" if p.get('pos') != "Goalkeeper"
+                                          else (f"MISSING (GK Out: {gk_n})" if gk_m else "MISSING")),
+                            }
+                            for p in key_11
+                        ] if key_11 else [],
                     })
                     print(f"\n>> KEY MISSING VULNERABILITY (The Hole): {kmv:.1f}%")
                     print(f">> REPLACEMENT VULNERABILITY (The Doom): {rv:.1f}%")
 
                 if len(m_stats) == 2:
                     h, a = (m_stats[0], m_stats[1]) if m_stats[0]['loc'] == 'home' else (m_stats[1], m_stats[0])
-                    # NEW: build the persisted team audit entry for this
-                    # fixture using data already computed above (m_stats +
-                    # team_gk_notes). Purely additive — does not affect h/a
-                    # objects used below for match_picks/killer rules.
-                    TEAM_AUDIT_FEED[f_id] = {
-                        "fixture": fx.get('name'),
-                        "kickoff_utc": start_dt.strftime('%H:%M'),
-                        "status_text": status_text,
-                        "home": {
-                            "team_id": str(h['id']),
-                            "team_name": h['name'],
-                            "gk_out": h['gk_out'],
-                            "gk_status": team_gk_notes.get(str(h['id']), {}).get("gk_status", ""),
-                            "gk_vuln_score": team_gk_notes.get(str(h['id']), {}).get("gk_vuln_score", 0.0),
-                            "missing_count": h['miss'],
-                            "def_miss": h['def_miss'],
-                            "mid_miss": h['mid_miss'],
-                            "att_miss": h['att_miss'],
-                            "kmv": h['kmv'],
-                            "rv": h['rv'],
-                        },
-                        "away": {
-                            "team_id": str(a['id']),
-                            "team_name": a['name'],
-                            "gk_out": a['gk_out'],
-                            "gk_status": team_gk_notes.get(str(a['id']), {}).get("gk_status", ""),
-                            "gk_vuln_score": team_gk_notes.get(str(a['id']), {}).get("gk_vuln_score", 0.0),
-                            "missing_count": a['miss'],
-                            "def_miss": a['def_miss'],
-                            "mid_miss": a['mid_miss'],
-                            "att_miss": a['att_miss'],
-                            "kmv": a['kmv'],
-                            "rv": a['rv'],
-                        },
-                    }
 
                     match_picks =[]
                     print(f"\n[PRE-MATCH STRATEGIC PREDICTIONS]")
@@ -426,20 +701,83 @@ def run_prematch_engine():
                     if kp:
                         print("\n[ADVANCED KILLER RULES TRIGGERED]")
                         for r in kp: print(f"*** {r}")
-                        match_picks.extend(kp)
+                        # FIX: killer rules are INFORMATIONAL notes, not
+                        # actionable picks. They used to be extended into
+                        # match_picks as raw strings, and Stage 2's
+                        # process_triple_phase_audit() then crashed on
+                        # pick['type'] (TypeError: string indices must be
+                        # integers, not 'str') — killing the whole fixture's
+                        # verification. Wrap each note in a structured
+                        # non-actionable record so the message survives but
+                        # can never be mistaken for a prediction. Stage 2
+                        # skips KILLER_NOTE entries explicitly.
+                        match_picks.extend(
+                            {"type": "KILLER_NOTE", "note": r} for r in kp
+                        )
                     if match_picks: FINAL_PREDICTIONS_FEED[f_id] = match_picks
 
-            pagination = resp.get("pagination", {})
-            has_more_pages = pagination.get("has_more", False); current_page += 1
+                    # NEW: build the persisted team audit entry for this
+                    # fixture using data already computed above (m_stats +
+                    # team_gk_notes) and the match_picks/killer rules just
+                    # calculated. Purely additive — does not affect the h/a
+                    # objects or the verdict/pick logic above.
+                    TEAM_AUDIT_FEED[f_id] = {
+                        "fixture_id": str(f_id),
+                        "fixture": fx.get('name'),
+                        "kickoff_utc": start_dt.strftime('%H:%M'),
+                        "status_text": status_text,
+                        "odds_home_win": odds_data['home_win'],
+                        "odds_away_win": odds_data['away_win'],
+                        "odds_o25": odds_data['o25'],
+                        "picks": [dict(p) for p in match_picks] if match_picks else [],
+                        "killer_rules": kp if kp else [],
+                        "combined_miss": int(h['miss'] + a['miss']),
+                        "home": {
+                            "loc": h['loc'],
+                            "miss": int(h['miss']),
+                            "team_id": str(h['id']),
+                            "team_name": h['name'],
+                            "gk_out": h['gk_out'],
+                            "gk_status": team_gk_notes.get(str(h['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(h['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": int(h['miss']),
+                            "def_miss": int(h['def_miss']),
+                            "mid_miss": int(h['mid_miss']),
+                            "att_miss": int(h['att_miss']),
+                            "l_wing_miss": bool(h.get('l_wing_miss', False)),
+                            "r_wing_miss": bool(h.get('r_wing_miss', False)),
+                            "kmv": float(h['kmv']),
+                            "rv": float(h['rv']),
+                            "players": h.get('players', []),
+                        },
+                        "away": {
+                            "loc": a['loc'],
+                            "miss": int(a['miss']),
+                            "team_id": str(a['id']),
+                            "team_name": a['name'],
+                            "gk_out": a['gk_out'],
+                            "gk_status": team_gk_notes.get(str(a['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(a['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": int(a['miss']),
+                            "def_miss": int(a['def_miss']),
+                            "mid_miss": int(a['mid_miss']),
+                            "att_miss": int(a['att_miss']),
+                            "l_wing_miss": bool(a.get('l_wing_miss', False)),
+                            "r_wing_miss": bool(a.get('r_wing_miss', False)),
+                            "kmv": float(a['kmv']),
+                            "rv": float(a['rv']),
+                            "players": a.get('players', []),
+                        },
+                    }
 
-    with open(PREDICTIONS_FILE, 'w') as f: 
-        json.dump(FINAL_PREDICTIONS_FEED, f)
+    write_feed(PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED,
+               acquisition_ok=not acq_failed, label="live_predictions.json")
 
     # NEW: save the GK liability + missing-player audit to its own file.
     # PREDICTIONS_FILE above is untouched — this is a second, independent
     # write, for Code 6 to read.
-    with open(PREMATCH_TEAM_AUDIT_FILE, 'w') as f:
-        json.dump(TEAM_AUDIT_FEED, f)
+    write_feed(PREMATCH_TEAM_AUDIT_FILE, TEAM_AUDIT_FEED,
+               acquisition_ok=not acq_failed, label="prematch_team_audit.json")
 
     save_cache()
     print(f"\n--- SCAN COMPLETE: {len(FINAL_PREDICTIONS_FEED)} FEED SYNCED IN DATA DIR ---")

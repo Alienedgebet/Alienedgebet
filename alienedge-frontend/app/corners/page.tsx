@@ -38,6 +38,32 @@ const aggregatorColumns: PredictionColumn<CornerAggregatorPick>[] = [
   { key: "u25", header: "U2.5%", render: (r) => <ProbCell value={r["U2.5%"]} showBar={false} /> },
   { key: "total", header: "Total Exp", align: "right", render: (r) => r.Total_Exp },
   {
+    key: "actual_corners",
+    header: "Actual Corners",
+    align: "right",
+    className: "text-right",
+    render: (r) => {
+      const v = (r as unknown as Record<string, unknown>).verification as {
+        h_corners?: number;
+        a_corners?: number;
+        total_corners?: number;
+        verdict?: string;
+        note?: string;
+      } | undefined;
+      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
+        return <span className="text-2xs text-text-dim">—</span>;
+      }
+      const h = v.h_corners ?? 0;
+      const a = v.a_corners ?? 0;
+      const t = v.total_corners ?? h + a;
+      return (
+        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
+          {h}+{a}={t}
+        </span>
+      );
+    },
+  },
+  {
     key: "wounded",
     header: "Wounded (H/A)",
     render: (r) => (
@@ -61,6 +87,32 @@ const catalystColumns: PredictionColumn<CornerCatalystPick>[] = [
     render: (r) => <span className="font-medium text-text-primary">{r.fixture_name}</span>,
   },
   { key: "corners", header: "Predicted Corners", align: "right", render: (r) => r.predicted_corners },
+  {
+    key: "actual_corners",
+    header: "Actual Corners",
+    align: "right",
+    className: "text-right",
+    render: (r) => {
+      const v = (r as unknown as Record<string, unknown>).verification as {
+        h_corners?: number;
+        a_corners?: number;
+        total_corners?: number;
+        verdict?: string;
+        note?: string;
+      } | undefined;
+      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
+        return <span className="text-2xs text-text-dim">—</span>;
+      }
+      const h = v.h_corners ?? 0;
+      const a = v.a_corners ?? 0;
+      const t = v.total_corners ?? h + a;
+      return (
+        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
+          {h}+{a}={t}
+        </span>
+      );
+    },
+  },
   { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.corner_tier} /> },
   {
     key: "positions",
@@ -91,6 +143,32 @@ const psychologyColumns: PredictionColumn<CornerPsychologyPick>[] = [
     key: "fixture",
     header: "Fixture",
     render: (r) => <span className="font-medium text-text-primary">{r.fixture_name}</span>,
+  },
+  {
+    key: "actual_corners",
+    header: "Actual Corners",
+    align: "right",
+    className: "text-right",
+    render: (r) => {
+      const v = (r as unknown as Record<string, unknown>).verification as {
+        h_corners?: number;
+        a_corners?: number;
+        total_corners?: number;
+        verdict?: string;
+        note?: string;
+      } | undefined;
+      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
+        return <span className="text-2xs text-text-dim">—</span>;
+      }
+      const h = v.h_corners ?? 0;
+      const a = v.a_corners ?? 0;
+      const t = v.total_corners ?? h + a;
+      return (
+        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
+          {h}+{a}={t}
+        </span>
+      );
+    },
   },
   {
     key: "positions",
@@ -134,6 +212,32 @@ const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
     render: (r) => `${r.stage1_predicted_corners} → ${r.stage2_predicted_corners}`,
   },
   { key: "expected", header: "Predicted Corners", align: "right", render: (r) => r.predicted_corners },
+  {
+    key: "actual_corners",
+    header: "Actual Corners",
+    align: "right",
+    className: "text-right",
+    render: (r) => {
+      const v = (r as unknown as Record<string, unknown>).verification as {
+        h_corners?: number;
+        a_corners?: number;
+        total_corners?: number;
+        verdict?: string;
+        note?: string;
+      } | undefined;
+      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
+        return <span className="text-2xs text-text-dim">—</span>;
+      }
+      const h = v.h_corners ?? 0;
+      const a = v.a_corners ?? 0;
+      const t = v.total_corners ?? h + a;
+      return (
+        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
+          {h}+{a}={t}
+        </span>
+      );
+    },
+  },
   { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.corner_tier} /> },
   { key: "style", header: "Style Alignment", render: (r) => r.style_alignment },
   { key: "confidence", header: "Avg Confidence", align: "right", render: (r) => r.avg_confidence },
@@ -156,6 +260,32 @@ const stage1Columns: PredictionColumn<CornerStage1Pick>[] = [
     render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
   },
   { key: "expected", header: "Expected Total", align: "right", render: (r) => r.expected_total_corners },
+  {
+    key: "actual_corners",
+    header: "Actual Corners",
+    align: "right",
+    className: "text-right",
+    render: (r) => {
+      const v = (r as unknown as Record<string, unknown>).verification as {
+        h_corners?: number;
+        a_corners?: number;
+        total_corners?: number;
+        verdict?: string;
+        note?: string;
+      } | undefined;
+      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
+        return <span className="text-2xs text-text-dim">—</span>;
+      }
+      const h = v.h_corners ?? 0;
+      const a = v.a_corners ?? 0;
+      const t = v.total_corners ?? h + a;
+      return (
+        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
+          {h}+{a}={t}
+        </span>
+      );
+    },
+  },
   { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.corner_tier} /> },
   { key: "diff", header: "Expected Diff", align: "right", render: (r) => r.expected_difference },
   { key: "team_more", header: "Team With More", render: (r) => r.team_more_corners },

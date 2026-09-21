@@ -16,6 +16,7 @@ import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import {
   ChainStage,
@@ -503,38 +504,74 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
 
-  // 1. Win Apex (Verify -> DNA -> Rest)
+  // 1. Win Apex (Verify -> DNA -> Intelligent Pass Count -> Rest)
   const apexColumnsWithVerifyAndDna = useMemo(
     () => [
       createVerifyColumn<WinApexPick>(),
       createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date),
+      createIntelligentPassColumn<WinApexPick>({
+        getTeam: (r) => r.Target,
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
       ...apexColumns,
     ],
     [dnaV2, date]
   );
 
-  // 2. Win Psychology (Verify -> Rest)
+  // 2. Win Psychology (Verify -> Intelligent Pass Count -> Rest)
   const psychologyColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<WinPsychologyPick>(), ...psychologyColumns],
-    []
+    () => [
+      createVerifyColumn<WinPsychologyPick>(),
+      createIntelligentPassColumn<WinPsychologyPick>({
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
+      ...psychologyColumns,
+    ],
+    [date]
   );
 
-  // 3. Underdog-to-Score (Verify -> Rest)
+  // 3. Underdog-to-Score (Verify -> Intelligent Pass Count -> Rest)
   const u2sColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<WinU2SPick>(), ...u2sColumns],
-    []
+    () => [
+      createVerifyColumn<WinU2SPick>(),
+      createIntelligentPassColumn<WinU2SPick>({
+        getTeam: (r) => r.Underdog,
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
+      ...u2sColumns,
+    ],
+    [date]
   );
 
-  // 4. Win Forecast (Verify -> Rest)
+  // 4. Win Forecast (Verify -> Intelligent Pass Count -> Rest)
   const forecastColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<WinForecastPick>(), ...forecastColumns],
-    []
+    () => [
+      createVerifyColumn<WinForecastPick>(),
+      createIntelligentPassColumn<WinForecastPick>({
+        getTeam: (r) => r.team_name,
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...forecastColumns,
+    ],
+    [date]
   );
 
-  // 5. Win Raw (Verify -> Rest)
+  // 5. Win Raw (Verify -> Intelligent Pass Count -> Rest)
   const rawColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<WinRawPick>(), ...rawColumns],
-    []
+    () => [
+      createVerifyColumn<WinRawPick>(),
+      createIntelligentPassColumn<WinRawPick>({
+        getTeam: (r) => r.team_name,
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...rawColumns,
+    ],
+    [date]
   );
 
   return (

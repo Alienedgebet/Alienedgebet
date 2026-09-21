@@ -8,7 +8,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# live_cache.py lives in the repo ROOT (not a subpackage), so a single
+# dirname() resolves to the backend root. The old double-dirname() resolved
+# to the PARENT directory (/var/www) and wrote live_inplay_cache.json to
+# /var/www/data/ while the API and every LIVE_SCANNER stage read/write
+# /var/www/backend/data/. One canonical path for all components.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LIVE_CACHE_FILE = os.path.join(DATA_DIR, "live_inplay_cache.json")
 PREMATCH_CACHE_FILE = os.path.join(DATA_DIR, "live_prematch_cache.json")
@@ -37,6 +42,41 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
         print("[CACHE WARNING] SPORTMONKS_API_KEY is missing!")
         return []
 
+    # Pacing is a BACKGROUND-only concern now. This function runs inside
+    # USER-FACING API requests (the in-play fetch feeds /api/win/apex,
+    # /api/corners, settlement, ...). The old behaviour — time.sleep() up to
+    # 10s when a shared 429 cooldown gate was active — stalled every request
+    # behind the gate (measured live: 10.1s per endpoint → browser
+    # "timeout of 10000ms exceeded" on SHVI/FHVI/Underdog) and made date
+    # switching lag badly. New policy, in order:
+    #   1. fresh cache            → returned above, no API call at all
+    #   2. cooldown gate active   → serve the STALE cache immediately
+    #                               (any age), or [] if none exists —
+    #                               never sleep, never hammer the provider
+    #   3. no gate                → normal single fetch
+    # Long gate-aware pacing still happens where it belongs: scanner stages,
+    # the daily archiver and the pipeline are background jobs.
+    _gate_file = os.path.join(DATA_DIR, "api_429_cooldown.lock")
+    try:
+        with open(_gate_file, "r") as _f:
+            _gate = json.load(_f)
+        if float(_gate.get("until", 0)) > time.time():
+            if os.path.exists(LIVE_CACHE_FILE):
+                try:
+                    with open(LIVE_CACHE_FILE, "r", encoding="utf-8") as _f2:
+                        _stale = json.load(_f2)
+                    if _stale.get("data"):
+                        print("[API GATE] live_cache: shared cooldown active — "
+                              "serving stale cache without refetch")
+                        return _stale["data"]
+                except Exception:
+                    pass
+            print("[API GATE] live_cache: shared cooldown active — no cache "
+                  "available, returning [] without refetch")
+            return []
+    except Exception:
+        pass
+
     # 2. Fetch SportMonks ONCE
     url = "https://api.sportmonks.com/v3/football/livescores/inplay"
     params = {
@@ -58,6 +98,76 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
             }
             with open(LIVE_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, indent=2)
+            print(f"[LIVE CACHE] refreshed: {len(raw_data)} in-play fixture(s)")
+
+            # GATE 2b (FT-SNAPSHOT RECOVERY): a 200 + EMPTY payload is still a
+            # successful acquisition — of "nothing is in-play right now" — and
+            # an empty list means every fixture that WAS live has left it
+            # (finished). If the scanner missed the whistle in a 429 storm,
+            # this is the LAST chance to keep the result: merge any finished
+            # fixtures still missing from the snapshot in from today's archive
+            # (and yesterday's, for past-midnight runs). The snapshot merge is
+            # additive and id-preserving; we only pull rows the snapshot lacks
+            # and only rows with a usable score, so a good live-captured
+            # result can never be downgraded by an archive row.
+            if not raw_data:
+                try:
+                    from settlement_service import write_ft_snapshot, load_ft_snapshot
+                    _today = datetime.now().strftime("%Y-%m-%d")
+                    _dates = {_today, (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")}
+                    _have = set()
+                    for _d in _dates:
+                        _have |= set(load_ft_snapshot(_d).keys())
+                    _pull = {}
+                    for _d in _dates:
+                        _missing = []
+                        for _fid, _fx in load_finished_archive(_d).items():
+                            if _fid in _have:
+                                continue
+                            if not _fx.get("score_available", True):
+                                continue  # a score-less row adds nothing
+                            _missing.append(_fx)
+                        if _missing:
+                            _pull[_d] = _missing
+                    if _pull:
+                        write_ft_snapshot(_pull)
+                        _n = sum(len(v) for v in _pull.values())
+                        print(f"[FT SNAPSHOT] empty in-play feed — recovered "
+                              f"{_n} finished result(s) from archive")
+                    else:
+                        print(f"[FT SNAPSHOT] empty in-play feed — snapshot already "
+                              f"holds {len(_have)} result(s)")
+                except Exception as _rec_err:
+                    print(f"[FT SNAPSHOT] empty-feed recovery failed (non-fatal): {_rec_err}")
+                return []
+
+            # FT RESULT SNAPSHOT: persist finished fixtures so settlement can
+            # use them after the fixture leaves the inplay feed (before the
+            # nightly archive runs). Hardened:
+            #   * A 200 + empty data response (the 429-storm shape) now MERGES
+            #     into the snapshot instead of being ignored — the merge keeps
+            #     existing entries, so this is additive and safe.
+            #   * On a real fetch, finished fixtures are captured EVEN when
+            #     extract_match_data could not read a final score (they carry
+            #     score_available=False and are upgraded later — dropping them
+            #     made the match invisible to settlement forever).
+            try:
+                from settlement_service import extract_match_data, write_ft_snapshot
+                finished_by_date = {}
+                for fx in raw_data:
+                    if not isinstance(fx, dict):
+                        continue
+                    std = extract_match_data(fx)
+                    if std.get("is_finished"):
+                        fx_date = std.get("match_date") or datetime.now().strftime("%Y-%m-%d")
+                        finished_by_date.setdefault(fx_date, []).append(std)
+                if finished_by_date:
+                    write_ft_snapshot(finished_by_date)
+                    n = sum(len(v) for v in finished_by_date.values())
+                    print(f"[FT SNAPSHOT] {n} finished fixture(s) persisted from in-play feed")
+            except Exception as _ft_err:
+                # Snapshot emission must never break the live cache write.
+                print(f"[FT SNAPSHOT] update failed (non-fatal): {_ft_err}")
 
             return raw_data
     except Exception as e:
@@ -127,3 +237,96 @@ def get_prematch_fixtures_cached(target_date: str, force_refresh: bool = False) 
         except Exception: pass
 
     return all_fixtures
+
+
+# ── GATE 3: FEED WRITE GUARD (an empty acquisition must never destroy a good feed) ──
+# On 2026-09-17 a subscription/quota failure made every Live stage read {"data": []}
+# from SportMonks (which answers HTTP 200 with an empty array and a "you don't have
+# access ... via your current subscription" message) and the stages then overwrote
+# the last good feeds with {} / [] — live_predictions.json, incoming_predictions.json
+# and danger_audit.json were all emptied while the provider was answering. A FAILED
+# acquisition and a genuinely quiet day are different facts and must produce
+# different writes.
+#
+# The acquiring stage tags its provider response via note_acquisition() (the local
+# GET() wrappers do this). An UNTAGGED {"data": []} stays a legitimate zero — no
+# matches today — and is still written exactly as before.
+
+def _log(msg):
+    """Emit a guard/acquisition message where the OPERATOR will actually see it.
+
+    Under systemd, stdout is a pipe, so plain print() is block-buffered (8KB) and
+    these messages would sit invisible for minutes — the same buffering that hid
+    earlier Live diagnostics. When the process has a logging configuration (the
+    24/7 service does) log through it, because logging flushes per record; when it
+    does not (ad-hoc scripts) fall back to print()."""
+    import logging
+    if logging.getLogger().handlers:
+        logging.getLogger("alienedge.live_cache").warning(msg)
+    else:
+        print(msg)
+
+
+def note_acquisition(result, status_code=None, reason=None):
+    """Tag a provider response dict IN PLACE with why it is empty, then return it.
+    The extra keys are ignored by every existing `resp.get("data", [])` caller."""
+    if isinstance(result, dict):
+        if status_code is not None:
+            result["_http_status"] = status_code
+        if reason:
+            result["_failure"] = str(reason)[:200]
+    return result
+
+
+def acquisition_failed(resp) -> bool:
+    """True only when an acquiring GET() wrapper recorded a FAILURE. A plain
+    {"data": []} is a legitimate empty result, never a failure."""
+    return isinstance(resp, dict) and bool(resp.get("_failure"))
+
+
+def _read_feed(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def write_feed(path, payload, acquisition_ok=True, label=None):
+    """Write one Live feed without ever replacing a good feed with the result of a
+    FAILED acquisition.
+
+    * acquisition_ok=False AND the new payload is EMPTY AND the file already holds a
+      non-empty feed  ->  the existing feed is preserved untouched and "preserved" is
+      returned (the failure is logged, with the feed's age).
+    * anything else (successful acquisition, or a legitimate empty day) -> the payload
+      is written atomically, exactly as every writer did before.
+
+    Returns "written" or "preserved".
+    """
+    label = label or os.path.basename(path)
+    if not payload and not acquisition_ok:
+        existing = _read_feed(path)
+        if existing:
+            try:
+                age = int(time.time() - os.path.getmtime(path))
+                age_txt = f"{age // 60}m{age % 60}s" if age >= 60 else f"{age}s"
+            except OSError:
+                age_txt = "unknown"
+            _log(f"[FEED GUARD] {label}: acquisition FAILED — existing feed "
+                 f"({len(existing)} entries, age {age_txt}) PRESERVED; the empty "
+                 f"result was NOT written.")
+            return "preserved"
+
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)  # atomic — readers never see a half-written feed
+    if not payload:
+        if acquisition_ok:
+            _log(f"[FEED GUARD] {label}: acquisition OK and genuinely empty — written "
+                 f"as empty (intended behaviour, unchanged).")
+        else:
+            _log(f"[FEED GUARD] {label}: acquisition FAILED but there was no existing "
+                 f"feed to protect — wrote empty (nothing to preserve).")
+    return "written"

@@ -19,7 +19,7 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 // including 0 = no timeout) always wins.
 const DEFAULT_TIMEOUT_MS = 10_000; // normal endpoints
 const HEAVY_TIMEOUT_MS = 45_000; // corners stage 1/2, GG, Win, Over 1.5 / Over 2.5 chains
-const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25)\//;
+const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25|sot|fhvi|shvi|underdog|draw|unders|alerts|weekly)\//;
 
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
@@ -661,6 +661,17 @@ export interface CornerStage1Pick {
   home_win_odds: number;
   over_2_5_odds: number;
   tier_1_priority: boolean;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerStage2Pick {
@@ -677,6 +688,17 @@ export interface CornerStage2Pick {
   away_is_persistent_venue: boolean;
   home_is_persistent_overall: boolean;
   away_is_persistent_overall: boolean;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerPsychologyPick {
@@ -690,6 +712,17 @@ export interface CornerPsychologyPick {
   is_wounded_beast: boolean;
   wounded_reason: string;
   wounded_team_name: string;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerCatalystPick {
@@ -703,6 +736,17 @@ export interface CornerCatalystPick {
   home_wounded_intensity: string;
   away_is_wounded_beast: boolean;
   away_wounded_intensity: string;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 export interface CornerAggregatorPick {
@@ -733,6 +777,17 @@ export interface CornerAggregatorPick {
   Away_DNA: string;
   Home_SH_Ratio: number;
   Away_SH_Ratio: number;
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+    h_corners?: number;
+    a_corners?: number;
+    total_corners?: number;
+  };
 }
 
 // ============================================================
@@ -993,6 +1048,12 @@ export interface LiveIncomingPick {
     target_name?: string;
     reason: string;
   }>;
+  live?: {
+    score: string;
+    minute: number;
+    state: string;
+    is_finished: boolean;
+  };
 }
 
 export interface LiveDangerReport {
@@ -1030,6 +1091,12 @@ export interface LiveDangerReport {
     "Under3.5": string;
     "Over1.5": string;
   };
+  live?: {
+    score: string;
+    minute: number;
+    state: string;
+    is_finished: boolean;
+  };
 }
 
 export interface LiveAggregatorReport {
@@ -1041,6 +1108,12 @@ export interface LiveAggregatorReport {
     away: { status: string; sync: string; breach: boolean };
   };
   match_chemistry_list: Record<string, string>;
+  live?: {
+    score: string;
+    minute: number;
+    state: string;
+    is_finished: boolean;
+  };
 }
 
 export interface LiveDashboardResult {
@@ -1379,6 +1452,66 @@ export interface PipelineResponse {
   results: Record<string, unknown>;
   errors: Record<string, string>;
 }
+
+// ============================================================
+// TEAM INTELLIGENCE — /api/team/{team_name}/intelligence/{date}
+// (INTELLIGENT_PASS/pass_count.py::get_team_intelligence)
+// Read-only second-level audit feed: the team's per-check intelligence
+// across every market for the date. Rendered by app/team/[teamName]/page.tsx.
+// ============================================================
+
+/** One intelligence check — mirrors pass_count.py's check dicts. */
+export interface IntelligenceCheck {
+  name: string;
+  result: "PASS" | "FAIL" | "NOT_AVAILABLE";
+  value?: unknown;
+  threshold?: string;
+}
+
+/** One market's audit: {passed, total, checks[]} — total is DYNAMIC
+ * (only applicable checks count; NOT_AVAILABLE never enters the denominator). */
+export interface MarketIntelligence {
+  passed: number;
+  total: number;
+  checks: IntelligenceCheck[];
+}
+
+export interface TeamIntelligencePage {
+  team: string;
+  date: string;
+  fixture: string;
+  fixture_id: string | number;
+  opponent: string;
+  fixture_found: boolean;
+  /** Keyed by market: win, win_psychology, gg, gg_precision, over25, over15,
+   * corners, draw, unders, u2s, fhvi, shvi. Empty for an unknown team. */
+  markets: Record<string, MarketIntelligence>;
+  /** Raw EXISTING engine values behind the checks — passthrough, missing → None. */
+  context?: Record<string, unknown>;
+}
+
+/** Stable market ordering for the page (sections outside this list render after). */
+export const TEAM_INTELLIGENCE_MARKET_ORDER = [
+  "win",
+  "win_psychology",
+  "gg",
+  "gg_precision",
+  "over25",
+  "over15",
+  "corners",
+  "draw",
+  "unders",
+  "u2s",
+  "fhvi",
+  "shvi",
+] as const;
+
+export const teamIntelligenceApi = {
+  get: (teamName: string, date: string): Promise<AxiosResponse<TeamIntelligencePage>> =>
+    api.get(
+      `/api/team/${encodeURIComponent(teamName)}/intelligence/${encodeURIComponent(date)}`
+    ),
+};
 
 // ============================================================
 // API ENDPOINT GROUPS — paths match api/main.py exactly

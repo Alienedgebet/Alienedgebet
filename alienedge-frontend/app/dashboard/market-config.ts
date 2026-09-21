@@ -24,6 +24,7 @@ import {
   Swords,
   type LucideIcon,
 } from "lucide-react";
+import type { VerificationData } from "@/components/predictions/VerifyCell";
 
 // ============================================================
 // DASHBOARD MARKET ADAPTERS
@@ -55,6 +56,25 @@ export interface MarketPick {
   score?: number;
   /** Bookmaker odds for this pick — surfaced next to the probability when available. */
   odds?: number;
+  /**
+   * Settlement/verify snapshot forwarded VERBATIM from the backend row
+   * (api/main.py `_settled()`). Never recalculated or reinterpreted here —
+   * this interface only carries it so VerifyCell can render the verdict.
+   */
+  verification?: VerificationData;
+}
+
+/** Backend rows may carry a settled verify snapshot under `verification`. */
+type VerifiableRow = { verification?: VerificationData };
+
+/**
+ * Forward the backend verification object UNCHANGED (no transform, no
+ * recalculation). Returns undefined when the row carries none, which
+ * VerifyCell already renders as "—".
+ */
+function verifyOf(row: unknown): VerificationData | undefined {
+  const v = (row as VerifiableRow | null | undefined)?.verification;
+  return v && typeof v === "object" ? v : undefined;
 }
 
 export interface MarketConfig {
@@ -85,6 +105,7 @@ export const WIN_MARKET: MarketConfig = {
         fixture: p.Fixture,
         tier: p.Category,
         prob: toFiniteNumber(p.Monte_Win_Prob) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -102,6 +123,7 @@ export const GG_MARKET: MarketConfig = {
         fixture: p.Fixture,
         tier: p.Category,
         prob: toFiniteNumber(p.Monte_GG_Prob) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -117,6 +139,7 @@ export const OVER25_MARKET: MarketConfig = {
         fixture: p.Fixture,
         tier: p.Category,
         prob: toFiniteNumber(p.Super_Monte_Prob) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -133,6 +156,7 @@ export const OVER15_MARKET: MarketConfig = {
         tier: p.Tier,
         prob: parseProbability(p.Base_Poisson),
         score: toFiniteNumber(p.Score) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -150,6 +174,7 @@ export const CORNERS_MARKET: MarketConfig = {
         // Master_Score is a numeric STRING in production ("65"), which
         // previously crashed EliteRankList's `value.toFixed(1)`.
         score: toFiniteNumber(p.Master_Score) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -165,6 +190,7 @@ export const UNDERDOG_MARKET: MarketConfig = {
         fixture: p.Fixture,
         tier: p.Rank,
         prob: parseProbability(p.Monte_UD_Prob),
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -188,6 +214,7 @@ export const DRAW_MARKET: MarketConfig = {
           prob: drawProb != null ? drawProb * 100 : undefined,
           score: toFiniteNumber(p.composite_draw_score) ?? undefined,
           odds: toFiniteNumber(p.draw_odds) ?? undefined,
+          verification: verifyOf(p),
         };
       })
     ),
@@ -209,6 +236,7 @@ export const UNDERS_MARKET: MarketConfig = {
           // percentage mapping but only when the value is numeric.
           prob: u25Prob != null ? u25Prob * 100 : undefined,
           score: toFiniteNumber(p.u25_score) ?? undefined,
+          verification: verifyOf(p),
         };
       })
     ),
@@ -226,6 +254,7 @@ export const SOT_MARKET: MarketConfig = {
         tier: p.Verdict,
         prob: parseProbability(p["Poisson_Over_8.5"]),
         score: toFiniteNumber(p.Proj_SOT) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -241,6 +270,7 @@ export const FHVI_MARKET: MarketConfig = {
         fixture: p.fixture,
         tier: p.fhvi_label,
         score: toFiniteNumber(p.fhvi_score) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };
@@ -256,6 +286,7 @@ export const SHVI_MARKET: MarketConfig = {
         fixture: p.fixture,
         tier: p.shvi_label,
         score: toFiniteNumber(p.shvi_score) ?? undefined,
+        verification: verifyOf(p),
       }))
     ),
 };

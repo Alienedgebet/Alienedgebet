@@ -16,6 +16,7 @@ import { useApi } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import {
   ChainBranch,
@@ -279,21 +280,30 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
     cacheKey: `gg-precision:${date}`,
   });
 
-  // 1. GG Supreme (Verify -> DNA -> Rest)
+  // 1. GG Supreme (Verify -> DNA -> Intelligent Pass Count -> Rest)
   const supremeColumnsWithVerifyAndDna = useMemo(
     () => [
       createVerifyColumn<GGSupremePick>(),
       createDnaColumn<GGSupremePick>(dnaV2?.market_factors, "gg", date),
+      createIntelligentPassColumn<GGSupremePick>({
+        getTeam: (r) => (r as { team_name?: string }).team_name,
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
       ...supremeColumns,
     ],
     [dnaV2, date]
   );
 
-  // 2. Over 1.5 Precision (Verify -> DNA -> Rest)
+  // 2. Over 1.5 Precision (Verify -> DNA -> Intelligent Pass Count -> Rest)
   const o15ColumnsWithVerifyAndDna = useMemo(
     () => [
       createVerifyColumn<GGO15Pick>(),
       createDnaColumn<GGO15Pick>(dnaV2?.market_factors, "over15", date),
+      createIntelligentPassColumn<GGO15Pick>({
+        getLabel: (r) => r.fixture,
+        date,
+      }),
       ...o15Columns,
     ],
     [dnaV2, date]
@@ -311,10 +321,17 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
     []
   );
 
-  // 5. GG Precision BTTS Head (Verify -> Rest)
+  // 5. GG Precision BTTS Head (Verify -> Intelligent Pass Count -> Rest)
   const ggColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<GGPrecisionPick>(), ...ggColumns],
-    []
+    () => [
+      createVerifyColumn<GGPrecisionPick>(),
+      createIntelligentPassColumn<GGPrecisionPick>({
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...ggColumns,
+    ],
+    [date]
   );
 
   // 6. GG Cross-Verification (Verify -> Rest)
