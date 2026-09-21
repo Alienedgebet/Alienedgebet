@@ -1454,6 +1454,66 @@ export interface PipelineResponse {
 }
 
 // ============================================================
+// TEAM INTELLIGENCE — /api/team/{team_name}/intelligence/{date}
+// (INTELLIGENT_PASS/pass_count.py::get_team_intelligence)
+// Read-only second-level audit feed: the team's per-check intelligence
+// across every market for the date. Rendered by app/team/[teamName]/page.tsx.
+// ============================================================
+
+/** One intelligence check — mirrors pass_count.py's check dicts. */
+export interface IntelligenceCheck {
+  name: string;
+  result: "PASS" | "FAIL" | "NOT_AVAILABLE";
+  value?: unknown;
+  threshold?: string;
+}
+
+/** One market's audit: {passed, total, checks[]} — total is DYNAMIC
+ * (only applicable checks count; NOT_AVAILABLE never enters the denominator). */
+export interface MarketIntelligence {
+  passed: number;
+  total: number;
+  checks: IntelligenceCheck[];
+}
+
+export interface TeamIntelligencePage {
+  team: string;
+  date: string;
+  fixture: string;
+  fixture_id: string | number;
+  opponent: string;
+  fixture_found: boolean;
+  /** Keyed by market: win, win_psychology, gg, gg_precision, over25, over15,
+   * corners, draw, unders, u2s, fhvi, shvi. Empty for an unknown team. */
+  markets: Record<string, MarketIntelligence>;
+  /** Raw EXISTING engine values behind the checks — passthrough, missing → None. */
+  context?: Record<string, unknown>;
+}
+
+/** Stable market ordering for the page (sections outside this list render after). */
+export const TEAM_INTELLIGENCE_MARKET_ORDER = [
+  "win",
+  "win_psychology",
+  "gg",
+  "gg_precision",
+  "over25",
+  "over15",
+  "corners",
+  "draw",
+  "unders",
+  "u2s",
+  "fhvi",
+  "shvi",
+] as const;
+
+export const teamIntelligenceApi = {
+  get: (teamName: string, date: string): Promise<AxiosResponse<TeamIntelligencePage>> =>
+    api.get(
+      `/api/team/${encodeURIComponent(teamName)}/intelligence/${encodeURIComponent(date)}`
+    ),
+};
+
+// ============================================================
 // API ENDPOINT GROUPS — paths match api/main.py exactly
 // ============================================================
 
