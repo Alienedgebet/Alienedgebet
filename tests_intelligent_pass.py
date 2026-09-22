@@ -21,8 +21,11 @@ def fresh_snapshot(overrides=None):
     """A snapshot where every source index is empty → every check is
     NOT_AVAILABLE (the denominator stays FIXED at the market's full rule
     set; only the numerator varies). Tests override only the sources
-    relevant to the rule under test."""
+    relevant to the rule under test. The date window is PINNED to DATE so
+    sealed-offline suites never touch real cache files on neighbouring dates."""
+    pc._seal_date(DATE)
     snap = {
+        "date": DATE, "label_by_id": {}, "dna_prof_by_name": {},
         "win_by_id": {}, "win_by_name": {},
         "wps_by_id": {}, "wps_by_name": {},
         "gps_by_id": {}, "gps_by_name": {},
@@ -43,10 +46,8 @@ def fresh_snapshot(overrides=None):
 
 
 def evaluate(market, row, snap):
-    pc.clear_cache()
-    pc._SNAPSHOTS[DATE] = snap
-    rows = pc.evaluate_market(market, [dict(row)], DATE)
-    return rows[0]["intelligent_pass_count"]
+    pc.clear_cache(); pc._seal_date(DATE); pc._SNAPSHOTS[DATE] = snap
+    return pc.evaluate_market(market, [dict(row)], DATE)[0]['intelligent_pass_count']
 
 
 def result_map(ipc):
@@ -55,15 +56,25 @@ def result_map(ipc):
 win_row = {"fixture_id": 100, "Fixture": "Arsenal vs Chelsea", "Target": "Arsenal"}
 side_rows = [
     {"fixture_id": 100, "Fixture": "Arsenal vs Chelsea", "team_name": "Arsenal",
-     "parity_score": 12, "last_5_goals_scored": 11, "opp_last_5_goals_scored": 6},
+     "parity_score": 12, "last_5_goals_scored": 11, "opp_last_5_goals_scored": 6,
+     "last_5_wins_overall": 4, "last_5_wins_at_venue": 3},
     {"fixture_id": 100, "Fixture": "Arsenal vs Chelsea", "team_name": "Chelsea",
-     "parity_score": -12, "last_5_goals_scored": 6, "opp_last_5_goals_scored": 11},
+     "parity_score": -12, "last_5_goals_scored": 6, "opp_last_5_goals_scored": 11,
+     "last_5_wins_overall": 1, "last_5_wins_at_venue": 0},
 ]
 snap = fresh_snapshot({"win_by_id": {"100": side_rows},
-                       "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows}})
+                       "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows},
+                       "label_by_id": {"100": "Arsenal vs Chelsea"}})
 ipc = evaluate("win_apex", win_row, snap)
 rm = result_map(ipc)
 check("WIN Parity +12 → PASS", rm.get("Parity +10") == pc.PASS)
+check("WIN Form compares WIN side-row last-5 WINS (4 > 1 → PASS)",
+      rm.get("Form") == pc.PASS
+      and next(c for c in ipc["checks"] if c["name"] == "Form")["value"]
+      == {"team_wins": 4.0, "opp_wins": 1.0})
+check("WIN provenance: parity check names the engine field",
+      next(c for c in ipc["checks"] if c["name"] == "Parity +10")["field"]
+      == "parity_score")
 
 side_rows[0]["parity_score"] = 8  # same fixture, below the +10 threshold
 ipc = evaluate("win_apex", win_row, snap)
@@ -143,7 +154,8 @@ check("U2S 'VETOED' psychology → NOT_AVAILABLE, 0/3 (no fake FAIL)",
       and rm.get("Psychology") == pc.NOT_AVAILABLE)
 # ── 5. Display/audit-only guarantee ──────────────────────────────────────────
 snap = fresh_snapshot({"win_by_id": {"100": side_rows},
-                       "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows}})
+                       "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows},
+                       "label_by_id": {"100": "Arsenal vs Chelsea"}})
 rows = pc.evaluate_market("win_apex", [dict(win_row)], DATE)
 row_keys_before = {"fixture_id", "Fixture", "Target"}
 check("evaluate_market only ADDS intelligent_pass_count (prediction untouched)",
@@ -152,16 +164,20 @@ check("evaluate_market_safe returns rows unchanged on evaluator crash",
       pc.evaluate_market_safe("win_apex", [dict(win_row)], "bogus-date") is not None)
 # ── 6. WIN on forecast side rows (Target fallback → team_name) ───────────────
 fc_row = {"fixture_id": 100, "fixture": "Arsenal vs Chelsea", "team_name": "Chelsea",
-          "parity_score": -14, "last_5_goals_scored": 4, "opp_last_5_goals_scored": 9}
+          "parity_score": -14, "last_5_goals_scored": 4, "opp_last_5_goals_scored": 9,
+          "last_5_wins_overall": 0, "last_5_wins_at_venue": 0}
 snap = fresh_snapshot({"win_by_id": {"100": side_rows},
-                       "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows}})
+                       "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows},
+                       "label_by_id": {"100": "Arsenal vs Chelsea"}})
 ipc = evaluate("win_apex", fc_row, snap)
 rm = result_map(ipc)
 check("WIN forecast row resolves its own side (Chelsea parity -14 → FAIL)",
       rm.get("Parity +10") == pc.FAIL
       and next(c for c in ipc["checks"] if c["name"] == "Parity +10")["value"] == -14)
-check("WIN forecast row Form compares the selected side (4 < 9 → FAIL)",
-      rm.get("Form") == pc.FAIL)
+check("WIN forecast row Form compares saved side-row WINS (0 vs Arsenal 4 → FAIL)",
+      rm.get("Form") == pc.FAIL
+      and next(c for c in ipc["checks"] if c["name"] == "Form")["value"]
+      == {"team_wins": 0.0, "opp_wins": 4.0})
 
 # ── 7. O2.5 — the engine's own council gates (Engine/over25_forecast.py) ─────
 for ks, po, h2h, pg, pd, exp_pass in [
@@ -195,18 +211,40 @@ ipc = evaluate("over25_apex", {"fixture_id": 999, "fixture": "No Rows vs At All"
 check("O2.5 apex with no forecast row → every gate NOT_AVAILABLE, 0/6",
       ipc is not None and ipc["total"] == 6 and ipc["passed"] == 0)
 
-# ── 8. WIN PSYCHOLOGY rows (fixture-level, side-neutral) ─────────────────────
-wps_row = {"fixture_id": 500, "Fixture": "Roma vs Lazio"}
+# ── 8. WIN PSYCHOLOGY rows (Master_Pick) — ONE WIN checklist ───────────────
+# Psychology rows are WIN picks (the picked winner): the SAME eight WIN
+# checks run, sourced per-side. Psychology uses the predicted team's OWN
+# signed base (H_Base for home, A_Base for away, > 0 = PASS); without a pick
+# the audit is honest about what is missing but keeps the fixed denominator.
+wps_row = {"fixture_id": 500, "Fixture": "Roma vs Lazio",
+           "Master_Pick": "Roma"}
 snap = fresh_snapshot({"wps_by_name": {pc._norm("Roma vs Lazio"): {
     "H_Base": 120, "A_Base": 44, "Audit_Score": 76}},
-    "sot_by_name": {pc._norm("Roma vs Lazio"): {
-        "Verdict": "DIAMOND", "Game_Script": "GLASS CANNONS"}}})
+    "label_by_id": {"500": "Roma vs Lazio"}})
 ipc = evaluate("win_psychology", dict(wps_row), snap)
 rm = result_map(ipc)
-check("WIN psychology: signed net H>A → PASS, SOT DIAMOND → PASS",
-      rm.get("Psychology") == pc.PASS and rm.get("SOT") == pc.PASS)
-check("WIN psychology: missing corners/underdog/draw still counted — fixed denominator of 5",
-      ipc["total"] == 5 and ipc["passed"] == 2)
+check("WIN psychology: Master_Pick Roma → home side net 120 > 0 PASS",
+      rm.get("Psychology") == pc.PASS
+      and next(c for c in ipc["checks"] if c["name"] == "Psychology")["value"] == 120.0
+      and next(c for c in ipc["checks"] if c["name"] == "Psychology")["field"] == "H_Base/A_Base")
+check("WIN psychology rows audit the FULL WIN 8-rule set (not a mini-list)",
+      ipc["total"] == 8 and len([c for c in ipc["checks"]
+                                 if c["result"] == pc.NOT_AVAILABLE]) == 7)
+
+awps_row = {"fixture_id": 501, "Fixture": "Roma vs Lazio",
+            "Master_Pick": "Lazio"}
+snap = fresh_snapshot({"wps_by_name": {pc._norm("Roma vs Lazio"): {
+    "H_Base": 120, "A_Base": -44, "Audit_Score": 164}},
+    "label_by_id": {"501": "Roma vs Lazio"}})
+ipc = evaluate("win_psychology", dict(awps_row), snap)
+rm = result_map(ipc)
+check("WIN psychology: away pick Lazio with A_Base -44 → FAIL (net <= 0)",
+      rm.get("Psychology") == pc.FAIL)
+nopick = {"fixture_id": 502, "Fixture": "Roma vs Lazio"}
+ipc = evaluate("win_psychology", dict(nopick), snap)
+check("WIN psychology: row without any pick → 0/8, every check NOT_AVAILABLE",
+      ipc is not None and ipc["total"] == 8 and ipc["passed"] == 0
+      and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
 
 # ── 9. GG composites (engine signals echo only; no invented thresholds) ──────
 gg_row = {"fixture_id": 600, "fixture": "Basel vs St. Gallen",

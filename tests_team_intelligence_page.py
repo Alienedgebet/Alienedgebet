@@ -1,11 +1,14 @@
 """Offline tests for get_team_intelligence (pure, no network).
 
-Every expectation below is written against the VERIFIED producing engines:
+Every expectation below is written against the VERIFIED producing engines
+and the JOIN rules this repo now enforces:
   • WIN parity      — win_forecast parity_score signed per side, cut +10
-  • Goal Intent     — DNA engine LEAN OVER per-side cut (> 55)
+  • Goal Intent     — predicted team's DNA Goal Intent VS the opponent's
   • GG BTTS Friction— DNA engine STRONG GG gate (home > 65 AND away > 55)
-  • Draw Probability— draw engine's own candidate floor (mc_draw >= 0.22)
+  • Draw Probability— the WIN rule (draw prob < 20% = PASS)
   • DNA parity      — draw factor-count balance in {0, 1}
+Cross-day joins are PINNED to the synthetic date (see _seal_date), so the
+offline suite can never fall through to real cache files.
 """
 import INTELLIGENT_PASS.pass_count as pc
 
@@ -47,6 +50,8 @@ side_rows = [
 
 def _build():
     s = {k: {} for k in _KEYS}
+    s["date"], s["label_by_id"] = DATE, {"100": "Arsenal vs Chelsea"}
+    s["dna_prof_by_name"] = {}
     s["u2s_rows"], s["corner_rows"] = [], []
     s["win_by_id"] = {"100": side_rows}
     s["win_by_name"] = {pc._norm("Arsenal vs Chelsea"): side_rows}
@@ -76,6 +81,7 @@ def _build():
 
 pc.clear_cache()
 pc._SNAPSHOTS[DATE] = _build()
+pc._seal_date(DATE)
 
 page = pc.get_team_intelligence("Arsenal", DATE)
 check("page resolves team to fixture", page["fixture_found"] is True)
@@ -91,22 +97,31 @@ win = page["markets"]["win"]
 check("win section has Parity +10 PASS with the raw signed value",
       any(c["name"] == "Parity +10" and c["result"] == pc.PASS and c["value"] == 12
           for c in win["checks"]))
-check("win Goal Intent uses the DNA LEAN OVER per-side cut (72 > 55 = PASS)",
-      any(c["name"] == "Goal Intent" and c["result"] == pc.PASS and c["value"] == 72
+check("win Goal Intent compares predicted team VS opponent (72 > 55 = PASS)",
+      any(c["name"] == "Goal Intent" and c["result"] == pc.PASS
+          and c["value"] == {"team": 72.0, "opp": 55.0}
           for c in win["checks"]))
 check("win denominator is FIXED at the full 8-rule set (N/A included)",
       win["total"] == 8 and win["passed"] == 3)
-# 3/4 is CORRECT here: this fixture IS a live draw candidate per the draw
-# engine's own floor (mc_draw 0.30 >= 0.22), so the WIN-side "Draw
-# Probability" check legitimately FAILs while the DRAW section PASSes the
-# very same field — same engine constant, opposite direction per market.
-check("win vs draw use the same mc_draw floor in opposite directions",
+# 3/8 is CORRECT here: Parity +10 / Goal Intent / Form support the pick while
+# SOT, Corners, Psychology and Underdog have no intelligence for this fixture
+# (NOT_AVAILABLE — counted in the FIXED denominator, never fabricated) and the
+# fixture IS a live draw candidate per the draw engine's own floor
+# (mc_draw 0.30 >= 0.22), so the WIN-side "Draw Probability" check
+# legitimately FAILs while the DRAW section PASSes the very same field —
+# same engine field, opposite direction per market.
+check("win vs draw use the same mc_draw field in opposite directions",
       next(c for c in win["checks"] if c["name"] == "Draw Probability")["result"] == pc.FAIL
+      and next(c for c in win["checks"] if c["name"] == "Draw Probability")["threshold"] == "< 0.20 (20%)"
       and next(c for c in page["markets"]["draw"]["checks"]
                if c["name"] == "Draw Probability")["result"] == pc.PASS)
-check("win Form check reports both counters",
-      any(c["name"] == "Form" and c["value"] == {"team": 11, "opp": 6}
+check("win Form compares last-5 WINS of the two WIN side rows",
+      any(c["name"] == "Form" and c["value"] == {"team_wins": 4.0, "opp_wins": 1.0}
           for c in win["checks"]))
+check("win_psychology runs the SAME WIN checklist as win (one checklist)",
+      [c["name"] for c in page["markets"]["win_psychology"]["checks"]]
+      == [c["name"] for c in win["checks"]]
+      and page["markets"]["win_psychology"]["passed"] == win["passed"])
 
 gg = page["markets"]["gg"]
 fr = next((c for c in gg["checks"] if c["name"] == "BTTS Friction"), None)

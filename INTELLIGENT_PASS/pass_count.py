@@ -26,42 +26,76 @@ HARD ARCHITECTURE RULES (user spec, all binding):
 
 RULE ORIGIN MAP (every threshold verified against the producing engine —
 nothing here reinterprets or normalises a scale):
-  ─ SOT support            Engine/sot_engine.py Verdict / Game_Script tags.
-                           DIAMOND (total>=10 AND consistency>70) is
-                           unconditionally supportive; GLASS CANNONS /
-                           SLAUGHTER game scripts structurally inflate shots.
-                           VALUE PLAY / MOMENTUM-only rows are NOT supportive
-                           (conservative FAIL). No per-side SOT split exists
-                           (Proj_SOT is a match total) — user decision (a):
-                           use the existing row + its Verdict/Game_Script.
+  ─ WIN SOT               PSYCHOLOGY/u2s_psychology.py per-side SOT
+                           expectancy — the very columns the WIN page renders
+                           as "SOT Expectancy (Dog)" / "SOT Expectancy (Fav)"
+                           (Dog_Venue_SOT / Fav_Venue_SOT, last-3 venue SOT).
+                           The predicted team's side is identified by the U2S
+                           row's own Underdog column (fixture-level identity),
+                           never by re-deriving favourite/underdog. The rule
+                           is the engine's OWN Tier-A1 comparison (L607-620:
+                           `if dog_v_sot > fav_v_sot … elif fav_v_sot >
+                           dog_v_sot …` — equal totals award nothing): PASS
+                           only when the predicted team's expectancy is
+                           strictly greater than the opponent's. Match-level
+                           Cerberus (Engine/sot_engine.py) has no per-side SOT
+                           (Proj_SOT is a match total), so it is not the WIN
+                           SOT source.
   ─ Corner Friction        AGGREGATOR/corner4_aggregator.py Friction labels:
                            💎 PERFECT / 📊 STABLE support a corner market;
                            💀 DEAD / 🛑 AVOID / UNDER oppose it.
-  ─ Psychology             PSYCHOLOGY/{win,gg,over25}_psychology.py —
-                           Audit_Score / Psych_Score / Score are SIGNED NET
-                           SCORES (real values like +162 / -44), NOT 0-100.
-                           User decision (a): PASS = net score > 0.
-  ─ Underdog (U2S)         PSYCHOLOGY/u2s_psychology.py Psych_Score is the
-                           underdog's signed net score (>0 supports the dog
-                           scoring, i.e. opposes the favourite). dog_score_prob
-                           "<50%" is the AGGREGATOR/master_underdog_audit.py
-                           longshot gate (0-100 "%"-string).
-  ─ Goal Intent / DNA      CORE/dna_v2_market_factors.py market factor counts
-                           + CORE/dna_engine_v2.py Market_Power_Scores
-                           (Goal_Intent 0-100, both sides of the fixture).
+  ─ WIN Corners            AGGREGATOR/corner4_aggregator.py "TRUE FAVOURITE
+                           RESOLUTION" (L676-684): True_Corner_Fav is the side
+                           with the higher syndicate corner score
+                           (Home_Score vs Away_Score). WIN rule: PASS when the
+                           predicted team IS True_Corner_Fav. The Friction
+                           label is NOT the WIN corner rule.
+  ─ WIN Psychology         PSYCHOLOGY/win_psychology.py H_Base / A_Base are
+                           SIGNED per-side nets (the engine's own Audit_Score
+                           is |H_Base - A_Base|). The predicted team's OWN
+                           side net > 0 == PASS — the same condition the
+                           engine itself uses when it marks a row OVERTURNED
+                           (the picked side's base went negative). A fixture
+                           level Audit_Score / the apex row's copied
+                           Psych_Score is only the documented fallback when
+                           the side pair is absent.
+  ─ Underdog (U2S)         AGGREGATOR/master_underdog_audit.py Dog_Score_Prob
+                           (0-100 "%") is the longshot gate; PASS < 50%. The
+                           same producer's Engine/underdog_engine.py
+                           dog_score_prob is the documented fallback (same
+                           field, same scale, same engine family).
+  ─ WIN Goal Intent        CORE/dna_v2_market_factors.py per-side Goal Intent
+                           (home_value / away_value 0-100, produced off
+                           DNA Market_Power_Scores). WIN rule: the predicted
+                           team's Goal Intent > the opponent's → PASS.
+                           Fallback for fixtures without a market-factor
+                           entry: the same engine's per-team
+                           Market_Power_Scores.Goal_Intent profiles
+                           (data/team_dna_profiles.json / cache dna) for both
+                           named teams — identical field, identical 0-100
+                           scale, no new formula.
   ─ WIN Parity             Engine/win_forecast.py parity_score is ALREADY
                            SIGNED PER SIDE ("parity_score": parity_diff if
                            side=="home" else -parity_diff) — the selected
                            team's 5-game goal-involvement (venue+overall+H2H)
                            advantage vs this exact opponent. User rule: PASS
                            = parity_score >= +10 on the selected team's row.
-  ─ WIN Form               Pure comparison of existing counters
-                           (Engine/win_forecast.py): last_5_goals_scored vs
-                           opp_last_5_goals_scored. No new thresholds.
+  ─ WIN Form               Pure comparison of the existing form counters
+                           (Engine/win_forecast.py): the predicted team's
+                           last_5_wins_overall vs the OPPONENT's own side
+                           row's last_5_wins_overall (both sides are always
+                           written by the same engine). When the opponent's
+                           wins counter is absent the row's own
+                           last_5_goals_scored vs opp_last_5_goals_scored is
+                           the documented fallback. No new thresholds.
   ─ Draw probability       Engine/draw_engine.py mc_draw_prob (0-1 Monte
-                           Carlo) < 0.20; dmi (Draw Magnet Index 0-1) >= 0.45
-                           and parity (0-1) >= 0.6 are the engine's own tier
-                           gates (L863/870) — reused verbatim.
+                           Carlo) < 0.20 (user rule); dmi (Draw Magnet Index
+                           0-1) >= 0.45 and parity (0-1) >= 0.6 are the
+                           engine's own tier gates (L863/870) — reused
+                           verbatim. A WIN pick whose fixture has no draw
+                           row falls back to the pick's own
+                           Monte_Draw_Prob (the WIN apex engine's own draw
+                           risk, 0-100 %) against the same 20% cut.
   ─ DNA parity (draw)      data/dna_v2_market_factors.json markets.draw
                            factor win-count balance: |home_count-away_count|
                            in {0,1} (user rule; values outside 0/1 FAIL).
@@ -90,12 +124,39 @@ COMPOSITE CACHE FILES
   and are never read by this evaluator.
 
 IDENTITY
-  fixture_id is the primary key wherever a source carries it (str()-matched —
-  cache files mix str/int). Legacy name-only sources (psychology, sot, fhvi,
-  shvi, corner4) use deterministic label normalisation — the same
-  clean_n/get_match_key convention those engines already use, NOT fuzzy team
-  matching. Composite cache files (draw, unders, gg_o15) are read head-0 only
-  (their parity-list / u35 / o15 heads are different markets).
+  fixture_id is the primary key wherever a source carries it (normalised to
+  str() — cache files mix str/int, and a raw-int comparison against a
+  str-keyed registry silently dropped the WIN side rows). Legacy name-only
+  sources (psychology, sot, fhvi, shvi, corner4) use deterministic label
+  normalisation — the same clean_n/get_match_key convention those engines
+  already use, NOT fuzzy team matching. A fixture_id whose label-bearing
+  sources disagree is resolved through label_by_id (majority label of the
+  id-bearing engines on that date), so a row that stores the fixture with the
+  sides swapped can still reach every name-keyed source. Composite cache files
+  (draw, unders, gg_o15) are read head-0 only (their parity-list / u35 / o15
+  heads are different markets).
+
+CROSS-DAY SOURCE WINDOW  (why N/A was wrong for existing intelligence)
+  main.py documents that the WIN Apex aggregator "takes NO date argument —
+  it always reads the latest merged state", so the SAME apex payload is
+  snapshotted under every date while its supporting engine rows live in the
+  files of the day the apex engine actually read (verified 2026-09-21:
+  189/191 apex picks resolve their U2S / psychology / corners / SOT rows in
+  the 2026-09-20 caches, one day back; 14/15 on 2026-09-22). Auditing such a
+  pick against the requested date alone produced NOT_AVAILABLE for
+  intelligence that is saved on disk — the exact failure this module must not
+  repeat. Every source join therefore resolves in a bounded date window
+  (the requested date FIRST, then ±1..±MAX_SOURCE_LOOKBACK_DAYS), matching by
+  fixture_id and, for id-less sources, by the label that date's own
+  id-bearing engines confirm. The date that supplied every value is reported
+  on the check itself (`source`), so the audit stays fully traceable.
+
+PROVENANCE (how the user can see where each value comes from)
+  Every check is {name, result, value, threshold, source, field, mapping}:
+    source  — the engine key (cache file) + the date the row was read from;
+    field   — the exact source field inside that engine's row;
+    mapping — the team/side mapping used (e.g. "predicted=AtNé side=FAV");
+  so no PASS/FAIL is ever unexplained.
 """
 import json
 import os
@@ -119,6 +180,18 @@ INTELLIGENT_PASS_RULES = {
     # ── WIN ────────────────────────────────────────────────────────────────
     # Parity +10: win_raw/win_forecast parity_score is signed per side.
     "WIN_PARITY_THRESHOLD": 10,
+    # WIN Draw Probability — the requested WIN cut (user rule): a WIN pick is
+    # clean when the fixture's draw probability stays BELOW 20%. Both stored
+    # representations of that same 20% are listed next to the field they
+    # belong to (draw engine mc_draw_prob is a 0-1 Monte Carlo float; the WIN
+    # apex row's Monte_Draw_Prob is the same quantity as a 0-100 number).
+    "WIN_DRAW_PROB_MAX": 0.20,
+    "WIN_DRAW_PROB_MAX_PCT": 20,
+    # WIN Underdog — the longshot gate's own scale (0-100 "%"), PASS below it.
+    "WIN_UNDERDOG_SCORE_PROB_MAX": 50,
+    # Cross-day source window (see the module docstring): the requested date is
+    # always tried first; only a genuine miss on that date looks at ±N days.
+    "MAX_SOURCE_LOOKBACK_DAYS": 3,
     # Draw engine's own draw-candidate floor (Engine/draw_engine.py TIER2 gate
     # `mc_draw >= 0.22`). A WIN pick PASSES when the fixture is BELOW the
     # engine's draw-candidate floor; the DRAW page uses the same constant in
@@ -161,6 +234,19 @@ INTELLIGENT_PASS_RULES = {
     "SOT_DIAMOND_TOKEN": "DIAMOND",
 }
 
+# WIN check name → the authoritative source field (provenance for rows that
+# resolve with no pickable side, so even NOT_AVAILABLE says where it looked).
+_WIN_FIELDS = {
+    "SOT": "U2S Dog_Venue_SOT / Fav_Venue_SOT",
+    "Corners": "corners_aggregator True_Corner_Fav",
+    "Psychology": "win_psychology H_Base / A_Base",
+    "Underdog": "underdog Dog_Score_Prob",
+    "Goal Intent": "DNA Goal Intent",
+    "Draw Probability": "draw mc_draw_prob / apex Monte_Draw_Prob",
+    "Parity +10": "win parity_score",
+    "Form": "win last_5_wins_overall",
+}
+
 # Markets whose pipeline stage carries no applicable second-level intelligence
 # of its own: they intentionally render no Intelligent Pass column (the
 # frontend hides the cell because the API attaches no audit object).
@@ -196,8 +282,9 @@ TEAM_INTELLIGENCE_MARKETS = {
 }
 _MARKET_EVALUATOR_ALIASES = {
     # canonical report key -> the evaluator engine key(s) that market audits with
-    "win": ("win_apex", "win_forecast"),
-    "win_psychology": ("win_psychology",),
+    # "win" and "win_psychology" are the SAME pick (WIN pack): ONE checklist.
+    "win": ("win_apex", "win_forecast", "win_raw"),
+    "win_psychology": ("win_apex", "win_forecast", "win_raw"),
     "gg": ("gg_supreme",),
     "gg_precision": ("gg_precision",),
     "gg_o15": ("gg_o15",),
@@ -296,6 +383,41 @@ def _head_n(data, idx):
     return []
 
 
+_DNA_PROFILE_MEMO = {"index": None}
+
+
+def _index_dna_profiles(payload):
+    """{normalised team name: DNA profile} from a dna payload
+    ({team_id: profile}, CORE/dna_profiler.py)."""
+    idx = {}
+    if isinstance(payload, dict):
+        for entry in payload.values():
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("team_name")
+            if name:
+                idx.setdefault(_norm(name), entry)
+    return idx
+
+
+def _dna_profiles(date):
+    """Per-team DNA profiles for this date: the date's own dna cache payload
+    when the pipeline produced one, otherwise the cumulative producer file
+    data/team_dna_profiles.json (loaded once per process — it is the same
+    engine store for every date, so the window never duplicates it)."""
+    payload = _load("dna", date)
+    if isinstance(payload, dict) and payload:
+        return _index_dna_profiles(payload)
+    if _DNA_PROFILE_MEMO["index"] is None:
+        try:
+            with open(os.path.join(ROOT, "data", "team_dna_profiles.json"),
+                      "r", encoding="utf-8") as f:
+                _DNA_PROFILE_MEMO["index"] = _index_dna_profiles(json.load(f))
+        except Exception:
+            _DNA_PROFILE_MEMO["index"] = {}
+    return _DNA_PROFILE_MEMO["index"]
+
+
 def _load_dna_factors(date):
     """DNA v2 market factors. Reads the API's served snapshot first
     (output/cache/dna_market_factors__{date}.json, dict {fixture_id: entry});
@@ -341,14 +463,32 @@ def _head0(data):
     if isinstance(data, list) and data and isinstance(data[0], list):
         return [r for r in data[0] if isinstance(r, dict)]
     return _rows(data)
+def _idstr(v):
+    """Fixture identity as a string, or "" when the value is a placeholder.
+    Cache files mix int and str ids ('19713004' vs 19713004) — every registry
+    and comparison in this module uses this one normaliser, because an
+    int-vs-str comparison against a str-keyed registry is exactly what let an
+    apex row silently REPLACE the WIN side rows of its own fixture."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v != v:      # NaN
+        return ""
+    s = str(v).strip()
+    if not s or s.lower() in {"nan", "none", "n/a", "na", "null", "-"}:
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
 def _id_index(rows):
     """{str(fixture_id): row} — fixture_id is the primary identity wherever
     a source carries it (cache files mix str/int ids)."""
     idx = {}
     for r in rows:
-        fid = r.get("fixture_id")
-        if fid not in (None, ""):
-            idx.setdefault(str(fid), r)
+        fid = _idstr(r.get("fixture_id"))
+        if fid:
+            idx.setdefault(fid, r)
     return idx
 
 
@@ -367,16 +507,60 @@ def _name_index(rows):
     return idx
 
 
+_VS_SPLIT = r"\s+vs\.?\s+"
+
+
+def _reverse_label(label):
+    """The same fixture with its two sides swapped ("A vs B" → "B vs A").
+    Deterministic, not fuzzy: the two labels describe the identical fixture,
+    only the stored orientation differs between engines. Used ONLY after the
+    exact label and the date's canonical label both missed."""
+    parts = re.split(_VS_SPLIT, str(label or "").strip(), maxsplit=1)
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        return ""
+    return f"{parts[1].strip()} vs {parts[0].strip()}"
+
+
+def _canonical_label(snap, fid):
+    """The fixture's label as stored by that date's ID-BEARING engines
+    (win_raw/win_forecast, underdog, draw, unders, over25, fhvi/shvi, DNA
+    market factors). Apex rows are known to store the fixture with the sides
+    swapped (verified: apex 'Atlético Nacional vs Llaneros' == side rows'
+    'Llaneros vs Atlético Nacional'), so the id-bearing majority label — not
+    the calling row's own string — is what the name-keyed engines are joined
+    on."""
+    fid = _idstr(fid)
+    if not fid:
+        return ""
+    return (snap.get("label_by_id") or {}).get(fid, "")
+
+
 def _resolve(snap, prefix, fid, fxn):
-    """Resolve a source row: fixture_id first, normalised label fallback.
-    Indexes are per-source, so an id hit is always same-file."""
+    """Resolve a source row: fixture_id first, then the exact label, then the
+    date's canonical label for that id, then the reversed label. Indexes are
+    per-source, so an id hit is always same-file, and every fallback is an
+    exact normalised string comparison (never fuzzy matching)."""
     by_id = snap.get(prefix + "_by_id") or {}
     by_name = snap.get(prefix + "_by_name") or {}
-    if fid and fid in by_id:
-        return by_id[fid]
-    fx_key = _norm(fxn) if fxn else ""
-    if fx_key and fx_key in by_name:
-        return by_name[fx_key]
+    fid_s = _idstr(fid)
+    if fid_s and fid_s in by_id:
+        return by_id[fid_s]
+    if fxn:
+        key = _norm(fxn)
+        if key in by_name:
+            return by_name[key]
+    canon = _canonical_label(snap, fid_s)
+    if canon:
+        key = _norm(canon)
+        if key in by_name:
+            return by_name[key]
+        rev = _norm(_reverse_label(canon))
+        if rev and rev in by_name:
+            return by_name[rev]
+    if fxn:
+        rev = _norm(_reverse_label(fxn))
+        if rev and rev in by_name:
+            return by_name[rev]
     return None
 
 
@@ -389,19 +573,74 @@ def _fixture_label(row):
 
 
 def _split_fixture(label):
-    parts = re.split(r"\s+vs\.?\s+", str(label or "").strip())
+    parts = re.split(_VS_SPLIT, str(label or "").strip())
     return (parts[0], parts[1]) if len(parts) == 2 else ("", "")
 # ══════════════════════════════════════════════════════════════════════════════
-# PER-DATE SNAPSHOT (lazy memo — OOM-safe by construction: one dict of
-# references to already-on-disk rows, per worker, one date at a time)
+# PER-DATE SNAPSHOT (lazy memo — one dict of references to already-on-disk rows
+# per date; the cross-day window keeps at most _MAX_WINDOW_SNAPSHOTS dates)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SNAPSHOTS = {}
+# Bounded window cache: enough for the requested date plus the ±lookback days
+# the cross-day payloads actually need (5 dates ≈ 22 MB on real 2026-09 data).
+_MAX_WINDOW_SNAPSHOTS = 5
+# Hermetic-test seam for _seal_date() below: when set, cross-day source
+# lookups are restricted to exactly these dates, so an injected snapshot can
+# never silently fall through to real cache files on disk.
+_WINDOW_DATES_OVERRIDE = None
+
+
+def _seal_date(*dates):
+    """Hermetic-test seam: PIN cross-day joins to exactly the given dates.
+
+    Offline suites inject synthetic snapshots, but the evaluator's source
+    window would otherwise fall through to REAL cache files on neighbouring
+    dates (fortuitous hits/flaky misses). Every suite must call this with its
+    synthetic date right after injecting — the window then touches nothing
+    else."""
+    global _WINDOW_DATES_OVERRIDE
+    _WINDOW_DATES_OVERRIDE = list(dates)
 
 
 def clear_cache():
-    """Test/ops hook — drop every memoised per-date snapshot."""
+    """Test/ops hook — drop every memoised per-date snapshot. Also UNSEALS
+    the date window (the next call re-seals as needed)."""
+    global _WINDOW_DATES_OVERRIDE
     _SNAPSHOTS.clear()
+    _WINDOW_DATES_OVERRIDE = None
+    _SNAPSHOTS.clear()
+
+
+def _window_dates(date):
+    """The dates a source join may look at, in priority order: the requested
+    date first, then the nearer neighbours (±1 … ±MAX_SOURCE_LOOKBACK_DAYS).
+    Bounded by construction — the module never scans the whole archive."""
+    if _WINDOW_DATES_OVERRIDE is not None:
+        return list(_WINDOW_DATES_OVERRIDE)
+    from datetime import date as _d, timedelta as _td
+    try:
+        base = _d.fromisoformat(str(date))
+    except (TypeError, ValueError):
+        return [date]
+    span = int(INTELLIGENT_PASS_RULES["MAX_SOURCE_LOOKBACK_DAYS"])
+    out = [base.strftime("%Y-%m-%d")]
+    for step in range(1, span + 1):
+        out.append((base - _td(days=step)).strftime("%Y-%m-%d"))
+        out.append((base + _td(days=step)).strftime("%Y-%m-%d"))
+    return out
+
+
+def _trim_window_cache(keep):
+    """Evict the least-recently-inserted snapshot once the window cache is
+    full (plain FIFO — the requested date of the current call is always the
+    most recent insertion, so it can never be evicted mid-evaluation)."""
+    while len(_SNAPSHOTS) > _MAX_WINDOW_SNAPSHOTS:
+        for key in list(_SNAPSHOTS):
+            if key != keep:
+                _SNAPSHOTS.pop(key, None)
+                break
+        else:
+            break
 
 
 def _snapshot(date):
@@ -417,23 +656,28 @@ def _snapshot(date):
     # the team-intelligence fixture locator must still resolve the fixture —
     # the report page must never say "no fixture" for a fixture the engines
     # clearly saved. Apex rows carry fixture_id + label (fixture-level).
+    #
+    # ID NORMALISATION (bug fix): the apex registry check MUST compare the
+    # normalised key, otherwise an apex row (fixture_id stored as int) sees
+    # "19713004 not in {'19713004': [...]}" and REPLACES the side rows of its
+    # own fixture — which is what silently turned Parity/Form into N/A.
     win_side_rows = _rows(_load("win_raw", date)) + _rows(_load("win_forecast", date))
     win_apex_rows = _rows(_load("win_apex", date))
     win_by_id, win_by_name = {}, {}
     for r in win_side_rows:
-        fid = r.get("fixture_id")
-        if fid not in (None, ""):
-            win_by_id.setdefault(str(fid), []).append(r)
+        fid = _idstr(r.get("fixture_id"))
+        if fid:
+            win_by_id.setdefault(fid, []).append(r)
         label = _fixture_label(r)
         if label:
             win_by_name.setdefault(_norm(label), []).append(r)
     for r in win_apex_rows:
-        fid = r.get("fixture_id")
+        fid = _idstr(r.get("fixture_id"))
         label = _fixture_label(r)
-        if fid in (None, "") or not label:
+        if not fid or not label:
             continue
         if fid not in win_by_id:  # side rows take priority (they carry team_name)
-            win_by_id[str(fid)] = [r]
+            win_by_id[fid] = [r]
         key = _norm(label)
         if key not in win_by_name:
             win_by_name[key] = [r]
@@ -471,6 +715,41 @@ def _snapshot(date):
     # on the supreme row's own Psych_Score field (not on the composite head).
     gg_rows = _rows(_load("gg_supreme", date))
 
+    # ── ID → CANONICAL LABEL REGISTRY ────────────────────────────────────────
+    # Built from the engines that store BOTH the fixture id and a real
+    # 'home vs away' label; the id-bearing majority wins, apex rows are added
+    # LAST (they can store the fixture with its sides swapped), so a fixture
+    # whose only saved row is an apex row still gets a label.
+    underdog_base_rows = _rows(_load("underdog_base", date))
+    underdog_audit_rows = _rows(_load("underdog_audit", date))
+    fhvi_rows = _rows(_load("fhvi", date))
+    shvi_rows = _rows(_load("shvi", date))
+    label_cand = {}
+
+    def _add_label(r):
+        fid = _idstr(r.get("fixture_id"))
+        label = _fixture_label(r)
+        if not fid or not label:
+            return
+        bucket = label_cand.setdefault(fid, {})
+        key = _norm(label)
+        bucket[key] = (label, bucket.get(key, ("", 0))[1] + 1)
+
+    for rows in (win_side_rows, underdog_base_rows, underdog_audit_rows,
+                 draw_rows, unders_rows, o25f_rows, ggc_rows, o15c_rows,
+                 gg_rows, dna_clash_rows, fhvi_rows, shvi_rows):
+        for r in rows or []:
+            _add_label(r)
+    for fid, entry in (dmf or {}).items():
+        if isinstance(entry, dict) and _fixture_label(entry):
+            _add_label(dict(entry, fixture_id=fid))
+    for r in win_apex_rows:
+        _add_label(r)
+    label_by_id = {
+        fid: max(bucket.items(), key=lambda kv: kv[1][1])[1][0]
+        for fid, bucket in label_cand.items() if bucket
+    }
+
     dna_factors_by_id, dna_factors_by_name = {}, {}
     dna_draw_by_id, dna_draw_by_name = {}, {}
     if isinstance(dmf, dict):
@@ -478,15 +757,20 @@ def _snapshot(date):
             if not isinstance(entry, dict):
                 continue
             markets = entry.get("markets") or {}
-            dna_factors_by_id[str(fid)] = markets
+            fkey = _idstr(fid)
+            dna_factors_by_id[fkey] = markets
             label = entry.get("fixture")
             if label:
                 key = _norm(label)
                 dna_factors_by_name.setdefault(key, markets)
-                dna_draw_by_id[str(fid)] = markets.get("draw") or {}
+                dna_draw_by_id[fkey] = markets.get("draw") or {}
                 dna_draw_by_name.setdefault(key, markets.get("draw") or {})
 
     snap = {
+        # the date this snapshot was read from (every check reports it)
+        "date": date,
+        # fixture_id → canonical 'home vs away' label for this date
+        "label_by_id": label_by_id,
         # per-side WIN rows
         "win_by_id": win_by_id,
         "win_by_name": win_by_name,
@@ -496,14 +780,14 @@ def _snapshot(date):
         "ops_by_id": {}, "ops_by_name": _name_index(_rows(_load("over25_psychology", date))),
         "u2s_by_id": {}, "u2s_by_name": _name_index(u2s_rows),
         "sot_by_id": {}, "sot_by_name": _name_index(_rows(_load("sot", date))),
-        "fhvi_by_id": {}, "fhvi_by_name": _name_index(_rows(_load("fhvi", date))),
-        "shvi_by_id": {}, "shvi_by_name": _name_index(_rows(_load("shvi", date))),
+        "fhvi_by_id": {}, "fhvi_by_name": _name_index(fhvi_rows),
+        "shvi_by_id": {}, "shvi_by_name": _name_index(shvi_rows),
         "cagg_by_id": {}, "cagg_by_name": _name_index(corner_rows),
         # id-keyed sources (id may be str or int on disk — normalised to str)
-        "ud_by_id": _id_index(_rows(_load("underdog_base", date))),
-        "ud_by_name": _name_index(_rows(_load("underdog_base", date))),
-        "uda_by_id": _id_index(_rows(_load("underdog_audit", date))),
-        "uda_by_name": _name_index(_rows(_load("underdog_audit", date))),
+        "ud_by_id": _id_index(underdog_base_rows),
+        "ud_by_name": _name_index(underdog_base_rows),
+        "uda_by_id": _id_index(underdog_audit_rows),
+        "uda_by_name": _name_index(underdog_audit_rows),
         # Market-filtered composite rows (see shape filters above)
         "draw_by_id": _id_index(draw_rows),
         "draw_by_name": _name_index(draw_rows),
@@ -514,6 +798,9 @@ def _snapshot(date):
         "dna_by_name": dna_factors_by_name,
         "dna_draw_by_id": dna_draw_by_id,
         "dna_draw_by_name": dna_draw_by_name,
+        # per-team DNA profiles (Market_Power_Scores.Goal_Intent) — the WIN
+        # Goal Intent fallback for fixtures without a market-factor entry
+        "dna_prof_by_name": _dna_profiles(date),
         # O2.5 engine forecast rows + GG/O1.5 composite heads
         "o25f_by_id": _id_index(o25f_rows),
         "o25f_by_name": _name_index(o25f_rows),
@@ -533,7 +820,112 @@ def _snapshot(date):
         "corner_rows": corner_rows,
     }
     _SNAPSHOTS[date] = snap
+    _trim_window_cache(date)
     return snap
+# ══════════════════════════════════════════════════════════════════════════════
+# CROSS-DAY SOURCE RESOLUTION — the requested date is tried FIRST; only a
+# genuine miss looks at the window (see the module docstring). Every helper
+# returns the date that supplied the row so the check can report it.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _resolve_any(date, prefix, fid, fxn):
+    """(row, source_date) for one source across the date window, or (None, "").
+
+    Cross-fixture guard: when a neighbouring date knows the SAME label under a
+    DIFFERENT fixture id (two-legged ties, double-headers), that date is
+    skipped — its row belongs to another fixture, not to this pick."""
+    fid_s = _idstr(fid)
+    for d in _window_dates(date):
+        snap = _snapshot(d)
+        if d != date and fid_s:
+            known = snap.get("label_by_id") or {}
+            if fxn:
+                mapped = _label_fixture_id(snap, fxn)
+                if mapped and mapped != fid_s:
+                    continue
+            elif known:
+                continue
+        row = _resolve(snap, prefix, fid_s, fxn)
+        if row is not None:
+            return row, d
+    return None, ""
+
+
+def _label_fixture_id(snap, label):
+    """The fixture id a date's own id-bearing engines give a label (either
+    orientation), or "" when that date has no such fixture."""
+    key = _norm(label)
+    if not key:
+        return ""
+    rev = _norm(_reverse_label(label))
+    for fid, lab in (snap.get("label_by_id") or {}).items():
+        k = _norm(lab)
+        if k == key or (rev and k == rev):
+            return fid
+    return ""
+
+
+def _canonical_label_any(date, fid, fxn):
+    """(canonical label, source_date) for a fixture across the source window —
+    the label that date's id-bearing engines agree on. Falls back to the
+    calling row's own label when no date knows the fixture id."""
+    fid_s = _idstr(fid)
+    if fid_s:
+        for d in _window_dates(date):
+            lab = (_snapshot(d).get("label_by_id") or {}).get(fid_s, "")
+            if lab:
+                return lab, d
+    return (fxn or ""), date
+
+
+def _win_rows_any(date, fid, fxn):
+    """(side_rows, source_date) for a fixture's WIN side rows. The canonical
+    label of the supplying date is used when the calling row stored the
+    fixture with its sides swapped."""
+    fid_s = _idstr(fid)
+    for d in _window_dates(date):
+        snap = _snapshot(d)
+        rows = []
+        if fid_s:
+            rows = list((snap.get("win_by_id") or {}).get(fid_s, []))
+        if not rows and fxn:
+            label = ""
+            if fid_s:
+                label = (snap.get("label_by_id") or {}).get(fid_s, "")
+            if not label:
+                label = fxn
+            for key in (_norm(label), _norm(_reverse_label(label)), _norm(fxn)):
+                if not key:
+                    continue
+                rows = list((snap.get("win_by_name") or {}).get(key, []))
+                if rows:
+                    break
+        side_rows = [r for r in rows if r.get("team_name")]
+        if side_rows:
+            return side_rows, d
+    return [], ""
+
+
+def _win_side_trio(date, fid, fxn, team):
+    """(selected row, opponent row, source_date) for one team's WIN side rows.
+
+    The pair is the engine's own output shape: Engine/win_forecast.py always
+    writes BOTH sides of a fixture, so the opponent's own row (its
+    last_5_wins_overall / parity_score) is reachable from the same source."""
+    rows, d = _win_rows_any(date, fid, fxn)
+    if not rows:
+        return None, None, ""
+    t = _norm(team or "")
+    if not t:
+        return rows[0], None, d
+    mine = next((r for r in rows if _norm(r.get("team_name") or "") == t), None)
+    theirs = next((r for r in rows if _norm(r.get("team_name") or "") != t), None)
+    return mine, theirs, d
+
+
+def _win_side_row_any(date, fid, fxn, team):
+    row, _opp, d = _win_side_trio(date, fid, fxn, team)
+    return row, d
 # ══════════════════════════════════════════════════════════════════════════════
 # RULE EVALUATION PRIMITIVES (one pre-existing field/verdict each)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -581,26 +973,95 @@ def _dna_factor(factors, name):
     return next((f for f in factors if f.get("name") == name), None)
 
 
-def _dna_goal_intent_for(snap, fid, fxn, team):
-    """Existing DNA Goal_Intent power score (0-100) for one named team of
-    this fixture. The PASS cut is the DNA engine's OWN LEAN OVER per-side
-    line (combined_goal_intent > 55, CORE/dna_engine_v2.py L592) applied to
-    the side's own score — no new scale is introduced.
-    Returns (result, value)."""
-    factors = _dna_factors(snap, fid, fxn, "over25")
-    goal = _dna_factor(factors or [], "Goal Intent")
-    if not goal:
-        return NOT_AVAILABLE, None
-    home_team, away_team = _split_fixture(fxn)
-    if _norm(team or "") and _norm(team) == _norm(home_team):
-        val = _num(goal.get("home_value"))
-    elif _norm(team or "") and _norm(team) == _norm(away_team):
-        val = _num(goal.get("away_value"))
-    else:
-        return NOT_AVAILABLE, None
-    if val is None:
-        return NOT_AVAILABLE, None
-    return (PASS if val > INTELLIGENT_PASS_RULES["DNA_OVER_LEAN_CUT"] else FAIL), val
+def _win_res(result, value=None, threshold=None, source="", field="", mapping=""):
+    """One WIN check's payload — the rule result plus its provenance
+    (source engine + date, source field, team/side mapping) so the report can
+    show exactly where every value came from."""
+    return {"result": result, "value": value, "threshold": threshold,
+            "source": source, "field": field, "mapping": mapping}
+
+
+def _win_goal_intent_check(date, fid, fxn, target):
+    """WIN Goal Intent — the predicted team's existing DNA Goal Intent (0-100)
+    must beat its opponent's. Preferred source: the fixture's own market-factor
+    breakdown (CORE/dna_v2_market_factors.py, over25 → "Goal Intent"
+    home_value/away_value). Fallback for fixtures that pass did not cover: the
+    same engine's per-team profiles (Market_Power_Scores.Goal_Intent) for both
+    named sides — identical field and scale, so no normalisation is added."""
+    canon, _cd = _canonical_label_any(date, fid, fxn)
+    label = canon or fxn or ""
+    home, away = _split_fixture(label)
+    t_n, h_n, a_n = _norm(target), _norm(home), _norm(away)
+    if not t_n or t_n not in (h_n, a_n):
+        return _win_res(NOT_AVAILABLE,
+                        source="dna_market_factors / dna profiles",
+                        field="Goal Intent",
+                        mapping=f"{target} = neither side of '{label}'")
+    markets, d = _resolve_any(date, "dna", fid, label)
+    goal = _dna_factor((markets or {}).get("over25", {}).get("factors") or [],
+                       "Goal Intent")
+    if goal:
+        tv = _num(goal.get("home_value") if t_n == h_n else goal.get("away_value"))
+        ov = _num(goal.get("away_value") if t_n == h_n else goal.get("home_value"))
+        if tv is not None and ov is not None:
+            return _win_res(PASS if tv > ov else FAIL,
+                            value={"team": tv, "opp": ov},
+                            threshold="team Goal Intent > opponent (0-100)",
+                            source=f"dna_market_factors @ {d}",
+                            field="Goal Intent (home_value/away_value)",
+                            mapping=f"{target} = {'home' if t_n == h_n else 'away'}")
+    prof = _snapshot(d or date).get("dna_prof_by_name") or {}
+    opp_name = away if t_n == h_n else home
+    pt, po = prof.get(t_n), prof.get(_norm(opp_name))
+    if pt and po:
+        tv = _num((pt.get("Market_Power_Scores") or {}).get("Goal_Intent"))
+        ov = _num((po.get("Market_Power_Scores") or {}).get("Goal_Intent"))
+        if tv is not None and ov is not None:
+            return _win_res(PASS if tv > ov else FAIL,
+                            value={"team": tv, "opp": ov},
+                            threshold="team Goal Intent > opponent (0-100)",
+                            source=f"dna profiles @ {d or date}",
+                            field="Market_Power_Scores.Goal_Intent",
+                            mapping=f"{target} vs {opp_name}")
+    return _win_res(NOT_AVAILABLE,
+                    source="dna_market_factors / dna profiles",
+                    field="Goal Intent",
+                    mapping=f"{target} = no DNA Goal Intent in the window")
+
+
+def _win_sot_check(date, fid, fxn, target):
+    """WIN SOT — the predicted team's OWN side SOT expectancy from the U2S
+    engine (the WIN page's "SOT Expectancy (Dog)/(Fav)" columns:
+    Dog_Venue_SOT / Fav_Venue_SOT), evaluated with the engine's own Tier-A1
+    comparison (a side's expectancy must be strictly greater; a tie awards
+    nothing). The row's Underdog column names the dog, so the predicted team's
+    side is read, never re-derived from odds."""
+    row, d = _resolve_any(date, "u2s", fid, fxn)
+    if not row:
+        return _win_res(NOT_AVAILABLE, source="u2s_psychology",
+                        field="Dog_Venue_SOT / Fav_Venue_SOT",
+                        mapping=f"{target} = no U2S row in the source window")
+    dog = str(row.get("Underdog") or "")
+    t_n, dog_n = _norm(target), _norm(dog)
+    canon, _cd = _canonical_label_any(date, fid, fxn)
+    home, away = _split_fixture(canon or fxn or "")
+    if not t_n or t_n not in (_norm(home), _norm(away)):
+        return _win_res(NOT_AVAILABLE, source=f"u2s_psychology @ {d}",
+                        field="Dog_Venue_SOT / Fav_Venue_SOT",
+                        mapping=f"{target} = not a side of '{canon or fxn}'")
+    side = "dog" if t_n == dog_n else "fav"
+    t_field = "Dog_Venue_SOT" if side == "dog" else "Fav_Venue_SOT"
+    o_field = "Fav_Venue_SOT" if side == "dog" else "Dog_Venue_SOT"
+    tv, ov = _num(row.get(t_field)), _num(row.get(o_field))
+    if tv is None or ov is None:
+        return _win_res(NOT_AVAILABLE, source=f"u2s_psychology @ {d}",
+                        field=t_field, mapping=f"{target} = {side.upper()}")
+    return _win_res(PASS if tv > ov else FAIL,
+                    value={"side": side, "team_sot": tv, "opp_sot": ov},
+                    threshold="team SOT expectancy > opponent (U2S Tier A1)",
+                    source=f"u2s_psychology @ {d}",
+                    field=f"{t_field} vs {o_field}",
+                    mapping=f"{target} = {side.upper()} (U2S Underdog={dog})")
 
 
 def _dna_clash_signal(snap, fid, fxn, market_signals_key):
@@ -777,37 +1238,206 @@ def _win_side_row(snap, fid, fxn, team):
     return None
 
 
-def _win_parity_eval(snap, fid, fxn, team, src_row=None):
-    """WIN Parity +10 — the selected team's OWN row already carries its
-    signed advantage vs this opponent (Engine/win_forecast.py stores
+def _win_parity_eval(date, fid, fxn, team, src_row=None):
+    """WIN Parity +10 — the selected team's OWN row already carries its signed
+    advantage vs this opponent (Engine/win_forecast.py stores
     parity_diff if side==home else -parity_diff). PASS = >= +10.
-    When the calling row itself is that side row (win_forecast rows are), its
-    own value is authoritative and the join is skipped."""
-    r = src_row if (isinstance(src_row, dict)
-                    and _num(src_row.get("parity_score")) is not None) else None
-    if r is None:
-        r = _win_side_row(snap, fid, fxn, team)
+    When the calling row itself is that side row (win_forecast/win_raw rows
+    are), its own value is authoritative and the join is skipped — otherwise
+    the fixture's side rows are resolved across the source window."""
+    v = _num(src_row.get("parity_score")) if isinstance(src_row, dict) else None
+    if v is not None:
+        return _win_res(PASS if v >= INTELLIGENT_PASS_RULES["WIN_PARITY_THRESHOLD"] else FAIL,
+                        value=v, threshold=">= +10",
+                        source="calling row", field="parity_score",
+                        mapping=f"{team} = the row's own side")
+    r, d = _win_side_row_any(date, fid, fxn, team)
     if not r:
-        return NOT_AVAILABLE, None
+        return _win_res(NOT_AVAILABLE, threshold=">= +10",
+                        source="win_raw/win_forecast", field="parity_score",
+                        mapping=f"{team} = no saved side row in the window")
     v = _num(r.get("parity_score"))
     if v is None:
-        return NOT_AVAILABLE, None
-    return (PASS if v >= INTELLIGENT_PASS_RULES["WIN_PARITY_THRESHOLD"] else FAIL), v
+        return _win_res(NOT_AVAILABLE, threshold=">= +10",
+                        source=f"win_raw/win_forecast @ {d}", field="parity_score")
+    return _win_res(PASS if v >= INTELLIGENT_PASS_RULES["WIN_PARITY_THRESHOLD"] else FAIL,
+                    value=v, threshold=">= +10",
+                    source=f"win_raw/win_forecast @ {d}", field="parity_score",
+                    mapping=f"{team} = {r.get('side') or 'selected'} side row")
 
 
-def _win_form_eval(snap, fid, fxn, team, src_row=None):
-    """WIN Form — pure comparison of existing last-5 counters (no new
-    thresholds): selected team's last_5_goals_scored vs opponent's."""
-    r = src_row if (isinstance(src_row, dict)
-                    and _num(src_row.get("last_5_goals_scored")) is not None) else None
-    if r is None:
-        r = _win_side_row(snap, fid, fxn, team)
-    if not r:
-        return NOT_AVAILABLE, None
-    gs, opp = _num(r.get("last_5_goals_scored")), _num(r.get("opp_last_5_goals_scored"))
-    if gs is None or opp is None:
-        return NOT_AVAILABLE, None
-    return (PASS if gs > opp else FAIL), {"team": gs, "opp": opp}
+def _win_form_eval(date, fid, fxn, team, src_row=None):
+    """WIN Form — the predicted team's existing last-5 WINS vs the opponent's
+    own side row's last-5 WINS (both counters come from the same
+    Engine/win_forecast.py pair). The row's own goals counters are the
+    documented fallback when the opponent's wins counter is absent."""
+    mine, opp, d = _win_side_trio(date, fid, fxn, team)
+    # The calling row's OWN wins counter is authoritative when present — the
+    # same precedence as the parity check (the audited WIN row IS the
+    # predicted team's engine row, so its counter outranks the saved pair).
+    src_w = _num(src_row.get("last_5_wins_overall")) if isinstance(src_row, dict) else None
+    if src_w is not None and opp is not None:
+        ow = _num(opp.get("last_5_wins_overall"))
+        if ow is not None:
+            return _win_res(PASS if src_w > ow else FAIL,
+                            value={"team_wins": src_w, "opp_wins": ow},
+                            threshold="team last-5 wins > opponent last-5 wins",
+                            source=f"calling row + win_raw/win_forecast @ {d}",
+                            field="last_5_wins_overall",
+                            mapping=f"{team} (calling row) vs opponent's own row")
+    # Goals fallback stays INSIDE the same engine's output shape: a side row
+    # carries BOTH its own goals and the opponent's (opp_last_5_goals_scored),
+    # so the calling row can stand in when the registered pair misses it.
+    if mine is None and isinstance(src_row, dict) \
+            and _num(src_row.get("last_5_goals_scored")) is not None:
+        mine, opp = src_row, None
+    if mine is None:
+        return _win_res(NOT_AVAILABLE,
+                        source="win_raw/win_forecast",
+                        field="last_5_wins_overall",
+                        mapping=f"{team} = no saved side row in the window")
+    w, ow = _num(mine.get("last_5_wins_overall")), _num(opp.get("last_5_wins_overall")) if opp else None
+    if w is not None and ow is not None:
+        return _win_res(PASS if w > ow else FAIL,
+                        value={"team_wins": w, "opp_wins": ow},
+                        threshold="team last-5 wins > opponent last-5 wins",
+                        source=f"win_raw/win_forecast @ {d}",
+                        field="last_5_wins_overall",
+                        mapping=f"{team} vs {opp.get('team_name')}")
+    gs, og = _num(mine.get("last_5_goals_scored")), _num(mine.get("opp_last_5_goals_scored"))
+    if gs is None or og is None:
+        return _win_res(NOT_AVAILABLE, source=f"win_raw/win_forecast @ {d}",
+                        field="last_5_wins_overall")
+    return _win_res(PASS if gs > og else FAIL, value={"team": gs, "opp": og},
+                    threshold="team last-5 goals > opponent last-5 goals (fallback)",
+                    source=f"win_raw/win_forecast @ {d}",
+                    field="last_5_goals_scored",
+                    mapping=f"{team} vs opponent's own row")
+
+
+
+def _win_corners_check(date, fid, fxn, target):
+    """WIN Corners — the predicted team must also be the fixture's TRUE corner
+    favourite (AGGREGATOR/corner4_aggregator.py "TRUE FAVOURITE RESOLUTION":
+    True_Corner_Fav is the side with the higher syndicate corner score)."""
+    c, d = _resolve_any(date, "cagg", fid, fxn)
+    if not c:
+        return _win_res(NOT_AVAILABLE, source="corners_aggregator",
+                        field="True_Corner_Fav",
+                        mapping=f"{target} = no corner row in the source window")
+    fav = str(c.get("True_Corner_Fav") or "")
+    if not fav:
+        return _win_res(NOT_AVAILABLE, source=f"corners_aggregator @ {d}",
+                        field="True_Corner_Fav")
+    h_team = c.get("Home_Team")
+    is_home = _norm(target) == _norm(h_team) or (
+        not h_team and _norm(target) == _norm(_split_fixture(fxn)[0]))
+    t_score = c.get("Home_Score") if is_home else c.get("Away_Score")
+    o_score = c.get("Away_Score") if is_home else c.get("Home_Score")
+    return _win_res(PASS if _norm(fav) == _norm(target) else FAIL,
+                    value={"true_corner_fav": fav, "team_corner_score": t_score,
+                           "opp_corner_score": o_score,
+                           "Total_Exp": c.get("Total_Exp")},
+                    threshold="predicted team == True_Corner_Fav",
+                    source=f"corners_aggregator @ {d}",
+                    field="True_Corner_Fav (Home_Score vs Away_Score)",
+                    mapping=f"{target} vs corner favourite '{fav}'")
+
+
+def _win_psych_check(date, fid, fxn, target, side, src_row=None):
+    """WIN Psychology — the predicted team's OWN signed psychology net.
+    PSYCHOLOGY/win_psychology.py H_Base/A_Base are signed per side
+    (Audit_Score is |H-A|) and the engine itself marks a row OVERTURNED when
+    the picked side's base goes negative. PASS = the predicted side's net > 0.
+    A fixture-level audit score is only the documented fallback when the side
+    pair (or the side mapping) is unavailable."""
+    if side in ("home", "away") and isinstance(src_row, dict):
+        h, a = _num(src_row.get("H_Base")), _num(src_row.get("A_Base"))
+        if h is not None and a is not None:
+            v = h if side == "home" else a
+            return _win_res(PASS if v > INTELLIGENT_PASS_RULES["PSYCHOLOGY_NET_SCORE_PASS"] else FAIL,
+                            value=v, threshold="signed net > 0",
+                            source="calling row", field="H_Base/A_Base",
+                            mapping=f"{target} = {side} side net")
+    row, d = _resolve_any(date, "wps", fid, fxn)
+    if row and side in ("home", "away"):
+        h, a = _num(row.get("H_Base")), _num(row.get("A_Base"))
+        if h is not None and a is not None:
+            v = h if side == "home" else a
+            return _win_res(PASS if v > INTELLIGENT_PASS_RULES["PSYCHOLOGY_NET_SCORE_PASS"] else FAIL,
+                            value=v, threshold="signed net > 0",
+                            source=f"win_psychology @ {d}", field="H_Base/A_Base",
+                            mapping=f"{target} = {side} side net")
+    psych_srcs = []
+    if isinstance(src_row, dict):
+        psych_srcs.append(("calling row", src_row))
+    if row:
+        psych_srcs.append((f"win_psychology @ {d}", row))
+    for src, srow in psych_srcs:
+        for val in ("Psych_Score", "Audit_Score"):
+            v = _num(srow.get(val))
+            if v is not None:
+                return _win_res(PASS if v > INTELLIGENT_PASS_RULES["PSYCHOLOGY_NET_SCORE_PASS"] else FAIL,
+                                value=v, threshold="signed net > 0",
+                                source=src, field=val,
+                                mapping=f"{target} (fixture-level net)")
+    return _win_res(NOT_AVAILABLE, source="win_psychology",
+                    field="H_Base/A_Base",
+                    mapping=f"{target} = no psychology row in the source window")
+
+
+def _win_underdog_check(date, fid, fxn):
+    """WIN Underdog — the existing longshot gate on the fixture's dog
+    (master_underdog_audit Dog_Score_Prob, 0-100 "%"): PASS when the underdog
+    scores less than half the time. underdog_engine's dog_score_prob is the
+    same field of the same engine family, used when the audit row is absent."""
+    cut = INTELLIGENT_PASS_RULES["WIN_UNDERDOG_SCORE_PROB_MAX"]
+    for prefix, field, label in (("uda", "Dog_Score_Prob", "underdog_audit"),
+                                 ("ud", "dog_score_prob", "underdog_base")):
+        row, d = _resolve_any(date, prefix, fid, fxn)
+        if not row:
+            continue
+        p = _frac(row.get(field))
+        if p is None:
+            continue
+        return _win_res(PASS if p < cut / 100.0 else FAIL,
+                        value=row.get(field), threshold=f"< {cut}%",
+                        source=f"{label} @ {d}", field=field,
+                        mapping=f"dog = {row.get('underdog_team') or 'the fixture underdog'}")
+    return _win_res(NOT_AVAILABLE,
+                    source="underdog_audit / underdog_base",
+                    field="Dog_Score_Prob",
+                    mapping="fixture not covered by the underdog engines")
+
+
+def _win_draw_check(date, fid, fxn, src_row=None):
+    """WIN Draw Probability — below 20% the win side is clean. Primary source:
+    the draw engine's own Monte Carlo mc_draw_prob (0-1 float). When the
+    fixture has no draw row, the pick's OWN Monte_Draw_Prob (the WIN apex
+    engine's draw risk, stored as a 0-100 number) is compared against the same
+    20% cut in its own representation."""
+    r, d = _resolve_any(date, "draw", fid, fxn)
+    if r is not None:
+        f = _frac(r.get("mc_draw_prob"))
+        if f is None:
+            return _win_res(NOT_AVAILABLE, source=f"draw @ {d}",
+                            field="mc_draw_prob")
+        return _win_res(PASS if f < INTELLIGENT_PASS_RULES["WIN_DRAW_PROB_MAX"] else FAIL,
+                        value=r.get("mc_draw_prob"), threshold="< 0.20 (20%)",
+                        source=f"draw @ {d}", field="mc_draw_prob",
+                        mapping="fixture-level Monte Carlo draw probability")
+    if isinstance(src_row, dict):
+        raw = _num(src_row.get("Monte_Draw_Prob"))
+        if raw is not None:
+            return _win_res(PASS if raw < INTELLIGENT_PASS_RULES["WIN_DRAW_PROB_MAX_PCT"] else FAIL,
+                            value=raw,
+                            threshold=f"< {INTELLIGENT_PASS_RULES['WIN_DRAW_PROB_MAX_PCT']} (20%)",
+                            source="calling row (WIN apex)",
+                            field="Monte_Draw_Prob",
+                            mapping="the pick's own draw risk (0-100 scale)")
+    return _win_res(NOT_AVAILABLE, source="draw / Monte_Draw_Prob",
+                    field="mc_draw_prob / Monte_Draw_Prob",
+                    mapping="no draw intelligence for this fixture in the window")
 
 
 def _dog_att_eval(snap, fid, fxn):
@@ -840,20 +1470,30 @@ def _fav_def_eval(snap, fid, fxn):
 # the same total (WIN=x/8, GG=x/4 …) and only x varies per pick.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _checks_for_market(market, snap, row, fid, fxn):
-    """Return [{name, result, value, threshold}] for one market row."""
+def _checks_for_market(market, snap, row, fid, fxn, date=None):
+    """Return [{name, result, value, threshold, source, field, mapping}]."""
     rules = INTELLIGENT_PASS_RULES
+    req_date = date or snap.get("date") or ""
     home, away = _split_fixture(fxn)
-    fid_s = str(fid) if fid not in (None, "") else ""
+    fid_s = _idstr(fid)
     checks = []
 
-    def add(name, result, value=None, threshold=None):
-        checks.append({"name": name, "result": result,
-                       "value": value, "threshold": threshold})
+    def add(name, result, value=None, threshold=None,
+            source="", field="", mapping=""):
+        checks.append({"name": name, "result": result, "value": value,
+                       "threshold": threshold, "source": source,
+                       "field": field, "mapping": mapping})
 
-    # ── WIN (apex/forecast picks: Target team vs listed opponent) ────────────
-    if market in ("win_apex", "win_forecast"):
-        target = str(row.get("Target") or row.get("team_name") or "")
+    # ── WIN (apex/forecast/raw/psychology picks: the predicted team, by id) ──
+    if market in ("win_apex", "win_forecast", "win_raw", "win_psychology"):
+        target = str(row.get("Target") or row.get("team_name")
+                     or row.get("Master_Pick") or "")
+        # Resolve the fixture's canonical 'home vs away' label from the
+        # id-bearing engines before any side or name join is made.
+        canon, _label_date = _canonical_label_any(req_date, fid_s, fxn)
+        if canon:
+            fxn = canon
+            home, away = _split_fixture(fxn)
         if not fxn and target:
             # Row carries no fixture label (some side rows are keyed by id
             # only) — take the label from the fixture's WIN side row.
@@ -872,131 +1512,62 @@ def _checks_for_market(market, snap, row, fid, fxn):
             # FIXED DENOMINATOR: even with no pickable side, the WIN audit
             # always carries its FULL 8-rule set (see the rule order below) —
             # the denominator must never depend on row shape.
-            add("SOT", NOT_AVAILABLE)
-            add("Corners", NOT_AVAILABLE)
-            add("Psychology", NOT_AVAILABLE)
-            add("Underdog", NOT_AVAILABLE)
-            add("Goal Intent", NOT_AVAILABLE)
-            add("Draw Probability", NOT_AVAILABLE)
-            add("Parity +10", NOT_AVAILABLE)
-            add("Form", NOT_AVAILABLE)
+            for _name in ("SOT", "Corners", "Psychology", "Underdog",
+                          "Goal Intent", "Draw Probability", "Parity +10",
+                          "Form"):
+                add(_name, NOT_AVAILABLE, field=_WIN_FIELDS.get(_name, ""),
+                    mapping=f"{target or '?'} = no side mapping")
             return checks
-        # 1. SOT support (existing SOT row + its Verdict/Game_Script)
-        s = _resolve(snap, "sot", fid_s, fxn)
-        if not s:
-            add("SOT", NOT_AVAILABLE)
-        else:
-            v = str(s.get("Verdict") or "")
-            gs = str(s.get("Game_Script") or "")
-            if rules["SOT_DIAMOND_TOKEN"] in v or any(t in gs for t in rules["SOT_SUPPORT_TAGS"]):
-                add("SOT", PASS, value=gs or v)
-            else:
-                add("SOT", FAIL, value=gs or v)
-        # 2. Corners friction (corner4 Friction label)
-        c = _resolve(snap, "cagg", None, fxn)
-        if not c:
-            add("Corners", NOT_AVAILABLE)
-        else:
-            fr = str(c.get("Friction") or "")
-            if "PERFECT" in fr or "STABLE" in fr:
-                add("Corners", PASS, value=fr)
-            elif "DEAD" in fr or "AVOID" in fr:
-                add("Corners", FAIL, value=fr)
-            else:
-                add("Corners", FAIL, value=fr)
-        # 3. Psychology — the row's own signed audit net score for the PICK
-        # (apex builders copy the selected side's psychology output); fallback
-        # to the joined win_psychology row's side net when absent.
-        ps_val = _num(row.get("Psych_Score"))
-        if ps_val is not None:
-            add("Psychology", PASS if ps_val > 0 else FAIL, value=row.get("Psych_Score"))
-        else:
-            wps_row = _resolve(snap, "wps", fid_s, fxn)
-            add("Psychology", _psych_side(snap, "wps", fid_s, fxn, side),
-                value=wps_row and wps_row.get("Audit_Score"))
+        # 1. SOT expectancy (U2S per-side intelligence, matched by fav/dog)
+        r = _win_sot_check(req_date, fid_s, fxn, target)
+        add("SOT", r["result"], value=r["value"], threshold=r["threshold"],
+            source=r["source"], field=r["field"], mapping=r["mapping"])
+        # 2. Corners (predicted team must be the True_Corner_Fav)
+        r = _win_corners_check(req_date, fid_s, fxn, target)
+        add("Corners", r["result"], value=r["value"], threshold=r["threshold"],
+            source=r["source"], field=r["field"], mapping=r["mapping"])
+        # 3. Psychology — the predicted team's OWN signed side net
+        r = _win_psych_check(req_date, fid_s, fxn, target, side, row)
+        add("Psychology", r["result"], value=r["value"],
+            threshold=r["threshold"], source=r["source"], field=r["field"],
+            mapping=r["mapping"])
         # 4. Underdog gate (existing dog_score_prob "<50%" longshot rule)
-        u = _resolve(snap, "uda", fid_s, fxn)
-        if not u:
-            add("Underdog", NOT_AVAILABLE)
-        else:
-            p = _frac(u.get("Dog_Score_Prob"))
-            if p is None:
-                add("Underdog", NOT_AVAILABLE)
-            else:
-                add("Underdog", PASS if p < 0.50 else FAIL,
-                    value=u.get("Dog_Score_Prob"), threshold="<50%")
-        # 5. Goal Intent (existing DNA power score for the selected team)
-        gi_res, gi_val = _dna_goal_intent_for(snap, fid_s, fxn, target)
-        add("Goal Intent", gi_res, value=gi_val)
-        # 6. Draw probability — PASS when the fixture sits BELOW the draw
-        # engine's own draw-candidate floor (mc_draw >= 0.22, draw_engine
-        # TIER2 gate): no live draw candidate → the win side is cleaner.
-        d = _resolve(snap, "draw", fid_s, fxn)
-        if not d:
-            add("Draw Probability", NOT_AVAILABLE)
-        else:
-            mp = _frac(d.get("mc_draw_prob"))
-            if mp is None:
-                add("Draw Probability", NOT_AVAILABLE)
-            else:
-                add("Draw Probability", PASS if mp < rules["DRAW_MC_DRAW_PROB_FLOOR"] else FAIL,
-                    value=d.get("mc_draw_prob"), threshold="< 0.22 (draw engine floor)")
+        r = _win_underdog_check(req_date, fid_s, fxn)
+        add("Underdog", r["result"], value=r["value"],
+            threshold=r["threshold"], source=r["source"], field=r["field"],
+            mapping=r["mapping"])
+        # 5. Goal Intent (predicted team's DNA Goal Intent vs opponent's)
+        r = _win_goal_intent_check(req_date, fid_s, fxn, target)
+        add("Goal Intent", r["result"], value=r["value"],
+            threshold=r["threshold"], source=r["source"], field=r["field"],
+            mapping=r["mapping"])
+        # 6. Draw probability — PASS below 20% (user rule), existing field
+        r = _win_draw_check(req_date, fid_s, fxn, row)
+        add("Draw Probability", r["result"], value=r["value"],
+            threshold=r["threshold"], source=r["source"], field=r["field"],
+            mapping=r["mapping"])
         # 7. Parity +10 (win_forecast engine's signed parity_score, own row)
-        par_res, par_val = _win_parity_eval(snap, fid_s, fxn, target, row)
-        add("Parity +10", par_res, value=par_val, threshold=">= +10")
-        # 8. Form (existing last-5 counters, pure comparison)
-        fm_res, fm_val = _win_form_eval(snap, fid_s, fxn, target, row)
-        add("Form", fm_res, value=fm_val)
+        r = _win_parity_eval(req_date, fid_s, fxn, target, row)
+        add("Parity +10", r["result"], value=r["value"],
+            threshold=r["threshold"], source=r["source"], field=r["field"],
+            mapping=r["mapping"])
+        # 8. Form (existing last-5 counters, team vs opponent)
+        r = _win_form_eval(req_date, fid_s, fxn, target, row)
+        add("Form", r["result"], value=r["value"], threshold=r["threshold"],
+            source=r["source"], field=r["field"], mapping=r["mapping"])
         return checks
 
-    # ── WIN PSYCHOLOGY (fixture-level audit rows: no side selection) ────────
+    # ── WIN PSYCHOLOGY — same WIN pick, same ONE WIN checklist ────────────────
+    # The WIN page's psychology table is another WIN pick (Master_Pick), and
+    # supporting-engine identity must never pick the checklist (§15). Its
+    # audit is therefore the COMPLETE WIN ruleset above: seed the predicted
+    # team from this row and run the same eight checks.
     if market == "win_psychology":
-        # SOT support (existing SOT row + its Verdict/Game_Script)
-        s = _resolve(snap, "sot", fid_s, fxn)
-        if not s:
-            add("SOT", NOT_AVAILABLE)
-        else:
-            v = str(s.get("Verdict") or "")
-            gs = str(s.get("Game_Script") or "")
-            if rules["SOT_DIAMOND_TOKEN"] in v or any(t in gs for t in rules["SOT_SUPPORT_TAGS"]):
-                add("SOT", PASS, value=gs or v)
-            else:
-                add("SOT", FAIL, value=gs or v)
-        # Corner friction (corner4 Friction label)
-        c = _resolve(snap, "cagg", None, fxn)
-        if not c:
-            add("Corners", NOT_AVAILABLE)
-        else:
-            fr = str(c.get("Friction") or "")
-            if "PERFECT" in fr or "STABLE" in fr:
-                add("Corners", PASS, value=fr)
-            else:
-                add("Corners", FAIL, value=fr)
-        # This row's OWN signed psychology net (H_Base - A_Base) via the join.
-        add("Psychology", _psych_side(snap, "wps", fid_s, fxn, None))
-        # Underdog gate (master_underdog_audit longshot rule)
-        u = _resolve(snap, "uda", fid_s, fxn)
-        if not u:
-            add("Underdog", NOT_AVAILABLE)
-        else:
-            p = _frac(u.get("Dog_Score_Prob"))
-            if p is None:
-                add("Underdog", NOT_AVAILABLE)
-            else:
-                add("Underdog", PASS if p < 0.50 else FAIL,
-                    value=u.get("Dog_Score_Prob"), threshold="<50%")
-        # Draw engine's own candidate floor (inverted: not a live draw = good)
-        d = _resolve(snap, "draw", fid_s, fxn)
-        if not d:
-            add("Draw Probability", NOT_AVAILABLE)
-        else:
-            mp = _frac(d.get("mc_draw_prob"))
-            if mp is None:
-                add("Draw Probability", NOT_AVAILABLE)
-            else:
-                add("Draw Probability", PASS if mp < rules["DRAW_MC_DRAW_PROB_FLOOR"] else FAIL,
-                    value=d.get("mc_draw_prob"), threshold="< 0.22 (draw engine floor)")
-        return checks
+        target = str(row.get("Master_Pick") or row.get("Target")
+                     or row.get("team_name") or "")
+        if target:
+            row = dict(row, Target=target)
+        return _checks_for_market("win_apex", snap, row, fid, fxn, date=req_date)
     # ── GG / BTTS ────────────────────────────────────────────────────────────
     if market == "gg_supreme":
         ps_val = _num(row.get("Psych_Score"))
@@ -1284,7 +1855,7 @@ def evaluate_market(market_key, rows, date):
             continue
         fxn = _fixture_label(row)
         fid = row.get("fixture_id")
-        checks = _checks_for_market(market_key, snap, row, fid, fxn)
+        checks = _checks_for_market(market_key, snap, row, fid, fxn, date=date)
         # FIXED-DENOMINATOR RULE: the denominator is the market's FULL rule
         # set — every check the branch defines, whether its data exists or
         # not (WIN=8, GG=4, O2.5=6, …). N/A never shrinks the total; only
@@ -1443,36 +2014,49 @@ def _team_context(snap, fid_s, fxn, team_name):
     return ctx
 
 
-def _locate_fixture(snap, team_name):
-    """Find a team's fixture via the WIN-side registry. Strong match: a row
-    naming the team (team_name on side rows, Target on apex rows). Weak
-    fallback: a fixture-level row (no team identity) whose label contains
-    the team — this keeps the report resolvable for fixtures whose ONLY
-    saved rows are fixture-level (e.g. apex-only runs). Returns
-    (fixture_id, rows, fixture_label)."""
+def _locate_fixture(date, snap, team_name):
+    """Find a team's fixture via the WIN-side registry — across the source
+    window, because the WIN pack is cross-day: the requested date is tried
+    first, then the neighbours. Strong match: a row naming the team
+    (team_name on side rows, Target on apex rows, Master_Pick on psychology
+    rows). Weak fallback: a fixture-level row (no team identity) whose label
+    contains the team — this keeps the report resolvable for fixtures whose
+    ONLY saved rows are fixture-level (e.g. apex-only runs). Returns
+    (fixture_id, rows, canonical fixture_label).
+    IMPORTANT: the returned label is always the date's CANONICAL 'home vs
+    away' label from the id-bearing engines — never a swapped apex label —
+    so every name-keyed join downstream resolves."""
     t = _norm(team_name or "")
+    if not t:
+        return "", [], ""
 
     def _row_names(r):
-        return [n for n in (r.get("team_name"), r.get("Target")) if n]
+        return [n for n in (r.get("team_name"), r.get("Target"),
+                            r.get("Master_Pick")) if n]
 
-    for fid, rows in sorted((snap.get("win_by_id") or {}).items()):
-        hit = next((r for r in rows
-                    if any(_norm(n) == t for n in _row_names(r))), None)
-        if hit:
-            return fid, rows, _fixture_label(hit)
-    # Second pass: label-side fallback. A fixture-level row names at most
-    # ONE participant (apex rows carry Target); the other side exists only
-    # in the label. Match the fixture label's SIDES (exact normalised
-    # equality) — containment would let 'Arsenal' resolve an
-    # 'Arsenal U21 vs Brighton U21' fixture.
-    for fid, rows in sorted((snap.get("win_by_id") or {}).items()):
-        for r in rows:
-            label = _fixture_label(r) or ""
-            if not label or not t:
-                continue
-            parts = re.split(r"\s+vs\.?\s+", label, flags=re.I)
-            if any(_norm(p) == t for p in parts if p.strip()):
-                return fid, rows, label
+    for d in _window_dates(date):
+        dsnap = snap if d == date else _snapshot(d)
+        # First pass: exact team-side match.
+        for fid, rows in sorted((dsnap.get("win_by_id") or {}).items()):
+            hit = next((r for r in rows
+                        if any(_norm(n) == t for n in _row_names(r))), None)
+            if hit:
+                canon = (dsnap.get("label_by_id") or {}).get(fid, "")
+                return fid, rows, canon or _fixture_label(hit)
+        # Second pass: label-side fallback. A fixture-level row names at most
+        # ONE participant (apex rows carry Target); the other side exists only
+        # in the label. Match the fixture label's SIDES (exact normalised
+        # equality) — containment would let 'Arsenal' resolve an
+        # 'Arsenal U21 vs Brighton U21' fixture.
+        for fid, rows in sorted((dsnap.get("win_by_id") or {}).items()):
+            for r in rows:
+                label = _fixture_label(r) or ""
+                if not label:
+                    continue
+                parts = re.split(r"\s+vs\.?\s+", label, flags=re.I)
+                if any(_norm(p) == t for p in parts if p.strip()):
+                    canon = (dsnap.get("label_by_id") or {}).get(fid, "")
+                    return fid, rows, canon or label
     return "", [], ""
 
 
@@ -1503,20 +2087,23 @@ def _get_market_intelligence(team_name, date, market):
     # Locate the team's fixture via the WIN-side fixture registry (side rows
     # carry team_name; apex rows carry Target; fixture-level-only fixtures
     # resolve by label containment — the engines saved, so it must resolve).
-    fixture_id, side_rows_hit, fxn = _locate_fixture(snap, team_name)
+    # Window-aware: the WIN pack is cross-day, so the fixture may live in a
+    # neighbouring date's registry — but the report always plays back the
+    # REQUESTED date's story, and every source join happens over the window.
+    fixture_id, side_rows_hit, fxn = _locate_fixture(date, snap, team_name)
     base = {"team": team_name, "date": date, "market": market,
             "market_label": TEAM_INTELLIGENCE_MARKETS[market]}
     if not fxn:
         return dict(base, fixture="", fixture_id="", fixture_found=False,
                     opponent="", prediction=None, score=None, checks=[])
 
-    fid_s = str(fixture_id)
+    fid_s = _idstr(fixture_id)
     opp = _opponent_from(side_rows_hit, fxn, team_name)
 
     # THE PAGE/MARKET IS AUTHORITATIVE: run ONLY this market's evaluator
     # branch, seeded with the same per-fixture row shape the market tables use.
     engine_key = _MARKET_EVALUATOR_ALIASES[market][0]
-    if market == "win":
+    if market in ("win", "win_psychology"):
         row = {"Target": team_name}          # the pick: {team} to win
     elif market == "u2s":
         row = {"fixture_id": fid_s, "fixture": fxn}
@@ -1533,10 +2120,10 @@ def _get_market_intelligence(team_name, date, market):
         # itself (Psych_Score) — seed it exactly as the GG table rows do.
         row = _resolve(snap, "gsup", fid_s, fxn) or {}
     else:
-        # gg_precision / gg_o15 / over25 / over15 / win_psychology:
+        # gg_precision / gg_o15 / over25 / over15:
         # their branches join the fixture's own engine rows internally.
         row = {}
-    checks = _checks_for_market(engine_key, snap, row, fid_s, fxn)
+    checks = _checks_for_market(engine_key, snap, row, fid_s, fxn, date=date)
     # FIXED-DENOMINATOR RULE (matches evaluate_market): total is the market's
     # FULL rule set; N/A never shrinks it — only the numerator varies.
     score = {
@@ -1545,7 +2132,7 @@ def _get_market_intelligence(team_name, date, market):
     }
     return dict(base, fixture=fxn, fixture_id=fixture_id, fixture_found=True,
                 opponent=opp,
-                prediction=team_name if market == "win" else None,
+                prediction=team_name if market in ("win", "win_psychology") else None,
                 score=score, checks=checks)
 
 
@@ -1570,7 +2157,7 @@ def get_team_intelligence(team_name, date, market=None):
 
     # Same locator as the single-market report: side rows carry team_name,
     # apex rows carry Target, fixture-level-only rows resolve by label.
-    fixture_id, side_rows_hit, fxn = _locate_fixture(snap, team_name)
+    fixture_id, side_rows_hit, fxn = _locate_fixture(date, snap, team_name)
     if not fxn:
         return {"team": team_name, "date": date, "fixture": "",
                 "fixture_id": "", "fixture_found": False, "markets": {}}
@@ -1588,22 +2175,23 @@ def get_team_intelligence(team_name, date, market=None):
             "checks": checks,
         }
 
-    _mark("win", _checks_for_market("win_apex", snap, {"Target": team_name}, fid_s, fxn))
-    _mark("win_psychology", _checks_for_market("win_psychology", snap, {}, fid_s, fxn))
-    _mark("gg", _checks_for_market("gg_supreme", snap, {}, fid_s, fxn))
-    _mark("gg_precision", _checks_for_market("gg_precision", snap, {}, fid_s, fxn))
-    _mark("over25", _checks_for_market("over25_apex", snap, {}, fid_s, fxn))
-    _mark("over15", _checks_for_market("over15", snap, {}, fid_s, fxn))
-    _mark("corners", _checks_for_market("corners_aggregator", snap, {}, fid_s, fxn))
+    _mark("win", _checks_for_market("win_apex", snap, {"Target": team_name}, fid_s, fxn, date=date))
+    _mark("win_psychology", _checks_for_market("win_apex", snap,
+                                                {"Target": team_name}, fid_s, fxn, date=date))
+    _mark("gg", _checks_for_market("gg_supreme", snap, {}, fid_s, fxn, date=date))
+    _mark("gg_precision", _checks_for_market("gg_precision", snap, {}, fid_s, fxn, date=date))
+    _mark("over25", _checks_for_market("over25_apex", snap, {}, fid_s, fxn, date=date))
+    _mark("over15", _checks_for_market("over15", snap, {}, fid_s, fxn, date=date))
+    _mark("corners", _checks_for_market("corners_aggregator", snap, {}, fid_s, fxn, date=date))
     _mark("draw", _checks_for_market(
-        "draw", snap, _resolve(snap, "draw", fid_s, fxn) or {}, fid_s, fxn))
+        "draw", snap, _resolve(snap, "draw", fid_s, fxn) or {}, fid_s, fxn, date=date))
     _mark("unders", _checks_for_market(
-        "unders_u25", snap, _resolve(snap, "un", fid_s, fxn) or {}, fid_s, fxn))
-    _mark("u2s", _checks_for_market("u2s", snap, {"fixture_id": fid_s, "fixture": fxn}, fid_s, fxn))
+        "unders_u25", snap, _resolve(snap, "un", fid_s, fxn) or {}, fid_s, fxn, date=date))
+    _mark("u2s", _checks_for_market("u2s", snap, {"fixture_id": fid_s, "fixture": fxn}, fid_s, fxn, date=date))
     _mark("fhvi", _checks_for_market(
-        "fhvi", snap, _resolve(snap, "fhvi", fid_s, fxn) or {}, fid_s, fxn))
+        "fhvi", snap, _resolve(snap, "fhvi", fid_s, fxn) or {}, fid_s, fxn, date=date))
     _mark("shvi", _checks_for_market(
-        "shvi", snap, _resolve(snap, "shvi", fid_s, fxn) or {}, fid_s, fxn))
+        "shvi", snap, _resolve(snap, "shvi", fid_s, fxn) or {}, fid_s, fxn, date=date))
     return {
         "team": team_name, "date": date, "fixture": fxn, "fixture_id": fixture_id,
         "opponent": opp, "fixture_found": True, "markets": markets,
