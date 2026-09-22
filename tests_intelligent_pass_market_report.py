@@ -44,6 +44,8 @@ snap = {k: {} for k in [
     "dna_draw_by_id", "dna_draw_by_name", "o25f_by_id", "o25f_by_name",
     "ggc_by_id", "ggc_by_name", "o15c_by_id", "o15c_by_name"]}
 snap["u2s_rows"], snap["corner_rows"] = [], []
+snap["date"], snap["label_by_id"] = DATE, {"100": "Arsenal vs Chelsea"}
+snap["dna_prof_by_name"] = {}
 snap["win_by_id"] = {"100": side_rows}
 snap["win_by_name"] = {pc._norm("Arsenal vs Chelsea"): side_rows}
 snap["draw_by_id"] = {"100": {"mc_draw_prob": 0.30, "parity": 0.7, "dmi": 0.5}}
@@ -72,6 +74,7 @@ snap["shvi_by_name"] = {pc._norm("Arsenal vs Chelsea"): {
 
 pc.clear_cache()
 pc._SNAPSHOTS[DATE] = snap
+pc._seal_date(DATE)
 
 
 def report(market, team="Arsenal"):
@@ -115,12 +118,24 @@ check("no O2.5 checks inside DRAW report", not (O25_ONLY & set(names("draw"))))
 
 # ── scores differ per pick on the SAME fixture (not one generic number) ────
 # FIXED-DENOMINATOR RULE: totals are each market's FULL rule set
-# (O2.5=6, WIN=8, FHVI/SHVI=1); only the numerator varies per pick.
+# (O2.5=6, WIN=8, FHVI/SHVI=1); only the numerator varies per pick. WIN is
+# 3/8: Parity +10 / Goal Intent / Form support the pick, the four side-sourced
+# checks have no intelligence for this fixture (NOT_AVAILABLE — never
+# fabricated) and Draw Probability FAILs at mc_draw 0.30 against the WIN
+# rule's own < 20% cut.
 check("same fixture, per-pick scores: O2.5 6/6 vs WIN 3/8 vs FHVI 1/1 vs SHVI 0/1",
       report("over25")["score"] == {"passed": 6, "total": 6}
       and report("win")["score"] == {"passed": 3, "total": 8}
       and report("fhvi")["score"] == {"passed": 1, "total": 1}
       and report("shvi")["score"] == {"passed": 0, "total": 1})
+
+# ── WIN psychology is the SAME pick audited by the SAME WIN checklist ───────
+wp = report("win_psychology")
+check("WIN-psychology click runs the WIN checklist (8 same-name checks)",
+      [c["name"] for c in wp["checks"]]
+      == [c["name"] for c in report("win")["checks"]]
+      and wp["market"] == "win_psychology"
+      and wp["score"] == report("win")["score"])
 
 # ── every sidebar market has its own evaluator (§12) ───────────────────────
 ALL_MARKETS = ["win", "win_psychology", "gg", "gg_precision", "gg_o15", "over25",
@@ -187,11 +202,13 @@ check("gg Psychology verdict+value come from the supreme row's own Psych_Score",
 DATE2 = "2026-09-27"
 snap2 = {k: {} for k in snap}
 snap2["u2s_rows"], snap2["corner_rows"] = [], []
+snap2["date"], snap2["label_by_id"], snap2["dna_prof_by_name"] = DATE2, {}, {}
 apex_row = {"fixture_id": 200, "Fixture": "Real Madrid vs Barcelona",
             "Target": "Real Madrid"}
 snap2["win_by_id"] = {"200": [apex_row]}
 snap2["win_by_name"] = {pc._norm("Real Madrid vs Barcelona"): [apex_row]}
 pc._SNAPSHOTS[DATE2] = snap2
+pc._seal_date(DATE2)
 mad = pc.get_team_intelligence("Real Madrid", DATE2, market="over25")
 check("apex Target match resolves the fixture (strong pass)",
       mad["fixture_found"] is True
@@ -205,10 +222,11 @@ check("the OTHER side resolves by label containment (apex-only runs)",
 # ── regression: word-boundary guard — an U21 fixture never swallows the team
 snap3 = {k: {} for k in snap}
 snap3["u2s_rows"], snap3["corner_rows"] = [], []
+snap3["date"], snap3["label_by_id"], snap3["dna_prof_by_name"] = DATE, {}, {}
 snap3["win_by_id"] = {"300": [{"fixture_id": 300,
                                "Fixture": "Arsenal U21 vs Brighton U21"}]}
 check("word-boundary guard: senior team does NOT resolve an U21-only fixture",
-      pc._locate_fixture(snap3, "Arsenal") == ("", [], ""))
+      pc._locate_fixture(DATE, snap3, "Arsenal") == ("", [], ""))
 pc._SNAPSHOTS.pop(DATE2, None)
 
 print("OK" if not FAILS else str(len(FAILS)) + " FAILURES", flush=True)
