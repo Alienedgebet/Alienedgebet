@@ -161,6 +161,7 @@ PROVENANCE (how the user can see where each value comes from)
 import json
 import os
 import re
+import time
 import unicodedata
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -581,9 +582,25 @@ def _split_fixture(label):
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SNAPSHOTS = {}
-# Bounded window cache: enough for the requested date plus the ±lookback days
-# the cross-day payloads actually need (5 dates ≈ 22 MB on real 2026-09 data).
-_MAX_WINDOW_SNAPSHOTS = 5
+_SNAP_FRESH_AT = {}  # date → monotonic ts of the last freshness validation
+# Freshness validations are THROTTLED per date: each one scans the whole
+# cache dir (~660 entries), and evaluate_market re-enters _snapshot ~20× per
+# row via internal source lookups — unthrottled that was 13,000+ stat() calls
+# per row (~0.19 s). A 2 s TTL keeps a mid-request pipeline save visible
+# within ≤2 s while making every other entry a dict lookup.
+_FRESH_VALIDATE_SECONDS = 2.0
+# Per-date staleness metadata for the memo above: the cache dir's own mtime
+# (changes on every atomic save / file create / delete) plus the mtime of
+# every cache file the build actually touched (absent files recorded with
+# None so a later creation is detected). A long-lived API worker must never
+# serve a pre-pipeline snapshot as current data.
+_SNAP_META = {}
+# Bounded window cache: enough for the requested date plus the FULL ±lookback
+# window the cross-day payloads walk (±3 days = 7 dates) — a cap smaller than
+# the window made every single row evict and rebuild full snapshots
+# (~0.27 s each), which turned a 191-row apex response into a ~90 s request
+# and timed the WIN Pick Pack out on full dates.
+_MAX_WINDOW_SNAPSHOTS = 8
 # Hermetic-test seam for _seal_date() below: when set, cross-day source
 # lookups are restricted to exactly these dates, so an injected snapshot can
 # never silently fall through to real cache files on disk.
@@ -608,7 +625,8 @@ def clear_cache():
     global _WINDOW_DATES_OVERRIDE
     _SNAPSHOTS.clear()
     _WINDOW_DATES_OVERRIDE = None
-    _SNAPSHOTS.clear()
+    _SNAP_META.clear()
+    _SNAP_FRESH_AT.clear()
 
 
 def _window_dates(date):
@@ -638,16 +656,84 @@ def _trim_window_cache(keep):
         for key in list(_SNAPSHOTS):
             if key != keep:
                 _SNAPSHOTS.pop(key, None)
+                _SNAP_META.pop(key, None)
                 break
         else:
             break
 
 
+def _record_snapshot_meta():
+    """Fingerprint the cache dir cheaply: the dir's own mtime (changes on
+    every atomic engine save / file create / delete) plus the mtime of every
+    file in it. ~1 ms for a few hundred files — negligible next to the
+    ~0.3 s snapshot rebuild it guards."""
+    try:
+        st = os.stat(CACHE_DIR)
+        meta = {"dir": st.st_mtime_ns, "files": {}}
+        with os.scandir(CACHE_DIR) as it:
+            for entry in it:
+                try:
+                    meta["files"][entry.name] = entry.stat().st_mtime_ns
+                except OSError:
+                    meta["files"][entry.name] = None
+        return meta
+    except OSError:
+        return None
+
+
+def _snapshot_is_fresh(meta):
+    """True when the dir mtime AND every recorded file mtime are unchanged
+    since the fingerprint was taken. Missing/absent files (None) are
+    compared by name so a later creation is detected."""
+    try:
+        st = os.stat(CACHE_DIR)
+        if st.st_mtime_ns != meta.get("dir"):
+            return False
+        prev = meta.get("files") or {}
+        with os.scandir(CACHE_DIR) as it:
+            seen = set()
+            for entry in it:
+                seen.add(entry.name)
+                try:
+                    m = entry.stat().st_mtime_ns
+                except OSError:
+                    m = None
+                if prev.get(entry.name, object()) != m:
+                    return False
+        return len(prev) == len(seen)
+    except OSError:
+        return False
+
+
 def _snapshot(date):
     snap = _SNAPSHOTS.get(date)
     if snap is not None:
-        return snap
+        # mtime-validated memo: the cache dir's mtime changes on EVERY
+        # atomic engine save (file create/replace/delete), and per-file
+        # mtimes catch in-place edits. Unchanged mtimes → the memo IS the
+        # current disk state, so the ~0.3 s rebuild is skipped per row.
+        # Freshness checks are THROTTLED to one full dir scan per date per
+        # _FRESH_VALIDATE_SECONDS — evaluate_market re-enters _snapshot
+        # ~20× per row, and an unthrottled scan on every entry is thousands
+        # of stat() calls per row. A mid-request pipeline save becomes
+        # visible within ≤2 s of the next evaluation.
+        now = time.monotonic()
+        if now - _SNAP_FRESH_AT.get(date, 0.0) >= _FRESH_VALIDATE_SECONDS:
+            _SNAP_FRESH_AT[date] = now
+            meta = _SNAP_META.get(date)
+            # meta None → a test/ops-injected memo (never built from disk):
+            # trusted as-is. Real builds always record a fingerprint.
+            if meta is not None and not _snapshot_is_fresh(meta):
+                _SNAPSHOTS.pop(date, None)
+                _SNAP_META.pop(date, None)
+                snap = None
+        if snap is not None:
+            return snap
 
+    # Capture disk mtimes BEFORE reading: if the pipeline saves while this
+    # build runs, the dir mtime no longer matches the recorded one and the
+    # next call rebuilds — a mid-build change can never be memoised as fresh.
+    meta0 = _record_snapshot_meta()
     # WIN side rows: win_raw and win_forecast share the win_forecast engine's
     # row shape (same producer) and BOTH store parity_score signed per side —
     # so a row for the selected team is the row whose team_name matches.
@@ -820,6 +906,8 @@ def _snapshot(date):
         "corner_rows": corner_rows,
     }
     _SNAPSHOTS[date] = snap
+    _SNAP_META[date] = meta0
+    _SNAP_FRESH_AT[date] = time.monotonic()
     _trim_window_cache(date)
     return snap
 # ══════════════════════════════════════════════════════════════════════════════
