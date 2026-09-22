@@ -72,25 +72,30 @@ function IntelligentPassCell({
   date?: string;
   market?: string;
 }) {
-  if (!data || data.total === 0) {
-    return <span className="font-mono text-2xs text-text-dim">–</span>;
-  }
-  const cls =
-    data.passed === data.total
+  // Fixture-level rows with no audit (or a 0/0 audit) still drill down: the
+  // report page resolves the fixture from team+date, so the click must never
+  // dead-end on a plain dash. The dash stays visually dim.
+  const effective: IntelligentPassData =
+    data && data.total > 0
+      ? data
+      : { market: market || data?.market, passed: 0, total: 0, checks: [] };
+  const cls = !effective.total
+    ? "border-white/10 text-text-dim"
+    : effective.passed === effective.total
       ? "border-accent-green/40 text-accent-green"
-      : data.passed / data.total >= 0.6
+      : effective.passed / effective.total >= 0.6
         ? "border-amber-500/40 text-amber-300"
         : "border-rose-500/40 text-rose-300";
   return (
     <Suspense
       fallback={
         <span className="font-mono text-[11px] font-black text-text-dim">
-          {data.passed}/{data.total}
+          {effective.total ? `${effective.passed}/${effective.total}` : "–"}
         </span>
       }
     >
       <ReportLink
-        data={data}
+        data={effective}
         team={team}
         date={date}
         market={market}
@@ -126,9 +131,10 @@ function ReportLink({
   // produced "//win?date=...", which browsers parse as host "win"
   // (ERR_NAME_NOT_RESOLVED). Normalize instead of prepending.
   const cleanPath = `/${pathname.replace(/^\/+/, "")}`;
+  const fromRef = from ? `${cleanPath}?${from}` : cleanPath;
   const href = `/team/${encodeURIComponent(team || "")}?date=${date || ""}${
     marketKey ? `&market=${encodeURIComponent(marketKey)}` : ""
-  }${from ? `&from=${encodeURIComponent(`${cleanPath}?${from}`)}` : ""}`;
+  }${fromRef ? `&from=${encodeURIComponent(fromRef)}` : ""}`;
   return (
     <Link
       href={href}

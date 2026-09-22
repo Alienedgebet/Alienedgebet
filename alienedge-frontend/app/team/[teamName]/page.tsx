@@ -1,8 +1,7 @@
 "use client";
 
 import { Suspense, useMemo } from "react";
-import Link from "next/link";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { BrainCircuit, ArrowLeft } from "lucide-react";
 import {
   teamIntelligenceApi,
@@ -168,11 +167,17 @@ function ReportInner() {
     { cacheKey: `team-intelligence:${teamName}:${effectiveDate}:${market || "all"}` }
   );
 
-  // Back ALWAYS returns to the page the click came from; the market→page map
-  // is only the fallback for URLs that arrived without ?from=. The value is
-  // decoded and sanitized: it must be a same-origin path with exactly one
-  // leading slash (a "//win"-style value would resolve "win" as a hostname —
-  // ERR_NAME_NOT_RESOLVED — so it falls back to the market's own page).
+  // Back ALWAYS returns to the page the click came from — exactly like the
+  // DNA drill-down. Primary mechanism is HISTORY BACK (router.back()): the
+  // market page is still mounted in the router stack, so its selected date /
+  // tab / filter state and its fetched data are restored instantly with zero
+  // re-fetch and zero dependence on URL plumbing. ?from= is only the
+  // deep-link fallback for URLs that arrived here directly (new tab / shared
+  // link / history already gone): it is decoded and sanitized — it must be a
+  // same-origin path with exactly one leading slash (a "//win"-style value
+  // would resolve "win" as a hostname — ERR_NAME_NOT_RESOLVED — so it falls
+  // back to the market's own page).
+  const router = useRouter();
   const backHref = useMemo(() => {
     let target = "";
     if (from) {
@@ -221,13 +226,22 @@ function ReportInner() {
       {/* ── 1. HEADER — team + THE clicked market ─────────────────────── */}
       <div className="glass flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
         <div className="flex items-center gap-3">
-          <Link
-            href={backHref}
+          <button
+            type="button"
+            onClick={() => {
+              // History back restores the originating page exactly as it was
+              // (date, tab, filters, scroll) — same mechanism as the DNA
+              // drill-down. Only when this report was opened as a fresh
+              // deep link (nothing to pop) do we use the sanitized
+              // ?from=/market fallback instead.
+              if (window.history.length > 1) router.back();
+              else window.location.assign(backHref);
+            }}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 transition-all hover:border-cyan-400 hover:text-white active:scale-95"
             aria-label="Back to the originating page"
           >
             <ArrowLeft className="h-4 w-4" />
-          </Link>
+          </button>
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-indigo/30 bg-accent-indigo/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]">
             <BrainCircuit className="h-4 w-4 text-accent-indigo" />
           </div>
