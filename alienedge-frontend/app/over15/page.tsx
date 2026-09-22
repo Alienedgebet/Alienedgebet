@@ -104,10 +104,10 @@ export default function Over15Page() {
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
 
-      {/* ── 3. STAGE 1: Over 1.5 Psychology ──────────────────────────── */}
+      {/* ── 3. Over 1.5 Intelligence ─────────────────────────────────── */}
       <div>
         <ChainStage
-          title="Over 1.5 Psychology"
+          title="Over 1.5 Intelligence"
           description="Psychology layer"
           fetcher={() => over15Api.getPsychology(date)}
           deps={[date]}
@@ -118,10 +118,10 @@ export default function Over15Page() {
         />
       </div>
 
-      {/* ── 4. STAGE 2: Over 1.5 Base (Stage 3) ──────────────────────── */}
+      {/* ── 4. Over 1.5 Gold ─────────────────────────────────────────── */}
       <div>
         <ChainStage
-          title="Over 1.5 Base (Stage 3)"
+          title="Over 1.5 Gold"
           description="Foundation base"
           fetcher={() => over15Api.getStage3(date)}
           deps={[date]}

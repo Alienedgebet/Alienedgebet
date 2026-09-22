@@ -5,10 +5,7 @@ import { CornerUpRight } from "lucide-react";
 import {
   cornersApi,
   type CornerAggregatorPick,
-  type CornerCatalystPick,
-  type CornerPsychologyPick,
   type CornerStage2Pick,
-  type CornerStage1Pick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
@@ -19,9 +16,6 @@ import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import {
   MOCK_CORNER_AGG,
-  MOCK_CORNER_CAT,
-  MOCK_CORNER_PSYCH,
-  MOCK_CORNER_S1,
   MOCK_CORNER_S2,
 } from "@/lib/mock-chains";
 
@@ -81,125 +75,6 @@ const aggregatorColumns: PredictionColumn<CornerAggregatorPick>[] = [
   },
 ];
 
-const catalystColumns: PredictionColumn<CornerCatalystPick>[] = [
-  {
-    key: "fixture",
-    header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture_name}</span>,
-  },
-  { key: "corners", header: "Predicted Corners", align: "right", render: (r) => r.predicted_corners },
-  {
-    key: "actual_corners",
-    header: "Actual Corners",
-    align: "right",
-    className: "text-right",
-    render: (r) => {
-      const v = (r as unknown as Record<string, unknown>).verification as {
-        h_corners?: number;
-        a_corners?: number;
-        total_corners?: number;
-        verdict?: string;
-        note?: string;
-      } | undefined;
-      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
-        return <span className="text-2xs text-text-dim">—</span>;
-      }
-      const h = v.h_corners ?? 0;
-      const a = v.a_corners ?? 0;
-      const t = v.total_corners ?? h + a;
-      return (
-        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
-          {h}+{a}={t}
-        </span>
-      );
-    },
-  },
-  { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.corner_tier} /> },
-  {
-    key: "positions",
-    header: "Table Pos (H/A)",
-    align: "right",
-    render: (r) => `${r.home_position} / ${r.away_position}`,
-  },
-  { key: "friction", header: "Friction Grade", render: (r) => r.friction_grade },
-  {
-    key: "wounded",
-    header: "Wounded Beast",
-    render: (r) => (
-      <div className="flex flex-col gap-0.5 text-2xs">
-        {r.home_is_wounded_beast && (
-          <span className="text-accent-red">H: {r.home_wounded_intensity}</span>
-        )}
-        {r.away_is_wounded_beast && (
-          <span className="text-accent-red">A: {r.away_wounded_intensity}</span>
-        )}
-        {!r.home_is_wounded_beast && !r.away_is_wounded_beast && <span className="text-text-dim">—</span>}
-      </div>
-    ),
-  },
-];
-
-const psychologyColumns: PredictionColumn<CornerPsychologyPick>[] = [
-  {
-    key: "fixture",
-    header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture_name}</span>,
-  },
-  {
-    key: "actual_corners",
-    header: "Actual Corners",
-    align: "right",
-    className: "text-right",
-    render: (r) => {
-      const v = (r as unknown as Record<string, unknown>).verification as {
-        h_corners?: number;
-        a_corners?: number;
-        total_corners?: number;
-        verdict?: string;
-        note?: string;
-      } | undefined;
-      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
-        return <span className="text-2xs text-text-dim">—</span>;
-      }
-      const h = v.h_corners ?? 0;
-      const a = v.a_corners ?? 0;
-      const t = v.total_corners ?? h + a;
-      return (
-        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
-          {h}+{a}={t}
-        </span>
-      );
-    },
-  },
-  {
-    key: "positions",
-    header: "Table Pos (H/A)",
-    align: "right",
-    render: (r) => `${r.home_position} / ${r.away_position}`,
-  },
-  { key: "gap", header: "Standings Gap", align: "right", render: (r) => r.standings_gap },
-  { key: "friction", header: "Friction Grade", render: (r) => r.friction_grade },
-  { key: "tactical", header: "Tactical Grade", render: (r) => r.tactical_intelligence_grade },
-  {
-    key: "note",
-    header: "Tactical Note",
-    className: "max-w-[220px] truncate",
-    render: (r) => r.tactical_note || "—",
-  },
-  {
-    key: "wounded",
-    header: "Wounded Beast",
-    render: (r) =>
-      r.is_wounded_beast ? (
-        <span className="text-accent-red">
-          {r.wounded_team_name}: {r.wounded_reason}
-        </span>
-      ) : (
-        <span className="text-text-dim">—</span>
-      ),
-  },
-];
-
 const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
   {
     key: "fixture",
@@ -254,56 +129,6 @@ const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
   },
 ];
 
-const stage1Columns: PredictionColumn<CornerStage1Pick>[] = [
-  {
-    key: "fixture",
-    header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
-  },
-  { key: "expected", header: "Expected Total", align: "right", render: (r) => r.expected_total_corners },
-  {
-    key: "actual_corners",
-    header: "Actual Corners",
-    align: "right",
-    className: "text-right",
-    render: (r) => {
-      const v = (r as unknown as Record<string, unknown>).verification as {
-        h_corners?: number;
-        a_corners?: number;
-        total_corners?: number;
-        verdict?: string;
-        note?: string;
-      } | undefined;
-      if (!v || v.verdict === "PENDING" || (v.h_corners == null && v.a_corners == null)) {
-        return <span className="text-2xs text-text-dim">—</span>;
-      }
-      const h = v.h_corners ?? 0;
-      const a = v.a_corners ?? 0;
-      const t = v.total_corners ?? h + a;
-      return (
-        <span className="font-mono text-2xs text-amber-200" title={v.note || ""}>
-          {h}+{a}={t}
-        </span>
-      );
-    },
-  },
-  { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.corner_tier} /> },
-  { key: "diff", header: "Expected Diff", align: "right", render: (r) => r.expected_difference },
-  { key: "team_more", header: "Team With More", render: (r) => r.team_more_corners },
-  {
-    key: "prob_like",
-    header: "Prob-Like %",
-    render: (r) => <ProbCell value={r.team_more_corners_probability_like} showBar={false} />,
-  },
-  {
-    key: "odds",
-    header: "Odds (Win/O2.5)",
-    align: "right",
-    render: (r) => `${r.home_win_odds.toFixed(2)} / ${r.over_2_5_odds.toFixed(2)}`,
-  },
-  { key: "confidence", header: "Avg Confidence", align: "right", render: (r) => r.avg_confidence },
-];
-
 export default function CornersPage() {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
@@ -328,27 +153,9 @@ export default function CornersPage() {
     [dnaV2, date]
   );
 
-  // 2. Catalyst (Verify -> Rest)
-  const catalystColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<CornerCatalystPick>(), ...catalystColumns],
-    []
-  );
-
-  // 3. Psychology (Verify -> Rest)
-  const psychologyColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<CornerPsychologyPick>(), ...psychologyColumns],
-    []
-  );
-
   // 4. Refiner Stage 2 (Verify -> Rest)
   const stage2ColumnsWithVerify = useMemo(
     () => [createVerifyColumn<CornerStage2Pick>(), ...stage2Columns],
-    []
-  );
-
-  // 5. Miner Stage 1 (Verify -> Rest)
-  const stage1ColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<CornerStage1Pick>(), ...stage1Columns],
     []
   );
 
@@ -376,10 +183,10 @@ export default function CornersPage() {
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
 
-      {/* ── 3. STAGE 1: Corner Master Aggregator ────────────────────── */}
+      {/* ── 3. Corner Intelligence ─────────────────────────────────── */}
       <div>
         <ChainStage
-          title="Corner Master Aggregator"
+          title="Corner Intelligence"
           description="Elite output"
           fetcher={() => cornersApi.getAggregator(date)}
           deps={[date]}
@@ -390,38 +197,10 @@ export default function CornersPage() {
         />
       </div>
 
-      {/* ── 4. STAGE 2: Corner Catalyst ─────────────────────────────── */}
+      {/* ── 6. Corner ────────────────────────────────────────────────── */}
       <div>
         <ChainStage
-          title="Corner Catalyst"
-          description="Wounded-beast catalyst layer"
-          fetcher={() => cornersApi.getCatalyst(date)}
-          deps={[date]}
-          columns={catalystColumnsWithVerify}
-          rowKey={(r, i) => `${r.fixture_name}-${i}`}
-          emptyMessage="No catalyst picks for this date."
-          fallbackData={MOCK_CORNER_CAT}
-        />
-      </div>
-
-      {/* ── 5. STAGE 3: Corner Psychology ───────────────────────────── */}
-      <div>
-        <ChainStage
-          title="Corner Psychology"
-          description="Standings & tactical psychology"
-          fetcher={() => cornersApi.getPsychology(date)}
-          deps={[date]}
-          columns={psychologyColumnsWithVerify}
-          rowKey={(r, i) => `${r.fixture_name}-${i}`}
-          emptyMessage="No psychology audits for this date."
-          fallbackData={MOCK_CORNER_PSYCH}
-        />
-      </div>
-
-      {/* ── 6. STAGE 4: Corner Refiner (Stage 2) ────────────────────── */}
-      <div>
-        <ChainStage
-          title="Corner Refiner (Stage 2)"
+          title="Corner"
           description="Style-alignment refinement"
           fetcher={() => cornersApi.getStage2(date)}
           deps={[date]}
@@ -432,19 +211,6 @@ export default function CornersPage() {
         />
       </div>
 
-      {/* ── 7. STAGE 5: Corner Miner (Stage 1) ──────────────────────── */}
-      <div>
-        <ChainStage
-          title="Corner Miner (Stage 1)"
-          description="Foundation base"
-          fetcher={() => cornersApi.getStage1(date)}
-          deps={[date]}
-          columns={stage1ColumnsWithVerify}
-          rowKey={(r, i) => `${r.fixture_id}-${i}`}
-          emptyMessage="No stage 1 picks for this date."
-          fallbackData={MOCK_CORNER_S1}
-        />
-      </div>
     </div>
   );
 }

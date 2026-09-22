@@ -189,10 +189,10 @@ export default function SHVIPage() {
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
 
-      {/* ── 3. STAGE 1: SHVI Streak Miner ────────────────────────────── */}
+      {/* ── 3. Second Half Over 1 A ──────────────────────────────────── */}
       <div>
         <ChainStage
-          title="SHVI Streak Miner"
+          title="Second Half Over 1 A"
           description="Foundation base"
           fetcher={() => specialsApi.getSHVI(date)}
           deps={[date]}
@@ -203,10 +203,10 @@ export default function SHVIPage() {
         />
       </div>
 
-      {/* ── 4. STAGE 2: SH-GG Winner ─────────────────────────────────── */}
+      {/* ── 4. Second Half Over1 B ───────────────────────────────────── */}
       <div>
         <ChainStage
-          title="SH-GG Winner"
+          title="Second Half Over1 B"
           description="SH Master supplementary panel"
           fetcher={() => shMasterApi.getSHGGWinner(date)}
           deps={[date]}
@@ -217,10 +217,10 @@ export default function SHVIPage() {
         />
       </div>
 
-      {/* ── 5. STAGE 3: SH Master Vortex ─────────────────────────────── */}
+      {/* ── 5. Second Half Over1 C ───────────────────────────────────── */}
       <div>
         <ChainStage
-          title="SH Master Vortex"
+          title="Second Half Over1 C"
           description="SH Master supplementary panel"
           fetcher={() => shMasterApi.getSHMaster(date)}
           deps={[date]}
@@ -231,10 +231,10 @@ export default function SHVIPage() {
         />
       </div>
 
-      {/* ── 6. STAGE 4: SH 8-Goal Aggregator ─────────────────────────── */}
+      {/* ── 6. S H V 1 Intelligence ──────────────────────────────────── */}
       <div>
         <ChainStage
-          title="SH 8-Goal Aggregator"
+          title="S H V 1 Intelligence"
           description="SH Master supplementary panel"
           fetcher={() => shMasterApi.getSH8Goal(date)}
           deps={[date]}

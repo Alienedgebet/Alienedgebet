@@ -4,7 +4,6 @@ import { useMemo } from "react";
 import { Swords } from "lucide-react";
 import {
   underdogApi,
-  type UnderdogApexPick,
   type UnderdogMasterPick,
   type UnderdogBasePick,
 } from "@/lib/api";
@@ -13,27 +12,7 @@ import { createVerifyColumn } from "@/components/predictions/createVerifyColumn"
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
-import { MOCK_UD_APEX, MOCK_UD_AUDIT, MOCK_UD_BASE } from "@/lib/mock-chains";
-
-const apexColumns: PredictionColumn<UnderdogApexPick>[] = [
-  {
-    key: "fixture",
-    header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.Fixture}</span>,
-  },
-  { key: "rank", header: "Rank", render: (r) => <TierBadge tier={r.Rank} /> },
-  {
-    key: "prob",
-    header: "Monte UD %",
-    render: (r) => <ProbCell value={r.Monte_UD_Prob} showBar={false} />,
-  },
-  { key: "engine", header: "Engine", render: (r) => r.Engine },
-  { key: "handshake", header: "Handshake", render: (r) => r.Handshake },
-  { key: "dna", header: "DNA", render: (r) => r.DNA },
-  { key: "rule", header: "Rule", render: (r) => r.Rule },
-  { key: "vuln", header: "Fav Vulnerability", render: (r) => r.Fav_Vuln },
-  { key: "sh_gg", header: "SH GG Label", render: (r) => r.SH_GG_Label },
-];
+import { MOCK_UD_AUDIT, MOCK_UD_BASE } from "@/lib/mock-chains";
 
 const auditColumns: PredictionColumn<UnderdogMasterPick>[] = [
   {
@@ -100,12 +79,6 @@ const baseColumns: PredictionColumn<UnderdogBasePick>[] = [
 export default function UnderdogPage() {
   const { date } = useSelectedDate();
 
-  // 1. Apex (Verify -> Rest)
-  const apexColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<UnderdogApexPick>(), ...apexColumns],
-    []
-  );
-
   // 2. Audit (Verify -> Rest)
   const auditColumnsWithVerify = useMemo(
     () => [
@@ -149,7 +122,7 @@ export default function UnderdogPage() {
               Underdog to Score Intelligence
             </h1>
             <p className="text-[11px] text-text-secondary">
-              Full 3-stage U2S engine — Apex picks, master audit &amp; foundation base
+              U2S intelligence — master audit &amp; foundation base
             </p>
           </div>
         </div>
@@ -158,24 +131,10 @@ export default function UnderdogPage() {
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
 
-      {/* ── 3. STAGE 1: Underdog Apex ────────────────────────────────── */}
+      {/* ── 3. STAGE 2: Underdog Master Audit → Underdog 2 ────────────── */}
       <div>
         <ChainStage
-          title="Underdog Apex — Final Aggregator"
-          description="Elite output"
-          fetcher={() => underdogApi.getApex(date)}
-          deps={[date]}
-          columns={apexColumnsWithVerify}
-          rowKey={(r, i) => `${r.fixture_id}-${i}`}
-          emptyMessage="No apex picks for this date."
-          fallbackData={MOCK_UD_APEX}
-        />
-      </div>
-
-      {/* ── 4. STAGE 2: Underdog Master Audit ────────────────────────── */}
-      <div>
-        <ChainStage
-          title="Underdog Master Audit"
+          title="Underdog 2"
           description="Audit layer"
           fetcher={() => underdogApi.getAudit(date)}
           deps={[date]}
@@ -186,10 +145,10 @@ export default function UnderdogPage() {
         />
       </div>
 
-      {/* ── 5. STAGE 3: Underdog Base Engine ─────────────────────────── */}
+      {/* ── 5. STAGE 3: Underdog Base Engine → Underdog ───────────────── */}
       <div>
         <ChainStage
-          title="Underdog Base Engine"
+          title="Underdog"
           description="Foundation base"
           fetcher={() => underdogApi.getBase(date)}
           deps={[date]}

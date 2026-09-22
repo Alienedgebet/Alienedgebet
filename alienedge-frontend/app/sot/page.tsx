@@ -59,10 +59,10 @@ export default function SOTPage() {
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
 
-      {/* ── 3. CERBERUS S.O.T. ENGINE TABLE ──────────────────────────── */}
+      {/* ── 3. SHORT ON TARGET OVER 6.5+ TABLE ───────────────────────── */}
       <div>
         <ChainStage
-          title="Cerberus S.O.T. Engine"
+          title="Short On Target Over 6.5+"
           description="Foundation base"
           fetcher={() => specialsApi.getSOT(date)}
           deps={[date]}
