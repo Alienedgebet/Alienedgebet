@@ -102,11 +102,6 @@ const validationAlertColumns: PredictionColumn<LiveValidationPick>[] = [
     render: (r) => <span className="font-medium text-text-primary">{r.match_name}</span>,
   },
   {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
-  {
     key: "prediction_type",
     header: "prediction_type",
     render: (r) => (

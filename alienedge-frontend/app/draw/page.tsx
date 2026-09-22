@@ -96,7 +96,7 @@ export default function DrawPage() {
               Draw Intelligence
             </h1>
             <p className="text-[11px] text-text-secondary">
-              Draw Magnet Index — composite analysis, high-parity list &amp; amateur draws
+              Draw Magnet — ranked draws &amp; No 3 Goal in a Roll &amp; Asian Handicap 2.5
             </p>
           </div>
         </div>
@@ -105,9 +105,9 @@ export default function DrawPage() {
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
 
-      {/* ── 3. BRANCH 1: Draw Magnet Index ──────────────────────────── */}
+      {/* ── 3. BRANCH 1: Draw Magnet ────────────────────────────────── */}
       <ChainBranch
-        title="Draw Magnet Index"
+        title="Draw Magnet"
         description={isMock ? "Full ranked draw list · Demo" : "Full ranked draw list"}
         data={payload?.draws ?? []}
         loading={result.loading}
@@ -117,9 +117,9 @@ export default function DrawPage() {
         emptyMessage="No draw picks for this date."
       />
 
-      {/* ── 4. BRANCH 2: High Parity List ───────────────────────────── */}
+      {/* ── 4. BRANCH 2: No 3 Goal in a Roll & Asian Handicap 2.5 ───── */}
       <ChainBranch
-        title="High Parity List"
+        title="No 3 Goal in a Roll & Asian Handicap 2.5"
         description={isMock ? "Parity ≥ 0.9 subset · Demo" : "Parity ≥ 0.9 subset"}
         data={payload?.parity_list ?? []}
         loading={result.loading}
@@ -129,17 +129,6 @@ export default function DrawPage() {
         emptyMessage="No high-parity fixtures for this date."
       />
 
-      {/* ── 5. BRANCH 3: Amateurs List ──────────────────────────────── */}
-      <ChainBranch
-        title="Amateurs List"
-        description={isMock ? "Total draws > 5 subset · Demo" : "Total draws > 5 subset"}
-        data={payload?.amateurs_list ?? []}
-        loading={result.loading}
-        error={result.error}
-        columns={drawColumnsWithVerifyAndDna}
-        rowKey={(r, i) => `${r.fixture_id}-${i}`}
-        emptyMessage="No amateur-table fixtures for this date."
-      />
     </div>
   );
 }

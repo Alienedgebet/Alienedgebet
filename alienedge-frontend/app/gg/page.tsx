@@ -4,11 +4,9 @@ import { useMemo } from "react";
 import { Zap } from "lucide-react";
 import {
   ggApi,
-  type GGCrossVerifyPick,
   type GGForensicPick,
   type GGO15Pick,
   type GGPrecisionPick,
-  type GGPsychologyPick,
   type GGSupremePick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -26,19 +24,12 @@ import {
   type PredictionColumn,
 } from "@/components/predictions";
 import {
-  MOCK_GG_CROSS,
   MOCK_GG_FORENSICS,
   MOCK_GG_PRECISION,
-  MOCK_GG_PSYCH,
   MOCK_GG_SUPREME,
 } from "@/lib/mock-chains";
 
 const supremeColumns: PredictionColumn<GGSupremePick>[] = [
-  {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
   {
     key: "Fixture",
     header: "Fixture",
@@ -117,11 +108,6 @@ const supremeColumns: PredictionColumn<GGSupremePick>[] = [
 
 const forensicsColumns: PredictionColumn<GGForensicPick>[] = [
   {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
-  {
     key: "league_id",
     header: "league_id",
     render: (r) => <span className="font-mono text-2xs">{r.league_id}</span>,
@@ -160,51 +146,7 @@ const forensicsColumns: PredictionColumn<GGForensicPick>[] = [
   },
 ];
 
-const psychologyColumns: PredictionColumn<GGPsychologyPick>[] = [
-  {
-    key: "Fixture",
-    header: "Fixture",
-    render: (r) => (
-      <span className="font-medium text-text-primary">{r.Fixture}</span>
-    ),
-  },
-  { key: "MC_Rank", header: "MC_Rank", render: (r) => r.MC_Rank },
-  {
-    key: "MC_Prob",
-    header: "MC_Prob",
-    render: (r) => <ProbCell value={r.MC_Prob} showBar={false} />,
-  },
-  {
-    key: "Psych_Score",
-    header: "Psych_Score",
-    align: "right",
-    render: (r) => r.Psych_Score,
-  },
-  {
-    key: "Tier",
-    header: "Tier",
-    render: (r) => <TierBadge tier={r.Tier} />,
-  },
-  {
-    key: "Spears",
-    header: "Spears",
-    className: "max-w-[200px] truncate",
-    render: (r) => r.Spears || "—",
-  },
-  {
-    key: "Psych_Triggers",
-    header: "Psych_Triggers",
-    className: "max-w-[220px] truncate",
-    render: (r) => r.Psych_Triggers || "—",
-  },
-];
-
 const ggColumns: PredictionColumn<GGPrecisionPick>[] = [
-  {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
   {
     key: "fixture",
     header: "fixture",
@@ -239,7 +181,6 @@ const ggColumns: PredictionColumn<GGPrecisionPick>[] = [
 ];
 
 const o15Columns: PredictionColumn<GGO15Pick>[] = [
-  { key: "fixture_id", header: "fixture_id", render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span> },
   { key: "fixture", header: "fixture", render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span> },
   { key: "home_team", header: "home_team", render: (r) => r.home_team },
   { key: "away_team", header: "away_team", render: (r) => r.away_team },
@@ -258,18 +199,6 @@ const o15Columns: PredictionColumn<GGO15Pick>[] = [
   { key: "sig5_fatigue_penalty", header: "Fatigue Penalty", align: "right", render: (r) => r.sig5_fatigue_penalty },
   { key: "fatigue_home", header: "Home Fatigue", align: "right", render: (r) => r.fatigue_home.toFixed(2) },
   { key: "fatigue_away", header: "Away Fatigue", align: "right", render: (r) => r.fatigue_away.toFixed(2) },
-];
-
-const crossVerifyColumns: PredictionColumn<GGCrossVerifyPick>[] = [
-  { key: "fixture_id", header: "fixture_id", render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span> },
-  { key: "league_id", header: "league_id", render: (r) => <span className="font-mono text-2xs">{r.league_id}</span> },
-  { key: "home_team", header: "home_team", render: (r) => <span className="font-medium text-text-primary">{r.home_team}</span> },
-  { key: "away_team", header: "away_team", render: (r) => <span className="font-medium text-text-primary">{r.away_team}</span> },
-  { key: "gg_prob_pct", header: "gg_prob_pct", render: (r) => <ProbCell value={r.gg_prob_pct} showBar={false} /> },
-  { key: "tier", header: "tier", render: (r) => <TierBadge tier={r.tier} /> },
-  { key: "verification_days", header: "verification_days", align: "right", render: (r) => r.verification_days },
-  { key: "table_distance", header: "table_distance", align: "right", render: (r) => r.table_distance },
-  { key: "audit_timestamp", header: "audit_timestamp", className: "max-w-[160px] truncate", render: (r) => r.audit_timestamp || "—" },
 ];
 
 export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
@@ -317,12 +246,6 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
     []
   );
 
-  // 4. GG Psychology (Verify -> Rest)
-  const psychologyColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<GGPsychologyPick>(), ...psychologyColumns],
-    []
-  );
-
   // 5. GG Precision BTTS Head (Verify -> Intelligent Pass Count -> Rest)
   const ggColumnsWithVerify = useMemo(
     () => [
@@ -335,12 +258,6 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
       ...ggColumns,
     ],
     [date]
-  );
-
-  // 6. GG Cross-Verification (Verify -> Rest)
-  const crossVerifyColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<GGCrossVerifyPick>(), ...crossVerifyColumns],
-    []
   );
 
   const live = precision.data;
@@ -375,7 +292,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
       {/* ── 3. STAGE 1: GG Supreme ───────────────────────────────────── */}
       <div>
         <ChainStage
-          title="GG Supreme — Final Aggregator"
+          title="GG Intelligence"
           description="Top-of-chain picks after full 3-stage GG audit"
           fetcher={() => ggApi.getSupreme(date)}
           deps={[date]}
@@ -400,24 +317,10 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
         />
       </div>
 
-      {/* ── 5. STAGE 3: GG Psychology ────────────────────────────────── */}
-      <div>
-        <ChainStage
-          title="GG Psychology"
-          description="Monte Carlo rank, psychology score, spears and trigger signals"
-          fetcher={() => ggApi.getPsychology(date)}
-          deps={[date]}
-          columns={psychologyColumnsWithVerify}
-          rowKey={(r, i) => `${r.Fixture}-${i}`}
-          emptyMessage="No psychology audits for this date."
-          fallbackData={MOCK_GG_PSYCH}
-        />
-      </div>
-
       {/* ── 6. STAGE 4: GG Precision BTTS Head ───────────────────────── */}
       <div>
         <ChainBranch
-          title="GG Precision — BTTS Head"
+          title="GG Precision"
           description={
             precisionIsMock
               ? "GG precision engine — Poisson, venue BTTS, GK vulnerability · Demo"
@@ -435,7 +338,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
       {/* ── 7. STAGE 5: Over 1.5 Precision Twin Head ─────────────────── */}
       <div>
         <ChainBranch
-          title="Over 1.5 Precision — Twin Head"
+          title="GG Over 1.5"
           description={
             precisionIsMock
               ? "Over 1.5 precision — lambda, venue goals avg, fatigue · Demo"
@@ -450,19 +353,6 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
         />
       </div>
 
-      {/* ── 8. STAGE 6: GG Cross-Verification ────────────────────────── */}
-      <div>
-        <ChainStage
-          title="GG Cross-Verification"
-          description="7-day rolling BTTS cross-verification — verified vs. live table distance"
-          fetcher={() => ggApi.getCrossVerify()}
-          deps={[]}
-          columns={crossVerifyColumnsWithVerify}
-          rowKey={(r, i) => `${r.fixture_id}-${i}`}
-          emptyMessage="No cross-verification data right now."
-          fallbackData={MOCK_GG_CROSS}
-        />
-      </div>
     </div>
   );
 }

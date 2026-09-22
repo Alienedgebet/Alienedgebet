@@ -4,13 +4,11 @@ import { useMemo } from "react";
 import { TrendingUp } from "lucide-react";
 import {
   over25Api,
+  specialsApi,
   type Over25ApexPick,
   type Over25GoldPick,
-  type Over25ForecastPick,
-  type Over25Stage3Pick,
-  type Over25PsychologyPick,
   type Over25Stage2Pick,
-  type Over25Stage1Pick,
+  type FHVIPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
@@ -18,15 +16,12 @@ import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
-import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
+import { ChainStage, TierBadge, ProbCell, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import {
   MOCK_O25_APEX,
-  MOCK_O25_FORECAST,
   MOCK_O25_GOLD,
-  MOCK_O25_PSYCH,
-  MOCK_O25_S1,
   MOCK_O25_S2,
-  MOCK_O25_S3,
+  MOCK_FHVI,
 } from "@/lib/mock-chains";
 
 const apexColumns: PredictionColumn<Over25ApexPick>[] = [
@@ -95,70 +90,6 @@ const goldColumns: PredictionColumn<Over25GoldPick>[] = [
   { key: "h2h", header: "H2H Analyzed", align: "right", render: (r) => r.metrics.h2h_matches_analyzed },
 ];
 
-const forecastColumns: PredictionColumn<Over25ForecastPick>[] = [
-  {
-    key: "fixture",
-    header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
-  },
-  { key: "league", header: "League", render: (r) => r.league },
-  {
-    key: "kill",
-    header: "Kill Switch",
-    render: (r) => (
-      <span className={r.kill_switch_pass ? "text-accent-green" : "text-accent-red"}>
-        {r.kill_switch_pass ? "Pass" : "Fail"}
-      </span>
-    ),
-  },
-  {
-    key: "poisson",
-    header: "Poisson Over %",
-    render: (r) => <ProbCell value={r.poisson_over_prob_num} showBar={false} />,
-  },
-  { key: "odds", header: "O2.5 Odds", align: "right", render: (r) => r.o25_odds.toFixed(2) },
-  { key: "votes", header: "Council Votes", render: (r) => r.council_votes },
-  { key: "pos_gap", header: "Pos Gap", align: "right", render: (r) => r.pos_gap },
-  { key: "h2h_overs", header: "H2H Overs /5", align: "right", render: (r) => r.h2h_overs_last_5 },
-];
-
-const stage3Columns: PredictionColumn<Over25Stage3Pick>[] = [
-  {
-    key: "match",
-    header: "Match",
-    render: (r) => <span className="font-medium text-text-primary">{r.Match}</span>,
-  },
-  { key: "poisson", header: "Poisson %", render: (r) => <ProbCell value={r["Poisson%"]} showBar={false} /> },
-  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
-  { key: "grade", header: "Grade", render: (r) => <TierBadge tier={r.Grade} /> },
-  { key: "h2h", header: "H2H Record", render: (r) => r.H2H_Record },
-  { key: "picked", header: "Picked By", render: (r) => r.PickedBy },
-  {
-    key: "fail",
-    header: "Failures",
-    className: "max-w-[200px] truncate",
-    render: (r) => r.Failures || "—",
-  },
-];
-
-const psychologyColumns: PredictionColumn<Over25PsychologyPick>[] = [
-  {
-    key: "fixture",
-    header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.Fixture}</span>,
-  },
-  { key: "poisson", header: "Base Poisson", render: (r) => <ProbCell value={r.Base_Poisson} showBar={false} /> },
-  { key: "grade", header: "Base Grade", render: (r) => r.Base_Grade },
-  { key: "score", header: "Score", align: "right", render: (r) => r.Score },
-  { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.Tier} /> },
-  {
-    key: "reasons",
-    header: "Reasons",
-    className: "max-w-[220px] truncate",
-    render: (r) => r.Reasons || "—",
-  },
-];
-
 const stage2Columns: PredictionColumn<Over25Stage2Pick>[] = [
   {
     key: "fixture",
@@ -177,16 +108,37 @@ const stage2Columns: PredictionColumn<Over25Stage2Pick>[] = [
   },
 ];
 
-const stage1Columns: PredictionColumn<Over25Stage1Pick>[] = [
+const fhviColumns: PredictionColumn<FHVIPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
     render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
   },
-  { key: "time", header: "Time", render: (r) => r.Time },
-  { key: "confidence", header: "Confidence", render: (r) => r.Confidence },
-  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
-  { key: "algo", header: "Algorithm", render: (r) => r.Algorithm },
+  { key: "country", header: "Country", render: (r) => r.country },
+  { key: "category", header: "Category", render: (r) => <TierBadge tier={r.Category} /> },
+  { key: "label", header: "FHVI Label", render: (r) => r.fhvi_label },
+  {
+    key: "score",
+    header: "FHVI Score",
+    render: (r) => (
+      <div className="flex flex-col gap-1">
+        <span className="font-mono text-xs text-text-primary">{r.fhvi_score.toFixed(1)}</span>
+        <ScoreBar score={r.fhvi_score} max={100} height={2.5} />
+      </div>
+    ),
+  },
+  { key: "pressure", header: "FH Pressure", align: "right", render: (r) => r.fh_pressure },
+  { key: "comb_fh", header: "Comb FH Rate", align: "right", render: (r) => r.comb_fh_r },
+  { key: "sh_avg", header: "Avg SH Goals", align: "right", render: (r) => r.avg_sh_goals },
+  {
+    key: "half_scores",
+    header: "HT → FT",
+    render: (r) => (
+      <span className="font-mono">
+        {r.ht_score} → {r.ft_score}
+      </span>
+    ),
+  },
 ];
 
 export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) {
@@ -214,42 +166,26 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
     []
   );
 
-  // 3. Forecast (Verify -> Rest)
-  const forecastColumnsWithVerify = useMemo(
-    () => [
-      createVerifyColumn<Over25ForecastPick>(),
-      createIntelligentPassColumn<Over25ForecastPick>({
-        market: "over25",
-        getLabel: (r) => r.fixture,
-        date,
-      }),
-      ...forecastColumns,
-    ],
-    []
-  );
-
-  // 4. Kill-Switch Stage 3 (Verify -> Rest)
-  const stage3ColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<Over25Stage3Pick>(), ...stage3Columns],
-    []
-  );
-
-  // 5. Psychology (Verify -> Rest)
-  const psychologyColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<Over25PsychologyPick>(), ...psychologyColumns],
-    []
-  );
-
   // 6. Council Stage 2 (Verify -> Rest)
   const stage2ColumnsWithVerify = useMemo(
     () => [createVerifyColumn<Over25Stage2Pick>(), ...stage2Columns],
     []
   );
 
-  // 7. Base Stage 1 (Verify -> Rest)
-  const stage1ColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<Over25Stage1Pick>(), ...stage1Columns],
-    []
+  // 4. FHVI duplicate display (Verify -> Intelligent Pass Count -> Rest)
+  // Same live data source as the FHVI page (specialsApi.getFHVI) — a second
+  // presentation of the same panel, titled Over 2.5 Intelligence 2.
+  const fhviColumnsWithVerify = useMemo(
+    () => [
+      createVerifyColumn<FHVIPick>(),
+      createIntelligentPassColumn<FHVIPick>({
+        market: "fhvi",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...fhviColumns,
+    ],
+    [date]
   );
 
   return (
@@ -280,7 +216,7 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
       {/* ── 3. STAGE 1: Over 2.5 Apex ────────────────────────────────── */}
       <div>
         <ChainStage
-          title="Over 2.5 Apex — Final Aggregator"
+          title="Over 2.5 Intelligence 1"
           description="Elite output"
           fetcher={() => over25Api.getApex(date)}
           deps={[date]}
@@ -305,52 +241,10 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
         />
       </div>
 
-      {/* ── 5. STAGE 3: Over 2.5 Forecast ────────────────────────────── */}
+      {/* ── 5. STAGE 3: Over 2.5 Judges (Stage 2) ─────────────────────── */}
       <div>
         <ChainStage
-          title="Over 2.5 Forecast"
-          description="Forecast layer"
-          fetcher={() => over25Api.getForecast(date)}
-          deps={[date]}
-          columns={forecastColumnsWithVerify}
-          rowKey={(r, i) => `${r.fixture_id}-${i}`}
-          emptyMessage="No forecast picks for this date."
-          fallbackData={MOCK_O25_FORECAST}
-        />
-      </div>
-
-      {/* ── 6. STAGE 4: Over 2.5 Kill-Switch (Stage 3) ────────────────── */}
-      <div>
-        <ChainStage
-          title="Over 2.5 Kill-Switch (Stage 3)"
-          description="Failure-audited grading"
-          fetcher={() => over25Api.getStage3(date)}
-          deps={[date]}
-          columns={stage3ColumnsWithVerify}
-          rowKey={(r, i) => `${r.Match}-${i}`}
-          emptyMessage="No stage 3 picks for this date."
-          fallbackData={MOCK_O25_S3}
-        />
-      </div>
-
-      {/* ── 7. STAGE 5: Over 2.5 Psychology ──────────────────────────── */}
-      <div>
-        <ChainStage
-          title="Over 2.5 Psychology"
-          description="Psychology layer"
-          fetcher={() => over25Api.getPsychology(date)}
-          deps={[date]}
-          columns={psychologyColumnsWithVerify}
-          rowKey={(r, i) => `${r.Fixture}-${i}`}
-          emptyMessage="No psychology audits for this date."
-          fallbackData={MOCK_O25_PSYCH}
-        />
-      </div>
-
-      {/* ── 8. STAGE 6: Over 2.5 Council (Stage 2) ───────────────────── */}
-      <div>
-        <ChainStage
-          title="Over 2.5 Council (Stage 2)"
+          title="Over 2.5 Judges"
           description="Multi-algorithm voting"
           fetcher={() => over25Api.getStage2(date)}
           deps={[date]}
@@ -360,18 +254,17 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
           fallbackData={MOCK_O25_S2}
         />
       </div>
-
-      {/* ── 9. STAGE 7: Over 2.5 Probabilistic Base (Stage 1) ─────────── */}
+      {/* ── 5. FHVI DUPLICATE DISPLAY: Over 2.5 Intelligence 2 ──────── */}
       <div>
         <ChainStage
-          title="Over 2.5 Probabilistic Base (Stage 1)"
-          description="Foundation base"
-          fetcher={() => over25Api.getStage1(date)}
+          title="Over 2.5 Intelligence 2"
+          description="First Half Volatility Intelligence — same live FHVI data source"
+          fetcher={() => specialsApi.getFHVI(date)}
           deps={[date]}
-          columns={stage1ColumnsWithVerify}
-          rowKey={(r, i) => `${r.id}-${i}`}
-          emptyMessage="No stage 1 picks for this date."
-          fallbackData={MOCK_O25_S1}
+          columns={fhviColumnsWithVerify}
+          rowKey={(r, i) => `${r.fixture}-${i}`}
+          emptyMessage="No FHVI picks for this date."
+          fallbackData={MOCK_FHVI}
         />
       </div>
     </div>

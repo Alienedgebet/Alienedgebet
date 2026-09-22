@@ -8,8 +8,6 @@ import {
   type DnaProfile,
   type WinApexPick,
   type WinForecastPick,
-  type WinPsychologyPick,
-  type WinRawPick,
   type WinU2SPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -28,8 +26,6 @@ import {
   MOCK_DNA,
   MOCK_WIN_APEX,
   MOCK_WIN_FORECAST,
-  MOCK_WIN_PSYCH,
-  MOCK_WIN_RAW,
   MOCK_WIN_U2S,
 } from "@/lib/mock-chains";
 
@@ -38,11 +34,6 @@ import {
 // ============================================================
 
 const apexColumns: PredictionColumn<WinApexPick>[] = [
-  {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
   {
     key: "Fixture",
     header: "Fixture",
@@ -110,75 +101,6 @@ const apexColumns: PredictionColumn<WinApexPick>[] = [
     header: "Veto_Reason",
     className: "max-w-[200px] truncate",
     render: (r) => r.Veto_Reason || "—",
-  },
-];
-
-const psychologyColumns: PredictionColumn<WinPsychologyPick>[] = [
-  {
-    key: "Fixture",
-    header: "Fixture",
-    render: (r) => (
-      <span className="font-medium text-text-primary">{r.Fixture}</span>
-    ),
-  },
-  { key: "Master_Pick", header: "Master_Pick", render: (r) => r.Master_Pick },
-  {
-    key: "Master_Prob",
-    header: "Master_Prob",
-    render: (r) => <ProbCell value={r.Master_Prob} showBar={false} />,
-  },
-  {
-    key: "H_Base",
-    header: "H_Base",
-    align: "right",
-    render: (r) => r.H_Base,
-  },
-  {
-    key: "A_Base",
-    header: "A_Base",
-    align: "right",
-    render: (r) => r.A_Base,
-  },
-  {
-    key: "Audit_Score",
-    header: "Audit_Score",
-    align: "right",
-    render: (r) => r.Audit_Score,
-  },
-  {
-    key: "Tier",
-    header: "Tier",
-    render: (r) => <TierBadge tier={r.Tier} />,
-  },
-  {
-    key: "Spears",
-    header: "Spears",
-    className: "max-w-[180px] truncate",
-    render: (r) => r.Spears || "—",
-  },
-  {
-    key: "H_Quality",
-    header: "H_Quality",
-    className: "max-w-[160px] truncate",
-    render: (r) => r.H_Quality || "—",
-  },
-  {
-    key: "A_Quality",
-    header: "A_Quality",
-    className: "max-w-[160px] truncate",
-    render: (r) => r.A_Quality || "—",
-  },
-  {
-    key: "Home_Logic",
-    header: "Home_Logic",
-    className: "max-w-[220px] truncate",
-    render: (r) => r.Home_Logic || "—",
-  },
-  {
-    key: "Away_Logic",
-    header: "Away_Logic",
-    className: "max-w-[220px] truncate",
-    render: (r) => r.Away_Logic || "—",
   },
 ];
 
@@ -265,11 +187,6 @@ const u2sColumns: PredictionColumn<WinU2SPick>[] = [
 
 const forecastColumns: PredictionColumn<WinForecastPick>[] = [
   {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
-  {
     key: "fixture",
     header: "fixture",
     render: (r) => (
@@ -296,95 +213,6 @@ const forecastColumns: PredictionColumn<WinForecastPick>[] = [
     render: (r) => (
       <span className="font-mono text-text-muted">{r.poisson_draw_prob}</span>
     ),
-  },
-  {
-    key: "last_5_wins_overall",
-    header: "last_5_wins_overall",
-    align: "right",
-    render: (r) => r.last_5_wins_overall,
-  },
-  {
-    key: "last_5_wins_at_venue",
-    header: "last_5_wins_at_venue",
-    align: "right",
-    render: (r) => r.last_5_wins_at_venue,
-  },
-  {
-    key: "last_5_goals_scored",
-    header: "last_5_goals_scored",
-    align: "right",
-    render: (r) => r.last_5_goals_scored,
-  },
-  {
-    key: "opp_last_5_goals_scored",
-    header: "opp_last_5_goals_scored",
-    align: "right",
-    render: (r) => r.opp_last_5_goals_scored,
-  },
-  {
-    key: "opp_last_5_losses",
-    header: "opp_last_5_losses",
-    align: "right",
-    render: (r) => r.opp_last_5_losses,
-  },
-  {
-    key: "opp_last_5_conceded_raw",
-    header: "opp_last_5_conceded_raw",
-    align: "right",
-    render: (r) => r.opp_last_5_conceded_raw,
-  },
-  {
-    key: "opp_no_clean_sheet_count",
-    header: "opp_no_clean_sheet_count",
-    align: "right",
-    render: (r) => r.opp_no_clean_sheet_count,
-  },
-  {
-    key: "h2h_wins_last_5",
-    header: "h2h_wins_last_5",
-    align: "right",
-    render: (r) => r.h2h_wins_last_5,
-  },
-  {
-    key: "last_3_no_draw_BOTH",
-    header: "last_3_no_draw_BOTH",
-    align: "right",
-    render: (r) => (r.last_3_no_draw_BOTH ? "Yes" : "No"),
-  },
-  {
-    key: "parity_score",
-    header: "parity_score",
-    align: "right",
-    render: (r) => r.parity_score,
-  },
-  {
-    key: "parity_even_count",
-    header: "parity_even_count",
-    align: "right",
-    render: (r) => r.parity_even_count,
-  },
-];
-
-const rawColumns: PredictionColumn<WinRawPick>[] = [
-  {
-    key: "fixture_id",
-    header: "fixture_id",
-    render: (r) => <span className="font-mono text-2xs">{r.fixture_id}</span>,
-  },
-  {
-    key: "fixture",
-    header: "fixture",
-    render: (r) => (
-      <span className="font-medium text-text-primary">{r.fixture}</span>
-    ),
-  },
-  { key: "side", header: "side", render: (r) => r.side },
-  { key: "team_name", header: "team_name", render: (r) => r.team_name },
-  {
-    key: "win_odds",
-    header: "win_odds",
-    align: "right",
-    render: (r) => Number(r.win_odds).toFixed(2),
   },
   {
     key: "last_5_wins_overall",
@@ -520,20 +348,6 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     [dnaV2, date]
   );
 
-  // 2. Win Psychology (Verify -> Intelligent Pass Count -> Rest)
-  const psychologyColumnsWithVerify = useMemo(
-    () => [
-      createVerifyColumn<WinPsychologyPick>(),
-      createIntelligentPassColumn<WinPsychologyPick>({
-        market: "win_psychology",
-        getLabel: (r) => r.Fixture,
-        date,
-      }),
-      ...psychologyColumns,
-    ],
-    [date]
-  );
-
   // 3. Underdog-to-Score (Verify -> Intelligent Pass Count -> Rest)
   const u2sColumnsWithVerify = useMemo(
     () => [
@@ -564,21 +378,6 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     [date]
   );
 
-  // 5. Win Raw (Verify -> Intelligent Pass Count -> Rest)
-  const rawColumnsWithVerify = useMemo(
-    () => [
-      createVerifyColumn<WinRawPick>(),
-      createIntelligentPassColumn<WinRawPick>({
-        market: "win",
-        getTeam: (r) => r.team_name,
-        getLabel: (r) => r.fixture,
-        date,
-      }),
-      ...rawColumns,
-    ],
-    [date]
-  );
-
   return (
     <div
       data-embedded={embedded || undefined}
@@ -595,7 +394,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
               Win Intelligence
             </h1>
             <p className="text-[11px] text-text-secondary">
-              Multi-stage win probability engine — Apex picks, psychology forensics &amp; forecast data
+              Multi-stage win probability engine — Apex picks, U2S signal &amp; forecast data
             </p>
           </div>
         </div>
@@ -604,9 +403,9 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
       {/* 5-Day History Audit Strip */}
       <QuickHistoryStrip />
 
-      {/* Stage 1: Win Apex — Final Aggregator */}
+      {/* Stage 1: Win Intelligence */}
       <ChainStage
-        title="Win Apex — Final Aggregator"
+        title="Win Intelligence"
         description="Top-of-chain picks after full 3-stage audit"
         fetcher={() => winApi.getApex(date)}
         deps={[date]}
@@ -616,9 +415,9 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         fallbackData={MOCK_WIN_APEX}
       />
 
-      {/* Stage 2: Team DNA — Goal Intent Board */}
+      {/* Stage 2: DNA & Goal Intent Board */}
       <ChainStage
-        title="Team DNA — Goal Intent Board"
+        title="DNA & Goal Intent Board"
         description="Tactical DNA scores: Goal Intent, Win Dominance, BTTS Friction, Corner Power"
         fetcher={() => foundationApi.getDNA(date)}
         deps={[date]}
@@ -626,18 +425,6 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         rowKey={(r, i) => `${r.team_id}-${i}`}
         emptyMessage="No DNA profiles for this date."
         fallbackData={MOCK_DNA}
-      />
-
-      {/* Stage 3: Win Psychology */}
-      <ChainStage
-        title="Win Psychology"
-        description="Psychological edge analysis — spears, quality grades, home/away logic"
-        fetcher={() => winApi.getPsychology(date)}
-        deps={[date]}
-        columns={psychologyColumnsWithVerify}
-        rowKey={(r, i) => `${r.Fixture}-${i}`}
-        emptyMessage="No psychology audits for this date."
-        fallbackData={MOCK_WIN_PSYCH}
       />
 
       {/* Stage 4: Underdog-to-Score Signal (U2S) */}
@@ -664,17 +451,6 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         fallbackData={MOCK_WIN_FORECAST}
       />
 
-      {/* Stage 6: Win Raw */}
-      <ChainStage
-        title="Win Raw"
-        description="Unfiltered engine output — full fixture dataset before ranking"
-        fetcher={() => winApi.getRaw(date)}
-        deps={[date]}
-        columns={rawColumnsWithVerify}
-        rowKey={(r, i) => `${r.fixture_id}-${r.side}-${i}`}
-        emptyMessage="No raw engine data for this date."
-        fallbackData={MOCK_WIN_RAW}
-      />
     </div>
   );
 }
