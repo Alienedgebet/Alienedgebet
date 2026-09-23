@@ -102,11 +102,14 @@ check("win Goal Intent compares predicted team VS opponent (72 > 55 = PASS)",
           and c["value"] == {"team": 72.0, "opp": 55.0}
           for c in win["checks"]))
 check("win denominator is FIXED at the full 8-rule set (N/A included)",
-      win["total"] == 8 and win["passed"] == 3)
-# 3/8 is CORRECT here: Parity +10 / Goal Intent / Form support the pick while
-# SOT, Corners, Psychology and Underdog have no intelligence for this fixture
-# (NOT_AVAILABLE — counted in the FIXED denominator, never fabricated) and the
-# fixture IS a live draw candidate per the draw engine's own floor
+      win["total"] == 8 and win["passed"] == 2)
+# 2/8 is CORRECT here: Parity +10 / Goal Intent support the pick while the
+# Form trio is HALF (goals + wins support it, conceded has no intelligence
+# for this fixture — the new single-check Form rule FAILs honestly on the
+# incomplete trio); SOT, Corners, Psychology and Underdog have no intelligence
+# for this fixture (NOT_AVAILABLE — counted in the FIXED denominator, never
+# fabricated) and the fixture IS a live draw candidate per the draw engine's
+# own floor
 # (mc_draw 0.30 >= 0.22), so the WIN-side "Draw Probability" check
 # legitimately FAILs while the DRAW section PASSes the very same field —
 # same engine field, opposite direction per market.
@@ -115,8 +118,10 @@ check("win vs draw use the same mc_draw field in opposite directions",
       and next(c for c in win["checks"] if c["name"] == "Draw Probability")["threshold"] == "< 0.20 (20%)"
       and next(c for c in page["markets"]["draw"]["checks"]
                if c["name"] == "Draw Probability")["result"] == pc.PASS)
-check("win Form compares last-5 WINS of the two WIN side rows",
-      any(c["name"] == "Form" and c["value"] == {"team_wins": 4.0, "opp_wins": 1.0}
+check("win Form is ONE check: trio HALF on the overall-fallback legs",
+      any(c["name"] == "Form" and c["result"] == pc.FAIL
+          and c["value"]["tier"] == "HALF"
+          and [m["leg"] for m in c["value"]["legs"]] == ["goals", "wins", "conceded"]
           for c in win["checks"]))
 check("win_psychology runs the SAME WIN checklist as win (one checklist)",
       [c["name"] for c in page["markets"]["win_psychology"]["checks"]]

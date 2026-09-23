@@ -287,6 +287,8 @@ def run_win_forecast_engine(target_date=None):
                     "poisson_draw_prob": f"{p_draw}%",
                     "last_5_wins_overall": t_m["wins"],
                     "last_5_wins_at_venue": t_m["v_wins"],
+                    "last_5_venue_goals_scored": t_m["v_gs"],
+                    "last_5_venue_goals_conceded": t_m["v_gc"],
                     "last_5_goals_scored": t_m["gs"],
                     "opp_last_5_goals_scored": o_m["gs"],
                     "opp_last_5_losses": o_m["losses"],

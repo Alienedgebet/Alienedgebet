@@ -156,14 +156,36 @@ def build_market_counts_for_fixture(home_profile, away_profile):
     return markets
 
 
+def _resolve_profile(profiles, team_id, team_name):
+    """
+    TEAM-ID-AUTHORITATIVE lookup (the fix): `profiles` is already keyed by
+    team_id string, so this is a direct dict lookup — no ambiguity, no risk
+    of two differently-named clubs sharing a display name colliding.
+
+    Falls back to the OLD name-matching behaviour only when `team_id` is
+    missing/empty, which only happens for a clash record written by the
+    pre-fix version of dna_engine_v2.py (before home_id/away_id existed).
+    Once main.py has run once under the new engine, every fresh clash file
+    carries real IDs and this fallback is never exercised again — nothing
+    needs to be deleted or migrated for that to happen naturally.
+    """
+    if team_id:
+        profile = profiles.get(str(team_id))
+        if profile is not None:
+            return profile
+    # Legacy fallback — old behaviour, unchanged, only reached for old files.
+    return next((p for p in profiles.values() if p.get("team_name") == team_name), None)
+
+
 def build_market_factor_counts(target_date):
     """
     Callable entrypoint (mirrors the engine's run_* signature) so it can be
     wired into main.py / api/main.py the same way as every other engine.
 
     Reads the DNA v2 profiles + style clashes already written to disk by
-    run_dna_engine_v2(target_date), joins them per fixture, and writes the
-    per-market factor-count breakdown to data/dna_v2_market_factors.json.
+    run_dna_engine_v2(target_date), joins them per fixture BY TEAM ID (see
+    _resolve_profile), and writes the per-market factor-count breakdown to
+    data/dna_v2_market_factors.json.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -183,16 +205,11 @@ def build_market_factor_counts(target_date):
         fixture_id = str(clash.get("fixture_id"))
         home_name  = clash.get("home_team")
         away_name  = clash.get("away_team")
+        home_id    = clash.get("home_id")   # present on clashes written by the fixed engine
+        away_id    = clash.get("away_id")
 
-        # Profiles are keyed by team_id, not team_name — resolve by name match
-        # against the two profiles referenced in this clash (cheap, since the
-        # clash was itself built from exactly these two team profiles).
-        home_profile = next(
-            (p for p in profiles.values() if p.get("team_name") == home_name), None
-        )
-        away_profile = next(
-            (p for p in profiles.values() if p.get("team_name") == away_name), None
-        )
+        home_profile = _resolve_profile(profiles, home_id, home_name)
+        away_profile = _resolve_profile(profiles, away_id, away_name)
 
         result[fixture_id] = {
             "fixture_id": fixture_id,

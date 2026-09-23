@@ -57,10 +57,14 @@ win_row = {"fixture_id": 100, "Fixture": "Arsenal vs Chelsea", "Target": "Arsena
 side_rows = [
     {"fixture_id": 100, "Fixture": "Arsenal vs Chelsea", "team_name": "Arsenal",
      "parity_score": 12, "last_5_goals_scored": 11, "opp_last_5_goals_scored": 6,
-     "last_5_wins_overall": 4, "last_5_wins_at_venue": 3},
+     "last_5_wins_overall": 4, "last_5_wins_at_venue": 3,
+     "last_5_venue_goals_scored": 9, "last_5_venue_goals_conceded": 2,
+     "opp_last_5_conceded_raw": 7},
     {"fixture_id": 100, "Fixture": "Arsenal vs Chelsea", "team_name": "Chelsea",
      "parity_score": -12, "last_5_goals_scored": 6, "opp_last_5_goals_scored": 11,
-     "last_5_wins_overall": 1, "last_5_wins_at_venue": 0},
+     "last_5_wins_overall": 1, "last_5_wins_at_venue": 0,
+     "last_5_venue_goals_scored": 5, "last_5_venue_goals_conceded": 6,
+     "opp_last_5_conceded_raw": 2},
 ]
 snap = fresh_snapshot({"win_by_id": {"100": side_rows},
                        "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows},
@@ -68,10 +72,13 @@ snap = fresh_snapshot({"win_by_id": {"100": side_rows},
 ipc = evaluate("win_apex", win_row, snap)
 rm = result_map(ipc)
 check("WIN Parity +12 → PASS", rm.get("Parity +10") == pc.PASS)
-check("WIN Form compares WIN side-row last-5 WINS (4 > 1 → PASS)",
+_form = next(c for c in ipc["checks"] if c["name"] == "Form")
+check("WIN Form = ONE check — three legs, all pass → FULL PASS "
+      "(venue goals 9>5, venue wins 3>0, conceded 2<6)",
       rm.get("Form") == pc.PASS
-      and next(c for c in ipc["checks"] if c["name"] == "Form")["value"]
-      == {"team_wins": 4.0, "opp_wins": 1.0})
+      and _form["value"]["tier"] == "FULL"
+      and _form["value"]["legs_passed"] == 3
+      and all(m["basis"] == "venue" for m in _form["value"]["legs"]))
 check("WIN provenance: parity check names the engine field",
       next(c for c in ipc["checks"] if c["name"] == "Parity +10")["field"]
       == "parity_score")
@@ -174,10 +181,32 @@ rm = result_map(ipc)
 check("WIN forecast row resolves its own side (Chelsea parity -14 → FAIL)",
       rm.get("Parity +10") == pc.FAIL
       and next(c for c in ipc["checks"] if c["name"] == "Parity +10")["value"] == -14)
-check("WIN forecast row Form compares saved side-row WINS (0 vs Arsenal 4 → FAIL)",
-      rm.get("Form") == pc.FAIL
-      and next(c for c in ipc["checks"] if c["name"] == "Form")["value"]
-      == {"team_wins": 0.0, "opp_wins": 4.0})
+_form2 = next(c for c in ipc["checks"] if c["name"] == "Form")
+check("WIN forecast row Form trio for Chelsea (0/3 legs → NONE → FAIL)",
+      rm.get("Form") == pc.FAIL and _form2["value"]["tier"] == "NONE"
+      and _form2["value"]["legs_passed"] == 0)
+
+# ── 6b. WIN Form tier ladder — SAME side pair, different concessions ─────────
+weak = [dict(side_rows[0], last_5_venue_goals_conceded=7), dict(side_rows[1])]
+snap_b = fresh_snapshot({"win_by_id": {"100": weak},
+                         "win_by_name": {pc._norm("Arsenal vs Chelsea"): weak},
+                         "label_by_id": {"100": "Arsenal vs Chelsea"}})
+rm_b = result_map(evaluate("win_apex", win_row, snap_b))
+check("WIN Form with the conceded leg flipped → HALF (2/3), still FAIL",
+      rm_b.get("Form") == pc.FAIL
+      and next(c for c in evaluate("win_apex", win_row, snap_b)["checks"]
+               if c["name"] == "Form")["value"]["tier"] == "HALF")
+strong_nan = [dict(side_rows[0], last_5_venue_goals_scored=None,
+                   last_5_goals_scored=None), dict(side_rows[1])]
+snap_c = fresh_snapshot({"win_by_id": {"100": strong_nan},
+                         "win_by_name": {pc._norm("Arsenal vs Chelsea"): strong_nan},
+                         "label_by_id": {"100": "Arsenal vs Chelsea"}})
+rm_c = result_map(evaluate("win_apex", win_row, snap_c))
+check("WIN Form overall-fallback basis scoreboard: missing venue goals on "
+      "BOTH rows and missing overall goals → that leg NOT_AVAILABLE",
+      next(c for c in evaluate("win_apex", win_row, snap_c)["checks"]
+           if c["name"] == "Form")["value"]["legs"][0]["result"]
+      == pc.NOT_AVAILABLE)
 
 # ── 7. O2.5 — the engine's own council gates (Engine/over25_forecast.py) ─────
 for ks, po, h2h, pg, pd, exp_pass in [
@@ -213,9 +242,10 @@ check("O2.5 apex with no forecast row → every gate NOT_AVAILABLE, 0/6",
 
 # ── 8. WIN PSYCHOLOGY rows (Master_Pick) — ONE WIN checklist ───────────────
 # Psychology rows are WIN picks (the picked winner): the SAME eight WIN
-# checks run, sourced per-side. Psychology uses the predicted team's OWN
-# signed base (H_Base for home, A_Base for away, > 0 = PASS); without a pick
-# the audit is honest about what is missing but keeps the fixed denominator.
+# checks run, sourced per-side. Psychology passes only when the predicted
+# team's OWN base sits 50+ ABOVE the opponent's (H_Base for home, A_Base for
+# away); without a pick the audit is honest about what is missing but keeps
+# the fixed denominator.
 wps_row = {"fixture_id": 500, "Fixture": "Roma vs Lazio",
            "Master_Pick": "Roma"}
 snap = fresh_snapshot({"wps_by_name": {pc._norm("Roma vs Lazio"): {
@@ -223,10 +253,11 @@ snap = fresh_snapshot({"wps_by_name": {pc._norm("Roma vs Lazio"): {
     "label_by_id": {"500": "Roma vs Lazio"}})
 ipc = evaluate("win_psychology", dict(wps_row), snap)
 rm = result_map(ipc)
-check("WIN psychology: Master_Pick Roma → home side net 120 > 0 PASS",
+_psych = next(c for c in ipc["checks"] if c["name"] == "Psychology")
+check("WIN psychology: Master_Pick Roma, margin 120-44=76 >= 50 → PASS",
       rm.get("Psychology") == pc.PASS
-      and next(c for c in ipc["checks"] if c["name"] == "Psychology")["value"] == 120.0
-      and next(c for c in ipc["checks"] if c["name"] == "Psychology")["field"] == "H_Base/A_Base")
+      and _psych["value"] == {"team": 120.0, "opp": 44.0, "margin": 76.0}
+      and _psych["field"] == "H_Base/A_Base")
 check("WIN psychology rows audit the FULL WIN 8-rule set (not a mini-list)",
       ipc["total"] == 8 and len([c for c in ipc["checks"]
                                  if c["result"] == pc.NOT_AVAILABLE]) == 7)
@@ -238,13 +269,66 @@ snap = fresh_snapshot({"wps_by_name": {pc._norm("Roma vs Lazio"): {
     "label_by_id": {"501": "Roma vs Lazio"}})
 ipc = evaluate("win_psychology", dict(awps_row), snap)
 rm = result_map(ipc)
-check("WIN psychology: away pick Lazio with A_Base -44 → FAIL (net <= 0)",
+check("WIN psychology: away pick Lazio, margin -44-120=-164 < 50 → FAIL",
       rm.get("Psychology") == pc.FAIL)
 nopick = {"fixture_id": 502, "Fixture": "Roma vs Lazio"}
 ipc = evaluate("win_psychology", dict(nopick), snap)
 check("WIN psychology: row without any pick → 0/8, every check NOT_AVAILABLE",
       ipc is not None and ipc["total"] == 8 and ipc["passed"] == 0
       and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
+
+# ── 8b. WIN Corners — per-team expected corners, nearest engine first ────────
+crow = {"fixture_id": 700, "Fixture": "Leeds vs Everton", "Target": "Leeds"}
+# 1. stage2 by fixture id: predicted 10.2, diff +1.4 → home expects 5.8 > 4.4
+s2 = {"fixture_id": 700, "fixture_name": "Leeds vs Everton",
+      "predicted_corners": 10.2, "diff": 1.4}
+snap = fresh_snapshot({"c2_by_id": {"700": dict(s2, __source="corners_stage2")},
+                       "label_by_id": {"700": "Leeds vs Everton"}})
+ipc = evaluate("win_apex", dict(crow), snap)
+_cor = next(c for c in ipc["checks"] if c["name"] == "Corners")
+check("WIN Corners: stage2 pair gives Leeds 5.8 vs Everton 4.4 → PASS",
+      result_map(ipc).get("Corners") == pc.PASS
+      and _cor["value"]["team_exp"] == 5.8
+      and _cor["source"].startswith("corners_stage2"))
+# Home-versus-away mapping flips when the pick is away.
+ecrow = dict(crow, Target="Everton")
+ipc = evaluate("win_apex", ecrow, snap)
+check("WIN Corners: away pick gets the away expectation (4.4 < 5.8 → FAIL)",
+      result_map(ipc).get("Corners") == pc.FAIL)
+# 2. aggregator by label when stage2 is absent: Home_Exp/Away_Exp compare.
+agg = {"Fixture": "Leeds vs Everton", "Home_Team": "Leeds", "Away_Team": "Everton",
+       "Home_Exp": "4.1", "Away_Exp": "5.9", "Total_Exp": "10.0",
+       "True_Corner_Fav": "Everton"}
+snap = fresh_snapshot({"cagg_by_name": {pc._norm("Leeds vs Everton"): agg}})
+ipc = evaluate("win_apex", dict(crow), snap)
+check("WIN Corners: aggregator Home_Exp 4.1 < Away_Exp 5.9 → FAIL for Leeds",
+      result_map(ipc).get("Corners") == pc.FAIL)
+check("WIN Corners: still counts in the fixed denominator (x/8, not dropped)",
+      ipc is not None and ipc["total"] == 8)
+# 3. DNA last resort: Avg Corners winner carries the expected-corners pair.
+dmf = {"corners": {"home_count": 3, "away_count": 3, "factors": [
+    {"name": "Avg Corners", "home_value": 5.2, "away_value": 3.4,
+     "winner": "home"}]}}
+snap = fresh_snapshot({"dna_by_name": {pc._norm("Leeds vs Everton"): dmf},
+                       "label_by_id": {"700": "Leeds vs Everton"}})
+ipc = evaluate("win_apex", dict(crow), snap)
+check("WIN Corners: DNA Avg Corners 5.2 > 3.4 → PASS (last resort)",
+      result_map(ipc).get("Corners") == pc.PASS)
+# 4. A DNA zero is 'no corner data', never a free pass.
+zerof = {"corners": {"home_count": 3, "away_count": 3, "factors": [
+    {"name": "Avg Corners", "home_value": 6.0, "away_value": 0,
+     "winner": "home"}]}}
+snap = fresh_snapshot({"dna_by_name": {pc._norm("Leeds vs Everton"): zerof},
+                       "label_by_id": {"700": "Leeds vs Everton"}})
+ipc = evaluate("win_apex", dict(crow), snap)
+check("WIN Corners: DNA opponent value 0 → NOT_AVAILABLE (no fake FAIL/PASS)",
+      result_map(ipc).get("Corners") == pc.NOT_AVAILABLE)
+# 5. No corner data anywhere → NOT_AVAILABLE (fixed denominator, honest).
+ipc = evaluate("win_apex", {"fixture_id": 701, "Fixture": "X vs Y",
+                            "Target": "X"}, fresh_snapshot())
+check("WIN Corners: no corner row anywhere → NOT_AVAILABLE",
+      result_map(ipc).get("Corners") == pc.NOT_AVAILABLE)
+
 
 # ── 9. GG composites (engine signals echo only; no invented thresholds) ──────
 gg_row = {"fixture_id": 600, "fixture": "Basel vs St. Gallen",

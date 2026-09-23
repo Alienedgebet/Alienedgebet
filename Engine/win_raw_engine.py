@@ -215,17 +215,19 @@ def run_win_raw_engine(target_date):
                     if is_v: venue_5.append(m)
                     if len(venue_5) == 5: break
                 
-                v_wins = 0; v_parity_sum = 0
+                v_wins = 0; v_parity_sum = 0; v_gs = 0; v_gc = 0
                 for m in venue_5:
                     st = get_match_stats(m, tid)
                     if st:
                         v_wins += st["res"] == "W"
                         v_parity_sum += st["total"]
+                        v_gs += st["scored"]; v_gc += st["conceded"]
 
                 return {
                     "wins": ov_wins, "gs": ov_gs, "gc": ov_gc, "losses": ov_losses,
                     "cs_fail": ov_cs_fail, "even": ov_even, "no_draw_3": no_draw_3,
-                    "v_wins": v_wins, "v_parity": v_parity_sum, "ov_parity": (ov_gs + ov_gc)
+                    "v_wins": v_wins, "v_parity": v_parity_sum, "ov_parity": (ov_gs + ov_gc),
+                    "v_gs": v_gs, "v_gc": v_gc
                 }
 
             h_m = get_side_metrics(hid, team_histories.get(hid,[]), "home")
@@ -250,6 +252,8 @@ def run_win_raw_engine(target_date):
                     "win_odds": w_odd,
                     "last_5_wins_overall": t_m["wins"],
                     "last_5_wins_at_venue": t_m["v_wins"],
+                    "last_5_venue_goals_scored": t_m["v_gs"],
+                    "last_5_venue_goals_conceded": t_m["v_gc"],
                     "last_5_goals_scored": t_m["gs"],
                     "opp_last_5_goals_scored": o_m["gs"],
                     "opp_last_5_losses": o_m["losses"],
