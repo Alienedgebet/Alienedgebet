@@ -119,13 +119,17 @@ check("no O2.5 checks inside DRAW report", not (O25_ONLY & set(names("draw"))))
 # ── scores differ per pick on the SAME fixture (not one generic number) ────
 # FIXED-DENOMINATOR RULE: totals are each market's FULL rule set
 # (O2.5=6, WIN=8, FHVI/SHVI=1); only the numerator varies per pick. WIN is
-# 3/8: Parity +10 / Goal Intent / Form support the pick, the four side-sourced
-# checks have no intelligence for this fixture (NOT_AVAILABLE — never
+# 2/8 under the new single-check trio rules: Parity +10 / Goal Intent support
+# the pick; Form is HALF (goals + wins pass, conceded has no data for this
+# fixture → the check FAILs, honestly, on an incomplete trio); the four
+# side-sourced checks have no intelligence here (NOT_AVAILABLE — never
 # fabricated) and Draw Probability FAILs at mc_draw 0.30 against the WIN
 # rule's own < 20% cut.
-check("same fixture, per-pick scores: O2.5 6/6 vs WIN 3/8 vs FHVI 1/1 vs SHVI 0/1",
+check("same fixture, per-pick scores: O2.5 6/6 vs WIN 2/8 vs FHVI 1/1 vs SHVI 0/1",
       report("over25")["score"] == {"passed": 6, "total": 6}
-      and report("win")["score"] == {"passed": 3, "total": 8}
+      and report("win")["score"] == {"passed": 2, "total": 8}
+      and next(c for c in report("win")["checks"]
+               if c["name"] == "Form")["value"]["tier"] == "HALF"
       and report("fhvi")["score"] == {"passed": 1, "total": 1}
       and report("shvi")["score"] == {"passed": 0, "total": 1})
 

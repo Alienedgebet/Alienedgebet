@@ -44,21 +44,26 @@ nothing here reinterprets or normalises a scale):
   ─ Corner Friction        AGGREGATOR/corner4_aggregator.py Friction labels:
                            💎 PERFECT / 📊 STABLE support a corner market;
                            💀 DEAD / 🛑 AVOID / UNDER oppose it.
-  ─ WIN Corners            AGGREGATOR/corner4_aggregator.py "TRUE FAVOURITE
-                           RESOLUTION" (L676-684): True_Corner_Fav is the side
-                           with the higher syndicate corner score
-                           (Home_Score vs Away_Score). WIN rule: PASS when the
-                           predicted team IS True_Corner_Fav. The Friction
-                           label is NOT the WIN corner rule.
+  ─ WIN Corners            Per-team EXPECTED corners, nearest engine first:
+                           corners_stage2 / corners_psychology / corners_catalyst
+                           predicted_corners +/- diff (the exact formula the
+                           aggregator stores as Home_Exp / Away_Exp) —
+                           fixture-id join; then the aggregator
+                           (Home_Exp / Away_Exp, else True_Corner_Fav) —
+                           label join; then corners_stage1 (engine's own
+                           team_more_corners verdict / lastN averages);
+                           DNA corners intelligence (market factors, then
+                           per-team profiles) is the documented last resort
+                           for a fixture no corner engine produced. PASS:
+                           predicted team's expectation > opponent's.
   ─ WIN Psychology         PSYCHOLOGY/win_psychology.py H_Base / A_Base are
-                           SIGNED per-side nets (the engine's own Audit_Score
-                           is |H_Base - A_Base|). The predicted team's OWN
-                           side net > 0 == PASS — the same condition the
-                           engine itself uses when it marks a row OVERTURNED
-                           (the picked side's base went negative). A fixture
-                           level Audit_Score / the apex row's copied
-                           Psych_Score is only the documented fallback when
-                           the side pair is absent.
+                           the two sides' base scores; PASS requires the
+                           predicted team's base to sit WIN_PSYCH_MIN_GAP
+                           (+50) ABOVE the opponent's — stricter than the
+                           engine's own LOCK floor (net >= 45). A
+                           fixture-level audit net (Audit_Score, the picked
+                           side's margin) uses the same gap when the side
+                           pair is absent.
   ─ Underdog (U2S)         AGGREGATOR/master_underdog_audit.py Dog_Score_Prob
                            (0-100 "%") is the longshot gate; PASS < 50%. The
                            same producer's Engine/underdog_engine.py
@@ -80,14 +85,18 @@ nothing here reinterprets or normalises a scale):
                            team's 5-game goal-involvement (venue+overall+H2H)
                            advantage vs this exact opponent. User rule: PASS
                            = parity_score >= +10 on the selected team's row.
-  ─ WIN Form               Pure comparison of the existing form counters
-                           (Engine/win_forecast.py): the predicted team's
-                           last_5_wins_overall vs the OPPONENT's own side
-                           row's last_5_wins_overall (both sides are always
-                           written by the same engine). When the opponent's
-                           wins counter is absent the row's own
-                           last_5_goals_scored vs opp_last_5_goals_scored is
-                           the documented fallback. No new thresholds.
+  ─ WIN Form               ONE check, THREE legs: the predicted team must
+                           have (a) more venue goals, (b) more venue wins,
+                           and (c) less conceded at its venue than the
+                           opponent (Engine/win_forecast.py + win_raw_engine.py
+                           last_5_venue_goals_scored / last_5_wins_at_venue /
+                           last_5_venue_goals_conceded — both sides are
+                           always written by the same engine). All three =
+                           FULL pass; two = HALF; one = LOW; the tier travels
+                           on the payload and only FULL earns the count (the
+                           check stays ONE rule of the WIN 8-rule set).
+                           Snapshots without the venue fields fall back to
+                           the saved overall counters.
   ─ Draw probability       Engine/draw_engine.py mc_draw_prob (0-1 Monte
                            Carlo) < 0.20 (user rule); dmi (Draw Magnet Index
                            0-1) >= 0.45 and parity (0-1) >= 0.6 are the
@@ -210,8 +219,18 @@ INTELLIGENT_PASS_RULES = {
     "UNDERDOG_FAV_DEF_WEAKNESS_THRESHOLD": 1.40,
     # Underdog-to-score longshot gate (0-100 "%"-string, master_underdog_audit).
     "UNDERDOG_SCORE_PROB_THRESHOLD": 50,
-    # ── PSYCHOLOGY (signed net scores, NOT percentages) ────────────────────
+    # ── PSYCHOLOGY (signed base scores, NOT percentages) ────────────────────
     "PSYCHOLOGY_NET_SCORE_PASS": 0,
+    # WIN psychology gate: the predicted team's base score must be this far
+    # ABOVE the opponent's (PSYCHOLOGY/win_psychology.py H_Base / A_Base).
+    "WIN_PSYCH_MIN_GAP": 50,
+    # WIN corners: per-team expected corners, nearest engine first — the
+    # corner engines' own paired predictions (stage2 predicted_corners ±
+    # diff, aggregator Home_Exp/Away_Exp, stage1 per-team averages), then the
+    # DNA corners factors / profiles as the last-resort data source for a
+    # fixture no corner engine produced.
+    "WIN_CORNER_SOURCES": ("corners_stage2", "corners_aggregator",
+                           "corners_stage1"),
     # ── O2.5 (Engine/over25_forecast.py own 9-layer council gates) ─────────
     "O25_POS_GAP_VOTE_MAX": 8,          # `if pos_gap <= 8: votes += 1`
     "O25_POISSON_VOTE_MIN": 60,         # `if poisson_over > 60: votes += 1`
@@ -239,13 +258,15 @@ INTELLIGENT_PASS_RULES = {
 # resolve with no pickable side, so even NOT_AVAILABLE says where it looked).
 _WIN_FIELDS = {
     "SOT": "U2S Dog_Venue_SOT / Fav_Venue_SOT",
-    "Corners": "corners_aggregator True_Corner_Fav",
-    "Psychology": "win_psychology H_Base / A_Base",
+    "Corners": "corner engines per-team expected corners "
+               "(stage2 predicted_corners±diff, aggregator Home_Exp/Away_Exp, "
+               "stage1 lastN averages)",
+    "Psychology": "win_psychology H_Base / A_Base (margin >= +50 for the pick)",
     "Underdog": "underdog Dog_Score_Prob",
     "Goal Intent": "DNA Goal Intent",
     "Draw Probability": "draw mc_draw_prob / apex Monte_Draw_Prob",
     "Parity +10": "win parity_score",
-    "Form": "win last_5_wins_overall",
+    "Form": "win venue goals / venue wins / venue conceded vs opponent",
 }
 
 # Markets whose pipeline stage carries no applicable second-level intelligence
@@ -428,16 +449,23 @@ def _load_dna_factors(date):
     dmf = _load("dna_market_factors", date)
     if isinstance(dmf, dict) and dmf:
         return dmf
-    path = os.path.join(ROOT, "data", f"dna_v2_market_factors__{date}.json")
+    # Same payload shape ({fixture_id: entry}) either way: the day's dated
+    # copy first, then the producer file as written by the LAST pipeline run.
+    # Never read a dict-less stale fallback — a genuine miss returns None so
+    # every check stays NOT_AVAILABLE instead of borrowing another date.
+    path = os.path.join(ROOT, "data", "dna_v2_market_factors__%s.json" % date)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("market_factors")
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            return payload
     except Exception:
         pass
     path = os.path.join(ROOT, "data", "dna_v2_market_factors.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("market_factors")
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
     except Exception:
         return None
 
@@ -494,6 +522,25 @@ def _id_index(rows):
 
 
 _NAME_FIELDS = ("fixture", "Fixture", "Match", "fixture_name")
+
+
+def _corner2_by_id(stage2_rows, cpsych_rows, ccat_rows):
+    """The refiner-stage corner rows keyed by fixture id (stage2 preferred;
+    psychology / catalyst rows carry the same fields for the same fixtures
+    and are used when a stage2 row is absent). The source tag travels on
+    `__source` so every check can report exactly where its values came from.
+    """
+    idx = {}
+    for rows_, tag in ((stage2_rows, "corners_stage2"),
+                       (cpsych_rows, "corners_psychology"),
+                       (ccat_rows, "corners_catalyst")):
+        for r in rows_ or []:
+            if not isinstance(r, dict):
+                continue
+            fid = _idstr(r.get("fixture_id"))
+            if fid and fid not in idx:
+                idx[fid] = dict(r, __source=tag)
+    return idx
 
 
 def _name_index(rows):
@@ -801,6 +848,17 @@ def _snapshot(date):
     # on the supreme row's own Psych_Score field (not on the composite head).
     gg_rows = _rows(_load("gg_supreme", date))
 
+    # Corner pipeline rows for the WIN Corners rule chain: stage2 (refiner),
+    # psychology and catalyst share the same fixture universe and the same
+    # per-fixture id (fixture_name = the day's label). Stage1 (miner) carries
+    # the per-team lastN corner averages + the engine's own team_more_corners
+    # verdict, but only for the qualified subset. All are read here (disk
+    # only) and merged per fixture below.
+    stage2_rows = _rows(_load("corners_stage2", date))
+    cpsych_rows = _rows(_load("corners_psychology", date))
+    ccat_rows = _rows(_load("corners_catalyst", date))
+    stage1_rows = _rows(_load("corners_stage1", date))
+
     # ── ID → CANONICAL LABEL REGISTRY ────────────────────────────────────────
     # Built from the engines that store BOTH the fixture id and a real
     # 'home vs away' label; the id-bearing majority wins, apex rows are added
@@ -901,6 +959,10 @@ def _snapshot(date):
         # DNA engine's own per-fixture clash verdicts
         "dna_clash_by_id": _id_index(dna_clash_rows),
         "dna_clash_by_name": _name_index(dna_clash_rows),
+        # corner engines per fixture (stage2/psychology/catalyst keyed by
+        # fixture_id for the WIN Corners rule chain)
+        "c2_by_id": _corner2_by_id(stage2_rows, cpsych_rows, ccat_rows),
+        "c1_by_id": _id_index(stage1_rows),
         # raw per-fixture underdog identity rows (from the U2S feed itself)
         "u2s_rows": u2s_rows,
         "corner_rows": corner_rows,
@@ -1355,120 +1417,354 @@ def _win_parity_eval(date, fid, fxn, team, src_row=None):
 
 
 def _win_form_eval(date, fid, fxn, team, src_row=None):
-    """WIN Form — the predicted team's existing last-5 WINS vs the opponent's
-    own side row's last-5 WINS (both counters come from the same
-    Engine/win_forecast.py pair). The row's own goals counters are the
-    documented fallback when the opponent's wins counter is absent."""
+    """WIN Form — ONE check, THREE legs: the predicted team must have (a) more
+    venue goals, (b) more venue wins, and (c) less conceded at its venue than
+    the opponent (Engine/win_forecast.py + win_raw_engine.py
+    last_5_venue_goals_scored / last_5_wins_at_venue /
+    last_5_venue_goals_conceded — both sides are always written by the same
+    engine, so the opponent's own row carries ITS counters). All three =
+    FULL pass; two = HALF; one = LOW — the tier travels on the payload, and
+    only a FULL pass earns the count (the check itself stays ONE rule of the
+    WIN 8-rule set). Snapshots written before the venue fields existed fall
+    back to the saved overall counters for goals/conceded (the venue-wins
+    leg has always been saved)."""
     mine, opp, d = _win_side_trio(date, fid, fxn, team)
-    # The calling row's OWN wins counter is authoritative when present — the
-    # same precedence as the parity check (the audited WIN row IS the
-    # predicted team's engine row, so its counter outranks the saved pair).
-    src_w = _num(src_row.get("last_5_wins_overall")) if isinstance(src_row, dict) else None
-    if src_w is not None and opp is not None:
-        ow = _num(opp.get("last_5_wins_overall"))
-        if ow is not None:
-            return _win_res(PASS if src_w > ow else FAIL,
-                            value={"team_wins": src_w, "opp_wins": ow},
-                            threshold="team last-5 wins > opponent last-5 wins",
-                            source=f"calling row + win_raw/win_forecast @ {d}",
-                            field="last_5_wins_overall",
-                            mapping=f"{team} (calling row) vs opponent's own row")
-    # Goals fallback stays INSIDE the same engine's output shape: a side row
-    # carries BOTH its own goals and the opponent's (opp_last_5_goals_scored),
-    # so the calling row can stand in when the registered pair misses it.
-    if mine is None and isinstance(src_row, dict) \
-            and _num(src_row.get("last_5_goals_scored")) is not None:
-        mine, opp = src_row, None
-    if mine is None:
+
+    def _side_rows():
+        rows = []
+        if isinstance(mine, dict):
+            rows.append(("mine", mine))
+        if isinstance(opp, dict):
+            rows.append(("opp", opp))
+        if isinstance(src_row, dict):
+            rows.append(("call", src_row))
+        return rows
+
+    def _venue_pair(field, field_opp_fallback_self=None,
+                    cross_fallback_self=None, higher=True):
+        """(team_val, opp_val, basis) for one leg: exact venue pair first,
+        documented fallback second, None when genuinely unavailable."""
+        t_s = [r for n, r in _side_rows() if n in ("mine", "call")]
+        o_s = [r for n, r in _side_rows() if n in ("opp",)]
+        t_d = t_s[0] if t_s else None
+        o_d = o_s[0] if o_s else None
+        # Primary: the engines' saved venue counters, both sides.
+        if t_d is not None and o_d is not None:
+            tv, ov = _num(t_d.get(field)), _num(o_d.get(field))
+            if tv is not None and ov is not None:
+                return tv, ov, "venue"
+        # Fallback: saved overall counters (cross-read via the pair, exactly
+        # how the old Form rule read the opponent's own row).
+        if field_opp_fallback_self is not None and isinstance(mine, dict):
+            tv = _num(mine.get(field_opp_fallback_self))
+            ov = None
+            if opp is not None:
+                ov = _num(opp.get(cross_fallback_self or field_opp_fallback_self))
+            else:
+                ov = _num(mine.get(field_opp_fallback_self.replace(
+                    "last_5_", "opp_last_5_")))
+            if tv is not None and ov is not None:
+                return tv, ov, "overall"
+        return None, None, "missing"
+
+    # Leg 1 — venue goals: team v_gs > opponent v_gs.
+    tv, ov, b1 = _venue_pair("last_5_venue_goals_scored",
+                             "last_5_goals_scored")
+    # Leg 2 — venue wins: team venue wins > opponent venue wins.
+    wv, wo, _ = _venue_pair("last_5_wins_at_venue")
+    if wv is None or wo is None and opp is not None:
+        # wins counter is always saved; read the pair explicitly.
+        wv = _num(mine.get("last_5_wins_at_venue")) if isinstance(mine, dict) else None
+        wo = _num(opp.get("last_5_wins_at_venue")) if isinstance(opp, dict) else None
+        if wv is None and isinstance(src_row, dict):
+            wv = _num(src_row.get("last_5_wins_at_venue"))
+    # Leg 3 — venue conceded: team v_gc < opponent v_gc; overall fallback
+    # cross-reads both rows (the opponent's row carries OUR conceded).
+    cv, co, b3 = _venue_pair("last_5_venue_goals_conceded")
+    if cv is None or co is None:
+        my_c = _num(opp.get("opp_last_5_conceded_raw")) \
+            if isinstance(opp, dict) else None
+        their_c = _num(mine.get("opp_last_5_conceded_raw")) \
+            if isinstance(mine, dict) else None
+        if my_c is not None and their_c is not None:
+            cv, co, b3 = my_c, their_c, "overall"
+    src = "win_raw/win_forecast @ %s" % d if d else "win_raw/win_forecast"
+
+    legs, passed = [], 0
+    for name, a, b, higher, basis, field in (
+            ("goals", tv, ov, True, b1, "last_5_venue_goals_scored"),
+            ("wins", wv, wo, True, "venue", "last_5_wins_at_venue"),
+            ("conceded", cv, co, False, b3, "last_5_venue_goals_conceded")):
+        if a is None or b is None:
+            legs.append({"leg": name, "result": NOT_AVAILABLE, "basis": basis,
+                         "field": field})
+            continue
+        ok = (a > b) if higher else (a < b)
+        legs.append({"leg": name, "result": PASS if ok else FAIL,
+                     "team": a, "opp": b, "basis": basis, "field": field})
+        if ok:
+            passed += 1
+    evaluated = [m for m in legs if m["result"] != NOT_AVAILABLE]
+    tier = {3: "FULL", 2: "HALF", 1: "LOW"}.get(passed, "NONE")
+    if not evaluated:
         return _win_res(NOT_AVAILABLE,
                         source="win_raw/win_forecast",
-                        field="last_5_wins_overall",
-                        mapping=f"{team} = no saved side row in the window")
-    w, ow = _num(mine.get("last_5_wins_overall")), _num(opp.get("last_5_wins_overall")) if opp else None
-    if w is not None and ow is not None:
-        return _win_res(PASS if w > ow else FAIL,
-                        value={"team_wins": w, "opp_wins": ow},
-                        threshold="team last-5 wins > opponent last-5 wins",
-                        source=f"win_raw/win_forecast @ {d}",
-                        field="last_5_wins_overall",
-                        mapping=f"{team} vs {opp.get('team_name')}")
-    gs, og = _num(mine.get("last_5_goals_scored")), _num(mine.get("opp_last_5_goals_scored"))
-    if gs is None or og is None:
-        return _win_res(NOT_AVAILABLE, source=f"win_raw/win_forecast @ {d}",
-                        field="last_5_wins_overall")
-    return _win_res(PASS if gs > og else FAIL, value={"team": gs, "opp": og},
-                    threshold="team last-5 goals > opponent last-5 goals (fallback)",
-                    source=f"win_raw/win_forecast @ {d}",
-                    field="last_5_goals_scored",
-                    mapping=f"{team} vs opponent's own row")
+                        field="last_5_venue_goals_scored",
+                        mapping="%s = no saved side row in the window" % team)
+    return _win_res(PASS if passed == 3 else FAIL,
+                    value={"legs": legs, "legs_passed": passed,
+                           "legs_total": len(evaluated), "tier": tier},
+                    threshold="all 3: venue goals >, venue wins >, "
+                              "venue conceded < (FULL=3/3, HALF=2/3, LOW=1/3)",
+                    source=src,
+                    field="last_5_venue_goals_scored / last_5_wins_at_venue / "
+                          "last_5_venue_goals_conceded",
+                    mapping="%s form trio: %s" % (team, tier))
 
+
+
+def _corner_expected_pair(row, target, fxn):
+    """(team_exp, opp_exp) — per-team EXPECTED corners for the predicted
+    team vs its opponent from one corner-pipeline row. Refiner-stage rows
+    carry predicted_corners (total) + diff (signed home-minus-away of that
+    total), so per-team expectation is (total +/- diff)/2 — the exact
+    formula the aggregator stores as Home_Exp / Away_Exp. Returns
+    (None, None) when the row cannot compare the two teams' expectations."""
+    t_n = _norm(target)
+    home, away = _split_fixture(
+        row.get("fixture_name") or row.get("Fixture") or row.get("fixture")
+        or fxn or "")
+    total = _num(row.get("predicted_corners"))
+    diff = _num(row.get("diff"))
+    if t_n and total is not None and diff is not None:
+        h_exp, a_exp = (total + diff) / 2.0, (total - diff) / 2.0
+        if t_n == _norm(home):
+            return (h_exp, a_exp)
+        if t_n == _norm(away):
+            return (a_exp, h_exp)
+    return (None, None)
+
+
+def _corner_stage1_pair(row, target, fxn):
+    """Per-team lastN corner averages (+ the miner's own team_more_corners
+    verdict) from a stage1 row, mapped to (team, opp, verdict_name)."""
+    t_n = _norm(target)
+    t, o = None, None
+    home, away = _split_fixture(
+        row.get("fixture") or row.get("fixture_name") or fxn or "")
+    if t_n:
+        h = (row.get("home_team") or {})
+        a = (row.get("away_team") or {})
+        ht, at = _num(h.get("lastN_corners_avg")), _num(a.get("lastN_corners_avg"))
+        if t_n == _norm(home):
+            t, o = ht, at
+        elif t_n == _norm(away):
+            t, o = at, ht
+    return t, o, str(row.get("team_more_corners") or "")
+
+
+def _dna_corners_pair(snap, fid_s, fxn, target):
+    """(team, opp, field, mapping) from the DNA corners intelligence for the
+    predicted team vs opponent — the market-factors 'Avg Corners'/'Corner
+    Power' entries first, then the same engine's per-team profiles. A value
+    of 0/absent means 'that team's profile carries no corner data' (e.g. a
+    profile computed from matches without corner stats), NOT 'zero corners',
+    so a pair containing one is NOT_AVAILABLE instead of a free pass."""
+    home, away = _split_fixture(fxn or "")
+    t_n = _norm(target)
+    if not t_n or t_n not in (_norm(home), _norm(away)):
+        return None, None, "Corner_Power / Avg_Corners", \
+            f"{target} = neither side of '{fxn or '?'}'"
+    my_side = "home" if t_n == _norm(home) else "away"
+    opp_name = away if t_n == _norm(home) else home
+    markets = _resolve(snap, "dna", fid_s, fxn)
+    if markets is not None:
+        factors = (markets.get("corners") or {}).get("factors") or []
+        for factor_name in ("Avg Corners", "Corner Power"):
+            f = _dna_factor(factors, factor_name)
+            if not f:
+                continue
+            hv, av = _num(f.get("home_value")), _num(f.get("away_value"))
+            if hv is None or av is None or hv <= 0 or av <= 0:
+                continue
+            tv, ov = (hv, av) if my_side == "home" else (av, hv)
+            return tv, ov, factor_name, f"{target} = {my_side} " \
+                                     "(dna_market_factors)"
+    # Fallback: the same engine's per-team profiles for both named sides.
+    prof = snap.get("dna_prof_by_name") or {}
+    pt, po = prof.get(t_n), prof.get(_norm(opp_name))
+    if pt and po:
+        for section, field in (("Raw_Audit_Metrics", "Avg_Corners"),
+                               ("Market_Power_Scores", "Corner_Power")):
+            tv = _num((pt.get(section) or {}).get(field))
+            ov = _num((po.get(section) or {}).get(field))
+            if tv is None or ov is None or tv <= 0 or ov <= 0:
+                continue
+            return tv, ov, "%s.%s" % (section, field), \
+                f"{target} vs {opp_name} (dna profiles)"
+    return None, None, "Corner_Power / Avg_Corners", \
+        f"{target} = no DNA corner data for both sides"
 
 
 def _win_corners_check(date, fid, fxn, target):
-    """WIN Corners — the predicted team must also be the fixture's TRUE corner
-    favourite (AGGREGATOR/corner4_aggregator.py "TRUE FAVOURITE RESOLUTION":
-    True_Corner_Fav is the side with the higher syndicate corner score)."""
+    """WIN Corners — the predicted-to-win team must EXPECT more corners than
+    its opponent (per-team expected corners, nearest engine first):
+      1. the corner pipeline's own predicted pair
+         (corners_stage2 / corners_psychology / corners_catalyst rows carry
+         the same predicted_corners +/- diff the aggregator stores as
+         Home_Exp / Away_Exp) — resolved by fixture_id;
+      2. the aggregator row itself (Home_Exp / Away_Exp, else the engine's
+         own True_Corner_Fav) — the only id-less corner output, label join;
+      3. the stage1 miner row (the engine's own team_more_corners verdict /
+         per-team lastN averages) — by fixture_id;
+      4. the DNA corners intelligence (per-fixture factors, then per-team
+         profiles) — the last-resort source for a fixture no corner engine
+         produced.
+    PASS only when the predicted team's expectation strictly exceeds the
+    opponent's. A 0/absent DNA value is 'no data', never a free pass."""
+    dates = [date] + [d for d in _window_dates(date) if d != date]
+    fid_s = _idstr(fid)
+    for d in dates:
+        snap = _snapshot(d)
+        row = (snap.get("c2_by_id") or {}).get(fid_s)
+        if not row:
+            continue
+        t, o = _corner_expected_pair(row, target, fxn)
+        if t is None or o is None:
+            continue
+        src = row.get("__source", "corners_stage2")
+        return _win_res(PASS if t > o else FAIL,
+                        value={"team_exp": t, "opp_exp": o,
+                               "predicted_corners": row.get("predicted_corners"),
+                               "diff": row.get("diff")},
+                        threshold="team expected corners > opponent "
+                                  "(corner engines' predicted pair)",
+                        source="%s @ %s" % (src, d),
+                        field="predicted_corners/diff (per-team expected corners)",
+                        mapping="%s vs rival corner expectation" % target)
+    home, away = _split_fixture(fxn or "")
+    t_n = _norm(target)
     c, d = _resolve_any(date, "cagg", fid, fxn)
-    if not c:
-        return _win_res(NOT_AVAILABLE, source="corners_aggregator",
-                        field="True_Corner_Fav",
-                        mapping=f"{target} = no corner row in the source window")
-    fav = str(c.get("True_Corner_Fav") or "")
-    if not fav:
-        return _win_res(NOT_AVAILABLE, source=f"corners_aggregator @ {d}",
-                        field="True_Corner_Fav")
-    h_team = c.get("Home_Team")
-    is_home = _norm(target) == _norm(h_team) or (
-        not h_team and _norm(target) == _norm(_split_fixture(fxn)[0]))
-    t_score = c.get("Home_Score") if is_home else c.get("Away_Score")
-    o_score = c.get("Away_Score") if is_home else c.get("Home_Score")
-    return _win_res(PASS if _norm(fav) == _norm(target) else FAIL,
-                    value={"true_corner_fav": fav, "team_corner_score": t_score,
-                           "opp_corner_score": o_score,
-                           "Total_Exp": c.get("Total_Exp")},
-                    threshold="predicted team == True_Corner_Fav",
-                    source=f"corners_aggregator @ {d}",
-                    field="True_Corner_Fav (Home_Score vs Away_Score)",
-                    mapping=f"{target} vs corner favourite '{fav}'")
+    if c:
+        h_team, a_team = c.get("Home_Team"), c.get("Away_Team")
+        he, ae = _num(c.get("Home_Exp")), _num(c.get("Away_Exp"))
+        # 2a. Per-team expected corners (the direct "more corners" measure).
+        if he is not None and ae is not None and t_n in (_norm(h_team),
+                                                       _norm(a_team)):
+            my_home = _norm(h_team) == t_n
+            t, o = (he, ae) if my_home else (ae, he)
+            return _win_res(PASS if t > o else FAIL,
+                            value={"team_exp": t, "opp_exp": o,
+                                   "Total_Exp": c.get("Total_Exp")},
+                            threshold="team Home_Exp/Away_Exp > opponent "
+                                      "(corner aggregator)",
+                            source="corners_aggregator @ %s" % d,
+                            field="Home_Exp / Away_Exp",
+                            mapping="%s vs rival corner expectation" % target)
+        # 2b. The engine's own True_Corner_Fav resolution.
+        fav = str(c.get("True_Corner_Fav") or "")
+        if fav and t_n in (_norm(h_team), _norm(a_team), ""):
+            is_home = _norm(h_team) == t_n or (
+                not h_team and t_n == _norm(home))
+            t_score = c.get("Home_Score") if is_home else c.get("Away_Score")
+            o_score = c.get("Away_Score") if is_home else c.get("Home_Score")
+            return _win_res(PASS if t_n == _norm(fav) else FAIL,
+                            value={"true_corner_fav": fav,
+                                   "team_corner_score": t_score,
+                                   "opp_corner_score": o_score,
+                                   "Total_Exp": c.get("Total_Exp")},
+                            threshold="predicted team == True_Corner_Fav",
+                            source="corners_aggregator @ %s" % d,
+                            field="True_Corner_Fav (Home_Score vs Away_Score)",
+                            mapping="%s vs corner favourite '%s'"
+                                    % (target, fav))
+    # 3. Stage1 miner (fixture-id join, exact).
+    for d in dates:
+        snap = _snapshot(d)
+        row = (snap.get("c1_by_id") or {}).get(fid_s)
+        if not row:
+            continue
+        t, o, fav = _corner_stage1_pair(row, target, fxn)
+        if fav and _norm(fav) == t_n:
+            return _win_res(PASS,
+                            value={"team_more_corners": fav, "team_avg": t,
+                                   "opp_avg": o},
+                            threshold="engine's own team_more_corners verdict",
+                            source="corners_stage1 @ %s" % d,
+                            field="team_more_corners (lastN corner averages)",
+                            mapping="%s = the engine's more-corners side"
+                                    % target)
+        if t is not None and o is not None:
+            return _win_res(PASS if t > o else FAIL,
+                            value={"team_avg": t, "opp_avg": o},
+                            threshold="team lastN corner average > opponent",
+                            source="corners_stage1 @ %s" % d,
+                            field="lastN_corners_avg (home_team/away_team)",
+                            mapping="%s vs rival corner averages" % target)
+    # 4. DNA corners intelligence — last resort (fixtures no corner
+    # engine produced at all).
+    for d in dates:
+        snap = _snapshot(d)
+        t, o, field, mapping = _dna_corners_pair(snap, fid_s, fxn, target)
+        if t is None or o is None:
+            continue
+        return _win_res(PASS if t > o else FAIL,
+                        value={"team": t, "opp": o},
+                        threshold="team corner strength > opponent (DNA corners)",
+                        source="dna corners @ %s" % d, field=field,
+                        mapping=mapping)
+    return _win_res(NOT_AVAILABLE, source="corners_stage2 / corners_aggregator / "
+                                         "corners_stage1 / DNA corners",
+                    field="per-team corner expectation",
+                    mapping="%s = no corner row in the source window" % target)
 
 
 def _win_psych_check(date, fid, fxn, target, side, src_row=None):
-    """WIN Psychology — the predicted team's OWN signed psychology net.
-    PSYCHOLOGY/win_psychology.py H_Base/A_Base are signed per side
-    (Audit_Score is |H-A|) and the engine itself marks a row OVERTURNED when
-    the picked side's base goes negative. PASS = the predicted side's net > 0.
-    A fixture-level audit score is only the documented fallback when the side
-    pair (or the side mapping) is unavailable."""
-    if side in ("home", "away") and isinstance(src_row, dict):
-        h, a = _num(src_row.get("H_Base")), _num(src_row.get("A_Base"))
-        if h is not None and a is not None:
-            v = h if side == "home" else a
-            return _win_res(PASS if v > INTELLIGENT_PASS_RULES["PSYCHOLOGY_NET_SCORE_PASS"] else FAIL,
-                            value=v, threshold="signed net > 0",
-                            source="calling row", field="H_Base/A_Base",
-                            mapping=f"{target} = {side} side net")
-    row, d = _resolve_any(date, "wps", fid, fxn)
-    if row and side in ("home", "away"):
-        h, a = _num(row.get("H_Base")), _num(row.get("A_Base"))
-        if h is not None and a is not None:
-            v = h if side == "home" else a
-            return _win_res(PASS if v > INTELLIGENT_PASS_RULES["PSYCHOLOGY_NET_SCORE_PASS"] else FAIL,
-                            value=v, threshold="signed net > 0",
-                            source=f"win_psychology @ {d}", field="H_Base/A_Base",
-                            mapping=f"{target} = {side} side net")
-    psych_srcs = []
+    """WIN Psychology — the predicted team's base score must sit at least
+    `WIN_PSYCH_MIN_GAP` ABOVE the opponent's (PSYCHOLOGY/win_psychology.py
+    H_Base / A_Base). The engine's own LOCK tier is net >= 45, so the check
+    demands the stricter +50 margin for the pick. A fixture-level audit net
+    is the documented fallback when the side pair is unavailable."""
+    gap = INTELLIGENT_PASS_RULES["WIN_PSYCH_MIN_GAP"]
+
+    def _side_margin(srow):
+        h, a = _num(srow.get("H_Base")), _num(srow.get("A_Base"))
+        if side not in ("home", "away") or h is None or a is None:
+            return None, None, None
+        if side == "home":
+            return h, a, h - a
+        return a, h, a - h
+
     if isinstance(src_row, dict):
-        psych_srcs.append(("calling row", src_row))
+        v, o, margin = _side_margin(src_row)
+        if margin is not None:
+            return _win_res(PASS if margin >= gap else FAIL,
+                            value={"team": v, "opp": o, "margin": margin},
+                            threshold=f"picked side base >= opponent base + {gap}",
+                            source="calling row", field="H_Base/A_Base",
+                            mapping=f"{target} = {side} side margin")
+    row, d = _resolve_any(date, "wps", fid, fxn)
     if row:
-        psych_srcs.append((f"win_psychology @ {d}", row))
-    for src, srow in psych_srcs:
-        for val in ("Psych_Score", "Audit_Score"):
-            v = _num(srow.get(val))
-            if v is not None:
-                return _win_res(PASS if v > INTELLIGENT_PASS_RULES["PSYCHOLOGY_NET_SCORE_PASS"] else FAIL,
-                                value=v, threshold="signed net > 0",
-                                source=src, field=val,
-                                mapping=f"{target} (fixture-level net)")
+        v, o, margin = _side_margin(row)
+        if margin is not None:
+            return _win_res(PASS if margin >= gap else FAIL,
+                            value={"team": v, "opp": o, "margin": margin},
+                            threshold=f"picked side base >= opponent base + {gap}",
+                            source=f"win_psychology @ {d}", field="H_Base/A_Base",
+                            mapping=f"{target} = {side} side margin")
+        # Fixture-level net (the engine's Audit_Score IS the picked side's
+        # margin for that fixture) — same gap, no invented normalisation.
+        for src, srow in (("calling row", src_row), (f"win_psychology @ {d}", row)):
+            if not isinstance(srow, dict):
+                continue
+            for val in ("Audit_Score", "Psych_Score"):
+                v = _num(srow.get(val))
+                if v is not None:
+                    return _win_res(PASS if v >= gap else FAIL,
+                                    value={"team": v, "opp": None, "margin": v},
+                                    threshold=f"picked side net >= +{gap}",
+                                    source=src, field=val,
+                                    mapping=f"{target} (fixture-level net)")
     return _win_res(NOT_AVAILABLE, source="win_psychology",
                     field="H_Base/A_Base",
                     mapping=f"{target} = no psychology row in the source window")
@@ -1603,7 +1899,9 @@ def _checks_for_market(market, snap, row, fid, fxn, date=None):
             for _name in ("SOT", "Corners", "Psychology", "Underdog",
                           "Goal Intent", "Draw Probability", "Parity +10",
                           "Form"):
-                add(_name, NOT_AVAILABLE, field=_WIN_FIELDS.get(_name, ""),
+                add(_name, NOT_AVAILABLE,
+                    source="row itself (no pick/side on this row)",
+                    field=_WIN_FIELDS.get(_name, ""),
                     mapping=f"{target or '?'} = no side mapping")
             return checks
         # 1. SOT expectancy (U2S per-side intelligence, matched by fav/dog)
