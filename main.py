@@ -447,6 +447,81 @@ def fill_shared_future_window(target_date, horizon=WINDOW_HORIZON_DAYS):
         return None
 
 
+def run_fixture_risk_classification(target_date, horizon=WINDOW_HORIZON_DAYS):
+    """PHASE 0b — label EVERY window fixture as league / CUP / FRIENDLY.
+
+    Runs the moment the shared window is filled, so the flags are derived from
+    the SAME canonical payload every prematch engine is served — no extra API
+    call, no second source of truth. Persisted PER DATE (output_store
+    `fixture_risk__{date}.json`) because the window is rolling: the flags must
+    outlive the 7-day horizon so historical pages can still show them.
+
+    Non-fatal by design: a failure here only means the UI shows no warning, and
+    every engine keeps running exactly as before.
+    """
+    print(f"\n[PHASE 0b] FIXTURE RISK CLASSIFICATION (cup / friendly) — {target_date}...")
+    try:
+        import fixture_classification as fc
+        import shared_fixture_window as window
+        dates = window.window_dates(target_date, horizon)
+        saved, totals = {}, {"fixtures": 0, "cup": 0, "friendly": 0, "unknown": 0}
+        for date in dates:
+            rows = fc.build_window_flags([date])
+            # guard=False: this is a COMPLETE per-date fixture inventory (one row
+            # per fixture in the window), not an engine's filtered pick universe,
+            # so the same-date collapse guard does not apply to it.
+            saved[date] = store.save("fixture_risk", date, rows)
+            for key in totals:
+                totals[key] += fc.summary(rows).get(key, 0)
+        print(f"   🏷️  {totals['fixtures']} fixtures labelled — "
+              f"🏆 CUP {totals['cup']} · 🤝 FRIENDLY {totals['friendly']} · "
+              f"❔ unknown {totals['unknown']} (dates: {', '.join(dates)})")
+        return {"dates": dates, "totals": totals, "saved": saved}
+    except Exception as e:
+        print(f"   ⚠️ [FIXTURE RISK] classification failed (non-fatal, no labels): {e}")
+        return None
+
+
+def backfill_fixture_risk(target_date):
+    """Backfill the cup/friendly labels for ONE already-processed date.
+
+    Historical dates have left the rolling window, so their labels cannot be
+    derived. This classifies a single day WITHOUT touching the window's other
+    days (fill_window would evict them) and WITHOUT any network call when the
+    day is still stored:
+
+      * day already in the window store -> classify it (offline), or
+      * day missing -> ONE acquisition through the window's own cached fetch
+        (`fetch_day`, i.e. through the global API cache / 429 guards), then
+        classify.
+
+    Never rolls, never evicts, never refetches a day it already holds.
+    """
+    import fixture_classification as fc
+    import shared_fixture_window as window
+
+    date = str(target_date)[:10]
+    store_obj = window._load_store()
+    entry = (store_obj.get("days") or {}).get(date)
+    if not (entry and entry.get("acquisition_ok")):
+        print(f"   ↻ [FIXTURE RISK] {date} not in the window — one cached acquisition")
+        entry = window.fetch_day(date)
+        if entry:
+            store_obj["days"][date] = entry          # additive: nothing evicted
+            store_obj["updated_at"] = datetime.now(timezone.utc).isoformat()
+            window._save_store(store_obj)
+    rows = fc.build_window_flags([date])
+    if not rows:
+        print(f"   ⚠️ [FIXTURE RISK] no window data for {date} — cannot label it")
+        return None
+    path = store.save("fixture_risk", date, rows)
+    totals = fc.summary(rows)
+    print(f"   🏷️  {date}: {totals['fixtures']} fixtures labelled — "
+          f"🏆 CUP {totals['cup']} · 🤝 FRIENDLY {totals['friendly']} · "
+          f"❔ unknown {totals['unknown']} -> {path}")
+    return {"date": date, "totals": totals, "path": path}
+
+
 def run_weekly_phase(target_date, horizon=WINDOW_HORIZON_DAYS):
     """PHASE 12 — the Weekly engine family (GG / WIN / O2.5) over the window.
 
@@ -511,6 +586,10 @@ def alienedge_master_system(cli_date_override: str = None):
     # normal cached calls.
     if window_enabled():
         fill_shared_future_window(target_date)
+        # PHASE 0b: label every window fixture CUP / FRIENDLY from that same
+        # canonical payload (no extra API call) and persist it per date, so every
+        # page can warn the user on cup/friendly picks.
+        run_fixture_risk_classification(target_date)
 
     # ── PHASE 1: FOUNDATION & DNA IDENTITY ───────────────────────────────────
     print(f"\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH for {target_date}...")
@@ -906,12 +985,26 @@ if __name__ == "__main__":
 
     if _weekly_only_date:
         fill_shared_future_window(_weekly_only_date)
+        run_fixture_risk_classification(_weekly_only_date)
         run_weekly_phase(_weekly_only_date)
         _rejected = store.guard_rejections()
         if _rejected:
             print(f"\n⚠️ [SNAPSHOT GUARD] {len(_rejected)} snapshot write(s) rejected "
                   f"as suspiciously collapsed and preserved.")
             sys.exit(2)
+        sys.exit(0)
+
+    # ── STANDALONE FIXTURE-RISK BACKFILL ─────────────────────────────────────
+    #   main.py --backfill-fixture-risk=YYYY-MM-DD
+    # Labels one already-processed date as cup/friendly WITHOUT rolling or
+    # evicting the window and WITHOUT a network call when that day is still
+    # stored. Historical dates simply gain their warning labels.
+    _backfill_dates = [a.split("=", 1)[1].strip()
+                       for a in sys.argv if a.startswith("--backfill-fixture-risk=")]
+    if _backfill_dates:
+        for _d in _backfill_dates:
+            if _d:
+                backfill_fixture_risk(_d)
         sys.exit(0)
 
     alienedge_master_system()

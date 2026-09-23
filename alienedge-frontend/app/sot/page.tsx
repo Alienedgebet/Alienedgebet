@@ -9,12 +9,13 @@ import { createIntelligentPassColumn } from "@/components/predictions/Intelligen
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SOT } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const columns: PredictionColumn<SOTPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.Fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />,
   },
   { key: "verdict", header: "Verdict", render: (r) => <TierBadge tier={r.Verdict} /> },
   { key: "proj", header: "SOT Expectancy", align: "right", render: (r) => r.Proj_SOT },

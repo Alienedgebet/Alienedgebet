@@ -30,6 +30,7 @@ import os
 import sys
 import json
 import math
+import re
 import subprocess
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -84,6 +85,161 @@ def _with_intelligent_pass(market_key: str, rows, date: Optional[str]):
         return intelligent_pass.evaluate_market_safe(market_key, rows, date)
     except Exception:
         return rows
+
+
+# ── FIXTURE RISK FLAGS (cup / friendly) ──────────────────────────────────────
+# One label per fixture, decided ONCE by fixture_classification from the shared
+# window and persisted per date by the pipeline. Here it is stamped onto EVERY
+# row the API serves, so no market page, weekly page or report can be missing
+# the warning. Purely additive: rows keep every key they already had, and a
+# fixture with no stored label is reported as `unknown` (never as "safe").
+_FIXTURE_RISK_INDEX: dict = {}      # date -> {"by_id": {}, "by_name": {}}
+_FIXTURE_RISK_ENABLED = True
+_LABEL_SPLIT = re.compile(r"\s+(?:vs?\.?|against|-)\s+", re.IGNORECASE)
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _clean_team(value):
+    return " ".join(_NON_ALNUM.sub(" ", str(value or "").lower()).split())
+
+
+def _normalise_label(label):
+    """'Ajax vs Heerenveen' -> 'ajax|heerenveen'.
+
+    MUST produce exactly the same shape as `_label_keys()` (team text with its
+    internal spaces kept, teams joined by '|'), because both sides of the join
+    are produced here. Order is preserved; the reverse ordering is indexed
+    separately by `_label_keys`.
+    """
+    if not label:
+        return ""
+    text = str(label).lower().replace("&", " and ")
+    text = _NON_ALNUM.sub(" ", text).strip()
+    parts = [p for p in _LABEL_SPLIT.split(text) if p.strip()]
+    if len(parts) >= 2:
+        return f"{_clean_team(parts[0])}|{_clean_team(parts[1])}"
+    return _clean_team(text)
+
+
+def _label_keys(home, away):
+    """Both orderings of a home/away pair, so 'A vs B' matches either side order."""
+    a, b = _clean_team(home), _clean_team(away)
+    if not a or not b:
+        return []
+    return [f"{a}|{b}", f"{b}|{a}"]
+
+
+def _fixture_risk_index(date: str) -> dict:
+    """Load one date's labels, indexed BOTH by fixture id and by fixture label.
+
+    id index   : "19726053"                    (exact, authoritative)
+    name index : "napoli|as roma" + reverse   (fallback, unique matches only)
+
+    The name index exists because several prematch engines identify their
+    fixture by label only (`Fixture` / `fixture` / `Match`) or by a differently
+    named id (`Fixture_ID`, `id`). It is deliberately STRICT: a label is
+    accepted only when it maps to exactly ONE fixture that day, and both the
+    home|away and away|home orderings are indexed. Ambiguity therefore resolves
+    to `unknown`, never to a guess.
+    """
+    if not _FIXTURE_RISK_ENABLED or not date:
+        return {}
+    if date in _FIXTURE_RISK_INDEX:
+        return _FIXTURE_RISK_INDEX[date]
+    by_id, by_name = {}, {}
+    try:
+        rows, _generated_at = store.load("fixture_risk", date, default=[])
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            fid = row.get("fixture_id")
+            if fid in (None, ""):
+                continue
+            fid = str(fid)
+            by_id[fid] = row
+            # NOTE: keyed by fixture id, not appended blindly — a fixture is
+            # reached by BOTH its participant names and its own `name`, so a
+            # list-append would store the same fixture twice under one key and
+            # every key would then look "ambiguous" and be thrown away.
+            for key in _label_keys(row.get("home_team"), row.get("away_team")):
+                by_name.setdefault(key, {})[fid] = row
+            label = _normalise_label(row.get("fixture_label"))
+            if label:
+                by_name.setdefault(label, {})[fid] = row
+    except Exception:
+        by_id, by_name = {}, {}
+    # keep ONLY unambiguous labels (exactly one fixture behind the key)
+    by_name = {k: next(iter(v.values())) for k, v in by_name.items() if len(v) == 1}
+    _FIXTURE_RISK_INDEX[date] = {"by_id": by_id, "by_name": by_name}
+    return _FIXTURE_RISK_INDEX[date]
+
+
+def _row_fixture_label(row):
+    """The fixture label a row displays, whichever of the repo's field names it
+    uses (`fixture` / `Fixture` / `Match` / `match` / `Target` / `Fixture_ID`)."""
+    for key in ("fixture", "Fixture", "match", "Match", "Target"):
+        value = row.get(key)
+        if value:
+            return value
+    return None
+
+
+def _row_fixture_id(row):
+    """The fixture id a row carries, whichever field name it uses
+    (`fixture_id` / `Fixture_ID` / `id`)."""
+    for key in ("fixture_id", "Fixture_ID", "id"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _lookup_fixture_risk(row, index):
+    """Exact fixture id first, then a unique fixture-label match."""
+    fid = _row_fixture_id(row)
+    if fid and fid in index["by_id"]:
+        return index["by_id"][fid]
+    label = _row_fixture_label(row)
+    if label:
+        key = _normalise_label(label)
+        if key and key in index["by_name"]:
+            return index["by_name"][key]
+        home, away = row.get("home_team"), row.get("away_team")
+        if home and away:
+            for key in _label_keys(home, away):
+                if key in index["by_name"]:
+                    return index["by_name"][key]
+    return None
+
+
+def _with_fixture_risk(rows, date: Optional[str]):
+    """Stamp additive fixture-risk fields onto each row (no-op without a date).
+
+    `is_cup` / `is_friendly` are booleans (False when unknown, and False is NOT
+    a safety claim — `classification` carries the honest `unknown`).
+    """
+    if not rows or not date:
+        return rows
+    index = _fixture_risk_index(date)
+    if not index or not (index["by_id"] or index["by_name"]):
+        return rows
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        flags = _lookup_fixture_risk(row, index)
+        if not flags:
+            # No stored label for this fixture: say so instead of implying safety.
+            row.setdefault("classification", "unknown")
+            continue
+        row["classification"] = flags.get("classification")
+        row["is_cup"] = bool(flags.get("is_cup"))
+        row["is_friendly"] = bool(flags.get("is_friendly"))
+        row["is_risk_fixture"] = bool(flags.get("is_risk_fixture"))
+        row["risk_level"] = flags.get("risk_level")
+        row["risk_label"] = flags.get("risk_label")
+        row["competition"] = flags.get("competition")
+        row["league_name"] = flags.get("league_name")
+    return rows
 
 # ── APP INIT ──────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -377,6 +533,7 @@ def read_range(key_prefix_fn, dates: list, defaults: dict, market_type: str, set
         # from 09-10 would otherwise pass the identity check after defaulting.
         rows = _guard_filter_rows(data, identity)
         rows = ensure_defaults(rows, defaults)
+        rows = _with_fixture_risk(rows, d)     # additive cup/friendly labels
         if settle:
             rows = _settled(rows, market_type, d)
         for row in rows:
@@ -398,6 +555,7 @@ def read(key: str, date: Optional[str], defaults: dict, market_type: str = "win"
     # ensure_defaults injects schema-wide defaults.
     rows = _guard_filter_rows(data, identity)
     rows = ensure_defaults(rows, defaults)
+    rows = _with_fixture_risk(rows, date)     # additive cup/friendly labels
     if settle and date:
         rows = _settled(rows, market_type, date)
     return rows
@@ -1454,6 +1612,7 @@ def _finalize_live_rows(rows, defaults, market_type, identity=None):
     out = []
     for date in order:
         group = ensure_defaults(grouped[date], defaults)
+        group = _with_fixture_risk(group, date or None)   # cup/friendly labels
         group = _settled(group, market_type, date or None)
         out.extend(group)
     return out
@@ -1598,6 +1757,32 @@ def filter_win_precision_single(date: str, filters: dict = Depends(win_precision
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# FIXTURE RISK LABELS (cup / friendly) — read-only audit of the per-date
+# classification the pipeline writes (main.py PHASE 0b). The same labels are
+# already stamped onto every picks row by read()/read_range(); this route exists
+# for screens that only know a fixture id (team intelligence, deep links) and
+# for verifying coverage of a date.
+# ════════════════════════════════════════════════════════════════════════════
+@app.get("/api/fixtures/risk/{date}", tags=["Foundation"])
+def get_fixture_risk_labels(date: str):
+    rows, generated_at = store.load("fixture_risk", date, default=[])
+    rows = [r for r in (rows or []) if isinstance(r, dict)]
+    cup = sum(1 for r in rows if r.get("is_cup"))
+    friendly = sum(1 for r in rows if r.get("is_friendly"))
+    unknown = sum(1 for r in rows if r.get("risk_level") == "unknown")
+    return {
+        "date": date,
+        "generated_at": generated_at,
+        "count": len(rows),
+        "cup": cup,
+        "friendly": friendly,
+        "unknown": unknown,
+        "coverage": (len(rows) - unknown) / len(rows) if rows else 0.0,
+        "fixtures": rows,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # TEAM INTELLIGENCE PAGE (display/audit only — pure reuse of the same
 # per-date cache snapshots the market pages already read; ZERO new API calls)
 # ════════════════════════════════════════════════════════════════════════════
@@ -1616,7 +1801,14 @@ def get_team_intelligence(
     if intelligent_pass is None:
         raise HTTPException(status_code=503, detail="Intelligent Pass evaluator unavailable")
     try:
-        return intelligent_pass.get_team_intelligence(team_name, date, market=market)
+        report = intelligent_pass.get_team_intelligence(team_name, date, market=market)
+        # Additive: the same cup/friendly label the market pages carry, so the
+        # drill-down report warns about the fixture it is auditing too.
+        try:
+            _with_fixture_risk([report], date)
+        except Exception:
+            pass
+        return report
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:

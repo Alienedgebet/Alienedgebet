@@ -15,6 +15,7 @@ import {
 import { useApi } from "@/lib/use-api";
 import { useSelectedDate } from "@/lib/date-context";
 import { ErrorState } from "@/components/predictions/ErrorState";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 /**
  * TEAM INTELLIGENCE PAGE — the drill-down behind every Intelligent Pass
@@ -254,7 +255,11 @@ function ReportInner() {
                   ? ` — ${TEAM_INTELLIGENCE_MARKET_LABELS[market] || market}`
                   : " — Team Intelligence"}
             </h1>
-            <p className="text-[11px] text-text-secondary">{headerFixture}</p>
+            <FixtureRiskTag
+              row={isSingle ? single : legacy}
+              label={headerFixture}
+              className="text-[11px] text-text-secondary"
+            />
           </div>
         </div>
         {isSingle && single?.fixture_found && single.score && (

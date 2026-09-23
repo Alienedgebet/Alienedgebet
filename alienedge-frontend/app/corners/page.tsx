@@ -18,12 +18,13 @@ import {
   MOCK_CORNER_AGG,
   MOCK_CORNER_S2,
 } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const aggregatorColumns: PredictionColumn<CornerAggregatorPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.Fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />,
   },
   { key: "score", header: "Master Score", align: "right", render: (r) => r.Master_Score },
   { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.Tier} /> },
@@ -79,7 +80,7 @@ const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture_name}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture_name} className="font-medium text-text-primary" />,
   },
   {
     key: "predicted",

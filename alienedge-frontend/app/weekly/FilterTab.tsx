@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { getTodayDate } from "@/lib/api";
 import { DEMO_MODE_ENABLED } from "@/lib/use-api";
 import { MarketFilterConfig, MOCK_WEEKLY_RESULTS } from "./filter-config";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 interface FilterTabProps {
   config: MarketFilterConfig;
@@ -425,7 +426,9 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                     </div>
 
                     {/* Fixture Name */}
-                    <h4 className="text-sm font-bold text-white mb-2 line-clamp-1">{fixture}</h4>
+                    <h4 className="text-sm font-bold text-white mb-2 line-clamp-1">
+                      <FixtureRiskTag row={row} label={fixture} textClassName="text-white" />
+                    </h4>
 
                     {/* Key Stats Pill Bar (Tailored to Engine) */}
                     <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-slate-300 border-t border-white/5 pt-2 mb-3">
@@ -489,7 +492,13 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
               <tbody className="divide-y divide-white/5 text-slate-200">
                 {rows.map((row, idx) => (
                   <tr key={idx} className="hover:bg-white/5 transition-colors">
-                    <td className="p-3 font-bold text-white">{row.fixture || `${row.home_team} vs ${row.away_team}`}</td>
+                    <td className="p-3 font-bold text-white">
+                      <FixtureRiskTag
+                        row={row}
+                        label={row.fixture || `${row.home_team} vs ${row.away_team}`}
+                        textClassName="text-white"
+                      />
+                    </td>
                     <td className="p-3 text-cyan-300">{row.tier || "VERIFIED"}</td>
                     <td className="p-3 font-bold text-indigo-300">@{row.win_odds || row.gg_odds || row.o25_odds || "1.65"}</td>
                     <td className="p-3 font-bold text-emerald-400">

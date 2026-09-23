@@ -28,13 +28,14 @@ import {
   MOCK_GG_PRECISION,
   MOCK_GG_SUPREME,
 } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const supremeColumns: PredictionColumn<GGSupremePick>[] = [
   {
     key: "Fixture",
     header: "Fixture",
     render: (r) => (
-      <span className="font-medium text-text-primary">{r.Fixture}</span>
+      <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />
     ),
   },
   {
@@ -110,13 +111,13 @@ const forensicsColumns: PredictionColumn<GGForensicPick>[] = [
   {
     key: "league_id",
     header: "league_id",
-    render: (r) => <span className="font-mono text-2xs">{r.league_id}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.league_id} className="font-mono text-2xs" />,
   },
   {
     key: "Fixture",
     header: "Fixture",
     render: (r) => (
-      <span className="font-medium text-text-primary">{r.Fixture}</span>
+      <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />
     ),
   },
   { key: "Score", header: "Score", render: (r) => r.Score },
@@ -151,11 +152,11 @@ const ggColumns: PredictionColumn<GGPrecisionPick>[] = [
     key: "fixture",
     header: "fixture",
     render: (r) => (
-      <span className="font-medium text-text-primary">{r.fixture}</span>
+      <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />
     ),
   },
-  { key: "home_team", header: "home_team", render: (r) => r.home_team },
-  { key: "away_team", header: "away_team", render: (r) => r.away_team },
+  { key: "home_team", header: "home_team", render: (r) => <FixtureRiskTag row={r} label={r.home_team} /> },
+  { key: "away_team", header: "away_team", render: (r) => <FixtureRiskTag row={r} label={r.away_team} /> },
   { key: "gg_tier", header: "gg_tier", render: (r) => <TierBadge tier={r.gg_tier} /> },
   { key: "gg_score", header: "gg_score", align: "right", render: (r) => r.gg_score },
   { key: "gg_signals_fired", header: "gg_signals_fired", align: "right", render: (r) => r.gg_signals_fired },
@@ -181,9 +182,9 @@ const ggColumns: PredictionColumn<GGPrecisionPick>[] = [
 ];
 
 const o15Columns: PredictionColumn<GGO15Pick>[] = [
-  { key: "fixture", header: "fixture", render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span> },
-  { key: "home_team", header: "home_team", render: (r) => r.home_team },
-  { key: "away_team", header: "away_team", render: (r) => r.away_team },
+  { key: "fixture", header: "fixture", render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" /> },
+  { key: "home_team", header: "home_team", render: (r) => <FixtureRiskTag row={r} label={r.home_team} /> },
+  { key: "away_team", header: "away_team", render: (r) => <FixtureRiskTag row={r} label={r.away_team} /> },
   { key: "o15_tier", header: "o15_tier", render: (r) => <TierBadge tier={r.o15_tier} /> },
   { key: "o15_score", header: "o15_score", align: "right", render: (r) => r.o15_score },
   { key: "combined_lambda", header: "combined_lambda", align: "right", render: (r) => Number(r.combined_lambda).toFixed(2) },

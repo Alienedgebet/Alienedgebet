@@ -247,7 +247,7 @@ export interface DnaV2Response {
   market_factors: Record<string, DnaV2FixtureFactors>;
 }
 
-export interface UnderdogBasePick {
+export interface UnderdogBasePick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
   league: string;
@@ -266,7 +266,7 @@ export interface UnderdogBasePick {
   dog_venue_wins: number;
 }
 
-export interface UnderdogMasterPick {
+export interface UnderdogMasterPick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
   underdog_team: string;
@@ -290,7 +290,7 @@ export interface UnderdogHandshake {
   Verdict: string;
 }
 
-export interface UnderdogApexPick {
+export interface UnderdogApexPick extends FixtureRisk {
   fixture_id: string;
   Fixture: string;
   Rank: string;
@@ -306,7 +306,7 @@ export interface UnderdogApexPick {
 // ============================================================
 // GG CHAIN TYPES
 // ============================================================
-export interface GGPrecisionPick {
+export interface GGPrecisionPick extends FixtureRisk {
   date?: string;
   fixture_id: string;
   fixture: string;
@@ -351,7 +351,7 @@ export interface GGPrecisionPick {
 // The o15 branch of /api/gg/precision/{date} — same run, second head
 // (Engine/gg_precision_engine.py::o15_row). mc_over15_prob is a 0-1 fraction
 // (Monte Carlo rate), not a pre-multiplied percentage.
-export interface GGO15Pick {
+export interface GGO15Pick extends FixtureRisk {
   date?: string;
   fixture_id: string;
   fixture: string;
@@ -381,7 +381,7 @@ export interface GGPrecisionResponse {
   o15: GGO15Pick[];
 }
 
-export interface GGForensicPick {
+export interface GGForensicPick extends FixtureRisk {
   fixture_id: string;
   league_id: string;
   Fixture: string;
@@ -394,7 +394,7 @@ export interface GGForensicPick {
   Forensic_Audit: string;
 }
 
-export interface GGPsychologyPick {
+export interface GGPsychologyPick extends FixtureRisk {
   Fixture: string;
   MC_Rank: string;
   MC_Prob: string;
@@ -404,7 +404,7 @@ export interface GGPsychologyPick {
   Psych_Triggers: string;
 }
 
-export interface GGSupremePick {
+export interface GGSupremePick extends FixtureRisk {
   fixture_id: string;
   Fixture: string;
   Category: string;
@@ -420,7 +420,7 @@ export interface GGSupremePick {
   Spears: string;
 }
 
-export interface GGCrossVerifyPick {
+export interface GGCrossVerifyPick extends FixtureRisk {
   fixture_id: string;
   home_team: string;
   away_team: string;
@@ -435,7 +435,7 @@ export interface GGCrossVerifyPick {
 // ============================================================
 // WIN CHAIN TYPES
 // ============================================================
-export interface WinForecastPick {
+export interface WinForecastPick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
   side: string;
@@ -456,7 +456,7 @@ export interface WinForecastPick {
   parity_even_count: number;
 }
 
-export interface WinU2SPick {
+export interface WinU2SPick extends FixtureRisk {
   Fixture: string;
   Underdog: string;
   Audit_Verdict: string;
@@ -473,7 +473,7 @@ export interface WinU2SPick {
   Triggers: string;
 }
 
-export interface WinPsychologyPick {
+export interface WinPsychologyPick extends FixtureRisk {
   Fixture: string;
   Master_Pick: string;
   Master_Prob: string;
@@ -488,7 +488,7 @@ export interface WinPsychologyPick {
   Away_Logic: string;
 }
 
-export interface WinApexPick {
+export interface WinApexPick extends FixtureRisk {
   fixture_id: string;
   Fixture: string;
   Target: string;
@@ -504,7 +504,7 @@ export interface WinApexPick {
   Veto_Reason: string;
 }
 
-export interface WinRawPick {
+export interface WinRawPick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
   side: string;
@@ -526,7 +526,7 @@ export interface WinRawPick {
 // ============================================================
 // OVER 2.5 CHAIN TYPES
 // ============================================================
-export interface Over25Stage1Pick {
+export interface Over25Stage1Pick extends FixtureRisk {
   id: string;
   fixture: string;
   Time: string;
@@ -535,7 +535,7 @@ export interface Over25Stage1Pick {
   Algorithm: string;
 }
 
-export interface Over25Stage2Pick {
+export interface Over25Stage2Pick extends FixtureRisk {
   id: string;
   fixture: string;
   Time: string;
@@ -545,7 +545,7 @@ export interface Over25Stage2Pick {
   Reasons: string;
 }
 
-export interface Over25Stage3Pick {
+export interface Over25Stage3Pick extends FixtureRisk {
   Match: string;
   Odds: number;
   "Poisson%": number;
@@ -556,7 +556,7 @@ export interface Over25Stage3Pick {
   Failures: string;
 }
 
-export interface Over25PsychologyPick {
+export interface Over25PsychologyPick extends FixtureRisk {
   Fixture: string;
   Base_Poisson: string;
   Base_Grade: string;
@@ -565,7 +565,7 @@ export interface Over25PsychologyPick {
   Reasons: string;
 }
 
-export interface Over25GoldPick {
+export interface Over25GoldPick extends FixtureRisk {
   fixture_id: string;
   league: string;
   kickoff_datetime: string;
@@ -589,7 +589,7 @@ export interface Over25GoldPick {
   };
 }
 
-export interface Over25ApexPick {
+export interface Over25ApexPick extends FixtureRisk {
   fixture_id: string;
   Fixture: string;
   Category: string;
@@ -604,7 +604,7 @@ export interface Over25ApexPick {
   Veto_Status: string;
 }
 
-export interface Over25ForecastPick {
+export interface Over25ForecastPick extends FixtureRisk {
   fixture_id: string;
   league: string;
   fixture: string;
@@ -621,7 +621,7 @@ export interface Over25ForecastPick {
 // ============================================================
 // OVER 1.5 CHAIN TYPES
 // ============================================================
-export interface Over15Stage3Pick {
+export interface Over15Stage3Pick extends FixtureRisk {
   Match: string;
   Odds: number;
   "Poisson%": number;
@@ -632,7 +632,7 @@ export interface Over15Stage3Pick {
   Failures: string;
 }
 
-export interface Over15PsychologyPick {
+export interface Over15PsychologyPick extends FixtureRisk {
   Fixture: string;
   Base_Poisson: string;
   Base_Grade: string;
@@ -641,7 +641,7 @@ export interface Over15PsychologyPick {
   Reasons: string;
 }
 
-export interface Over15ApexPick {
+export interface Over15ApexPick extends FixtureRisk {
   Fixture: string;
   Base_Poisson: string;
   Base_Grade: string;
@@ -653,7 +653,7 @@ export interface Over15ApexPick {
 // ============================================================
 // CORNER CHAIN TYPES
 // ============================================================
-export interface CornerStage1Pick {
+export interface CornerStage1Pick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
   expected_total_corners: number;
@@ -678,7 +678,7 @@ export interface CornerStage1Pick {
   };
 }
 
-export interface CornerStage2Pick {
+export interface CornerStage2Pick extends FixtureRisk {
   fixture_id: string;
   fixture_name: string;
   stage1_predicted_corners: number;
@@ -705,7 +705,7 @@ export interface CornerStage2Pick {
   };
 }
 
-export interface CornerPsychologyPick {
+export interface CornerPsychologyPick extends FixtureRisk {
   fixture_name: string;
   home_position: number;
   away_position: number;
@@ -729,7 +729,7 @@ export interface CornerPsychologyPick {
   };
 }
 
-export interface CornerCatalystPick {
+export interface CornerCatalystPick extends FixtureRisk {
   fixture_name: string;
   predicted_corners: number;
   corner_tier: string;
@@ -753,7 +753,7 @@ export interface CornerCatalystPick {
   };
 }
 
-export interface CornerAggregatorPick {
+export interface CornerAggregatorPick extends FixtureRisk {
   Fixture: string;
   Master_Score: number;
   Chaos_Rating: number;
@@ -797,7 +797,7 @@ export interface CornerAggregatorPick {
 // ============================================================
 // SPECIALS TYPES
 // ============================================================
-export interface DrawPick {
+export interface DrawPick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
   home_team: string;
@@ -833,7 +833,7 @@ export interface DrawResponse {
   amateurs_list: DrawPick[];
 }
 
-export interface UndersPick {
+export interface UndersPick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
   home_team: string;
@@ -859,7 +859,7 @@ export interface UndersResponse {
   u35: UndersPick[];
 }
 
-export interface SOTPick {
+export interface SOTPick extends FixtureRisk {
   Fixture: string;
   Verdict: string;
   Proj_SOT: number;
@@ -870,7 +870,7 @@ export interface SOTPick {
   "1x2_Home_Odd": number | string;
 }
 
-export interface FHVIPick {
+export interface FHVIPick extends FixtureRisk {
   fixture: string;
   ht_score: string;
   ft_score: string;
@@ -887,7 +887,7 @@ export interface FHVIPick {
   Category: string;
 }
 
-export interface SHVIPick {
+export interface SHVIPick extends FixtureRisk {
   fixture: string;
   ht_score: string;
   ft_score: string;
@@ -930,7 +930,7 @@ export interface SHGGWinnerPick {
   };
 }
 
-export interface SHMasterPick {
+export interface SHMasterPick extends FixtureRisk {
   fixture: string;
   league: string;
   shvi_score: number;
@@ -942,7 +942,7 @@ export interface SHMasterPick {
   late_threat: string;
 }
 
-export interface SH8GoalPick {
+export interface SH8GoalPick extends FixtureRisk {
   Fixture_ID: string;
   League: string;
   Time: string;
@@ -1380,6 +1380,23 @@ export const LIVE_SIDED_TYPES: LiveConditionType[] = [
   "da",
   "key_player_lost",
 ];
+
+// ============================================================
+// FIXTURE RISK (cup / friendly) — stamped by the API onto EVERY picks row
+// (api/main.py read()/read_range() via fixture_classification). Additive:
+// a row that was never classified keeps `classification: "unknown"`, which is
+// deliberately NOT treated as "safe" anywhere in the UI.
+// ============================================================
+export interface FixtureRisk {
+  classification?: "league" | "cup" | "friendly" | "unknown";
+  is_cup?: boolean;
+  is_friendly?: boolean;
+  is_risk_fixture?: boolean;
+  risk_level?: "high" | "elevated" | "normal" | "unknown";
+  risk_label?: string;
+  competition?: string | null;
+  league_name?: string | null;
+}
 
 // ============================================================
 // FILTER & PIPELINE TYPES

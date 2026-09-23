@@ -28,6 +28,7 @@ import {
   MOCK_WIN_FORECAST,
   MOCK_WIN_U2S,
 } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 // ============================================================
 // Columns = exact backend return / printout keys
@@ -38,10 +39,10 @@ const apexColumns: PredictionColumn<WinApexPick>[] = [
     key: "Fixture",
     header: "Fixture",
     render: (r) => (
-      <span className="font-medium text-text-primary">{r.Fixture}</span>
+      <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />
     ),
   },
-  { key: "Target", header: "Target", render: (r) => r.Target },
+  { key: "Target", header: "Target", render: (r) => <FixtureRiskTag row={r} label={r.Target} /> },
   {
     key: "Category",
     header: "Category",
@@ -109,7 +110,7 @@ const u2sColumns: PredictionColumn<WinU2SPick>[] = [
     key: "Fixture",
     header: "Fixture",
     render: (r) => (
-      <span className="font-medium text-text-primary">{r.Fixture}</span>
+      <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />
     ),
   },
   { key: "Underdog", header: "Underdog", render: (r) => r.Underdog },
@@ -190,11 +191,11 @@ const forecastColumns: PredictionColumn<WinForecastPick>[] = [
     key: "fixture",
     header: "fixture",
     render: (r) => (
-      <span className="font-medium text-text-primary">{r.fixture}</span>
+      <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />
     ),
   },
   { key: "side", header: "side", render: (r) => r.side },
-  { key: "team_name", header: "team_name", render: (r) => r.team_name },
+  { key: "team_name", header: "team_name", render: (r) => <FixtureRiskTag row={r} label={r.team_name} /> },
   {
     key: "poisson_win_prob",
     header: "poisson_win_prob",
@@ -211,7 +212,7 @@ const forecastColumns: PredictionColumn<WinForecastPick>[] = [
     header: "poisson_draw_prob",
     align: "right",
     render: (r) => (
-      <span className="font-mono text-text-muted">{r.poisson_draw_prob}</span>
+      <FixtureRiskTag row={r} label={r.poisson_draw_prob} className="font-mono text-text-muted" />
     ),
   },
   {
@@ -286,6 +287,7 @@ const dnaColumns: PredictionColumn<DnaProfile>[] = [
   {
     key: "team_name",
     header: "Team",
+    // Team-level rows have no fixture identity, so no cup/friendly warning here.
     render: (r) => (
       <span className="font-medium text-text-primary">{r.team_name}</span>
     ),
