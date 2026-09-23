@@ -514,8 +514,13 @@ def alienedge_master_system(cli_date_override: str = None):
 
     # ── PHASE 1: FOUNDATION & DNA IDENTITY ───────────────────────────────────
     print(f"\n[PHASE 1] INITIALIZING DNA, UNDERDOGS, AND FOUNDATION MATH for {target_date}...")
-    _safe_exec("DNA Profiler", run_dna_profiler, target_date, save_key="dna", save_date=d)
+    # DNA Engine V2 must run BEFORE the profiler: the profiler scopes its
+    # return to this date by reading the engine's home_id/away_id clash rows
+    # off disk — running profiler-first would always read the PREVIOUS run's
+    # clashes (different date or pre-id format) and silently fall back to the
+    # full global library. Market factors last (reads both outputs).
     _safe_exec("DNA Engine V2", run_dna_engine_v2, target_date, save_key="dna_v2", save_date=d)
+    _safe_exec("DNA Profiler", run_dna_profiler, target_date, save_key="dna", save_date=d)
     _safe_exec("DNA Market Factors", build_market_factor_counts, target_date, save_key="dna_market_factors", save_date=d)
 
     _safe_exec("Underdog Base Engine", run_underdog_engine, target_date, save_key="underdog_base", save_date=d)
@@ -592,11 +597,15 @@ def alienedge_master_system(cli_date_override: str = None):
     print("\n> 🏆 Processing Win, U2S, & SH Elite Aggregation...")
     _safe_exec("U2S Psychology Engine", run_u2s_psychology_engine, target_date, save_key="u2s_psychology", save_date=d)
     _safe_exec("Win Psychology Engine", run_win_psychology_engine, target_date, save_key="win_psychology", save_date=d)
-    # Win Apex takes NO date argument — it always reads the latest merged
-    # state, so it's saved under save_date=None ('__latest') AND separately
+    # Win Apex DOES take a date argument (run_win_apex_aggregator(target_date)
+    # uses it for every input CSV path — ranked_win_forecast_{date}.csv etc.).
+    # DATE FIX (2026-09-23): it previously got NO date, so on the nightly run
+    # (--date=tomorrow) it read TODAY's CSVs while its output was saved under
+    # TOMORROW's key — the Win Intelligence table then showed yesterday's
+    # fixtures. It is saved under save_date=None ('__latest') AND separately
     # snapshotted under this date so /api/status/{date} can show when it
     # last actually ran relative to the date being viewed.
-    win_apex_result = _safe_exec("Win Apex Aggregator", run_win_apex_aggregator, save_key="win_apex", save_date=None)
+    win_apex_result = _safe_exec("Win Apex Aggregator", run_win_apex_aggregator, target_date, save_key="win_apex", save_date=None)
     if win_apex_result is not None:
         store.save("win_apex", d, win_apex_result, guard=True)
     _safe_exec("SH Master Vortex", run_sh_master_vortex, target_date, save_key="sh_master", save_date=d)
@@ -705,8 +714,11 @@ def _second_chance_runners(td: str):
     guard in _safe_exec applies here too. `td` keeps the signature parallel
     to the full pipeline; the current engines take only (date, ...)."""
     return [
-        ("dna", "DNA Profiler", run_dna_profiler, {}),
+        # DNA Engine V2 FIRST — run_dna_profiler scopes its return via the
+        # engine's home_id/away_id clash rows (same ordering as the full
+        # pipeline; profiler-first would read a stale/ID-less clashes file).
         ("dna_v2", "DNA Engine V2", run_dna_engine_v2, {}),
+        ("dna", "DNA Profiler", run_dna_profiler, {}),
         ("dna_market_factors", "DNA Market Factors", build_market_factor_counts, {}),
         ("underdog_base", "Underdog Base Engine", run_underdog_engine, {}),
         ("underdog_audit", "Underdog Master Engine", run_underdog_master_engine, {}),
@@ -740,6 +752,9 @@ def _second_chance_runners(td: str):
         ("shvi", "SHVI Second Half Engine", run_shvi_engine, {"verbose": False}),
         ("u2s_psychology", "U2S Psychology Engine", run_u2s_psychology_engine, {}),
         ("win_psychology", "Win Psychology Engine", run_win_psychology_engine, {}),
+        # Reads date-keyed CSVs the forecast/psych engines above write — the
+        # nightly positional-arg call passes target_date the same way.
+        ("win_apex", "Win Apex Aggregator", run_win_apex_aggregator, {}),
         ("sh_master", "SH Master Vortex", run_sh_master_vortex, {}),
         ("sh_8goal", "SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, {}),
         ("win_raw", "Win Raw Probability Engine", run_win_raw_engine, {}),
