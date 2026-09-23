@@ -13,12 +13,13 @@ import { createIntelligentPassColumn } from "@/components/predictions/Intelligen
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_O15_PSYCH, MOCK_O15_S3 } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const psychologyColumns: PredictionColumn<Over15PsychologyPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.Fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />,
   },
   { key: "poisson", header: "Base Poisson", render: (r) => <ProbCell value={r.Base_Poisson} showBar={false} /> },
   { key: "grade", header: "Base Grade", render: (r) => r.Base_Grade },
@@ -36,7 +37,7 @@ const stage3Columns: PredictionColumn<Over15Stage3Pick>[] = [
   {
     key: "match",
     header: "Match",
-    render: (r) => <span className="font-medium text-text-primary">{r.Match}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.Match} className="font-medium text-text-primary" />,
   },
   { key: "poisson", header: "Poisson %", render: (r) => <ProbCell value={r["Poisson%"]} showBar={false} /> },
   { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },

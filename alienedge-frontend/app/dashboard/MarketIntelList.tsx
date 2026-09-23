@@ -13,6 +13,7 @@ import { DnaCountBadge } from "@/components/dna/DnaCountBadge";
 import { VerifyCell } from "@/components/predictions/VerifyCell";
 import type { DnaV2FixtureFactors, DnaV2MarketKey } from "@/lib/api";
 import type { MarketConfig, MarketPick } from "./market-config";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 interface MarketRow {
   config: MarketConfig;
@@ -114,9 +115,11 @@ export function MarketIntelList({
                 </Badge>
               )}
             </div>
-            <span className="text-[10.5px] font-semibold text-cyan-400">
-              {top?.fixture || "No picks today"}
-            </span>
+            <FixtureRiskTag
+              row={top}
+              label={top?.fixture || "No picks today"}
+              className="text-[10.5px] font-semibold text-cyan-400"
+            />
           </Link>
         );
       },

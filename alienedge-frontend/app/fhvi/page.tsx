@@ -9,12 +9,13 @@ import { createIntelligentPassColumn } from "@/components/predictions/Intelligen
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_FHVI } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const columns: PredictionColumn<FHVIPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "country", header: "Country", render: (r) => r.country },
   { key: "category", header: "Category", render: (r) => <TierBadge tier={r.Category} /> },

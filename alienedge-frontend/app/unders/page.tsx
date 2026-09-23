@@ -12,12 +12,13 @@ import { createVerifyColumn } from "@/components/predictions/createVerifyColumn"
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UNDERS } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const u25Columns: PredictionColumn<UndersPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "tier", header: "U2.5 Tier", render: (r) => (r.u25_tier ? <TierBadge tier={r.u25_tier} /> : "—") },
   { key: "score", header: "U2.5 Score", align: "right", render: (r) => r.u25_score ?? "—" },
@@ -70,7 +71,7 @@ const u35Columns: PredictionColumn<UndersPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "tier", header: "U3.5 Tier", render: (r) => (r.u35_tier ? <TierBadge tier={r.u35_tier} /> : "—") },
   { key: "score", header: "U3.5 Score", align: "right", render: (r) => r.u35_score ?? "—" },

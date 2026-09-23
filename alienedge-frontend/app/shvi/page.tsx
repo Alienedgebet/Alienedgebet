@@ -16,12 +16,13 @@ import { createIntelligentPassColumn } from "@/components/predictions/Intelligen
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SH_8GOAL, MOCK_SH_GG, MOCK_SH_MASTER, MOCK_SHVI } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const shviColumns: PredictionColumn<SHVIPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "country", header: "Country", render: (r) => r.country },
   { key: "category", header: "Category", render: (r) => <TierBadge tier={r.Category} /> },
@@ -88,7 +89,7 @@ const shMasterColumns: PredictionColumn<SHMasterPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "league", header: "League", render: (r) => r.league },
   { key: "score", header: "SHVI Score", align: "right", render: (r) => r.shvi_score.toFixed(1) },
@@ -111,7 +112,7 @@ const sh8GoalColumns: PredictionColumn<SH8GoalPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.Fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />,
   },
   { key: "league", header: "League", render: (r) => r.League },
   { key: "time", header: "Time", render: (r) => r.Time },

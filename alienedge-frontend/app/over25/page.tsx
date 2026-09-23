@@ -23,12 +23,13 @@ import {
   MOCK_O25_S2,
   MOCK_FHVI,
 } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const apexColumns: PredictionColumn<Over25ApexPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.Fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />,
   },
   { key: "category", header: "Category", render: (r) => <TierBadge tier={r.Category} /> },
   {
@@ -94,7 +95,7 @@ const stage2Columns: PredictionColumn<Over25Stage2Pick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "time", header: "Time", render: (r) => r.Time },
   { key: "votes", header: "Votes", align: "right", render: (r) => r.Votes },
@@ -112,7 +113,7 @@ const fhviColumns: PredictionColumn<FHVIPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "country", header: "Country", render: (r) => r.country },
   { key: "category", header: "Category", render: (r) => <TierBadge tier={r.Category} /> },

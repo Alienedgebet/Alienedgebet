@@ -13,12 +13,13 @@ import { createIntelligentPassColumn } from "@/components/predictions/Intelligen
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UD_AUDIT, MOCK_UD_BASE } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const auditColumns: PredictionColumn<UnderdogMasterPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "underdog", header: "Underdog", render: (r) => r.underdog_team },
   {
@@ -50,7 +51,7 @@ const baseColumns: PredictionColumn<UnderdogBasePick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "league", header: "League", render: (r) => r.league },
   { key: "underdog", header: "Underdog", render: (r) => r.underdog_team },

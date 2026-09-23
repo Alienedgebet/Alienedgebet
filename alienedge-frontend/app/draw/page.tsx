@@ -12,12 +12,13 @@ import { createVerifyColumn } from "@/components/predictions/createVerifyColumn"
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_DRAW } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 const drawColumns: PredictionColumn<DrawPick>[] = [
   {
     key: "fixture",
     header: "Fixture",
-    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
   },
   { key: "tier", header: "Tier", render: (r) => <TierBadge tier={r.tier} /> },
   {

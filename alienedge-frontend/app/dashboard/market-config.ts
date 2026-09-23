@@ -1,5 +1,6 @@
 import type { AxiosResponse } from "axios";
 import {
+  type FixtureRisk,
   ggApi,
   winApi,
   over25Api,
@@ -49,7 +50,7 @@ import type { VerificationData } from "@/components/predictions/VerifyCell";
 // not as its own dashboard market card.
 // ============================================================
 
-export interface MarketPick {
+export interface MarketPick extends FixtureRisk {
   fixture: string;
   tier?: string;
   prob?: number;
