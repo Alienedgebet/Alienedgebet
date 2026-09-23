@@ -4,7 +4,7 @@ Every expectation below is written against the VERIFIED producing engines
 and the JOIN rules this repo now enforces:
   • WIN parity      — win_forecast parity_score signed per side, cut +10
   • Goal Intent     — predicted team's DNA Goal Intent VS the opponent's
-  • GG BTTS Friction— DNA engine STRONG GG gate (home > 65 AND away > 55)
+  • GG BTTS Friction— BOTH teams > 50 (DNA factor home/away_value)
   • Draw Probability— the WIN rule (draw prob < 20% = PASS)
   • DNA parity      — draw factor-count balance in {0, 1}
 Cross-day joins are PINNED to the synthetic date (see _seal_date), so the
@@ -55,7 +55,8 @@ def _build():
     s["u2s_rows"], s["corner_rows"] = [], []
     s["win_by_id"] = {"100": side_rows}
     s["win_by_name"] = {pc._norm("Arsenal vs Chelsea"): side_rows}
-    s["draw_by_id"] = {"100": {"mc_draw_prob": 0.30, "parity": 0.7, "dmi": 0.5}}
+    s["draw_by_id"] = {"100": {"mc_draw_prob": 0.30, "parity": 0.7, "dmi": 0.5,
+                              "home_position": 3, "away_position": 15}}
     s["dna_by_id"] = {"100": {
         "over25": {"factors": [_GOAL_OVER25, _BOX_OVER25]},
         "gg": {"factors": [_FRICTION_GG, _GG_GOAL]},
@@ -66,7 +67,8 @@ def _build():
     s["dna_draw_by_id"] = {"100": {"home_count": 3, "away_count": 3}}
     s["o25f_by_id"] = {"100": {"kill_switch_pass": True, "poisson_over_prob_num": 71.5,
                                "h2h_overs_last_5": 4, "pos_gap": 5, "parity_diff": 22,
-                               "council_votes": "8/9"}}
+                               "council_votes": "8/9",
+                               "combined_gs_last_5": 24}}
     s["ggc_by_id"] = {"100": {"home_gk_liable": True, "away_gk_liable": False,
                               "gg_score": 88.0, "h2h_btts_rate": 0.5}}
     s["o15c_by_id"] = {"100": {"combined_lambda": 3.1, "lambda_home": 1.6,
@@ -92,7 +94,7 @@ check("markets dict present", isinstance(page.get("markets"), dict))
 check("all market sections present",
       set(page["markets"].keys()) ==
       {"win", "win_psychology", "gg", "gg_precision", "over25", "over15",
-       "corners", "draw", "unders", "u2s", "fhvi", "shvi"})
+       "corners", "draw", "unders", "u2s", "fhvi", "shvi", "sot"})
 win = page["markets"]["win"]
 check("win section has Parity +10 PASS with the raw signed value",
       any(c["name"] == "Parity +10" and c["result"] == pc.PASS and c["value"] == 12
@@ -130,7 +132,7 @@ check("win_psychology runs the SAME WIN checklist as win (one checklist)",
 
 gg = page["markets"]["gg"]
 fr = next((c for c in gg["checks"] if c["name"] == "BTTS Friction"), None)
-check("gg BTTS Friction uses the DNA STRONG GG gate (70 > 65 and 60 > 55 = PASS)",
+check("gg BTTS Friction: BOTH teams > 50 (70 and 60 = PASS)",
       fr is not None and fr["result"] == pc.PASS
       and fr["value"] == {"home_value": 70, "away_value": 60})
 gk = next((c for c in gg["checks"] if c["name"] == "Goalkeeper"), None)
@@ -145,10 +147,12 @@ dnap = next((c for c in draw["checks"] if c["name"] == "DNA Parity"), None)
 check("draw DNA parity |3-3| = 0 → PASS", dnap is not None and dnap["result"] == pc.PASS)
 
 o25 = page["markets"]["over25"]
-check("O2.5 section reuses the engine council gates (pos_gap 5, parity 22, h2h 4, poisson 71.5, kill switch)",
+check("O2.5 section runs the six user rules (kill, 71.5, 8/9, 24 goals, "
+      "intent 72/55, pos 3/15)",
       {c["name"]: c["result"] for c in o25["checks"]} ==
-      {"Kill Switch": pc.PASS, "Poisson Gate": pc.PASS, "H2H Overs": pc.PASS,
-       "Position Gap": pc.PASS, "Parity": pc.PASS, "DNA Over Signal": pc.PASS})
+      {"Kill Switch": pc.PASS, "Poisson Gate": pc.PASS,
+       "Council Votes": pc.PASS, "Goal Count": pc.PASS,
+       "Goal Intent": pc.PASS, "League Top 10": pc.PASS})
 
 fhvi = page["markets"]["fhvi"]
 check("FHVI section uses the >= 7 TIER-2 gate (8.4 = PASS)",

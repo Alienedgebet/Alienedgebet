@@ -48,7 +48,8 @@ snap["date"], snap["label_by_id"] = DATE, {"100": "Arsenal vs Chelsea"}
 snap["dna_prof_by_name"] = {}
 snap["win_by_id"] = {"100": side_rows}
 snap["win_by_name"] = {pc._norm("Arsenal vs Chelsea"): side_rows}
-snap["draw_by_id"] = {"100": {"mc_draw_prob": 0.30, "parity": 0.7, "dmi": 0.5}}
+snap["draw_by_id"] = {"100": {"mc_draw_prob": 0.30, "parity": 0.7, "dmi": 0.5,
+                              "home_position": 3, "away_position": 15}}
 snap["dna_by_id"] = {"100": {
     "over25": {"factors": [_GOAL_OVER25, _BOX_OVER25]},
     "gg": {"factors": [_FRICTION_GG, _GG_GOAL]},
@@ -59,7 +60,8 @@ snap["dna_by_id"] = {"100": {
 snap["dna_draw_by_id"] = {"100": {"home_count": 3, "away_count": 3}}
 snap["o25f_by_id"] = {"100": {"kill_switch_pass": True, "poisson_over_prob_num": 71.5,
                               "h2h_overs_last_5": 4, "pos_gap": 5, "parity_diff": 22,
-                              "council_votes": "8/9"}}
+                              "council_votes": "8/9",
+                              "combined_gs_last_5": 24}}
 snap["ggc_by_id"] = {"100": {"home_gk_liable": True, "away_gk_liable": False,
                              "gg_score": 88.0, "h2h_btts_rate": 0.5}}
 snap["o15c_by_id"] = {"100": {"combined_lambda": 3.1, "lambda_home": 1.6,
@@ -92,9 +94,10 @@ check("fixture resolved for the audited pick", r25["fixture"] == "Arsenal vs Che
 
 # ── §20 CRITICAL DATA TEST: same fixture, different clicks → different reports
 names = lambda m: [c["name"] for c in report(m)["checks"]]
-check("click O2.5 → ONLY the O2.5 council checks",
-      set(names("over25")) == {"Kill Switch", "Poisson Gate", "H2H Overs",
-                               "Position Gap", "Parity", "DNA Over Signal"})
+check("click O2.5 → ONLY the six user rules",
+      set(names("over25")) == {"Kill Switch", "Poisson Gate",
+                               "Council Votes", "Goal Count",
+                               "Goal Intent", "League Top 10"})
 check("click WIN → WIN-only checks (SOT/Corners/Psychology/Underdog/Goal Intent/Draw Prob/Parity/Form)",
       set(names("win")) == {"SOT", "Corners", "Psychology", "Underdog",
                             "Goal Intent", "Draw Probability", "Parity +10", "Form"})
@@ -108,7 +111,7 @@ check("click SHVI → SHVI-only check", set(names("shvi")) == {"SHVI"})
 
 # ── §12/§23: no unrelated market's checks leak into another market ──────────
 WIN_ONLY = {"Parity +10", "Form", "SOT", "Underdog"}
-O25_ONLY = {"Kill Switch", "Poisson Gate", "H2H Overs", "Position Gap"}
+O25_ONLY = {"Kill Switch", "Poisson Gate", "Council Votes", "Goal Count"}
 GG_ONLY = {"Goalkeeper", "BTTS Friction"}
 check("no WIN checks inside O2.5 report", not (WIN_ONLY & set(names("over25"))))
 check("no O2.5 checks inside WIN report", not (O25_ONLY & set(names("win"))))
@@ -143,7 +146,8 @@ check("WIN-psychology click runs the WIN checklist (8 same-name checks)",
 
 # ── every sidebar market has its own evaluator (§12) ───────────────────────
 ALL_MARKETS = ["win", "win_psychology", "gg", "gg_precision", "gg_o15", "over25",
-               "over15", "corners", "draw", "unders", "u2s", "fhvi", "shvi"]
+               "over15", "corners", "draw", "unders", "u2s", "fhvi", "shvi",
+               "sot"]
 for m in ALL_MARKETS:
     rep = report(m)
     check(f"market {m!r} has a single-market evaluator", rep["fixture_found"] is True
@@ -168,7 +172,7 @@ legacy = pc.get_team_intelligence("Arsenal", DATE)
 check("legacy all-markets payload still intact",
       set(legacy["markets"]) == {"win", "win_psychology", "gg", "gg_precision",
                                  "over25", "over15", "corners", "draw", "unders",
-                                 "u2s", "fhvi", "shvi"}
+                                 "u2s", "fhvi", "shvi", "sot"}
       and legacy["fixture_found"] is True)
 
 # ── §14: team identity ≠ market identity — away-side audit finds same fixture
