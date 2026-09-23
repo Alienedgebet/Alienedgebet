@@ -102,7 +102,8 @@ check("click WIN → WIN-only checks (SOT/Corners/Psychology/Underdog/Goal Inten
       set(names("win")) == {"SOT", "Corners", "Psychology", "Underdog",
                             "Goal Intent", "Draw Probability", "Parity +10", "Form"})
 check("click GG → GG-only checks",
-      set(names("gg")) == {"Psychology", "Goalkeeper", "BTTS Friction", "Goal Intent"})
+      set(names("gg")) == {"Both Teams Psych", "Both Teams Goal Intent",
+                           "Both Teams Last-5 Goal", "Both Teams Conceded Last-3"})
 check("click DRAW → Draw-only checks",
       set(names("draw")) == {"Draw Probability", "Psychology Parity",
                              "Draw Magnet", "DNA Parity"})
@@ -112,7 +113,7 @@ check("click SHVI → SHVI-only check", set(names("shvi")) == {"SHVI"})
 # ── §12/§23: no unrelated market's checks leak into another market ──────────
 WIN_ONLY = {"Parity +10", "Form", "SOT", "Underdog"}
 O25_ONLY = {"Kill Switch", "Poisson Gate", "Council Votes", "Goal Count"}
-GG_ONLY = {"Goalkeeper", "BTTS Friction"}
+GG_ONLY = {"Both Teams Psych", "Both Teams Last-5 Goal"}
 check("no WIN checks inside O2.5 report", not (WIN_ONLY & set(names("over25"))))
 check("no O2.5 checks inside WIN report", not (O25_ONLY & set(names("win"))))
 check("no GG checks inside WIN report", not (GG_ONLY & set(names("win"))))
@@ -155,10 +156,16 @@ for m in ALL_MARKETS:
           and isinstance(rep["checks"], list))
 
 # ── §10: FIXED denominator — every rule the market defines counts, N/A or not
+# corners (2026-09-23) = 2 checks. This snapshot carries no underdog
+# identity (N/A) but the over25_forecast Poisson 71.5 → under 2.5 28.5%
+# < 40 PASS — the denominator stays fixed, only the numerator moves.
 cor = report("corners")
+cor_map = {c["name"]: c["result"] for c in cor["checks"]}
 check("corners denominator is FIXED at the market's full rule set (N/A included)",
-      cor["score"]["total"] == len(cor["checks"]) and cor["score"]["total"] == 2
-      and cor["score"]["passed"] == 0)
+      cor["score"]["total"] == len(cor["checks"]) == 2
+      and cor_map == {"Underdog Psych": pc.NOT_AVAILABLE,
+                      "Under 2.5 < 40%": pc.PASS}
+      and cor["score"]["passed"] == 1)
 
 # ── §7: unknown / blank market is rejected, not silently generic ───────────
 try:
@@ -196,15 +203,19 @@ check("unknown team → fixture_found=False with market echoed",
 
 print("OK" if not FAILS else str(len(FAILS)) + " FAILURES", flush=True)
 
-# ── regression: GG psychology verdict AND raw value from the SUPREME row ────
-# (gg_psychology rows carry Psych_Score but no H_Base/A_Base; the branch
-# reads the verdict off the gg_supreme row the GG table rows carry)
-snap["gsup_by_id"] = {"100": {"Fixture": "Arsenal vs Chelsea", "Psych_Score": 75}}
+# ── regression: the GG psych verdict comes from the SUPREME row's per-team
+# Spears (BOTH > 65), never from its single blended Psych_Score ────────
+snap["gsup_by_id"] = {"100": {"Fixture": "Arsenal vs Chelsea",
+                              "Psych_Score": 75,
+                              "Spears": "H:70.0%|A:66.0%"}}
 snap["gsup_by_name"] = {pc._norm("Arsenal vs Chelsea"): snap["gsup_by_id"]["100"]}
 gg_rep = report("gg")
-gps = next((c for c in gg_rep["checks"] if c["name"] == "Psychology"), None)
-check("gg Psychology verdict+value come from the supreme row's own Psych_Score",
-      gps is not None and gps["result"] == pc.PASS and gps.get("value") == 75)
+bps = next((c for c in gg_rep["checks"] if c["name"] == "Both Teams Psych"), None)
+check("gg Both Teams Psych reads the supreme row's Spears (70/66 > 65), "
+      "not its Psych_Score 75",
+      bps is not None and bps["result"] == pc.PASS
+      and bps.get("value") == {"home_spear": 70.0, "away_spear": 66.0}
+      and bps.get("field") == "Spears (H:X%|A:Y%)")
 
 # ── regression: fixtures whose ONLY saved rows are fixture-level (apex-only)
 DATE2 = "2026-09-27"
