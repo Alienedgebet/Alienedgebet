@@ -9,7 +9,7 @@ export default function WinPrecisionWeeklyPage() {
     <div className="p-4 md:p-8 max-w-7xl mx-auto w-full">
       <FilterTab
         config={WIN_FILTER_CONFIG}
-        fetchSingle={(date) => filterApi.getWinPrecision(date)}
+        fetchSingle={(date, params) => filterApi.getWinPrecision(date, params)}
         fetchWeekly={(params) => filterApi.getWinPrecisionWeekly(params as any)}
       />
     </div>

@@ -15,11 +15,15 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 // A single aggressive timeout made large-but-legitimate analytics payloads
 // (Corners Stage 1 is ~345 KB) look like failures and swap into demo data.
 // Normal endpoints keep a sensible default; the known heavy analytics
-// chains get a longer budget. Any per-request override (config.timeout,
-// including 0 = no timeout) always wins.
+// chains get a longer budget. `/api/filter/*` is in the heavy set because a
+// non-baseline Weekly request (tipster sliders, a non-default odds corridor or
+// any drawer threshold) runs the real FILTER engine over every date in the
+// requested range inside the request — same work class as the other chains.
+// Any per-request override (config.timeout, including 0 = no timeout) always
+// wins.
 const DEFAULT_TIMEOUT_MS = 10_000; // normal endpoints
 const HEAVY_TIMEOUT_MS = 45_000; // corners stage 1/2, GG, Win, Over 1.5 / Over 2.5 chains
-const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25|sot|fhvi|shvi|underdog|draw|unders|alerts|weekly)\//;
+const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25|sot|fhvi|shvi|underdog|draw|unders|alerts|weekly|filter)\//;
 
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
@@ -1403,7 +1407,7 @@ export interface GGFilterParams {
 }
 
 export interface WinFilterParams {
-  mode?: "public" | "tipster" | "odds_band";
+  mode?: "public" | "tipster" | "odds_band" | "advanced";
   risk_level?: string;
   odds_band?: string;
   min_form_wins?: number;
@@ -1426,7 +1430,7 @@ export interface WinFilterParams {
 }
 
 export interface Over25FilterParams {
-  mode?: "public" | "tipster" | "odds_band";
+  mode?: "public" | "tipster" | "odds_band" | "advanced";
   risk_level?: string;
   odds_band?: string;
   min_poisson?: number;
@@ -1440,11 +1444,10 @@ export interface Over25FilterParams {
   anchor_date?: string;
 }
 
-export interface WinPrecisionWeeklyParams {
-  start_date?: string;
-  end_date?: string;
-  anchor_date?: string;
-}
+// Win Cross-Check uses the SAME drawer as /weekly/win (its default risk preset
+// is `safe`, which is the snapshot it has always read), so it accepts the whole
+// control set instead of dates only.
+export type WinPrecisionWeeklyParams = WinFilterParams;
 
 export interface PipelineResponse {
   date: string;
@@ -1817,8 +1820,8 @@ export const filterApi = {
   getOver25Weekly: (params?: Over25FilterParams) =>
     api.get("/api/filter/over25/weekly", { params }),
 
-  getWinPrecision: (date: string) =>
-    api.get(`/api/filter/win/precision/${date}`),
+  getWinPrecision: (date: string, params?: WinFilterParams) =>
+    api.get(`/api/filter/win/precision/${date}`, { params }),
 
   getWinPrecisionWeekly: (params?: WinPrecisionWeeklyParams) =>
     api.get("/api/filter/win/precision/weekly", { params }),

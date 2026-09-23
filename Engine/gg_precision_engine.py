@@ -47,6 +47,10 @@ MAX_KEY_PLAYERS        = 16
 CORE_START_RATE        = 0.6
 
 MARKET_1X2             = 1
+MARKET_BTTS            = 9   # ADDITIVE: BTTS ("GG") market id on the SAME
+                             # /odds/pre-match/fixtures/{id} response this engine
+                             # already fetches (same constant Engine/over25_forecast.py
+                             # already uses — no extra request is made for it).
 
 # ── GG TIER THRESHOLDS ───────────────────────────────────────────────────────
 GG_TIER1_SCORE         = 68    
@@ -164,9 +168,9 @@ def sniper_fetch_odds(fixture_id):
     try:
         data = GET(f"/odds/pre-match/fixtures/{fixture_id}")
     except Exception:
-        return {"h": None, "d": None, "a": None}
+        return {"h": None, "d": None, "a": None, "gg": None}
     odds_list = data.get("data", [])
-    res = {"h": None, "d": None, "a": None}
+    res = {"h": None, "d": None, "a": None, "gg": None}
     for o in odds_list:
         if o.get("market_id") == MARKET_1X2:
             lbl = str(o.get("label", "")).lower()
@@ -178,6 +182,21 @@ def sniper_fetch_odds(fixture_id):
                 res["d"] = val
             elif ("2" in lbl or "away" in lbl) and res["a"] is None:
                 res["a"] = val
+        # ── ADDITIVE (2026-09-23): BTTS ("GG") odds ──────────────────────────
+        # Extracted from the SAME response, so the Weekly page's MIN/MAX GG ODDS
+        # corridor becomes real without one extra SportMonks call. The market
+        # matching mirrors Engine/over25_forecast.py's existing BTTS extraction
+        # (market id, or a "both teams to score"/"btts" description, YES label
+        # only; half-time/result/corner/card/booking variants excluded).
+        desc = str(o.get("market_description") or o.get("name") or "").lower()
+        is_gg = (o.get("market_id") == MARKET_BTTS) or ("both teams to score" in desc) or ("btts" in desc)
+        if is_gg and not any(x in desc for x in ("half", "result", "win", "total", "corner", "card", "booking")):
+            lbl = str(o.get("label", "")).lower()
+            if lbl in ("yes", "gg", "btts-yes"):
+                try: val = float(o.get("value"))
+                except: continue
+                if res["gg"] is None:
+                    res["gg"] = val
     return res
 
 # ==============================================================================
@@ -1125,7 +1144,7 @@ def run_gg_o15_engine(target_date=None, verbose=False):
             try:
                 odds = sniper_fetch_odds(fx.get("id"))
             except Exception:
-                odds = {"h": None, "d": None, "a": None}
+                odds = {"h": None, "d": None, "a": None, "gg": None}
 
             # ─────────────────────────────────────────────────────────────
             # GG SCORE
@@ -1272,6 +1291,10 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 "draw_odds":         odds.get("d"),
                 "home_odds":         odds.get("h"),
                 "away_odds":         odds.get("a"),
+                # ADDITIVE (2026-09-23): real BTTS ("GG") market odds for the
+                # Weekly MIN/MAX GG ODDS corridor + card display. None when the
+                # feed carried no BTTS market for this fixture (never fabricated).
+                "gg_odds":           odds.get("gg"),
             }
 
             gg_row = {

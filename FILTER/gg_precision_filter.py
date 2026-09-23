@@ -113,10 +113,13 @@ def _load_authoritative_engine(target_date):
       counts, as historically produced by Engine/gg_stage1.py & gg_stage2.py:
           h2h_goal_parity = abs(h2h_home_goals - h2h_away_goals)
           concede_parity  = abs(h_conceded      - a_conceded)
-      Those modules are orphaned by design and are NOT re-introduced, and no current
-      dated artifact persists these two values. They therefore stay None (never
-      fabricated) and Layer 2 of the gate is explicitly not evaluated — see
-      apply_precision_filter().
+      Those orphaned modules are NOT re-introduced. The dated forensics artifact
+      (JUDGED_GG_PICKS_{date}.csv) now persists both operands as H2H_Parity /
+      Concede_Parity — values the aggregator already derived from data it already
+      fetched — and _load_forensics_enrichment() joins them in. They stay None
+      (never fabricated) on dates whose artifact predates that column, and Layer 2
+      of the gate is evaluated only when a bound is supplied AND operands exist —
+      see apply_precision_filter().
     """
     path = os.path.join(OUTPUT_DIR, f"ALIENEDGE_GG_PICKS_{target_date}.csv")
     if not os.path.exists(path):
@@ -140,6 +143,8 @@ def _load_authoritative_engine(target_date):
         v_h  = _to_float(r.get("venue_btts_home"))
         v_a  = _to_float(r.get("venue_btts_away"))
         par  = _to_float(r.get("parity"))
+        gg_o = _to_float(r.get("gg_odds"))   # ADDITIVE: real BTTS market odds, when the
+                                           # engine run that wrote this CSV carried them
         tier = r.get("gg_tier")
         tier = str(tier) if pd.notna(tier) else None
         last3 = _last3_from_tier(tier)
@@ -157,9 +162,10 @@ def _load_authoritative_engine(target_date):
             "away_position":   None,   # from forensics enrichment join (fixture_id)
             "home_gg_count":   _to_int(round(v_h * 5)) if v_h is not None else None,
             "away_gg_count":   _to_int(round(v_a * 5)) if v_a is not None else None,
-            "h2h_goal_parity": None,   # no dated producer (see NOTE 2) — never fabricated
-            "concede_parity":  None,   # no dated producer (see NOTE 2) — never fabricated
+            "h2h_goal_parity": None,   # h2h goal gap — see NOTE 2; filled only when the
+            "concede_parity":  None,   # dated forensics artifact carries the operands
             "engine_parity":   round(par, 3) if par is not None else None,
+            "gg_odds":         gg_o,
         })
     return pd.DataFrame(rows)
 
@@ -206,7 +212,8 @@ def _load_forensics_enrichment(target_date):
 
     enrich = {}
     for _, r in j.iterrows():
-        rec = {"h2h_gg_count": None, "home_position": None, "away_position": None}
+        rec = {"h2h_gg_count": None, "home_position": None, "away_position": None,
+               "h2h_goal_parity": None, "concede_parity": None}
         h2h = str(r.get("H2H_GG", "") or "").strip()
         if "/" in h2h:
             rec["h2h_gg_count"] = _to_int(h2h.split("/")[0])
@@ -214,6 +221,15 @@ def _load_forensics_enrichment(target_date):
         if m:
             rec["home_position"] = int(m.group(1))
             rec["away_position"] = int(m.group(2))
+        # ADDITIVE (2026-09-23): the forensics auditor now persists the two
+        # operands of its own documented TOTAL PARITY layer as real dated
+        # columns (H2H_Parity / Concede_Parity — the same integers it already
+        # computed from data it already fetched). Older dated files simply
+        # lack them → None → the parity gate stays unevaluated (no fabrication).
+        if "H2H_Parity" in j.columns:
+            rec["h2h_goal_parity"] = _to_int(r.get("H2H_Parity"))
+        if "Concede_Parity" in j.columns:
+            rec["concede_parity"] = _to_int(r.get("Concede_Parity"))
         enrich[str(r["fixture_id"])] = rec
     return enrich
 
@@ -320,7 +336,8 @@ def load_authoritative_history(target_date):
 # ============================================================
 # THE DEADLY PRECISION FILTER (gate logic preserved — all 6 layers)
 # ============================================================
-def apply_precision_filter(df, cfg):
+def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
+                           min_gg_odds=None, max_gg_odds=None):
     if df.empty: return df
 
     # ZERO-FABRICATION EXCLUSION: a row missing a real value for an EVALUATED gate
@@ -351,39 +368,73 @@ def apply_precision_filter(df, cfg):
     h_side = pd.to_numeric(complete["home_gg_count"], errors='coerce')
     a_side = pd.to_numeric(complete["away_gg_count"], errors='coerce')
 
-    # LAYER 2 (TOTAL PARITY LIMIT) IS NOT EVALUATED — deliberate, documented.
-    # Its operands are absolute integer gaps (h2h_goal_parity, concede_parity; see
-    # NOTE 2 in _load_authoritative_engine). No dated artifact persists them, and
-    # the only real parity figure available (engine parity_score, a 0-1 SIMILARITY
-    # where HIGH = evenly matched) is a DIFFERENT quantity in the opposite direction.
-    # Comparing it to the gate's "<= 4" bound would pass every row — a silent no-op
-    # masquerading as a gate — and mapping it into concede_parity would mislabel it.
-    # So: no operand, no evaluation, no fabrication. This matches the effective
-    # behaviour of the shipped code, where the injected defaults (1 + 1 = 2 <= 4)
-    # made this layer pass unconditionally.
-
-    # Strictly applying your 100% accuracy logic
-    mask = (
+    # ── GATES — each a boolean Series over `complete` (same rows as before) ────
+    layers = [
         # Layer 1: Probability Floor
-        (prob_num >= cfg["min_probability"]) &
-
-        # Layer 2: intentionally not evaluated — see the block comment above.
+        (prob_num >= cfg["min_probability"]),
 
         # Layer 3: SHORT TERM FORM (Now dynamic using User Config)
-        (h_last3.between(cfg["last3_gg_min"], cfg["last3_gg_max"])) &
-        (a_last3.between(cfg["last3_gg_min"], cfg["last3_gg_max"])) &
+        (h_last3.between(cfg["last3_gg_min"], cfg["last3_gg_max"])),
+        (a_last3.between(cfg["last3_gg_min"], cfg["last3_gg_max"])),
 
         # Layer 4: H2H GG VOLUME
-        (h2h_cnt >= cfg["h2h_gg_min"]) &
+        (h2h_cnt >= cfg["h2h_gg_min"]),
 
-        # Layer 5: 🟢 UPGRADED STANDINGS GATE (Distance Based)
-        (valid_positions) &
-        (pos_diff.between(cfg["pos_diff_min"], cfg["pos_diff_max"])) &
+        # Layer 5: STANDINGS GATE (Distance Based)
+        valid_positions,
+        (pos_diff.between(cfg["pos_diff_min"], cfg["pos_diff_max"])),
 
         # Layer 6: HISTORICAL SIDE-BIAS (Home vs Away performance)
-        (h_side >= cfg["home_gg_side_min"]) &
-        (a_side >= cfg["away_gg_side_min"])
-    )
+        (h_side >= cfg["home_gg_side_min"]),
+        (a_side >= cfg["away_gg_side_min"]),
+    ]
+
+    # ── LAYER 2: TOTAL PARITY LIMIT (additive activation) ────────────────────
+    # This layer's operands (absolute integer H2H / conceded gaps — NOTE 2 in
+    # _load_authoritative_engine) were historically unproduced, so the layer was
+    # never evaluated. The dated forensics artifact now carries them as
+    # H2H_Parity / Concede_Parity (computed from data the aggregator already
+    # fetched). The gate is evaluated ONLY when the caller supplies a bound AND
+    # this date's artifact really carries operands — otherwise it stays
+    # unevaluated: never fabricated, never a silent pass. A row missing an
+    # operand for an EVALUATED gate is excluded, the same zero-fabrication rule
+    # every other layer already follows.
+    if max_parity is not None:
+        h2h_par = pd.to_numeric(complete["h2h_goal_parity"], errors="coerce") \
+            if "h2h_goal_parity" in complete.columns else None
+        con_par = pd.to_numeric(complete["concede_parity"], errors="coerce") \
+            if "concede_parity" in complete.columns else None
+        if h2h_par is None or con_par is None or (h2h_par.isna().all() and con_par.isna().all()):
+            print(f"   [!] Total-parity gate requested (<= {max_parity}) but this "
+                  f"date's forensics artifact carries no operands — gate NOT evaluated.")
+        else:
+            layers.append((h2h_par + con_par) <= float(max_parity))
+
+    # ── GG (BTTS) ODDS CORRIDOR (additive activation) ─────────────────────────
+    # Same rule: only evaluated when the caller supplies a bound AND this date's
+    # engine artifact carries real gg_odds.
+    if min_gg_odds is not None or max_gg_odds is not None:
+        odds_num = pd.to_numeric(complete["gg_odds"], errors="coerce") \
+            if "gg_odds" in complete.columns else None
+        if odds_num is None or odds_num.isna().all():
+            print(f"   [!] GG-odds gate requested but this date's engine artifact "
+                  f"carries no gg_odds — gate NOT evaluated.")
+        else:
+            if min_gg_odds is not None:
+                layers.append(odds_num >= float(min_gg_odds))
+            if max_gg_odds is not None:
+                layers.append(odds_num <= float(max_gg_odds))
+
+    # ── COMBINE: strict (all gates) or soft (one failure allowed) ─────────────
+    if strict_mode:
+        mask = layers[0]
+        for cond in layers[1:]:
+            mask = mask & cond
+    else:
+        # Soft mode — the same "Diamond in the Rough" rule the WIN tipster
+        # filter already ships: allow exactly ONE gate to fail.
+        mask_sum = sum(cond.astype(int) for cond in layers)
+        mask = mask_sum >= (len(layers) - 1)
 
     df_filtered = complete[mask].copy()
 
@@ -411,7 +462,26 @@ def aggregate_picks(df):
 # ============================================================
 # 📦 THE BLACK BOX WRAPPER (date-aware — mirrors WIN / O2.5 filter entrypoints)
 # ============================================================
-def run_gg_precision_filter(target_date=None):
+def run_gg_precision_filter(target_date=None, cfg_overrides=None, max_parity=None,
+                            strict_mode=True, min_gg_odds=None, max_gg_odds=None,
+                            persist=True):
+    """Daily GG precision filter.
+
+    ADDITIVE (2026-09-23) — every new argument defaults to the SHIPPED behaviour,
+    so the pipeline call `run_gg_precision_filter(target_date)` is unchanged:
+      * `cfg_overrides`  — merge user gate values over USER_FILTER (the Weekly
+        drawer's MIN PROBABILITY / MIN HOME-AWAY GG / MIN H2H GG / MAX TABLE
+        DISTANCE). Unknown keys are ignored; None never overwrites a default.
+      * `max_parity`     — activates the documented Layer-2 total-parity gate
+        (H2H_Parity + Concede_Parity <= max_parity) when the dated artifact
+        carries operands; unevaluated otherwise.
+      * `strict_mode`    — False = allow ONE gate to fail (same soft rule the
+        WIN tipster filter already ships) for the STRICT PARITY LOCK toggle.
+      * `min/max_gg_odds`— real BTTS-odds corridor, evaluated only when the
+        engine artifact carries `gg_odds`.
+      * `persist`        — False = request-time filtering does NOT write
+        forecast_final_gg_precision.csv.
+    """
     if target_date is None:
         target_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     target_date = str(target_date)
@@ -428,9 +498,19 @@ def run_gg_precision_filter(target_date=None):
         print("❌ Filter closed: no authoritative GG data found for this date.")
         return []
 
+    # 1b. Effective gate config = engine defaults + caller overrides
+    cfg = dict(USER_FILTER)
+    if cfg_overrides:
+        for key, value in cfg_overrides.items():
+            if key in cfg and value is not None:
+                cfg[key] = value
+
     # 2. Filter
     print("🎯 Applying Precision Layers (Total Parity <= 4, Form constraints, Table Distance)...")
-    df_filtered = apply_precision_filter(df_all, USER_FILTER)
+    df_filtered = apply_precision_filter(df_all, cfg, strict_mode=strict_mode,
+                                         max_parity=max_parity,
+                                         min_gg_odds=min_gg_odds,
+                                         max_gg_odds=max_gg_odds)
 
     if df_filtered.empty:
         print("🛑 Precision Check: No matches survived the deadly accuracy layers.")
@@ -440,8 +520,9 @@ def run_gg_precision_filter(target_date=None):
     df_final = aggregate_picks(df_filtered)
     df_final["audit_timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-    # 4. Save and Print
-    df_final.to_csv(OUTPUT_FILE, index=False)
+    # 4. Save and Print (skipped for request-time/live filtering)
+    if persist:
+        df_final.to_csv(OUTPUT_FILE, index=False)
 
     print("\n      🏆 FINAL HIGH-PRECISION VERIFIED PICKS (AGGREGATED) 🏆")
     print("-" * 80)
@@ -450,7 +531,10 @@ def run_gg_precision_filter(target_date=None):
                         "tier", "verification_days"] if c in df_final.columns]
     print(df_final[cols].to_string(index=False))
     print("\n" + "-"*80)
-    print(f"✅ SUCCESS: {len(df_final)} Matches verified and saved to {OUTPUT_FILE}")
+    if persist:
+        print(f"✅ SUCCESS: {len(df_final)} Matches verified and saved to {OUTPUT_FILE}")
+    else:
+        print(f"✅ SUCCESS: {len(df_final)} Matches verified (live request, no artifact written)")
 
     return df_final.to_dict(orient="records")
 

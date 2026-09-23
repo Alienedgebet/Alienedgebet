@@ -18,11 +18,20 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER (OVER 2.5 GOALS - STAGE 3 FILTER)
 # ==============================================================================
-def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="balanced", odds_band="1.50-1.85"):
+def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="balanced",
+                                 odds_band="1.50-1.85", persist=True, **overrides):
     """
     Executes Over 2.5 Goals Filter Aggregator.
     Translates raw Stage 2 data into betting picks (Banker/Aggressive/Balanced).
-    Logic is 100% preserved and wrapped for professional execution.
+
+    ADDITIVE (2026-09-23):
+      * `overrides` are forwarded verbatim to the EXISTING tipster filter
+        (min_odds/max_odds/min_poisson/min_votes/max_pos_gap/min_h2h_overs) so
+        the Weekly page's Tipster sliders drive the real engine. Public mode
+        ignores them here (the API narrows the preset rows instead).
+      * `persist=False` keeps every gate and returned row byte-identical but
+        does NOT write FILTERED_O25_*.csv — request-time filtering must never
+        overwrite a pipeline artifact. Default `True` = unchanged.
     """
     # Ensure directories exist
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -167,7 +176,9 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
             final_df = apply_over_public_filter(raw_df, risk_level, odds_band)
             label = f"PUBLIC_{risk_level.upper()}"
         else:
-            final_df = apply_over_tipster_filter(raw_df)
+            # Tipster/advanced: forward the Weekly sliders to the EXISTING
+            # tipster filter. Unspecified keys keep the filter's own defaults.
+            final_df = apply_over_tipster_filter(raw_df, **overrides)
             label = "TIPSTER_PRO"
 
         # Sort by best probability first (safe extraction)
@@ -176,11 +187,14 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
             final_df['sort_help'] = sort_vals
             final_df = final_df.sort_values(by="sort_help", ascending=False).drop(columns=['sort_help'])
 
-        # SAVE THE FINAL PICKS
-        output_filename = os.path.join(OUTPUT_DIR, f"FILTERED_O25_{label}_{target_date}.csv")
-        final_df.to_csv(output_filename, index=False)
+        # SAVE THE FINAL PICKS (skipped for request-time/live filtering)
+        if persist:
+            output_filename = os.path.join(OUTPUT_DIR, f"FILTERED_O25_{label}_{target_date}.csv")
+            final_df.to_csv(output_filename, index=False)
+            print(f"[SUCCESS] Filter applied. {len(final_df)} {label} picks saved to {output_filename}")
+        else:
+            print(f"[SUCCESS] Filter applied (live request, no artifact written). {len(final_df)} {label} picks.")
 
-        print(f"[SUCCESS] Filter applied. {len(final_df)} {label} picks saved to {output_filename}")
         return final_df.to_dict(orient="records")
 
     except Exception as e:
