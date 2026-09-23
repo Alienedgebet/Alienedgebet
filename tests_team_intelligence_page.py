@@ -4,7 +4,9 @@ Every expectation below is written against the VERIFIED producing engines
 and the JOIN rules this repo now enforces:
   • WIN parity      — win_forecast parity_score signed per side, cut +10
   • Goal Intent     — predicted team's DNA Goal Intent VS the opponent's
-  • GG BTTS Friction— BOTH teams > 50 (DNA factor home/away_value)
+  • GG card         — the unified 4 checks (both sides' Spears > 65, both
+                      sides' DNA Goal Intent > 60, combined last-5 goals
+                      > 8, both teams conceded > 0)
   • Draw Probability— the WIN rule (draw prob < 20% = PASS)
   • DNA parity      — draw factor-count balance in {0, 1}
 Cross-day joins are PINNED to the synthetic date (see _seal_date), so the
@@ -131,13 +133,21 @@ check("win_psychology runs the SAME WIN checklist as win (one checklist)",
       and page["markets"]["win_psychology"]["passed"] == win["passed"])
 
 gg = page["markets"]["gg"]
-fr = next((c for c in gg["checks"] if c["name"] == "BTTS Friction"), None)
-check("gg BTTS Friction: BOTH teams > 50 (70 and 60 = PASS)",
-      fr is not None and fr["result"] == pc.PASS
-      and fr["value"] == {"home_value": 70, "away_value": 60})
-gk = next((c for c in gg["checks"] if c["name"] == "Goalkeeper"), None)
-check("gg Goalkeeper reuses the engine's own liable flag",
-      gk is not None and gk["result"] == pc.PASS)
+gg_map = {c["name"]: c for c in gg["checks"]}
+check("gg runs the unified 4-check card (fixed denominator of 4)",
+      set(gg_map) == {"Both Teams Psych", "Both Teams Goal Intent",
+                      "Both Teams Last-5 Goal", "Both Teams Conceded Last-3"}
+      and gg["total"] == 4)
+gi = gg_map["Both Teams Goal Intent"]
+check("gg Goal Intent 68/64 both > 60 → PASS (DNA gg factors)",
+      gi["result"] == pc.PASS
+      and gi["value"] == {"home_value": 68, "away_value": 64})
+check("gg combined last-5 goals 24 > 8 → PASS (over25_forecast)",
+      gg_map["Both Teams Last-5 Goal"]["result"] == pc.PASS)
+check("gg no Spears on this fixture's supreme row → Both Teams Psych N/A",
+      gg_map["Both Teams Psych"]["result"] == pc.NOT_AVAILABLE)
+check("gg side rows carry no conceded field → Both Teams Conceded Last-3 N/A",
+      gg_map["Both Teams Conceded Last-3"]["result"] == pc.NOT_AVAILABLE)
 
 draw = page["markets"]["draw"]
 dp = next((c for c in draw["checks"] if c["name"] == "Draw Probability"), None)
@@ -161,9 +171,12 @@ shvi = page["markets"]["shvi"]
 check("SHVI section uses the same >= 7 gate (5.1 = FAIL)",
       shvi["total"] == 1 and shvi["passed"] == 0)
 
-check("unavailable intelligence stays NOT_AVAILABLE (no fabrication)",
-      next(c for c in page["markets"]["corners"]["checks"]
-           if c["name"] == "Corner Friction")["result"] == pc.NOT_AVAILABLE)
+corner_map = {c["name"]: c["result"]
+              for c in page["markets"]["corners"]["checks"]}
+check("corners runs the 2-check card honestly (no fabrication): Underdog "
+      "Psych N/A (no U2S/Spears identity), Under 2.5 28.5% < 40 → PASS",
+      corner_map == {"Underdog Psych": pc.NOT_AVAILABLE,
+                     "Under 2.5 < 40%": pc.PASS})
 
 ctx = page["context"]
 check("context carries the raw WIN side values (parity 12, form 11 vs 6)",

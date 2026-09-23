@@ -168,35 +168,58 @@ rm = result_map(ipc)
 check("U2S 'VETOED' psychology → explicit FAIL (never N/A), 0/3",
       ipc is not None and ipc["total"] == 3 and ipc["passed"] == 0
       and rm.get("Psychology") == pc.FAIL)
-# Venue 4th check: FULL (3/3) sample appends it → denominator 4; a shorter
-# sample ("(1/1)") or "N/A" OMITS it entirely (the user's rule).
-u2s_full = {pc._norm("Bournemouth vs Liverpool"): {
-    "Underdog": "Bournemouth", "Psych_Score": 78,
-    "Dog_Scoring_Consistency": "100.0% (3/3)"}}
-ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
-    "u2s_by_name": u2s_full,
-    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
+# Venue 4th check: win_forecast last_5_wins_at_venue >= 3 (venue wins 3+ → PASS)
+# Omitted when data is absent/shorter → denominator 3 (user rule).
+u2s_win = fresh_snapshot({
+    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): {
+        "Underdog": "Bournemouth", "Psych_Score": 78}},
+    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}},
+    "win_by_id": {"300": [
+        {"side": "home", "team_name": "Bournemouth", "last_5_wins_at_venue": 3},
+        {"side": "away", "team_name": "Liverpool", "last_5_wins_at_venue": 1}]}})
+ipc = evaluate("u2s", dict(ud_row), u2s_win)
 rm = result_map(ipc)
-check("U2S full venue sample (3/3) → 4th check appended, 4/4 (psych+three-"
-      "fold+product+venue)",
+check("U2S venue: underdog 3/3 wins at venue → 4th check PASS, 4/4",
       ipc["total"] == 4 and ipc["passed"] == 4
       and rm.get("Venue Scoring") == pc.PASS)
-u2s_partial = dict(u2s_full,
-                   Dog_Scoring_Consistency="66.7% (2/3)")
-ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
-    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): u2s_partial},
-    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
+u2s_win2 = fresh_snapshot({
+    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): {
+        "Underdog": "Bournemouth", "Psych_Score": 78}},
+    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}},
+    "win_by_id": {"300": [
+        {"side": "home", "team_name": "Bournemouth", "last_5_wins_at_venue": 2},
+        {"side": "away", "team_name": "Liverpool", "last_5_wins_at_venue": 1}]}})
+ipc = evaluate("u2s", dict(ud_row), u2s_win2)
 rm = result_map(ipc)
-check("U2S venue sample (2/3) → 4th check appended as FAIL, 3/4",
+check("U2S venue: underdog 2/3 wins at venue → 4th check FAIL, 3/4",
       ipc["total"] == 4 and ipc["passed"] == 3
       and rm.get("Venue Scoring") == pc.FAIL)
-u2s_short = dict(u2s_full, Dog_Scoring_Consistency="100.0% (1/1)")
+# No win_by_id venue data → 4th check omitted, denominator 3
 ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
-    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): u2s_short},
+    "u2s_by_name": u2s_idx,
     "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
-check("U2S short venue sample (1/1) → 4th check OMITTED, denominator 3",
+check("U2S no venue data → 4th check OMITTED, denominator 3",
       ipc["total"] == 3
       and "Venue Scoring" not in result_map(ipc))
+# The surrogate: u2s_psychology's own venue sample. A full 3/3 proves the
+# 3-of-5 rule → PASS (4/4); a partial 2/3 cannot disprove it → the
+# check is omitted (no fake FAIL, denominator stays 3).
+ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
+    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): {
+        "Underdog": "Bournemouth", "Psych_Score": 78,
+        "Dog_Scoring_Consistency": "100.0% (3/3)"}},
+    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
+rm = result_map(ipc)
+check("U2S venue surrogate: full 3/3 venue sample → PASS, 4/4",
+      ipc["total"] == 4 and ipc["passed"] == 4
+      and rm.get("Venue Scoring") == pc.PASS)
+ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
+    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): {
+        "Underdog": "Bournemouth", "Psych_Score": 78,
+        "Dog_Scoring_Consistency": "66.7% (2/3)"}},
+    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
+check("U2S venue surrogate: 2/3 sample cannot prove 3-of-5 → OMITTED, 3/3",
+      ipc["total"] == 3 and "Venue Scoring" not in result_map(ipc))
 # ── 5. Display/audit-only guarantee ──────────────────────────────────────────
 snap = fresh_snapshot({"win_by_id": {"100": side_rows},
                        "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows},
@@ -395,18 +418,18 @@ check("WIN Corners: no corner row anywhere → NOT_AVAILABLE",
 
 
 # ── 9. GG — the ONE unified 4-check card on EVERY GG table ──────────────────
-GG_NAMES = {"Psychology", "Goalkeeper", "BTTS Friction", "Goal Intent"}
+GG_NAMES = {"Both Teams Psych", "Both Teams Goal Intent", "Both Teams Last-5 Goal", "Both Teams Conceded Last-3"}
 gg_row = {"fixture_id": 600, "fixture": "Basel vs St. Gallen",
           "sig1_mc_btts": 30.0, "sig2_venue_btts": 0.0, "sig3_gk_vuln": 20.0,
           "sig4_h2h_btts": 15.0, "sig5_directional": 0.0}
 ipc = evaluate("gg_precision", dict(gg_row), fresh_snapshot())
 rm = result_map(ipc)
 check("GG precision runs the UNIFIED card (same 4 names, fixed at 4, "
-      "honest 0/4 with no sources — the 5-signal card is gone)",
+      "honest 0/4 with no sources — the GK/BTTS/old Goal Intent card is gone)",
       ipc["total"] == 4 and set(rm) == GG_NAMES and ipc["passed"] == 0)
 gg_src = fresh_snapshot({
-    "gsup_by_id": {"600": {"Psych_Score": 115}},
-    "gsup_by_name": {pc._norm("Basel vs St. Gallen"): {"Psych_Score": 115}},
+    "gsup_by_id": {"600": {"Psych_Score": 115, "Spears": "H:70%|A:72%"}},
+    "gsup_by_name": {pc._norm("Basel vs St. Gallen"): {"Psych_Score": 115, "Spears": "H:70%|A:72%"}},
     "ggc_by_id": {"600": {"home_gk_liable": True, "away_gk_liable": False}},
     "ggc_by_name": {pc._norm("Basel vs St. Gallen"):
                     {"home_gk_liable": True, "away_gk_liable": False}},
@@ -414,17 +437,24 @@ gg_src = fresh_snapshot({
         {"name": "BTTS Friction", "home_value": 71, "away_value": 58,
          "winner": "home"},
         {"name": "Goal Intent", "home_value": 68, "away_value": 64,
-         "winner": "both"}]}}}})
+         "winner": "both"}]}}},
+    "o25f_by_id": {"600": {"combined_gs_last_5": 12}},
+    "o25f_by_name": {pc._norm("Basel vs St. Gallen"): {"combined_gs_last_5": 12}},
+    "win_by_id": {"600": [
+        {"side": "home", "team_name": "Basel", "opp_last_5_conceded_raw": "5"},
+        {"side": "away", "team_name": "St. Gallen", "opp_last_5_conceded_raw": "3"}]},
+    "win_by_name": {pc._norm("Basel vs St. Gallen"): [
+        {"side": "home", "team_name": "Basel", "opp_last_5_conceded_raw": "5"},
+        {"side": "away", "team_name": "St. Gallen", "opp_last_5_conceded_raw": "3"}]}})
 ipc = evaluate("gg_precision", dict(gg_row), gg_src)
-check("GG unified card with sources: psych 115 > 65, GK liable, BTTS 71/58 "
-      "> 50, intent 68/64 > 60 → 4/4",
+check("GG unified card with sources: psych 115 > 65, intent 68/64 > 60, last-5 goals 12 > 8, both conceded 5/3 > 0 → 4/4 (no Goalkeeper)",
       ipc["passed"] == 4 and ipc["total"] == 4)
-# psych boundary: 65 exactly is NOT above 65 → FAIL (the only green here: GK)
+# psych boundary: 65 exactly is NOT above 65 → FAIL
 ipc = evaluate("gg_precision", dict(gg_row), fresh_snapshot({
-    "gsup_by_id": {"600": {"Psych_Score": 65}},
-    "gsup_by_name": {pc._norm("Basel vs St. Gallen"): {"Psych_Score": 65}}}))
-check("GG psych 65 (boundary, must be ABOVE 65) → FAIL",
-      result_map(ipc).get("Psychology") == pc.FAIL)
+    "gsup_by_id": {"600": {"Psych_Score": 65, "Spears": "H:65%|A:65%"}},
+    "gsup_by_name": {pc._norm("Basel vs St. Gallen"): {"Psych_Score": 65, "Spears": "H:65%|A:65%"}}}))
+check("GG psych 65 boundary (must be ABOVE 65, not >=) → FAIL",
+      result_map(ipc).get("Both Teams Psych") == pc.FAIL)
 o15_row = {"fixture_id": 601, "fixture": "Sporting KC vs Philadelphia Union",
            "combined_lambda": 4.0, "lambda_home": 1.6, "lambda_away": 2.4,
            "o15_score": 80.0}
@@ -445,39 +475,92 @@ ipc = evaluate("shvi", {"fixture": "A vs B"}, fresh_snapshot())
 check("SHVI missing score → NOT_AVAILABLE, 0/1 (fixed denominator, no fake FAIL)",
       ipc is not None and ipc["total"] == 1 and ipc["passed"] == 0)
 
-# ── 11. SOT — the new 2-check card (psych > 50, under-2.5 prob > 65%) ───────
+# ── 11. SOT — the new 2-check card (Over 2.5 > 60%, psych > 60) ──────────────
 sot_fx = "Santa Fe vs Deportivo Cali"
 ipc = evaluate("sot", {"fixture": sot_fx}, fresh_snapshot({
     "gps_by_name": {pc._norm(sot_fx): {"Psych_Score": 75}},
-    "un_by_name": {pc._norm(sot_fx): {"mc_u25_prob": 0.81}}}))
+    "o25f_by_name": {pc._norm(sot_fx): {"poisson_over_prob_num": 71.5}}}))
 rm = result_map(ipc)
-check("SOT psych 75 > 50 and under-2.5 81% > 65 → 2/2",
+check("SOT Over 2.5 71.5% > 60 AND psych 75 > 60 → 2/2",
       ipc["total"] == 2 and ipc["passed"] == 2
       and rm.get("Psychology") == pc.PASS
-      and rm.get("Under 2.5 Probability") == pc.PASS)
+      and rm.get("Over 2.5 Probability") == pc.PASS)
 ipc = evaluate("sot", {"fixture": "No Sources vs At All"}, fresh_snapshot())
 check("SOT no intelligence → honest 0/2 (fixed denominator, no fake verdict)",
       ipc is not None and ipc["total"] == 2 and ipc["passed"] == 0
-      and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
+            and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
 ipc = evaluate("sot", {"fixture": "X vs Y"}, fresh_snapshot(
-    {"o25f_by_name": {pc._norm("X vs Y"): {"poisson_over_prob_num": 71.5}}}))
-check("SOT under-2.5 fallback = 100 - 71.5 = 28.5% → FAIL (>65 rule)",
-      result_map(ipc).get("Under 2.5 Probability") == pc.FAIL)
+    {"o25f_by_name": {pc._norm("X vs Y"): {"poisson_over_prob_num": 58.0}}}))
+check("SOT Over 2.5 58.0% < 60 → FAIL",
+      result_map(ipc).get("Over 2.5 Probability") == pc.FAIL)
 check("sot carries a count now (out of DISPLAY_ONLY, registered as a report market)",
       "sot" not in pc.DISPLAY_ONLY_MARKETS
       and "sot" in pc.TEAM_INTELLIGENCE_MARKETS
       and pc._MARKET_EVALUATOR_ALIASES["sot"] == ("sot",))
+# The unders path (u25 probability supplied) — this used to crash with
+# UnboundLocalError on prob_thr, silently leaving every SOT row unaudited.
+ipc = evaluate("sot", {"fixture": sot_fx}, fresh_snapshot({
+    "gps_by_name": {pc._norm(sot_fx): {"Psych_Score": 75}},
+    "un_by_name": {pc._norm(sot_fx): {"mc_u25_prob": 0.35}}}))
+rm = result_map(ipc)
+check("SOT unders path: u25 35% → over 2.5 65% > 60 → PASS (no crash)",
+      ipc["total"] == 2 and ipc["passed"] == 2
+      and rm.get("Over 2.5 Probability") == pc.PASS)
+ipc = evaluate("sot", {"fixture": sot_fx}, fresh_snapshot({
+    "gps_by_name": {pc._norm(sot_fx): {"Psych_Score": 75}},
+    "un_by_name": {pc._norm(sot_fx): {"mc_u25_prob": 0.45}}}))
+check("SOT unders path: u25 45% → over 2.5 55% < 60 → FAIL, 1/2",
+      ipc["total"] == 2 and ipc["passed"] == 1
+      and result_map(ipc).get("Over 2.5 Probability") == pc.FAIL)
 
-# ── 12. Corners friction — UNRANKED is neutral data, not a FAIL ─────────────
-for fr, exp in [("⚖️ UNRANKED", pc.NOT_AVAILABLE), ("📊 STABLE", pc.PASS),
-                ("💎 PERFECT", pc.PASS), ("💀 DEAD", pc.FAIL),
-                ("🛑 AVOID", pc.FAIL)]:
-    ipc = evaluate("corners_aggregator",
-                   {"fixture_id": 800, "Fixture": "Leeds vs Everton",
-                    "Friction": fr}, fresh_snapshot())
-    check(f"Corners friction {fr!r} → {exp}",
-          result_map(ipc).get("Corner Friction") == exp
-          and ipc["total"] == 2)
+# ── 12. Corners — the new 2-check card (underdog psych > 60%, under 2.5 < 40%)
+#     Full data: both checks PASS
+corner_fx = "Leeds vs Everton"
+corner_snap = fresh_snapshot({
+    "gsup_by_name": {pc._norm(corner_fx): {"Spears": "H:55.0%|A:65.0%"}},
+    "un_by_name": {pc._norm(corner_fx): {"mc_u25_prob": 0.35}}})
+ipc = evaluate("corners_aggregator",
+               {"fixture_id": 800, "Fixture": corner_fx,
+                "Underdog": "Everton", "Friction": "📊 STABLE"},
+               corner_snap)
+rm = result_map(ipc)
+check("Corners full: underdog psych 65 > 60 AND under 2.5 35% < 40 → 2/2",
+      ipc["total"] == 2 and ipc["passed"] == 2
+      and rm.get("Underdog Psych") == pc.PASS
+      and rm.get("Under 2.5 < 40%") == pc.PASS)
+#     Underdog psych FAIL (35% < 60), under 2.5 PASS (35% < 40)
+corner_snap2 = fresh_snapshot({
+    "gsup_by_name": {pc._norm(corner_fx): {"Spears": "H:70%|A:35.0%"}},
+    "un_by_name": {pc._norm(corner_fx): {"mc_u25_prob": 0.35}}})
+ipc = evaluate("corners_aggregator",
+               {"fixture_id": 800, "Fixture": corner_fx,
+                "Underdog": "Everton"},
+               corner_snap2)
+rm = result_map(ipc)
+check("Corners: underdog psych 35 < 60 → FAIL, under 2.5 35% < 40 → PASS → 1/2",
+      ipc["total"] == 2 and ipc["passed"] == 1
+      and rm.get("Underdog Psych") == pc.FAIL
+      and rm.get("Under 2.5 < 40%") == pc.PASS)
+#     No psych data → NOT_AVAILABLE, but under 2.5 still checks
+ipc = evaluate("corners_aggregator",
+               {"fixture_id": 800, "Fixture": corner_fx,
+                "Underdog": "Everton", "Friction": "💎 PERFECT"},
+               fresh_snapshot())
+rm = result_map(ipc)
+check("Corners no sources → honest 0/2 (both NOT_AVAILABLE)",
+      ipc["total"] == 2 and ipc["passed"] == 0
+      and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
+# The underdog's side comes from the fixture label (Leeds = home here), never
+# from assuming away when the win_forecast rows are absent.
+ipc = evaluate("corners_aggregator",
+               {"fixture_id": 800, "Fixture": corner_fx, "Underdog": "Leeds"},
+               fresh_snapshot({
+                   "gsup_by_name": {pc._norm(corner_fx): {"Spears": "H:70%|A:35%"}},
+                   "un_by_name": {pc._norm(corner_fx): {"mc_u25_prob": 0.35}}}))
+rm = result_map(ipc)
+check("Corners home underdog: H 70% > 60 → PASS (away side never assumed)",
+      ipc["total"] == 2 and ipc["passed"] == 2
+      and rm.get("Underdog Psych") == pc.PASS)
 
 print()
 failed = [l for l, ok in RESULTS if not ok]
