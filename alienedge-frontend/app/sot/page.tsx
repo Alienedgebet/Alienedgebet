@@ -5,6 +5,7 @@ import { Crosshair } from "lucide-react";
 import { specialsApi, type SOTPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SOT } from "@/lib/mock-chains";
@@ -31,10 +32,18 @@ const columns: PredictionColumn<SOTPick>[] = [
 export default function SOTPage() {
   const { date } = useSelectedDate();
 
-  // Verify -> Fixture -> Rest
+  // Verify -> Intelligent Pass Count -> Fixture -> Rest
   const columnsWithVerify = useMemo(
-    () => [createVerifyColumn<SOTPick>(), ...columns],
-    []
+    () => [
+      createVerifyColumn<SOTPick>(),
+      createIntelligentPassColumn<SOTPick>({
+        market: "sot",
+        getLabel: (r) => r.Fixture,
+        date,
+      }),
+      ...columns,
+    ],
+    [date]
   );
 
   return (

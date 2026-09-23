@@ -108,22 +108,41 @@ nothing here reinterprets or normalises a scale):
   ─ DNA parity (draw)      data/dna_v2_market_factors.json markets.draw
                            factor win-count balance: |home_count-away_count|
                            in {0,1} (user rule; values outside 0/1 FAIL).
-  ─ O2.5 votes             Engine/over25_forecast.py council gates reused
-                           verbatim: pos_gap <= 8 (league-position gap,
-                           99 = unknown sentinel → NOT_AVAILABLE),
-                           parity_diff > 0 (signed home-minus-away position
-                           parity), h2h_overs_last_5 > 0.
+  ─ O2.5 / O1.5 cards      The user's six-question card at each market's own
+                           level (2026-09-23): probability > 60% (O2.5 =
+                           poisson_over_prob_num, O1.5 = stage3 Poisson% →
+                           psychology Base_Poisson → gg_o15 mc_over15_prob);
+                           council_votes >= 7 of 9; combined_gs_last_5 >
+                           20 (O1.5: > 15); DNA Goal Intent BOTH sides > 50;
+                           kill switch = last 3 H2H all over 2.5 (O1.5:
+                           parsed from stage3 H2H_Record totals >= 2, NOT
+                           the 2.5 flag); one team in the league top 10
+                           (positions chained: corners_aggregator → corner
+                           stage2/psych/catalyst → draw engine; none found
+                           → NOT_AVAILABLE).
   ─ Unders parity          O2.5/O1.5 parity_diff is a SIGNED league-position
                            parity (engine gate: > 0) — NOT a ±0.4 scale.
   ─ FHVI / SHVI            Engine/fhvi_engine.py / shvi_engine.py Category
                            gate: score >= 7 == "TIER 2 - GOOD" or better.
+  ─ SOT card               The user's 2-check card (2026-09-23): match-level
+                           psychology > 50 (gg_psychology Psych_Score, WIN
+                           psychology Audit_Score fallback) and the
+                           under-2.5 probability > 65% (unders mc_u25_prob,
+                           100 - poisson_over_prob_num fallback).
   ─ Dead rubbers           AGGREGATOR/corner4_aggregator.py Chaos_Rating
                            (0-100): <= 20 == nothing to play for.
-  ─ U2S native fields      AGGREGATOR/apex_ud_aggregator.py underdog_base
-                           row (Dixon-Coles multipliers ~1.0-centred,
-                           higher=stronger/weaker): dog_att_strength >= 1.90,
-                           fav_def_weakness >= 1.40, dog_is_hot, dog_due_goal,
-                           fav_cs_streak == 0, dog_venue_wins > 0.
+  ─ U2S card               The user's card (2026-09-23), denominator 3 — or
+                           4 when u2s_psychology carries the FULL last-3
+                           venue sample (the one deliberate variable
+                           denominator): (1) Psych_Score > 60, the string
+                           VETOED = explicit FAIL; (2) dog_att_strength
+                           >= 3 x fav_def_weakness (three-fold: 9 vs 3
+                           passes; leak 0 with attack 0 = no data → N/A,
+                           leak 0 with attack > 0 = wall → FAIL);
+                           (3) attack x leak >= 2 double-strength signal;
+                           (4, only with a full (3/3)-shaped
+                           Dog_Scoring_Consistency sample) scored in ALL of
+                           its last 3 venue games.
 
 COMPOSITE CACHE FILES
   gg_o15 and unders store several market heads in one payload. Only the
@@ -212,13 +231,20 @@ INTELLIGENT_PASS_RULES = {
     "DRAW_DMI_THRESHOLD": 0.45,
     # DRAW — DNA factor-count parity balance (0 or 1 pass, else fail).
     "DRAW_DNA_PARITY_PASS_VALUES": {0, 1},
-    # ── UNDERDOG ───────────────────────────────────────────────────────────
-    # Dixon-Coles multipliers (higher = stronger dog attack / weaker
-    # favourite defence); repo-native direction is >=.
-    "UNDERDOG_DOG_ATT_STRENGTH_THRESHOLD": 1.90,
-    "UNDERDOG_FAV_DEF_WEAKNESS_THRESHOLD": 1.40,
-    # Underdog-to-score longshot gate (0-100 "%"-string, master_underdog_audit).
-    "UNDERDOG_SCORE_PROB_THRESHOLD": 50,
+    # ── UNDERDOG (U2S) — user rules 2026-09-23 ─────────────────────────────
+    # Psychology must be ABOVE this (u2s_psychology.Psych_Score scale);
+    # the string VETOED is an explicit FAIL verdict, never a N/A.
+    "U2S_PSYCH_MIN": 60,
+    # Attack-vs-defence rule (user example: attack 9, defence 3 → PASS):
+    # dog_att_strength must beat the favourite's concession rate THREE-FOLD.
+    "U2S_ATT_DEF_FOLD": 3,
+    # Double-strength signal (3rd check): attack * defensive leak >= 2.
+    "U2S_ATT_LEAK_PRODUCT": 2,
+    # 4th check — ONLY added when u2s_psychology carries the FULL last-3
+    # venue sample: Dog_Scoring_Consistency must read (3/3). A shorter
+    # sample or "N/A" OMITS the check entirely (the card stays x/3 — the
+    # one deliberate variable denominator in this evaluator).
+    "U2S_VENUE_SAMPLE": 3,
     # ── PSYCHOLOGY (signed base scores, NOT percentages) ────────────────────
     "PSYCHOLOGY_NET_SCORE_PASS": 0,
     # WIN psychology gate: the predicted team's base score must be this far
@@ -231,21 +257,30 @@ INTELLIGENT_PASS_RULES = {
     # fixture no corner engine produced.
     "WIN_CORNER_SOURCES": ("corners_stage2", "corners_aggregator",
                            "corners_stage1"),
-    # ── O2.5 (Engine/over25_forecast.py own 9-layer council gates) ─────────
-    "O25_POS_GAP_VOTE_MAX": 8,          # `if pos_gap <= 8: votes += 1`
-    "O25_POISSON_VOTE_MIN": 60,         # `if poisson_over > 60: votes += 1`
-    "O25_H2H_OVERS_VOTE_MIN": 3,        # `if h2h_overs_total >= 3: votes += 1`
-    "O25_PARITY_VOTE_DIRECTION": 0,     # `if parity_diff > 0: votes += 1`
+    # ── O2.5 / O1.5 — user rules 2026-09-23 (the same six-question card at
+    # each market's own level; Engine/over25_forecast.py carries the fields) ──
+    "O25_POISSON_VOTE_MIN": 60,         # probability > 60% (both markets)
+    "O15_PROB_MIN": 60,                 # O1.5 probability > 60%
+    "O25_COUNCIL_MIN": 7,               # council_votes >= 7 of 9
+    "O25_GOAL_COUNT_MIN": 20,           # combined_gs_last_5 > 20 (O2.5)
+    "O15_GOAL_COUNT_MIN": 15,           # combined_gs_last_5 > 15 (O1.5)
+    "DNA_INTENT_SIDE_MIN": 50,          # both teams' DNA Goal Intent > 50
+    "TOP10_LEAGUE_MAX": 10,             # one team must sit in the top 10
     # ── DNA engine v2 clash signals (CORE/dna_engine_v2.py L591-607) ───────
     "DNA_OVER_LEAN_CUT": 55,      # LEAN OVER: box_dominance > 55 or goal_intent > 55
-    "DNA_GG_FRICTION_HOME": 65,   # STRONG GG: BTTS_Friction home_score > 65
-    "DNA_GG_FRICTION_AWAY": 55,   # STRONG GG: BTTS_Friction away_score > 55
     "DNA_LEAN_GG_BOX": 60,        # LEAN GG: combined box dominance > 60
     "DNA_HIGH_CORNERS_CUT": 70,   # HIGH CORNERS: either side Corner_Power > 70
     # ── GG precision engine (Engine/gg_precision_engine.py) ───────────────
     "GG_GK_LIABILITY_CPG": 1.10,  # gk_bonus gate: cpg <= 1.10 = not liable
-    "O15_LAMBDA_INTENT_MIN": 1.00,  # intent_bonus: both lambdas >= 1.00
-    "O15_COMBINED_LAMBDA_SAT": 2.5,  # sig1 saturation: combined_lambda / 2.5
+    # ── GG — ONE unified 4-check card on EVERY GG table (user rule
+    # 2026-09-23: the 5-signal Precision card and the mixed O1.5 composite
+    # card are gone; all GG tables share Psychology/GK/BTTS/Goal Intent) ────
+    "GG_PSYCH_MIN": 65,               # match-level Psych_Score > 65
+    "GG_BTTS_SIDE_MIN": 50,           # BTTS Friction BOTH sides > 50
+    "GG_GOAL_INTENT_SIDE_MIN": 60,    # Goal Intent BOTH sides > 60
+    # ── SOT — new 2-check card (user rule 2026-09-23) ─────────────────────
+    "SOT_PSYCH_MIN": 50,              # match-level psychology > 50
+    "SOT_U25_PROB_MIN": 65,           # under-2.5 probability > 65%
     # ── FHVI/SHVI Category gate (>=7 == TIER 2 GOOD or better) ────────────
     "FHVI_TIER2_THRESHOLD": 7,
     "SHVI_TIER2_THRESHOLD": 7,
@@ -276,7 +311,7 @@ DISPLAY_ONLY_MARKETS = frozenset({
     "gg_psychology", "gg_forensics", "over25_psychology", "over15_psychology",
     "over25_gold", "over25_stage1", "over25_stage2", "over25_stage3",
     "over15_stage3", "corners_stage1", "corners_stage2",
-    "corners_psychology", "corners_catalyst", "sot", "sh_gg_winner",
+    "corners_psychology", "corners_catalyst", "sh_gg_winner",
     "underdog_apex_display", "cross_verify",
 })
 
@@ -301,6 +336,7 @@ TEAM_INTELLIGENCE_MARKETS = {
     "u2s": "Underdog-to-Score",
     "fhvi": "FHVI",
     "shvi": "SHVI",
+    "sot": "SOT",
 }
 _MARKET_EVALUATOR_ALIASES = {
     # canonical report key -> the evaluator engine key(s) that market audits with
@@ -318,6 +354,7 @@ _MARKET_EVALUATOR_ALIASES = {
     "u2s": ("u2s",),
     "fhvi": ("fhvi",),
     "shvi": ("shvi",),
+    "sot": ("sot",),
 }
 # ══════════════════════════════════════════════════════════════════════════════
 # LOW-LEVEL HELPERS
@@ -847,6 +884,10 @@ def _snapshot(date):
     # GG supreme rows themselves — the gg branch's psychology verdict lives
     # on the supreme row's own Psych_Score field (not on the composite head).
     gg_rows = _rows(_load("gg_supreme", date))
+    # O1.5 stage-3 / psychology rows — the O1.5 card's probability source
+    # (Poisson%) and its H2H_Record kill-switch sample (parsed scores).
+    o15s_rows = _rows(_load("over15_stage3", date))
+    o15p_rows = _rows(_load("over15_psychology", date))
 
     # Corner pipeline rows for the WIN Corners rule chain: stage2 (refiner),
     # psychology and catalyst share the same fixture universe and the same
@@ -956,6 +997,10 @@ def _snapshot(date):
         # lives on the supreme row's own Psych_Score field)
         "gsup_by_id": _id_index(gg_rows),
         "gsup_by_name": _name_index(gg_rows),
+        # O1.5 stage-3 / psychology rows (name-keyed: they carry Match /
+        # Fixture labels but no fixture_id)
+        "o15s_by_id": {}, "o15s_by_name": _name_index(o15s_rows),
+        "o15p_by_id": {}, "o15p_by_name": _name_index(o15p_rows),
         # DNA engine's own per-fixture clash verdicts
         "dna_clash_by_id": _id_index(dna_clash_rows),
         "dna_clash_by_name": _name_index(dna_clash_rows),
@@ -1333,21 +1378,111 @@ def _dna_corner_power(snap, fid, fxn):
         {"home_value": f.get("home_value"), "away_value": f.get("away_value")}
 
 
-def _gg_signal_checks(row, sig_map):
-    """Engine-native GG / O1.5 composite signal checks: the engine awards a
-    signal's points ONLY when it fires (Engine/gg_precision_engine.py), so
-    points > 0 == fired == PASS. No thresholds are invented here.
-    Returns (checks, applicable_count)."""
+def _gg_unified_checks(snap, row, fid, fxn, date):
+    """The ONE GG card — every GG table (supreme / precision / O1.5
+    composite) runs these same 4 checks (user rule 2026-09-23):
+      1 Psychology     — match-level Psych_Score > GG_PSYCH_MIN (ONE score
+                         per match: the engine blends BOTH teams into it);
+                         VETOED = explicit FAIL, never N/A. Chain: the
+                         calling row → gg_supreme → gg_psychology.
+      2 Goalkeeper     — the engine's own liable flags / cpg line (the
+                         user's "goalkeeper can use the data it has").
+      3 BTTS Friction  — DNA factor, BOTH sides > GG_BTTS_SIDE_MIN (> 50).
+      4 Goal Intent    — DNA factor, BOTH sides > GG_GOAL_INTENT_SIDE_MIN
+                         (> 60).
+    Every check carries source/field provenance."""
+    rules = INTELLIGENT_PASS_RULES
     checks = []
-    for name, field in sig_map:
-        v = _num(row.get(field))
+
+    # 1) match-level psychology across its saved homes (skip "N/A"/empty).
+    psych_thr = "> %d (match-level psych, both teams blended)" % rules["GG_PSYCH_MIN"]
+    chain = [("calling row", row.get("Psych_Score"))]
+    gsup, d1 = _resolve_any(date, "gsup", fid, fxn)
+    if gsup:
+        chain.append(("gg_supreme @ %s" % d1, gsup.get("Psych_Score")))
+    gps, d2 = _resolve_any(date, "gps", fid, fxn)
+    if gps:
+        chain.append(("gg_psychology @ %s" % d2, gps.get("Psych_Score")))
+    done = False
+    for src, raw in chain:
+        if raw is None or str(raw).strip().upper() in ("", "N/A"):
+            continue
+        if "VETO" in str(raw).upper():
+            checks.append({"name": "Psychology", "result": FAIL, "value": raw,
+                           "threshold": psych_thr, "source": src,
+                           "field": "Psych_Score",
+                           "mapping": "VETOED = explicit FAIL verdict"})
+            done = True
+            break
+        v = _num(raw)
         if v is None:
-            checks.append({"name": name, "result": NOT_AVAILABLE,
-                           "value": None, "threshold": "fired (points > 0)"})
+            continue
+        checks.append({"name": "Psychology",
+                       "result": PASS if v > rules["GG_PSYCH_MIN"] else FAIL,
+                       "value": raw, "threshold": psych_thr, "source": src,
+                       "field": "Psych_Score"})
+        done = True
+        break
+    if not done:
+        checks.append({"name": "Psychology", "result": NOT_AVAILABLE,
+                       "value": None, "threshold": psych_thr,
+                       "source": "gg_supreme / gg_psychology",
+                       "field": "Psych_Score"})
+
+    # 2) Goalkeeper — the producing engine's own flags (unchanged rule).
+    gk, gkd = _resolve_any(date, "ggc", fid, fxn)
+    gk_src = "gg_o15 composite @ %s" % gkd if gk else ""
+    if not gk:
+        gk, gkd = _resolve_any(date, "un", fid, fxn)
+        gk_src = "unders u25 @ %s" % gkd if gk else ""
+    limit = rules["GG_GK_LIABILITY_CPG"]
+    if not gk:
+        checks.append({"name": "Goalkeeper", "result": NOT_AVAILABLE,
+                       "value": None, "threshold": f"liable flag / cpg > {limit}",
+                       "source": "gg_o15 composite / unders u25",
+                       "field": "home_gk_liable / home_gk_cpg"})
+    else:
+        hl, al = gk.get("home_gk_liable"), gk.get("away_gk_liable")
+        hc, ac = _num(gk.get("home_gk_cpg")), _num(gk.get("away_gk_cpg"))
+        base = {"value": {"home_gk_cpg": gk.get("home_gk_cpg"),
+                          "away_gk_cpg": gk.get("away_gk_cpg"),
+                          "home_gk_liable": hl, "away_gk_liable": al},
+                "source": gk_src,
+                "field": "home_gk_liable / away_gk_liable / gk cpg"}
+        if hl is None and al is None and hc is None and ac is None:
+            checks.append({"name": "Goalkeeper", "result": NOT_AVAILABLE,
+                           "value": None,
+                           "threshold": f"liable flag / cpg > {limit}",
+                           "source": gk_src,
+                           "field": "home_gk_liable / gk cpg"})
+        elif bool(hl) or bool(al):
+            checks.append({"name": "Goalkeeper", "result": PASS,
+                           "threshold": f"liable (engine flag) / cpg > {limit}",
+                           **base})
+        elif hl is False and al is False:
+            checks.append({"name": "Goalkeeper", "result": FAIL,
+                           "threshold": "either GK liable", **base})
         else:
-            checks.append({"name": name, "result": PASS if v > 0 else FAIL,
-                           "value": row.get(field),
-                           "threshold": "fired (points > 0)"})
+            checks.append({"name": "Goalkeeper",
+                           "result": PASS if (hc or 0) > limit or (ac or 0) > limit else FAIL,
+                           "threshold": f"either > {limit}", **base})
+
+    # 3) BTTS Friction — both sides > 50 (DNA & Goal Intent Board data).
+    btts_thr = "both teams > %d (user rule)" % rules["GG_BTTS_SIDE_MIN"]
+    fr_res, fr_val = _dna_side_factor_check(
+        snap, fid, fxn, "gg", "BTTS Friction",
+        rules["GG_BTTS_SIDE_MIN"], rules["GG_BTTS_SIDE_MIN"])
+    checks.append({"name": "BTTS Friction", "result": fr_res, "value": fr_val,
+                   "threshold": btts_thr, "source": "dna_market_factors",
+                   "field": "BTTS Friction home_value / away_value"})
+    # 4) Goal Intent — both sides > 60.
+    gi_thr = "both teams > %d (user rule)" % rules["GG_GOAL_INTENT_SIDE_MIN"]
+    gi_res, gi_val = _dna_side_factor_check(
+        snap, fid, fxn, "gg", "Goal Intent",
+        rules["GG_GOAL_INTENT_SIDE_MIN"], rules["GG_GOAL_INTENT_SIDE_MIN"])
+    checks.append({"name": "Goal Intent", "result": gi_res, "value": gi_val,
+                   "threshold": gi_thr, "source": "dna_market_factors",
+                   "field": "Goal Intent home_value / away_value"})
     return checks
 
 
@@ -1824,34 +1959,152 @@ def _win_draw_check(date, fid, fxn, src_row=None):
                     mapping="no draw intelligence for this fixture in the window")
 
 
-def _dog_att_eval(snap, fid, fxn):
-    """DOG ATT STRENGTH — underdog_base Dixon-Coles attack multiplier
-    (~1.0-centred; higher = stronger dog attack). Repo-native direction >=."""
-    r = _resolve(snap, "ud", fid, fxn)
+def _u2s_base_pair(snap, date, row, fid, fxn):
+    """(attack, leak, source) for the U2S attack-vs-defence checks: the
+    calling row when it IS the underdog_base row (the underdog page's base
+    table), otherwise the fixture's underdog_base row across the window."""
+    if "dog_att_strength" in row or "fav_def_weakness" in row:
+        return (_num(row.get("dog_att_strength")),
+                _num(row.get("fav_def_weakness")), "calling row")
+    r, d = _resolve_any(date, "ud", fid, fxn)
     if not r:
-        return NOT_AVAILABLE
-    v = _num(r.get("dog_att_strength"))
-    if v is None:
-        return NOT_AVAILABLE
-    return PASS if v >= INTELLIGENT_PASS_RULES["UNDERDOG_DOG_ATT_STRENGTH_THRESHOLD"] else FAIL
+        return None, None, "underdog_base (no row in the source window)"
+    return (_num(r.get("dog_att_strength")),
+            _num(r.get("fav_def_weakness")),
+            "underdog_base @ %s" % d)
 
 
-def _fav_def_eval(snap, fid, fxn):
-    """FAV DEF WEAKNESS — underdog_base favourite defensive-weakness
-    multiplier (higher = concedes more). Repo-native direction >=."""
-    r = _resolve(snap, "ud", fid, fxn)
+def _u2s_venue_check(venue_raw):
+    """The 4th U2S check — emitted ONLY when the engine carries the FULL
+    last-3 venue sample: Dog_Scoring_Consistency like "100.0% (3/3)".
+    Returns the check dict to append, or None when the sample is absent
+    or shorter than U2S_VENUE_SAMPLE (the card then stays x/3 — the user's
+    rule: no data for the last-3 venue question → the question is omitted,
+    not counted blank)."""
+    m = re.search(r"\(\s*(\d+)\s*/\s*(\d+)\s*\)", str(venue_raw or ""))
+    if not m:
+        return None
+    scored, total = int(m.group(1)), int(m.group(2))
+    sample = INTELLIGENT_PASS_RULES["U2S_VENUE_SAMPLE"]
+    if total != sample:
+        return None
+    return {"name": "Venue Scoring",
+            "result": PASS if scored == sample else FAIL,
+            "value": venue_raw,
+            "threshold": "scored in ALL of its last %d venue games" % sample,
+            "source": "", "field": "Dog_Scoring_Consistency",
+            "mapping": "(%d/%d) venue sample" % (scored, total)}
+
+
+def _parse_council_votes(raw):
+    """(votes, of) parsed from Engine/over25_forecast council_votes ("7/9"),
+    or (None, None) when the field is absent/unparseable."""
+    m = re.match(r"\s*(\d+)\s*/\s*(\d+)", str(raw or ""))
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _league_top10_check(snap, date, fid, fxn):
+    """O2.5/O1.5 'one team must sit in the league top 10' — the forecast
+    rows do not store positions, so they are chained from existing caches
+    by fixture (user-approved source order):
+      corners_aggregator (Home_Pos/Away_Pos) → the merged corner
+      stage-2/psychology/catalyst rows (home_position/away_position) →
+      the draw engine rows (standings-backed home/away_position).
+    Unknown sentinels (>= 99) never count as data. Either side <= 10 →
+    PASS; a complete pair with both > 10 → FAIL; nothing usable → N/A."""
+    top = INTELLIGENT_PASS_RULES["TOP10_LEAGUE_MAX"]
+    thr = "either team in the league top %d (user rule)" % top
+    fail_res = None
+    for prefix, hk, ak, src in (
+            ("cagg", "Home_Pos", "Away_Pos", "corners_aggregator"),
+            ("c2", "home_position", "away_position",
+             "corner stage2/psych/catalyst"),
+            ("draw", "home_position", "away_position", "draw engine")):
+        r, d = _resolve_any(date, prefix, fid, fxn)
+        if not r:
+            continue
+        h, a = _num(r.get(hk)), _num(r.get(ak))
+        valid = [v for v in (h, a) if v is not None and 1 <= v < 99]
+        if not valid:
+            continue
+        if any(v <= top for v in valid):
+            return _win_res(PASS, value={"home_pos": h, "away_pos": a},
+                            threshold=thr, source="%s @ %s" % (src, d),
+                            field="%s / %s" % (hk, ak))
+        if len(valid) == 2:
+            fail_res = _win_res(FAIL, value={"home_pos": h, "away_pos": a},
+                                threshold=thr, source="%s @ %s" % (src, d),
+                                field="%s / %s" % (hk, ak))
+    return fail_res or _win_res(NOT_AVAILABLE, threshold=thr,
+                                source="corners_aggregator / corner stage2 / "
+                                       "draw engine",
+                                field="home/away league position",
+                                mapping="no usable position pair in the "
+                                        "source window")
+
+
+def _o15_probability_check(snap, date, fid, fxn):
+    """O1.5 'probability > 60%' — chain: over15_stage3 Poisson% →
+    over15_psychology Base_Poisson → gg_o15 head1 mc_over15_prob.
+    _frac normalises percent-strings and 0-1 fractions alike."""
+    for prefix, field, src in (
+            ("o15s", "Poisson%", "over15_stage3"),
+            ("o15p", "Base_Poisson", "over15_psychology"),
+            ("o15c", "mc_over15_prob", "gg_o15 composite")):
+        r, d = _resolve_any(date, prefix, fid, fxn)
+        if not r:
+            continue
+        f = _frac(r.get(field))
+        if f is None:
+            continue
+        return _win_res(PASS if f * 100.0 > INTELLIGENT_PASS_RULES["O15_PROB_MIN"]
+                        else FAIL, value=round(f * 100.0, 1),
+                        threshold="> %d%% (user rule)"
+                                  % INTELLIGENT_PASS_RULES["O15_PROB_MIN"],
+                        source="%s @ %s" % (src, d), field=field)
+    return _win_res(NOT_AVAILABLE,
+                    threshold="> %d%% (user rule)"
+                              % INTELLIGENT_PASS_RULES["O15_PROB_MIN"],
+                    source="over15_stage3 / over15_psychology / gg_o15",
+                    field="Poisson% / Base_Poisson / mc_over15_prob")
+
+
+def _o15_kill_switch_check(snap, date, fid, fxn):
+    """O1.5-level kill switch (user rule: the 1.5 flag, NOT the 2.5 one) —
+    the stage-3 row's H2H_Record holds the last meetings' scorelines
+    (e.g. "['1-2', '4-1', '2-2']"). PASS only with the FULL 3-meeting
+    sample and every total >= 2 goals (over 1.5); a partial sample is
+    honest NOT_AVAILABLE."""
+    thr = ("last 3 H2H meetings all over 1.5 goals "
+           "(O1.5-level kill switch, user rule)")
+    r, d = _resolve_any(date, "o15s", fid, fxn)
     if not r:
-        return NOT_AVAILABLE
-    v = _num(r.get("fav_def_weakness"))
-    if v is None:
-        return NOT_AVAILABLE
-    return PASS if v >= INTELLIGENT_PASS_RULES["UNDERDOG_FAV_DEF_WEAKNESS_THRESHOLD"] else FAIL
+        return _win_res(NOT_AVAILABLE, threshold=thr,
+                        source="over15_stage3", field="H2H_Record",
+                        mapping="no stage-3 row in the source window")
+    raw = r.get("H2H_Record")
+    scores = re.findall(r"(\d+)\s*-\s*(\d+)", str(raw or ""))
+    if len(scores) != 3:
+        return _win_res(NOT_AVAILABLE, value=raw, threshold=thr,
+                        source="over15_stage3 @ %s" % d, field="H2H_Record",
+                        mapping="needs the full 3-meeting sample "
+                                "(%d found)" % len(scores))
+    totals = [int(a) + int(b) for a, b in scores]
+    return _win_res(PASS if all(t >= 2 for t in totals) else FAIL,
+                    value=raw, threshold=thr,
+                    source="over15_stage3 @ %s" % d, field="H2H_Record",
+                    mapping="scoreline totals %s" % totals)
 # ══════════════════════════════════════════════════════════════════════════════
 # MARKET CHECKLISTS — the denominator is FIXED per market: it is ALWAYS the
 # branch's full rule set, regardless of whether a given fixture's inputs exist.
 # Missing intelligence → NOT_AVAILABLE, which lowers the NUMERATOR only (never
 # a fake FAIL and never a smaller denominator): the same market always shows
 # the same total (WIN=x/8, GG=x/4 …) and only x varies per pick.
+# SOLE EXCEPTION (user rule 2026-09-23): U2S emits its 4th check (Venue
+# Scoring) ONLY when u2s_psychology carries the full last-3 venue sample —
+# the underdog card is x/3 without that data and x/4 with it.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _checks_for_market(market, snap, row, fid, fxn, date=None):
@@ -1955,160 +2208,127 @@ def _checks_for_market(market, snap, row, fid, fxn, date=None):
             row = dict(row, Target=target)
         return _checks_for_market("win_apex", snap, row, fid, fxn, date=req_date)
     # ── GG / BTTS ────────────────────────────────────────────────────────────
-    if market == "gg_supreme":
-        ps_val = _num(row.get("Psych_Score"))
-        if ps_val is not None:
-            add("Psychology", PASS if ps_val > 0 else FAIL, value=row.get("Psych_Score"))
-        else:
-            add("Psychology", _psych_side(snap, "gps", fid_s, fxn, None))
-        # GG Goalkeeper — gg_precision_engine gk_bonus: a LIABLE GK boosts
-        # BTTS (+10 if both, +5 if one). The engine's own boolean flags are
-        # on the GG composite row; the cpg > 1.10 gate is the engine's own
-        # liability line (GK_LIABILITY_CPG). Unders u25 rows are used only as
-        # a fallback source when the GG row is unavailable.
-        gk = _resolve(snap, "ggc", fid_s, fxn) or _resolve(snap, "un", fid_s, fxn)
-        if not gk:
-            add("Goalkeeper", NOT_AVAILABLE)
-        else:
-            hl, al = gk.get("home_gk_liable"), gk.get("away_gk_liable")
-            hc, ac = _num(gk.get("home_gk_cpg")), _num(gk.get("away_gk_cpg"))
-            limit = rules["GG_GK_LIABILITY_CPG"]
-            if hl is None and al is None and hc is None and ac is None:
-                add("Goalkeeper", NOT_AVAILABLE)
-            elif bool(hl) or bool(al):
-                add("Goalkeeper", PASS,
-                    value={"home_gk_cpg": gk.get("home_gk_cpg"),
-                           "away_gk_cpg": gk.get("away_gk_cpg"),
-                           "home_gk_liable": hl, "away_gk_liable": al},
-                    threshold=f"liable (engine flag) / cpg > {limit}")
-            elif hl is False and al is False:
-                add("Goalkeeper", FAIL,
-                    value={"home_gk_liable": hl, "away_gk_liable": al},
-                    threshold="either GK liable")
-            else:
-                add("Goalkeeper", PASS if (hc or 0) > limit or (ac or 0) > limit else FAIL,
-                    value={"home_gk_cpg": gk.get("home_gk_cpg"),
-                           "away_gk_cpg": gk.get("away_gk_cpg")},
-                    threshold=f"either > {limit}")
-        # GOAL INTENT → prefers the DNA engine's OWN GG verdict
-        # (market_signals.GG_NoGG); falls back to its clash gates
-        # (CORE/dna_engine_v2.py L597-600):
-        #   STRONG GG : BTTS_Friction home_score > 65 AND away_score > 55
-        #   LEAN GG   : combined box dominance > 60
-        fr_res, fr_val = _dna_side_factor_check(
-            snap, fid_s, fxn, "gg", "BTTS Friction",
-            rules["DNA_GG_FRICTION_HOME"], rules["DNA_GG_FRICTION_AWAY"])
-        add("BTTS Friction", fr_res, value=fr_val,
-            threshold=f"home > {rules['DNA_GG_FRICTION_HOME']} and away > {rules['DNA_GG_FRICTION_AWAY']}")
-        gg_sig_res, gg_sig_val = _dna_gg_signal(snap, fid_s, fxn)
-        if gg_sig_res == NOT_AVAILABLE:
-            gg_sig_res, gg_sig_val = _dna_over_signal(snap, fid_s, fxn, "gg")
-        add("Goal Intent", gg_sig_res, value=gg_sig_val,
-            threshold="DNA GG verdict (STRONG GG / LEAN GG)")
+    # ── GG — EVERY GG table (supreme / precision / O1.5 composite) runs the
+    # ONE unified 4-check card (user rule 2026-09-23): match psych > 65,
+    # goalkeeper as-is, BTTS both > 50, Goal Intent both > 60. The 5-signal
+    # Precision card and the mixed lambda composite card are gone — all GG
+    # tables share this single card, each check with source/field provenance.
+    if market in ("gg_supreme", "gg_precision", "gg_o15"):
+        checks.extend(_gg_unified_checks(snap, row, fid_s, fxn, req_date))
         return checks
 
-    # ── GG PRECISION composite rows (gg_o15 head0 — the same engine's BTTS
-    # composite). Reuses the engine's OWN 5 signals: points are awarded only
-    # when a signal fires (Engine/gg_precision_engine.py calculate_gg_score),
-    # so `points > 0` == fired == PASS. No thresholds invented.
-    if market == "gg_precision":
-        checks.extend(_gg_signal_checks(row, (
-            ("MC BTTS", "sig1_mc_btts"),
-            ("Venue BTTS", "sig2_venue_btts"),
-            ("GK Vulnerability", "sig3_gk_vuln"),
-            ("H2H BTTS", "sig4_h2h_btts"),
-            ("Directional Intent", "sig5_directional"),
-        )))
-        return checks
-
-    # ── O1.5 composite rows (gg_o15 head1 — the Over-1.5 precision engine).
-    # Reuses that engine's own inputs/gates verbatim:
-    #   sig1 saturation combined_lambda / 2.5  → combined λ >= 2.5 maxes it
-    #   intent_bonus  λ_home >= 1.00 AND λ_away >= 1.00
-    #   gk flags      home_gk_liable / away_gk_liable
-    #   DNA over signal (existing DNA engine clash output for this market)
-    if market == "gg_o15":
-        lam = _num(row.get("combined_lambda"))
-        if lam is None:
-            add("Combined Lambda", NOT_AVAILABLE)
-        else:
-            sat = rules["O15_COMBINED_LAMBDA_SAT"]
-            add("Combined Lambda", PASS if lam >= sat else FAIL,
-                value=row.get("combined_lambda"), threshold=f">= {sat} (sig1 saturation)")
-        lh, la = _num(row.get("lambda_home")), _num(row.get("lambda_away"))
-        if lh is None or la is None:
-            add("Attacking Intent", NOT_AVAILABLE)
-        else:
-            mn = rules["O15_LAMBDA_INTENT_MIN"]
-            add("Attacking Intent", PASS if lh >= mn and la >= mn else FAIL,
-                value={"lambda_home": row.get("lambda_home"),
-                       "lambda_away": row.get("lambda_away")},
-                threshold=f"both >= {mn} (intent_bonus gate)")
-        hl, al = row.get("home_gk_liable"), row.get("away_gk_liable")
-        if hl is None and al is None:
-            add("Goalkeeper Leak", NOT_AVAILABLE)
-        else:
-            add("Goalkeeper Leak", PASS if bool(hl) or bool(al) else FAIL,
-                value={"home_gk_liable": hl, "away_gk_liable": al},
-                threshold="either GK liable (gk_leak_bonus)")
-        ov_res, ov_val = _dna_over_signal(snap, fid_s, fxn, "over15")
-        add("DNA Over Signal", ov_res, value=ov_val,
-            threshold=f"DNA over signal (cut {rules['DNA_OVER_LEAN_CUT']})")
-        return checks
-
-    # ── O2.5 (Engine/over25_forecast.py). Apex picks join the SAME engine's
-    # forecast row for their fixture. Every check below is one of the engine's
-    # own 9-layer council votes (L259-262) reused verbatim — pos_gap <= 8,
-    # parity_diff > 0, h2h_overs_total >= 3, poisson_over > 60 — plus the
-    # engine's own kill_switch gate; none of these are invented thresholds.
+    # ── O2.5 — the user's six-question card (2026-09-23): probability > 60,
+    # council >= 7/9, goal count > 20, DNA Goal Intent both > 50, the
+    # engine's own kill switch (last 3 H2H all over 2.5), and one team in
+    # the league top 10. Apex picks join the fixture's over25_forecast row
+    # (council / goal count live there too).
     if market in ("over25_forecast", "over25_apex"):
-        r = row if market == "over25_forecast" else (
-            _resolve(snap, "o25f", fid_s, fxn) or {})
+        if market == "over25_forecast":
+            r, rsrc = row, "calling row"
+        else:
+            r, rd = _resolve_any(req_date, "o25f", fid_s, fxn)
+            rsrc = ("over25_forecast @ %s" % rd) if r else ""
+        r = r or {}
         ks = r.get("kill_switch_pass")
         if ks is None:
-            add("Kill Switch", NOT_AVAILABLE)
+            add("Kill Switch", NOT_AVAILABLE,
+                threshold="last 3 H2H all over 2.5 (user rule)",
+                source=rsrc, field="kill_switch_pass")
         else:
             add("Kill Switch", PASS if ks else FAIL,
-                value=r.get("kill_switch_pass"), threshold="h2h_last_3_all_over")
+                value=r.get("kill_switch_pass"),
+                threshold="last 3 H2H all over 2.5 (user rule)",
+                source=rsrc, field="kill_switch_pass")
         po = _num(r.get("poisson_over_prob_num"))
         if po is None:
-            add("Poisson Gate", NOT_AVAILABLE)
+            add("Poisson Gate", NOT_AVAILABLE,
+                threshold="> %d%% (user rule)" % rules["O25_POISSON_VOTE_MIN"],
+                source=rsrc, field="poisson_over_prob_num")
         else:
             add("Poisson Gate", PASS if po > rules["O25_POISSON_VOTE_MIN"] else FAIL,
                 value=r.get("poisson_over_prob_num"),
-                threshold=f"> {rules['O25_POISSON_VOTE_MIN']} (council vote)")
-        h2h = _num(r.get("h2h_overs_last_5"))
-        if h2h is None:
-            add("H2H Overs", NOT_AVAILABLE)
+                threshold="> %d%% (user rule)" % rules["O25_POISSON_VOTE_MIN"],
+                source=rsrc, field="poisson_over_prob_num")
+        votes, of = _parse_council_votes(r.get("council_votes"))
+        council_thr = ">= %d of 9 (user rule)" % rules["O25_COUNCIL_MIN"]
+        if votes is None or of != 9:
+            add("Council Votes", NOT_AVAILABLE, value=r.get("council_votes"),
+                threshold=council_thr, source=rsrc, field="council_votes")
         else:
-            add("H2H Overs", PASS if h2h >= rules["O25_H2H_OVERS_VOTE_MIN"] else FAIL,
-                value=r.get("h2h_overs_last_5"),
-                threshold=f">= {rules['O25_H2H_OVERS_VOTE_MIN']} (council vote)")
-        pg = _num(r.get("pos_gap"))
-        if pg is None or pg >= 99:      # 99 == engine's unknown sentinel
-            add("Position Gap", NOT_AVAILABLE)
+            add("Council Votes",
+                PASS if votes >= rules["O25_COUNCIL_MIN"] else FAIL,
+                value=r.get("council_votes"), threshold=council_thr,
+                source=rsrc, field="council_votes")
+        g = _num(r.get("combined_gs_last_5"))
+        goal_thr = ("> %d (both teams' last-5 goals summed, user rule)"
+                    % rules["O25_GOAL_COUNT_MIN"])
+        if g is None:
+            add("Goal Count", NOT_AVAILABLE, threshold=goal_thr,
+                source=rsrc, field="combined_gs_last_5")
         else:
-            add("Position Gap", PASS if pg <= rules["O25_POS_GAP_VOTE_MAX"] else FAIL,
-                value=r.get("pos_gap"),
-                threshold=f"<= {rules['O25_POS_GAP_VOTE_MAX']} (council vote)")
-        pd_ = _num(r.get("parity_diff"))
-        if pd_ is None:
-            add("Parity", NOT_AVAILABLE)
-        else:
-            add("Parity", PASS if pd_ > rules["O25_PARITY_VOTE_DIRECTION"] else FAIL,
-                value=r.get("parity_diff"), threshold="> 0 (council vote)")
-        ov_res, ov_val = _dna_over_signal(snap, fid_s, fxn, "over25")
-        add("DNA Over Signal", ov_res, value=ov_val,
-            threshold=f"DNA over signal (cut {rules['DNA_OVER_LEAN_CUT']})")
+            add("Goal Count", PASS if g > rules["O25_GOAL_COUNT_MIN"] else FAIL,
+                value=r.get("combined_gs_last_5"), threshold=goal_thr,
+                source=rsrc, field="combined_gs_last_5")
+        gi_res, gi_val = _dna_side_factor_check(
+            snap, fid_s, fxn, "over25", "Goal Intent",
+            rules["DNA_INTENT_SIDE_MIN"], rules["DNA_INTENT_SIDE_MIN"])
+        add("Goal Intent", gi_res, value=gi_val,
+            threshold="both teams > %d (user rule)" % rules["DNA_INTENT_SIDE_MIN"],
+            source="dna_market_factors", field="Goal Intent home/away_value")
+        t10 = _league_top10_check(snap, req_date, fid_s, fxn)
+        add("League Top 10", t10["result"], value=t10["value"],
+            threshold=t10["threshold"], source=t10["source"],
+            field=t10["field"], mapping=t10.get("mapping"))
         return checks
 
-    # ── O1.5 standalone page (over15_apex / over15_psychology / stage-3 rows
-    # expose no independent signal fields of their own), so the audit uses the
-    # fixture's existing DNA Over-1.5 market intelligence only.
+    # ── O1.5 — the SAME six-question card at the 1.5 level (user rule
+    # 2026-09-23): probability > 60 (stage3 Poisson% → psychology
+    # Base_Poisson → gg_o15 mc), council >= 7/9 and goal count > 15 (both
+    # joined from the fixture's over25_forecast row), DNA Goal Intent both
+    # > 50, the O1.5-level kill switch (stage3 H2H_Record scorelines, NOT
+    # the 2.5 flag), and one team in the league top 10.
     if market in ("over15", "over15_stage3", "over15_apex"):
-        ov_res, ov_val = _dna_over_signal(snap, fid_s, fxn, "over15")
-        add("DNA Over Signal", ov_res, value=ov_val,
-            threshold=f"DNA over signal (cut {rules['DNA_OVER_LEAN_CUT']})")
+        prob = _o15_probability_check(snap, req_date, fid_s, fxn)
+        add("Probability Gate", prob["result"], value=prob["value"],
+            threshold=prob["threshold"], source=prob["source"],
+            field=prob["field"], mapping=prob.get("mapping"))
+        r25, d25 = _resolve_any(req_date, "o25f", fid_s, fxn)
+        r25_src = ("over25_forecast @ %s" % d25) if r25 else ""
+        r25 = r25 or {}
+        votes, of = _parse_council_votes(r25.get("council_votes"))
+        council_thr = ">= %d of 9 (user rule)" % rules["O25_COUNCIL_MIN"]
+        if votes is None or of != 9:
+            add("Council Votes", NOT_AVAILABLE, value=r25.get("council_votes"),
+                threshold=council_thr, source=r25_src, field="council_votes")
+        else:
+            add("Council Votes",
+                PASS if votes >= rules["O25_COUNCIL_MIN"] else FAIL,
+                value=r25.get("council_votes"), threshold=council_thr,
+                source=r25_src, field="council_votes")
+        g = _num(r25.get("combined_gs_last_5"))
+        goal_thr = ("> %d (both teams' last-5 goals summed, user rule)"
+                    % rules["O15_GOAL_COUNT_MIN"])
+        if g is None:
+            add("Goal Count", NOT_AVAILABLE, threshold=goal_thr,
+                source=r25_src, field="combined_gs_last_5")
+        else:
+            add("Goal Count", PASS if g > rules["O15_GOAL_COUNT_MIN"] else FAIL,
+                value=r25.get("combined_gs_last_5"), threshold=goal_thr,
+                source=r25_src, field="combined_gs_last_5")
+        gi_res, gi_val = _dna_side_factor_check(
+            snap, fid_s, fxn, "over15", "Goal Intent",
+            rules["DNA_INTENT_SIDE_MIN"], rules["DNA_INTENT_SIDE_MIN"])
+        add("Goal Intent", gi_res, value=gi_val,
+            threshold="both teams > %d (user rule)" % rules["DNA_INTENT_SIDE_MIN"],
+            source="dna_market_factors", field="Goal Intent home/away_value")
+        ks15 = _o15_kill_switch_check(snap, req_date, fid_s, fxn)
+        add("Kill Switch", ks15["result"], value=ks15["value"],
+            threshold=ks15["threshold"], source=ks15["source"],
+            field=ks15["field"], mapping=ks15.get("mapping"))
+        t10 = _league_top10_check(snap, req_date, fid_s, fxn)
+        add("League Top 10", t10["result"], value=t10["value"],
+            threshold=t10["threshold"], source=t10["source"],
+            field=t10["field"], mapping=t10.get("mapping"))
         return checks
 
     # ── Corners (aggregator Friction label + the DNA engine's own HIGH
@@ -2117,18 +2337,32 @@ def _checks_for_market(market, snap, row, fid, fxn, date=None):
         c = row if row.get("Friction") else (_resolve(snap, "cagg", fid_s, fxn) or row)
         fr = str(c.get("Friction") or "")
         if not fr:
-            add("Corner Friction", NOT_AVAILABLE)
+            add("Corner Friction", NOT_AVAILABLE,
+                source="corners_aggregator", field="Friction")
+        elif "UNRANKED" in fr.upper():
+            # corner4_aggregator treats UNRANKED as neutral (standings
+            # unknown) — a missing-data state, NEVER a FAIL (user-approved
+            # fix: 13/23 rows on 09-23 were being punished here).
+            add("Corner Friction", NOT_AVAILABLE, value=fr,
+                threshold="engine verdict (UNRANKED = standings unknown)",
+                source="corners_aggregator", field="Friction",
+                mapping="UNRANKED is neutral in corner4, not a fail")
         elif "PERFECT" in fr or "STABLE" in fr:
-            add("Corner Friction", PASS, value=fr)
-        elif "DEAD" in fr or "AVOID" in fr:
-            add("Corner Friction", FAIL, value=fr)
-        else:
-            add("Corner Friction", FAIL, value=fr)
+            add("Corner Friction", PASS, value=fr,
+                threshold="💎 PERFECT / 📊 STABLE support the corner market",
+                source="corners_aggregator", field="Friction")
+        else:  # 💀 DEAD / 🛑 AVOID and any other negative verdict
+            add("Corner Friction", FAIL, value=fr,
+                threshold="💀 DEAD / 🛑 AVOID oppose the corner market",
+                source="corners_aggregator", field="Friction")
         cp_res, cp_val = _dna_corners_signal(snap, fid_s, fxn)
+        cp_src = "dna_v2 fixture clash (market_signals.Corners)"
         if cp_res == NOT_AVAILABLE:
             cp_res, cp_val = _dna_corner_power(snap, fid_s, fxn)
+            cp_src = "dna_market_factors / DNA profiles"
         add("Corner Power", cp_res, value=cp_val,
-            threshold=f"DNA HIGH CORNERS verdict / either side > {rules['DNA_HIGH_CORNERS_CUT']}")
+            threshold=f"DNA HIGH CORNERS verdict / either side > {rules['DNA_HIGH_CORNERS_CUT']}",
+            source=cp_src, field="Corner_Power")
         return checks
 
     # ── Draw (engine's own tier gates + the new DNA parity check) ────────────
@@ -2176,29 +2410,150 @@ def _checks_for_market(market, snap, row, fid, fxn, date=None):
                 value={"home_gk_cpg": row.get("home_gk_cpg"),
                        "away_gk_cpg": row.get("away_gk_cpg")}, threshold="both <= 1.10")
         return checks
-    # ── Underdog To Score (U2S psychology row + its own named underdog) ──────
+    # ── Underdog To Score — the user's card (2026-09-23): psych > 60
+    # (VETOED = FAIL, never N/A), attack beating the fav's concession rate
+    # three-fold (9 vs 3 → PASS), the double-strength product, and — ONLY
+    # when u2s_psychology carries the full last-3 venue sample — venue
+    # scoring. Denominator 3 without venue data, 4 with it (the one
+    # deliberate variable denominator in this evaluator).
     if market == "u2s":
         u_row, dog = _u2s_row_for(snap, fid_s, fxn,
                                   row.get("fixture_id"), row.get("fixture") or row.get("Fixture"))
         if u_row and not dog:
-            dog = row.get("Underdog")
-        if not u_row or not dog:
-            add("Psychology", NOT_AVAILABLE)
-            add("Dog ATT Strength", NOT_AVAILABLE)
-            add("Fav Def Weakness", NOT_AVAILABLE)
-            return checks
-        # Psychology: prefer the calling row's own audit score; otherwise the
-        # joined U2S row's. Genuinely missing → NOT_AVAILABLE (never a fake FAIL).
-        ps_val = _num(row.get("Psych_Score"))
-        if ps_val is None:
-            ps_val = _num(u_row.get("Psych_Score"))
-        if ps_val is None:
-            add("Psychology", NOT_AVAILABLE)
+            dog = row.get("Underdog") or row.get("underdog_team")
+        # 1) Psychology — the calling row's own score first (the win-U2S
+        # table rows carry it), else the joined U2S row's. VETOED → FAIL.
+        raw_ps = row.get("Psych_Score")
+        ps_src = "calling row"
+        if raw_ps is None and u_row is not None:
+            raw_ps, ps_src = u_row.get("Psych_Score"), "u2s_psychology"
+        psych_thr = "> %d (user rule)" % rules["U2S_PSYCH_MIN"]
+        if raw_ps is None:
+            add("Psychology", NOT_AVAILABLE, threshold=psych_thr,
+                source="u2s_psychology", field="Psych_Score")
+        elif "VETO" in str(raw_ps).upper():
+            add("Psychology", FAIL, value=raw_ps, threshold=psych_thr,
+                source=ps_src, field="Psych_Score",
+                mapping="VETOED = explicit FAIL verdict, never N/A")
         else:
-            add("Psychology", PASS if ps_val > 0 else FAIL,
-                value=u_row.get("Psych_Score") if row.get("Psych_Score") is None else row.get("Psych_Score"))
-        add("Dog ATT Strength", _dog_att_eval(snap, fid_s, fxn))
-        add("Fav Def Weakness", _fav_def_eval(snap, fid_s, fxn))
+            ps = _num(raw_ps)
+            if ps is None:
+                add("Psychology", NOT_AVAILABLE, value=raw_ps,
+                    threshold=psych_thr, source=ps_src, field="Psych_Score")
+            else:
+                add("Psychology",
+                    PASS if ps > rules["U2S_PSYCH_MIN"] else FAIL,
+                    value=raw_ps, threshold=psych_thr,
+                    source=ps_src, field="Psych_Score")
+        # 2/3) attack vs the favourite's defensive leak (underdog_base row).
+        att, leak, base_src = _u2s_base_pair(snap, req_date, row, fid_s, fxn)
+        fold = rules["U2S_ATT_DEF_FOLD"]
+        prod_min = rules["U2S_ATT_LEAK_PRODUCT"]
+        fold_thr = ("dog attack >= %dx fav defensive leak "
+                    "(user example: attack 9 vs leak 3)" % fold)
+        prod_thr = "attack x leak >= %d (double-strength signal)" % prod_min
+        if att is None or leak is None:
+            add("Attack vs Defense", NOT_AVAILABLE, threshold=fold_thr,
+                source=base_src, field="dog_att_strength / fav_def_weakness")
+            add("Attack × Leak", NOT_AVAILABLE, threshold=prod_thr,
+                source=base_src, field="dog_att_strength * fav_def_weakness")
+        else:
+            no_data = (leak == 0 and att == 0)
+            # leak 0 with attack > 0 = the fav conceded NOTHING (a wall the
+            # dog cannot beat three-fold) → FAIL; both 0 = no data → N/A.
+            add("Attack vs Defense",
+                NOT_AVAILABLE if no_data else
+                (FAIL if leak == 0 else
+                 PASS if att >= fold * leak else FAIL),
+                value={"attack": att, "leak": leak},
+                threshold=fold_thr, source=base_src,
+                field="dog_att_strength / fav_def_weakness",
+                mapping="leak = fav's concession rate; 0+0 = no data, "
+                        "wall (leak 0, attack > 0) = FAIL")
+            add("Attack × Leak",
+                NOT_AVAILABLE if no_data else
+                PASS if att * leak >= prod_min else FAIL,
+                value={"attack": att, "leak": leak,
+                       "product": round(att * leak, 2)},
+                threshold=prod_thr, source=base_src,
+                field="dog_att_strength * fav_def_weakness")
+        # 4) venue scoring — APPENDED ONLY with the full last-3 sample.
+        venue_raw = row.get("Dog_Scoring_Consistency")
+        venue_src = "calling row"
+        if venue_raw is None and u_row is not None:
+            venue_raw = u_row.get("Dog_Scoring_Consistency")
+            venue_src = "u2s_psychology"
+        venue_check = _u2s_venue_check(venue_raw)
+        if venue_check is not None:
+            venue_check["source"] = (
+                "u2s_psychology" if venue_src != "calling row" else "calling row")
+            checks.append(venue_check)
+        return checks
+
+    # ── SOT — the user's 2-check card (2026-09-23): match-level psychology
+    # above 50 (gg_psychology's one-score-per-match, WIN psychology
+    # fallback) and the under-2.5 probability above 65% (unders Monte-Carlo
+    # u25 probability, Poisson-complement fallback).
+    if market == "sot":
+        # 1) match-level psychology chain
+        raw_ps, ps_src = None, ""
+        gps_row, gd = _resolve_any(req_date, "gps", fid_s, fxn)
+        if gps_row and str(gps_row.get("Psych_Score") or "").strip().upper() \
+                not in ("", "N/A", "NONE"):
+            raw_ps, ps_src = gps_row.get("Psych_Score"), \
+                "gg_psychology @ %s" % gd
+        if raw_ps is None:
+            wps_row, wd = _resolve_any(req_date, "wps", fid_s, fxn)
+            if wps_row:
+                for fld in ("Psych_Score", "Audit_Score"):
+                    if str(wps_row.get(fld) or "").strip().upper() \
+                            not in ("", "N/A", "NONE"):
+                        raw_ps, ps_src = wps_row.get(fld), \
+                            "win_psychology @ %s (%s)" % (wd, fld)
+                        break
+        psych_thr = "> %d (user rule)" % rules["SOT_PSYCH_MIN"]
+        if raw_ps is None:
+            add("Psychology", NOT_AVAILABLE, threshold=psych_thr,
+                source="gg_psychology / win_psychology", field="Psych_Score")
+        elif "VETO" in str(raw_ps).upper():
+            add("Psychology", FAIL, value=raw_ps, threshold=psych_thr,
+                source=ps_src, field="Psych_Score",
+                mapping="VETOED = explicit FAIL verdict, never N/A")
+        else:
+            pv = _num(raw_ps)
+            if pv is None:
+                add("Psychology", NOT_AVAILABLE, value=raw_ps,
+                    threshold=psych_thr, source=ps_src, field="Psych_Score")
+            else:
+                add("Psychology",
+                    PASS if pv > rules["SOT_PSYCH_MIN"] else FAIL,
+                    value=raw_ps, threshold=psych_thr,
+                    source=ps_src, field="Psych_Score")
+        # 2) under-2.5 probability chain: unders MC → Poisson complement
+        pct, psrc, pfield = None, "", ""
+        unr, ud = _resolve_any(req_date, "un", fid_s, fxn)
+        if unr:
+            f = _frac(unr.get("mc_u25_prob"))
+            if f is not None:
+                pct, psrc, pfield = f * 100.0, "unders @ %s" % ud, "mc_u25_prob"
+        if pct is None:
+            o25r, od = _resolve_any(req_date, "o25f", fid_s, fxn)
+            if o25r:
+                po25 = _num(o25r.get("poisson_over_prob_num"))
+                if po25 is not None:
+                    pct = 100.0 - po25
+                    psrc = "over25_forecast @ %s" % od
+                    pfield = "100 - poisson_over_prob_num"
+        prob_thr = "> %d%% (user rule)" % rules["SOT_U25_PROB_MIN"]
+        if pct is None:
+            add("Under 2.5 Probability", NOT_AVAILABLE, threshold=prob_thr,
+                source="unders mc_u25_prob / over25_forecast poisson",
+                field="mc_u25_prob / poisson_over_prob_num")
+        else:
+            add("Under 2.5 Probability",
+                PASS if pct > rules["SOT_U25_PROB_MIN"] else FAIL,
+                value=round(pct, 1), threshold=prob_thr,
+                source=psrc, field=pfield)
         return checks
 
     # ── FHVI / SHVI (>=7 == TIER 2 GOOD or better, per-file Category gate) ───
@@ -2578,6 +2933,8 @@ def get_team_intelligence(team_name, date, market=None):
         "fhvi", snap, _resolve(snap, "fhvi", fid_s, fxn) or {}, fid_s, fxn, date=date))
     _mark("shvi", _checks_for_market(
         "shvi", snap, _resolve(snap, "shvi", fid_s, fxn) or {}, fid_s, fxn, date=date))
+    _mark("sot", _checks_for_market(
+        "sot", snap, _resolve(snap, "sot", fid_s, fxn) or {}, fid_s, fxn, date=date))
     return {
         "team": team_name, "date": date, "fixture": fxn, "fixture_id": fixture_id,
         "opponent": opp, "fixture_found": True, "markets": markets,

@@ -120,45 +120,83 @@ check("DRAW no DNA factors → DNA Parity NOT_AVAILABLE",
       result_map(ipc).get("DNA Parity") == pc.NOT_AVAILABLE)
 check("DRAW DNA Parity counted in the FIXED denominator of 4 (0/4: 12% is below the floor)",
       ipc is not None and ipc["total"] == 4 and ipc["passed"] == 0)
-# ── 3. UNDERDOG — Dixon-Coles multipliers (repo-native >= direction) ─────────
+# ── 3. UNDERDOG (U2S) — the user's card (2026-09-23): psych > 60 with
+#    VETOED = explicit FAIL, attack >= 3x leak (9 vs 3 → PASS), the
+#    double-strength product >= 2, and the venue 4th check ONLY with a
+#    full (3/3) sample → denominator 3 (or 4 with venue data) ───────────────
 ud_row = {"fixture_id": 300, "fixture": "Bournemouth vs Liverpool",
           "Underdog": "Bournemouth", "Psych_Score": 78}
 u2s_idx = {pc._norm("Bournemouth vs Liverpool"): {
     "Underdog": "Bournemouth", "Psych_Score": 78}}
-for att, att_exp, fav, fav_exp in [
-        (1.90, pc.PASS, 1.40, pc.PASS),   # threshold values qualify (>=)
-        (2.10, pc.PASS, 1.55, pc.PASS),   # clearly above
-        (1.85, pc.FAIL, 1.35, pc.FAIL)]:  # below both thresholds
+for att, leak, fold_exp, prod_exp in [
+        (9.0, 3.0, pc.PASS, pc.PASS),   # user example: 9 vs 3 → three-fold PASS
+        (1.6, 1.3, pc.FAIL, pc.PASS),   # 1.6 < 3.9 three-fold, 2.08 product PASS
+        (0.5, 1.5, pc.FAIL, pc.FAIL)]:  # neither signal
     snap = fresh_snapshot({"u2s_by_name": u2s_idx, "ud_by_id": {"300": {
-        "dog_att_strength": att, "fav_def_weakness": fav}}})
+        "dog_att_strength": att, "fav_def_weakness": leak}}})
     ipc = evaluate("u2s", ud_row, snap)
     rm = result_map(ipc)
-    check(f"U2S DOG ATT STRENGTH {att} → {att_exp}",
-          rm.get("Dog ATT Strength") == att_exp)
-    check(f"U2S FAV DEF WEAKNESS {fav} → {fav_exp}",
-          rm.get("Fav Def Weakness") == fav_exp)
+    check(f"U2S attack {att} vs leak {leak} → three-fold {fold_exp}, "
+          f"product {prod_exp}, psych 78 > 60 PASS",
+          rm.get("Attack vs Defense") == fold_exp
+          and rm.get("Attack × Leak") == prod_exp
+          and rm.get("Psychology") == pc.PASS)
+    check("U2S denominator stays 3 without a full venue sample",
+          ipc["total"] == 3)
 
 snap = fresh_snapshot({"u2s_by_name": u2s_idx, "ud_by_id": {"300": {
     "dog_att_strength": None, "fav_def_weakness": None}}})
 ipc = evaluate("u2s", ud_row, snap)
 rm = result_map(ipc)
-check("U2S missing multipliers → both NOT_AVAILABLE",
-      rm.get("Dog ATT Strength") == pc.NOT_AVAILABLE
-      and rm.get("Fav Def Weakness") == pc.NOT_AVAILABLE)
-check("U2S multipliers count in the FIXED denominator of 3",
-      ipc is not None and ipc["total"] == 3 and ipc["passed"] == 1)
+check("U2S missing multipliers → both attack checks NOT_AVAILABLE "
+      "(psych 78 still earns the pass)",
+      rm.get("Attack vs Defense") == pc.NOT_AVAILABLE
+      and rm.get("Attack × Leak") == pc.NOT_AVAILABLE
+      and rm.get("Psychology") == pc.PASS
+      and ipc["total"] == 3 and ipc["passed"] == 1)
 # ── 4. Per-fixture availability / denominator integrity ──────────────────────
-ipc = evaluate("u2s", ud_row, fresh_snapshot())
-check("U2S all-missing → 0/3 (denominator FIXED at 3, no fake FAIL)",
-      ipc is not None and ipc["total"] == 3 and ipc["passed"] == 0)
+ipc = evaluate("u2s", {"fixture_id": 301, "fixture": "No Sources vs At All",
+                       "Underdog": "No Sources"}, fresh_snapshot())
+check("U2S all-missing → 0/3 (denominator FIXED at 3, no fake PASS/FAIL)",
+      ipc is not None and ipc["total"] == 3 and ipc["passed"] == 0
+      and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
 
 ipc = evaluate("u2s", {"fixture_id": 300, "fixture": "Bournemouth vs Liverpool",
                        "Underdog": "Bournemouth", "Psych_Score": "VETOED"},
-               fresh_snapshot())
+               fresh_snapshot({"u2s_by_name": u2s_idx}))
 rm = result_map(ipc)
-check("U2S 'VETOED' psychology → NOT_AVAILABLE, 0/3 (no fake FAIL)",
+check("U2S 'VETOED' psychology → explicit FAIL (never N/A), 0/3",
       ipc is not None and ipc["total"] == 3 and ipc["passed"] == 0
-      and rm.get("Psychology") == pc.NOT_AVAILABLE)
+      and rm.get("Psychology") == pc.FAIL)
+# Venue 4th check: FULL (3/3) sample appends it → denominator 4; a shorter
+# sample ("(1/1)") or "N/A" OMITS it entirely (the user's rule).
+u2s_full = {pc._norm("Bournemouth vs Liverpool"): {
+    "Underdog": "Bournemouth", "Psych_Score": 78,
+    "Dog_Scoring_Consistency": "100.0% (3/3)"}}
+ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
+    "u2s_by_name": u2s_full,
+    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
+rm = result_map(ipc)
+check("U2S full venue sample (3/3) → 4th check appended, 4/4 (psych+three-"
+      "fold+product+venue)",
+      ipc["total"] == 4 and ipc["passed"] == 4
+      and rm.get("Venue Scoring") == pc.PASS)
+u2s_partial = dict(u2s_full,
+                   Dog_Scoring_Consistency="66.7% (2/3)")
+ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
+    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): u2s_partial},
+    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
+rm = result_map(ipc)
+check("U2S venue sample (2/3) → 4th check appended as FAIL, 3/4",
+      ipc["total"] == 4 and ipc["passed"] == 3
+      and rm.get("Venue Scoring") == pc.FAIL)
+u2s_short = dict(u2s_full, Dog_Scoring_Consistency="100.0% (1/1)")
+ipc = evaluate("u2s", dict(ud_row), fresh_snapshot({
+    "u2s_by_name": {pc._norm("Bournemouth vs Liverpool"): u2s_short},
+    "ud_by_id": {"300": {"dog_att_strength": 9.0, "fav_def_weakness": 3.0}}}))
+check("U2S short venue sample (1/1) → 4th check OMITTED, denominator 3",
+      ipc["total"] == 3
+      and "Venue Scoring" not in result_map(ipc))
 # ── 5. Display/audit-only guarantee ──────────────────────────────────────────
 snap = fresh_snapshot({"win_by_id": {"100": side_rows},
                        "win_by_name": {pc._norm("Arsenal vs Chelsea"): side_rows},
@@ -208,32 +246,58 @@ check("WIN Form overall-fallback basis scoreboard: missing venue goals on "
            if c["name"] == "Form")["value"]["legs"][0]["result"]
       == pc.NOT_AVAILABLE)
 
-# ── 7. O2.5 — the engine's own council gates (Engine/over25_forecast.py) ─────
-for ks, po, h2h, pg, pd, exp_pass in [
-        (True, 71.5, 4, 5, 22, 5),     # all five council gates support
-        (False, 55.0, 1, 12, -3, 0)]:  # none support
-    # market "over25_forecast": the row IS the engine's forecast row
-    row = {"fixture_id": 400, "fixture": "Ajax vs Feyenoord",
-           "kill_switch_pass": ks, "poisson_over_prob_num": po,
-           "h2h_overs_last_5": h2h, "pos_gap": pg, "parity_diff": pd}
-    ipc = evaluate("over25_forecast", row, fresh_snapshot())
-    rm = result_map(ipc)
-    got = sum(1 for k in ("Kill Switch", "Poisson Gate", "H2H Overs",
-                          "Position Gap", "Parity") if rm.get(k) == pc.PASS)
-    check(f"O2.5 council gates (ks={ks}, poisson={po}, h2h={h2h}, gap={pg}, parity={pd}) → {exp_pass}/5",
-          got == exp_pass)
+# ── 7. O2.5 — the user's six-question card (2026-09-23) ─────────────────────
+O25_NAMES = {"Kill Switch", "Poisson Gate", "Council Votes",
+             "Goal Count", "Goal Intent", "League Top 10"}
+dna_o25_pass = {"dna_by_id": {"400": {"over25": {"factors": [
+    {"name": "Goal Intent", "home_value": 72, "away_value": 55,
+     "winner": "home"}]}}}}
+pos_pass = {"draw_by_id": {"400": {"home_position": 3, "away_position": 15}}}
+# Case A: all six rules support the pick → 6/6
+row = {"fixture_id": 400, "fixture": "Ajax vs Feyenoord",
+       "kill_switch_pass": True, "poisson_over_prob_num": 71.5,
+       "council_votes": "8/9", "combined_gs_last_5": 24}
+ipc = evaluate("over25_forecast", dict(row),
+               fresh_snapshot({**dna_o25_pass, **pos_pass}))
+rm = result_map(ipc)
+check("O2.5 card = the six user rules",
+      set(rm) == O25_NAMES and ipc["total"] == 6)
+check("O2.5 all six support (kill, 71.5, 8/9, 24 goals, intent 72/55, pos 3) → 6/6",
+      ipc["passed"] == 6)
+# Case B: none support → 0/6
+row = {"fixture_id": 400, "fixture": "Ajax vs Feyenoord",
+       "kill_switch_pass": False, "poisson_over_prob_num": 55.0,
+       "council_votes": "4/9", "combined_gs_last_5": 12}
+ipc = evaluate("over25_forecast", dict(row), fresh_snapshot({
+    "dna_by_id": {"400": {"over25": {"factors": [
+        {"name": "Goal Intent", "home_value": 45, "away_value": 40,
+         "winner": "neutral"}]}}},
+    "draw_by_id": {"400": {"home_position": 14, "away_position": 20}}}))
+check("O2.5 none support (kill off, 55, 4/9, 12 goals, intent 45/40, pos 14/20) → 0/6",
+      ipc["passed"] == 0 and ipc["total"] == 6)
+# Council boundary: 7/9 passes (>= 7 of 9); goal-count boundary: 21 > 20
+row = {"fixture_id": 400, "fixture": "Ajax vs Feyenoord",
+       "kill_switch_pass": True, "poisson_over_prob_num": 66.0,
+       "council_votes": "7/9", "combined_gs_last_5": 21}
+ipc = evaluate("over25_forecast", dict(row),
+               fresh_snapshot({**dna_o25_pass, **pos_pass}))
+rm = result_map(ipc)
+check("O2.5 council 7/9 → PASS (boundary) and goal count 21 > 20 → PASS",
+      rm.get("Council Votes") == pc.PASS and rm.get("Goal Count") == pc.PASS
+      and ipc["passed"] == 6)
 # apex picks join the SAME engine's forecast row by fixture id
 snap = fresh_snapshot({"o25f_by_id": {"400": {
-    "kill_switch_pass": True, "poisson_over_prob_num": 66.0, "h2h_overs_last_5": 3,
-    "pos_gap": 8, "parity_diff": 1}}})
+    "kill_switch_pass": True, "poisson_over_prob_num": 66.0,
+    "council_votes": "7/9", "combined_gs_last_5": 21}}, **dna_o25_pass})
 ipc = evaluate("over25_apex", {"fixture_id": 400, "fixture": "Ajax vs Feyenoord"}, snap)
 rm = result_map(ipc)
-check("O2.5 apex joins the over25_forecast row (pos_gap 8 → PASS, boundary)",
-      rm.get("Position Gap") == pc.PASS)
-snap = fresh_snapshot({"o25f_by_id": {"400": {"pos_gap": 99, "kill_switch_pass": True}}})
+check("O2.5 apex joins the over25_forecast row (kill switch + council resolve)",
+      rm.get("Kill Switch") == pc.PASS and rm.get("Council Votes") == pc.PASS)
+# unparseable council → honest NOT_AVAILABLE inside the fixed 6
+snap = fresh_snapshot({"o25f_by_id": {"400": {"kill_switch_pass": True}}})
 ipc = evaluate("over25_apex", {"fixture_id": 400, "fixture": "Ajax vs Feyenoord"}, snap)
-check("O2.5 pos_gap 99 sentinel → NOT_AVAILABLE (fixed denominator of 6)",
-      result_map(ipc).get("Position Gap") == pc.NOT_AVAILABLE
+check("O2.5 missing council_votes → NOT_AVAILABLE (fixed denominator of 6)",
+      result_map(ipc).get("Council Votes") == pc.NOT_AVAILABLE
       and ipc["total"] == 6 and ipc["passed"] == 1)
 ipc = evaluate("over25_apex", {"fixture_id": 999, "fixture": "No Rows vs At All"},
                fresh_snapshot())
@@ -330,24 +394,45 @@ check("WIN Corners: no corner row anywhere → NOT_AVAILABLE",
       result_map(ipc).get("Corners") == pc.NOT_AVAILABLE)
 
 
-# ── 9. GG composites (engine signals echo only; no invented thresholds) ──────
+# ── 9. GG — the ONE unified 4-check card on EVERY GG table ──────────────────
+GG_NAMES = {"Psychology", "Goalkeeper", "BTTS Friction", "Goal Intent"}
 gg_row = {"fixture_id": 600, "fixture": "Basel vs St. Gallen",
           "sig1_mc_btts": 30.0, "sig2_venue_btts": 0.0, "sig3_gk_vuln": 20.0,
           "sig4_h2h_btts": 15.0, "sig5_directional": 0.0}
 ipc = evaluate("gg_precision", dict(gg_row), fresh_snapshot())
 rm = result_map(ipc)
-check("GG precision signals: fired = points > 0 (3 fired, 2 not)",
-      ipc["total"] == 5 and ipc["passed"] == 3
-      and rm.get("MC BTTS") == pc.PASS and rm.get("Venue BTTS") == pc.FAIL)
+check("GG precision runs the UNIFIED card (same 4 names, fixed at 4, "
+      "honest 0/4 with no sources — the 5-signal card is gone)",
+      ipc["total"] == 4 and set(rm) == GG_NAMES and ipc["passed"] == 0)
+gg_src = fresh_snapshot({
+    "gsup_by_id": {"600": {"Psych_Score": 115}},
+    "gsup_by_name": {pc._norm("Basel vs St. Gallen"): {"Psych_Score": 115}},
+    "ggc_by_id": {"600": {"home_gk_liable": True, "away_gk_liable": False}},
+    "ggc_by_name": {pc._norm("Basel vs St. Gallen"):
+                    {"home_gk_liable": True, "away_gk_liable": False}},
+    "dna_by_id": {"600": {"gg": {"factors": [
+        {"name": "BTTS Friction", "home_value": 71, "away_value": 58,
+         "winner": "home"},
+        {"name": "Goal Intent", "home_value": 68, "away_value": 64,
+         "winner": "both"}]}}}})
+ipc = evaluate("gg_precision", dict(gg_row), gg_src)
+check("GG unified card with sources: psych 115 > 65, GK liable, BTTS 71/58 "
+      "> 50, intent 68/64 > 60 → 4/4",
+      ipc["passed"] == 4 and ipc["total"] == 4)
+# psych boundary: 65 exactly is NOT above 65 → FAIL (the only green here: GK)
+ipc = evaluate("gg_precision", dict(gg_row), fresh_snapshot({
+    "gsup_by_id": {"600": {"Psych_Score": 65}},
+    "gsup_by_name": {pc._norm("Basel vs St. Gallen"): {"Psych_Score": 65}}}))
+check("GG psych 65 (boundary, must be ABOVE 65) → FAIL",
+      result_map(ipc).get("Psychology") == pc.FAIL)
 o15_row = {"fixture_id": 601, "fixture": "Sporting KC vs Philadelphia Union",
            "combined_lambda": 4.0, "lambda_home": 1.6, "lambda_away": 2.4,
            "o15_score": 80.0}
 ipc = evaluate("gg_o15", dict(o15_row), fresh_snapshot())
 rm = result_map(ipc)
-check("O1.5 composite: lambda 4.0 >= 2.5 saturation PASS, both lambdas >= 1.0 PASS",
-      rm.get("Combined Lambda") == pc.PASS and rm.get("Attacking Intent") == pc.PASS)
-check("O1.5 composite: missing gk flags → NOT_AVAILABLE, fixed denominator of 4",
-      ipc["total"] == 4 and ipc["passed"] == 2)
+check("O1.5 composite table now runs the SAME unified GG card "
+      "(4 checks, not the old lambda card)",
+      ipc["total"] == 4 and set(rm) == GG_NAMES)
 
 # ── 10. FHVI / SHVI Category gate (>= 7 == TIER 2 or better) ─────────────────
 ipc = evaluate("fhvi", {"fixture": "Legia vs Jagiellonia", "fhvi_score": 7.0},
@@ -359,6 +444,40 @@ check("FHVI score 6.9 → FAIL", result_map(ipc).get("FHVI") == pc.FAIL)
 ipc = evaluate("shvi", {"fixture": "A vs B"}, fresh_snapshot())
 check("SHVI missing score → NOT_AVAILABLE, 0/1 (fixed denominator, no fake FAIL)",
       ipc is not None and ipc["total"] == 1 and ipc["passed"] == 0)
+
+# ── 11. SOT — the new 2-check card (psych > 50, under-2.5 prob > 65%) ───────
+sot_fx = "Santa Fe vs Deportivo Cali"
+ipc = evaluate("sot", {"fixture": sot_fx}, fresh_snapshot({
+    "gps_by_name": {pc._norm(sot_fx): {"Psych_Score": 75}},
+    "un_by_name": {pc._norm(sot_fx): {"mc_u25_prob": 0.81}}}))
+rm = result_map(ipc)
+check("SOT psych 75 > 50 and under-2.5 81% > 65 → 2/2",
+      ipc["total"] == 2 and ipc["passed"] == 2
+      and rm.get("Psychology") == pc.PASS
+      and rm.get("Under 2.5 Probability") == pc.PASS)
+ipc = evaluate("sot", {"fixture": "No Sources vs At All"}, fresh_snapshot())
+check("SOT no intelligence → honest 0/2 (fixed denominator, no fake verdict)",
+      ipc is not None and ipc["total"] == 2 and ipc["passed"] == 0
+      and all(c["result"] == pc.NOT_AVAILABLE for c in ipc["checks"]))
+ipc = evaluate("sot", {"fixture": "X vs Y"}, fresh_snapshot(
+    {"o25f_by_name": {pc._norm("X vs Y"): {"poisson_over_prob_num": 71.5}}}))
+check("SOT under-2.5 fallback = 100 - 71.5 = 28.5% → FAIL (>65 rule)",
+      result_map(ipc).get("Under 2.5 Probability") == pc.FAIL)
+check("sot carries a count now (out of DISPLAY_ONLY, registered as a report market)",
+      "sot" not in pc.DISPLAY_ONLY_MARKETS
+      and "sot" in pc.TEAM_INTELLIGENCE_MARKETS
+      and pc._MARKET_EVALUATOR_ALIASES["sot"] == ("sot",))
+
+# ── 12. Corners friction — UNRANKED is neutral data, not a FAIL ─────────────
+for fr, exp in [("⚖️ UNRANKED", pc.NOT_AVAILABLE), ("📊 STABLE", pc.PASS),
+                ("💎 PERFECT", pc.PASS), ("💀 DEAD", pc.FAIL),
+                ("🛑 AVOID", pc.FAIL)]:
+    ipc = evaluate("corners_aggregator",
+                   {"fixture_id": 800, "Fixture": "Leeds vs Everton",
+                    "Friction": fr}, fresh_snapshot())
+    check(f"Corners friction {fr!r} → {exp}",
+          result_map(ipc).get("Corner Friction") == exp
+          and ipc["total"] == 2)
 
 print()
 failed = [l for l, ok in RESULTS if not ok]

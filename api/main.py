@@ -1061,7 +1061,10 @@ def get_unders(date: str):
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/sot/{date}", tags=["Specials"])
 def get_sot(date: str):
-    return read("sot", date, SOT_DEFAULTS, "sot")
+    # SOT carries the user's 2-check Intelligent Pass card (psych > 50,
+    # under-2.5 probability > 65%) — wrapped like every other counted market.
+    return _with_intelligent_pass(
+        "sot", read("sot", date, SOT_DEFAULTS, "sot"), date)
 
 
 @app.get("/api/fhvi/{date}", tags=["Specials"])

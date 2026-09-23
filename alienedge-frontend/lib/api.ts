@@ -1504,6 +1504,7 @@ export const TEAM_INTELLIGENCE_MARKET_ORDER = [
   "u2s",
   "fhvi",
   "shvi",
+  "sot",
   "gg_o15",
 ] as const;
 
@@ -1523,6 +1524,7 @@ export const TEAM_INTELLIGENCE_MARKET_LABELS: Record<string, string> = {
   u2s: "Underdog-to-Score",
   fhvi: "FHVI",
   shvi: "SHVI",
+  sot: "SOT",
 };
 
 /** Market → the sidebar page that market's table lives on. Used ONLY as the
@@ -1541,6 +1543,7 @@ export const MARKET_SOURCE_PAGE: Record<string, string> = {
   u2s: "/underdog",
   fhvi: "/fhvi",
   shvi: "/shvi",
+  sot: "/sot",
 };
 
 /** SINGLE-MARKET report payload (team+date+market identity). Carries
