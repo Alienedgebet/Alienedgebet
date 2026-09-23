@@ -51,6 +51,9 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [viewFormat, setViewFormat] = useState<"cards" | "table">("cards");
   const [customParams, setCustomParams] = useState<Record<string, any>>({});
+  // Bumped by Reset so the uncontrolled number inputs (which render
+  // `defaultValue`) remount and visibly return to their engine defaults.
+  const [resetKey, setResetKey] = useState(0);
   
   // Data State — starts empty; real results are fetched on mount and on every
   // control change (mock only ever appears if NEXT_PUBLIC_DEMO_MODE is set).
@@ -96,11 +99,24 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
 
   const handleRunFilter = () => runFilter();
 
-  // Auto-fetch real results on mount and whenever the filter controls change.
+  // ── Drawer sensitivity (ADDITIVE) ─────────────────────────────────────────
+  // The drawer's own values used to be sent ONLY when the Run button was
+  // pressed, and the API ignored them anyway. They are now sent automatically,
+  // debounced so dragging a slider / typing a number issues ONE request per
+  // settle instead of one per keystroke, while the Run button still works
+  // exactly as before (and now uses the latest values immediately).
+  const [debouncedParams, setDebouncedParams] = useState<Record<string, unknown>>({});
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedParams(customParams), 400);
+    return () => clearTimeout(timer);
+  }, [customParams]);
+
+  // Auto-fetch real results on mount and whenever the filter controls change
+  // (debouncedParams = the Mathematical Precision Thresholds drawer).
   useEffect(() => {
     runFilter();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, mode, riskLevel, oddsBand, date, startDate, endDate, config.key]);
+  }, [scope, mode, riskLevel, oddsBand, date, startDate, endDate, config.key, debouncedParams]);
 
   const getRiskIcon = (iconName: string) => {
     if (iconName === "shield") return <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />;
@@ -207,10 +223,10 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
           ))}
         </div>
 
-        {/* Public Mode: Risk & Odds Corridors (Tailored for each engine) */}
-        {mode === "public" && (
-          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 rounded-xl bg-black/30 p-4 border border-white/5">
-            {/* Risk Selection */}
+        {/* Risk Profile (Public presets) + Odds Corridor (ALL modes) */}
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 rounded-xl bg-black/30 p-4 border border-white/5">
+          {/* Risk Selection — public presets (the engines' own risk profiles) */}
+          {mode === "public" && (
             <div>
               <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
                 Algorithm Risk Profile
@@ -233,31 +249,32 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                 ))}
               </div>
             </div>
+          )}
 
-            {/* Odds Band Selection */}
-            <div>
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
-                Target Odds Corridor
-              </span>
-              <div className="flex flex-wrap gap-2">
-                {config.oddsBands.map((band) => (
-                  <button
-                    key={band}
-                    onClick={() => setOddsBand(band)}
-                    className={cn(
-                      "rounded-lg border px-3 py-2 font-mono text-xs font-bold transition-all",
-                      oddsBand === band
-                        ? "border-indigo-500/50 bg-indigo-950/50 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.2)]"
-                        : "border-white/10 bg-white/5 text-slate-400 hover:text-white"
-                    )}
-                  >
-                    @{band}
-                  </button>
-                ))}
-              </div>
+          {/* Odds Band Selection — available in EVERY mode (additive: the
+              corridor previously vanished in Tipster/Advanced) */}
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
+              Target Odds Corridor
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {config.oddsBands.map((band) => (
+                <button
+                  key={band}
+                  onClick={() => setOddsBand(band)}
+                  className={cn(
+                    "rounded-lg border px-3 py-2 font-mono text-xs font-bold transition-all",
+                    oddsBand === band
+                      ? "border-indigo-500/50 bg-indigo-950/50 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.2)]"
+                      : "border-white/10 bg-white/5 text-slate-400 hover:text-white"
+                  )}
+                >
+                  @{band}
+                </button>
+              ))}
             </div>
           </div>
-        )}
+        </div>
 
         {/* Collapsible Advanced Parameters */}
         <div className="mt-4 border-t border-white/10 pt-3">
@@ -270,10 +287,22 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
             {showAdvanced ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
 
+          {/* ADDITIVE: one-click return to the engine's own defaults. The
+              backend treats a request with no drawer values as the shipped
+              baseline, so this genuinely restores the default result set. */}
+          {showAdvanced && Object.keys(customParams).length > 0 && (
+            <button
+              onClick={() => { setCustomParams({}); setResetKey((k) => k + 1); }}
+              className="ml-3 text-[11px] font-bold text-slate-500 hover:text-cyan-300 transition-colors"
+            >
+              Reset to engine defaults
+            </button>
+          )}
+
           {showAdvanced && (
             <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 rounded-xl bg-black/40 p-4 border border-white/5 animate-in fade-in">
               {config.fields.map((f) => (
-                <div key={f.key} className="flex flex-col gap-1">
+                <div key={`${f.key}-${resetKey}`} className="flex flex-col gap-1">
                   <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{f.label}</label>
                   {f.type === "checkbox" ? (
                     <label className="flex items-center gap-2 cursor-pointer mt-1">
@@ -290,7 +319,17 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                       type="number"
                       step={f.step || 1}
                       defaultValue={f.defaultValue}
-                      onChange={(e) => setCustomParams({ ...customParams, [f.key]: Number(e.target.value) })}
+                      onChange={(e) => {
+                        // Empty input = "back to the engine default" — never send
+                        // Number('') (which is 0 and would silently gate rows out).
+                        const raw = e.target.value;
+                        setCustomParams((prev) => {
+                          const next = { ...prev };
+                          if (raw === "") delete next[f.key];
+                          else next[f.key] = Number(raw);
+                          return next;
+                        });
+                      }}
                       className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 font-mono text-xs text-white outline-none focus:border-cyan-400"
                     />
                   )}

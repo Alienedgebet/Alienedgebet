@@ -35,7 +35,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -50,6 +50,19 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 import output_store as store  # noqa: E402  (same module main.py writes through)
+
+# Weekly filter control layer — turns the /weekly/* page's mode / risk / odds /
+# drawer parameters into validated overrides and, for any non-baseline request,
+# runs the SAME existing FILTER engines over the SAME dated artifacts
+# (persist=False). Pure disk + pandas: no new API calls, no new maths.
+from api.weekly_filter_live import (  # noqa: E402
+    gg_filter_params,
+    win_filter_params,
+    win_precision_params,
+    o25_filter_params,
+    is_baseline,
+    live_query,
+)
 
 # Intelligent Pass Count — pure read-only second-level audit over the same
 # cache snapshots. Display/audit only: it never changes predictions,
@@ -1405,18 +1418,50 @@ def get_live_dashboard():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# FILTER ENDPOINTS — read the risk-level matrix main.py now precomputes
-# (filter_win__safe / __balanced / __aggressive, filter_over25__banker /
-# __balanced / __aggressive) so the interactive Weekly Filter page never
-# needs a live compute either.
+# FILTER ENDPOINTS — two paths, one contract.
+#
+# 1. BASELINE (the default request: public preset + default odds band + no
+#    drawer edits) reads the risk-level matrix main.py precomputes
+#    (filter_win__safe / __balanced / __aggressive, filter_over25__banker /
+#    __balanced / __aggressive, filter_gg) — byte-identical rows, zero compute.
+#
+# 2. ANYTHING ELSE (tipster/advanced sliders, a non-default odds corridor, a
+#    non-default GG risk preset, or any drawer threshold) runs the SAME
+#    existing FILTER engine over the SAME dated artifacts via
+#    api/weekly_filter_live.live_query(), with persist=False so a click can
+#    never overwrite a pipeline artifact. See that module for the full
+#    control→gate mapping. No new prediction maths, no new API calls.
 # ════════════════════════════════════════════════════════════════════════════
 _WIN_RISK_LEVELS = {"safe", "balanced", "aggressive"}
 _O25_RISK_LEVELS = {"banker", "balanced", "aggressive"}
 
 
+def _finalize_live_rows(rows, defaults, market_type, identity=None):
+    """Give live-computed rows exactly the same post-processing the snapshot
+    path applies: shape guard, ensure_defaults, per-date settlement. Live rows
+    already carry their own `match_date` (stamped by live_query)."""
+    rows = _guard_filter_rows(rows, identity)
+    grouped = {}
+    order = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        date = str(row.get("match_date") or "")
+        if date not in grouped:
+            grouped[date] = []
+            order.append(date)
+        grouped[date].append(row)
+    out = []
+    for date in order:
+        group = ensure_defaults(grouped[date], defaults)
+        group = _settled(group, market_type, date or None)
+        out.extend(group)
+    return out
+
+
 @app.get("/api/filter/gg/weekly", tags=["Filters"])
 def filter_gg_weekly(
-    mode: str = "public",
+    filters: dict = Depends(gg_filter_params),
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     anchor_date: Optional[str] = None,
@@ -1424,106 +1469,132 @@ def filter_gg_weekly(
     """
     7-day rolling GG cross-verification.
 
-    Range supplied (start_date + end_date) → read every date in the range via
-    read_range() and concatenate, giving a true week of picks. Dates the
-    pipeline hasn't run yet contribute 0 rows.
+    Range supplied (start_date + end_date) → every date in the range.
+    No range → the last 7 dates ending today (or anchor_date).
 
-    No range supplied → the rolling window: the last 7 dates ending today, via
-    get_gg_cross_verify(). Both branches are date-scoped reads; neither touches
-    the dateless "__latest" key (nothing writes it for filter_gg any more).
+    Baseline request → the precomputed dated snapshots (unchanged behaviour).
+    Any other combination of mode / risk preset / odds corridor / drawer
+    thresholds → the live GG precision filter over the same dated artifacts.
     """
     if start_date and end_date:
         dates = _date_range(start_date, end_date)
+    elif anchor_date or start_date:
+        dates = [anchor_date or start_date]
+    else:
+        end = _today()
+        start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
+        dates = _date_range(start, end)
+
+    if is_baseline(filters):
         return read_range(lambda d: "filter_gg", dates, GG_CROSS_DEFAULTS, "gg")
-    return get_gg_cross_verify()
+    return _finalize_live_rows(
+        live_query("gg", dates, filters), GG_CROSS_DEFAULTS, "gg")
 
 
 @app.get("/api/filter/gg/{date}", tags=["Filters"])
-def filter_gg_single(date: str, mode: str = "public"):
+def filter_gg_single(date: str, filters: dict = Depends(gg_filter_params)):
     # GG is a dated snapshot exactly like WIN / O2.5 (main.py calls
-    # store.save("filter_gg", d, ...) for the run's date), so this reads ONLY the
-    # requested date's snapshot, through the same shared read() helper those two
-    # markets use. The old dateless "__latest" fallback is gone: nothing writes
-    # that key for filter_gg any more, so falling back to it served one frozen
-    # cross-day payload for every date the pipeline had not reached yet — a page
-    # that looks populated while showing another date's picks. A date with no
-    # snapshot now honestly returns [] (identical to filter_win_single /
-    # filter_over25_single).
-    return read("filter_gg", date, GG_CROSS_DEFAULTS, "gg")
+    # store.save("filter_gg", d, ...) for the run's date), so the baseline
+    # request reads ONLY the requested date's snapshot. A date with no snapshot
+    # honestly returns []. Any non-baseline control combination computes the
+    # live filter for that one date from the same dated artifacts.
+    if is_baseline(filters):
+        return read("filter_gg", date, GG_CROSS_DEFAULTS, "gg")
+    return _finalize_live_rows(
+        live_query("gg", [date], filters), GG_CROSS_DEFAULTS, "gg")
 
 
 @app.get("/api/filter/win/weekly", tags=["Filters"])
 def filter_win_weekly(
-    mode: str = "public",
+    filters: dict = Depends(win_filter_params),
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     anchor_date: Optional[str] = None,
-    risk_level: str = "balanced",
 ):
-    # FIX: previously only ever read ONE day even for a 7-day range request.
-    # Now genuinely walks every date in [start_date, end_date] (or a single
-    # anchor_date if that's all that was given) and concatenates each day's
-    # saved picks — this requires main.py to have actually run for each of
-    # those dates; days it hasn't reached yet simply contribute 0 rows.
-    risk = risk_level if risk_level in _WIN_RISK_LEVELS else "balanced"
+    # Walks every date in [start_date, end_date] (or a single anchor_date) and
+    # concatenates that day's picks; dates the pipeline hasn't reached simply
+    # contribute 0 rows. Baseline → the precomputed risk snapshot; otherwise the
+    # live WIN filter with the request's mode/risk/odds/drawer values.
     if start_date and end_date:
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: f"filter_win__{risk}", dates, WIN_FORECAST_DEFAULTS, "win",
-                      identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    if is_baseline(filters):
+        risk = filters["risk_level"] if filters["risk_level"] in _WIN_RISK_LEVELS else "balanced"
+        return read_range(lambda d: f"filter_win__{risk}", dates, WIN_FORECAST_DEFAULTS, "win",
+                          identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    return _finalize_live_rows(
+        live_query("win", dates, filters), WIN_FORECAST_DEFAULTS, "win", identity="win")
 
 
 @app.get("/api/filter/win/{date}", tags=["Filters"])
-def filter_win_single(date: str, mode: str = "public", risk_level: str = "balanced"):
-    risk = risk_level if risk_level in _WIN_RISK_LEVELS else "balanced"
-    return read(f"filter_win__{risk}", date, WIN_FORECAST_DEFAULTS, "win",
-                identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+def filter_win_single(date: str, filters: dict = Depends(win_filter_params)):
+    if is_baseline(filters):
+        risk = filters["risk_level"] if filters["risk_level"] in _WIN_RISK_LEVELS else "balanced"
+        return read(f"filter_win__{risk}", date, WIN_FORECAST_DEFAULTS, "win",
+                    identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    return _finalize_live_rows(
+        live_query("win", [date], filters), WIN_FORECAST_DEFAULTS, "win", identity="win")
 
 
 @app.get("/api/filter/over25/weekly", tags=["Filters"])
 def filter_over25_weekly(
-    mode: str = "public",
+    filters: dict = Depends(o25_filter_params),
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     anchor_date: Optional[str] = None,
-    risk_level: str = "balanced",
-    odds_band: str = "1.50-1.85",
 ):
-    risk = risk_level if risk_level in _O25_RISK_LEVELS else "balanced"
     if start_date and end_date:
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: f"filter_over25__{risk}", dates, O25_FORECAST_DEFAULTS, "o25",
-                      identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    if is_baseline(filters):
+        risk = filters["risk_level"] if filters["risk_level"] in _O25_RISK_LEVELS else "balanced"
+        return read_range(lambda d: f"filter_over25__{risk}", dates, O25_FORECAST_DEFAULTS, "o25",
+                          identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    return _finalize_live_rows(
+        live_query("o25", dates, filters), O25_FORECAST_DEFAULTS, "o25", identity="o25")
 
 
 @app.get("/api/filter/over25/{date}", tags=["Filters"])
-def filter_over25_single(date: str, mode: str = "public", risk_level: str = "balanced"):
-    risk = risk_level if risk_level in _O25_RISK_LEVELS else "balanced"
-    return read(f"filter_over25__{risk}", date, O25_FORECAST_DEFAULTS, "o25",
-                identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
+def filter_over25_single(date: str, filters: dict = Depends(o25_filter_params)):
+    if is_baseline(filters):
+        risk = filters["risk_level"] if filters["risk_level"] in _O25_RISK_LEVELS else "balanced"
+        return read(f"filter_over25__{risk}", date, O25_FORECAST_DEFAULTS, "o25",
+                    identity="o25")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    return _finalize_live_rows(
+        live_query("o25", [date], filters), O25_FORECAST_DEFAULTS, "o25", identity="o25")
 
 
 @app.get("/api/filter/win/precision/weekly", tags=["Filters"])
 def filter_win_precision_weekly(
+    filters: dict = Depends(win_precision_params),
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     anchor_date: Optional[str] = None,
 ):
+    # Win Cross-Check: same controls as /weekly/win, defaulting to the SAFE
+    # preset (filter_win__safe) it has always read.
     if start_date and end_date:
         dates = _date_range(start_date, end_date)
     else:
         dates = [anchor_date or start_date or _today()]
-    return read_range(lambda d: "filter_win__safe", dates, WIN_FORECAST_DEFAULTS, "win",
-                      identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    if is_baseline(filters):
+        return read_range(lambda d: "filter_win__safe", dates, WIN_FORECAST_DEFAULTS, "win",
+                          identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    return _finalize_live_rows(
+        live_query("win", dates, filters, risk_default="safe"),
+        WIN_FORECAST_DEFAULTS, "win", identity="win")
 
 
 @app.get("/api/filter/win/precision/{date}", tags=["Filters"])
-def filter_win_precision_single(date: str):
-    return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win",
-                identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+def filter_win_precision_single(date: str, filters: dict = Depends(win_precision_params)):
+    if is_baseline(filters):
+        return read("filter_win__safe", date, WIN_FORECAST_DEFAULTS, "win",
+                    identity="win")  # FILTER SHAPE GUARD (09-10 foreign rows)
+    return _finalize_live_rows(
+        live_query("win", [date], filters, risk_default="safe"),
+        WIN_FORECAST_DEFAULTS, "win", identity="win")
 
 
 # ════════════════════════════════════════════════════════════════════════════

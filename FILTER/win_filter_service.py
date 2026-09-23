@@ -113,10 +113,15 @@ def apply_tipster_filter(df,
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER (CALLABLE BY THE MASTER API/SCHEDULER)
 # ==============================================================================
-def run_win_filter_service(target_date, mode="public", **kwargs):
+def run_win_filter_service(target_date, mode="public", persist=True, **kwargs):
     """
     This is the entry point. It reads the engine data from the output folder 
     and runs the requested filter.
+
+    `persist=False` (ADDITIVE, used by the API's live Weekly-filter path) keeps
+    every gate and the returned rows byte-identical but does NOT write
+    FILTERED_{label}_PICKS_{date}.csv — a request-time slider move must never
+    overwrite a pipeline artifact. Default `True` = pipeline behaviour unchanged.
     """
     # Ensure directory exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -138,6 +143,32 @@ def run_win_filter_service(target_date, mode="public", **kwargs):
     
     # Load data from the Poisson Engine
     df = pd.read_csv(input_csv)
+
+    # ADDITIVE (2026-09-23): production_raw_engine_{date}.csv carries no Poisson
+    # probability column, so every Weekly Win row displayed "0%" and the API's
+    # ensure_defaults marked it `_incomplete`. ranked_win_forecast_{date}.csv is
+    # written by the same existing chain and DOES carry the REAL
+    # poisson_win_prob / poisson_draw_prob for the exact same (fixture_id, side)
+    # rows (verified 1:1 overlap on 2026-09-22/23). Merge those two columns in
+    # when absent: the row universe, every gate and the sort are untouched —
+    # no fabrication, and a no-op when the file or the join keys are missing.
+    if "poisson_win_prob" not in df.columns and {"fixture_id", "side"} <= set(df.columns):
+        ranked_path = os.path.join(OUTPUT_DIR, f"ranked_win_forecast_{target_date}.csv")
+        if os.path.exists(ranked_path):
+            try:
+                rf = pd.read_csv(ranked_path)
+                if "poisson_win_prob" in rf.columns and {"fixture_id", "side"} <= set(rf.columns):
+                    merge_cols = ["_merge_key", "poisson_win_prob"]
+                    if "poisson_draw_prob" in rf.columns:
+                        merge_cols.append("poisson_draw_prob")
+                    df["_merge_key"] = df["fixture_id"].astype(str) + "|" + df["side"].astype(str)
+                    rf["_merge_key"] = rf["fixture_id"].astype(str) + "|" + rf["side"].astype(str)
+                    df = df.merge(
+                        rf[merge_cols].drop_duplicates("_merge_key"),
+                        on="_merge_key", how="left",
+                    ).drop(columns=["_merge_key"])
+            except Exception as exc:
+                print(f"[WARN] Win Filter Engine: probability merge skipped ({exc}).")
     
     if mode == "public":
         filtered_df = apply_public_filter(df, **kwargs)
@@ -160,11 +191,15 @@ def run_win_filter_service(target_date, mode="public", **kwargs):
             print(f"[WARN] Could not sort by poisson_win_prob: {e}")
 
     # Save output for the App UI to read (safely into the dynamic OUTPUT_DIR)
-    output_fn = os.path.join(OUTPUT_DIR, f"FILTERED_{label}_PICKS_{target_date}.csv")
-    filtered_df.to_csv(output_fn, index=False)
-    
-    print(f"[SUCCESS] {label} Filter applied. {len(filtered_df)} picks ready and saved to {output_fn}")
-    
+    # — skipped for request-time (live) filtering so pipeline artifacts are
+    # never overwritten by a slider move.
+    if persist:
+        output_fn = os.path.join(OUTPUT_DIR, f"FILTERED_{label}_PICKS_{target_date}.csv")
+        filtered_df.to_csv(output_fn, index=False)
+        print(f"[SUCCESS] {label} Filter applied. {len(filtered_df)} picks ready and saved to {output_fn}")
+    else:
+        print(f"[SUCCESS] {label} Filter applied (live request, no artifact written). {len(filtered_df)} picks.")
+
     return filtered_df.to_dict(orient="records")
 
 # ==============================================================================

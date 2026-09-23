@@ -149,26 +149,46 @@ def run_gg_forensic_aggregator(target_date):
         data = GET_REQUEST(f"/fixtures/between/{start}/{end}/{team_id}", 
                    params={"include":"scores;participants", "per_page": 5, "order":"desc", "filters":"fixtureStates:5"})
         fixtures = data.get("data", [])
-        if not fixtures: return 0, False, 0.5
-        gg_last_3, has_00, total_gs = 0, False, 0
+        if not fixtures: return 0, False, 0.5, 0
+        gg_last_3, has_00, total_gs, total_conc = 0, False, 0, 0
         for i, f in enumerate(fixtures):
             st = get_match_stats_v3(f, team_id)
             if not st: continue
             if i < 2 and st["is_00"]: has_00 = True
             if i < 3 and st["is_gg"]: gg_last_3 += 1
             total_gs += st["s"]
-        return gg_last_3, has_00, (total_gs / len(fixtures))
+            total_conc += st["c"]   # ADDITIVE: conceded total — already fetched,
+                                    # now returned for the persisted Concede_Parity
+        return gg_last_3, has_00, (total_gs / len(fixtures)), total_conc
 
     def get_h2h_forensics(id1, id2):
         data = GET_REQUEST(f"/fixtures/head-to-head/{id1}/{id2}", params={"include":"scores;participants", "per_page":5, "order":"desc"})
         fixtures = data.get("data", [])[:5]
+
+        def _location_of(f, tid):
+            for p in f.get("participants", []) or []:
+                try:
+                    if int(p.get("id")) == int(tid):
+                        return str((p.get("meta") or {}).get("location") or "").lower()
+                except (TypeError, ValueError):
+                    continue
+            return ""
+
         gg_count, total_diff, valid = 0, 0, 0
+        team1_goals, team2_goals = 0, 0
         for f in fixtures:
             hg, ag = extract_goals_v3(f.get("scores", []))
             if hg is not None and ag is not None:
                 if hg > 0 and ag > 0: gg_count += 1
                 total_diff += abs(hg - ag); valid += 1
-        return gg_count, (total_diff / max(1, valid))
+                # ADDITIVE: accumulate each CURRENT side's goals across the H2H
+                # window (a historical fixture's home side may be either team of
+                # today's fixture) so the absolute H2H goal gap documented in
+                # FILTER/gg_precision_filter.py NOTE 2 is a real dated value.
+                loc = _location_of(f, id1)
+                if loc == "home":   team1_goals += hg; team2_goals += ag
+                elif loc == "away": team1_goals += ag; team2_goals += hg
+        return gg_count, (total_diff / max(1, valid)), abs(team1_goals - team2_goals)
 
     def get_league_rank_verified(season_id, team_id):
         if not season_id: return 99
@@ -278,12 +298,15 @@ def run_gg_forensic_aggregator(target_date):
             continue
 
         # FORENSIC FETCH
-        h_gg3, h_00, h_avg = get_team_recent_forensics(hid)
-        a_gg3, a_00, a_avg = get_team_recent_forensics(aid)
-        h2h_gg, parity_gap = get_h2h_forensics(hid, aid)
+        h_gg3, h_00, h_avg, h_conc = get_team_recent_forensics(hid)
+        a_gg3, a_00, a_avg, a_conc = get_team_recent_forensics(aid)
+        h2h_gg, parity_gap, h2h_goal_gap = get_h2h_forensics(hid, aid)
         h_rank = get_league_rank_verified(sid, hid)
         a_rank = get_league_rank_verified(sid, aid)
         math_prob = run_independent_poisson(h_avg, a_avg)
+        # ADDITIVE (2026-09-23): the two operands of the documented TOTAL PARITY
+        # layer (H2H goal gap + conceded gap), from data already fetched above.
+        concede_parity = abs(h_conc - a_conc)
         
         # DNA AUDIT
         dna_verdict, dna_insight = get_gg_tactical_opinion(hid, aid, c['h_name'], c['a_name'], dna_db)
@@ -315,7 +338,13 @@ def run_gg_forensic_aggregator(target_date):
             "H2H_GG": f"{h2h_gg}/5",
             "DNA_Insight": dna_insight,
             "Ranks": f"{h_rank}v{a_rank}",
-            "Forensic_Audit": " ".join(details)
+            "Forensic_Audit": " ".join(details),
+            # ADDITIVE (2026-09-23): real, dated parity operands consumed by
+            # FILTER/gg_precision_filter.py's Layer-2 gate and the Weekly page's
+            # MAX TOTAL PARITY control. Nothing about the existing Score x/6
+            # audit scoring changes.
+            "H2H_Parity": h2h_goal_gap,
+            "Concede_Parity": concede_parity,
         })
         time.sleep(0.1)
 
