@@ -13,6 +13,12 @@ const nextConfig: NextConfig = {
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
         { key: "X-DNS-Prefetch-Control", value: "off" },
       ],
+    }, {
+      source: "/hero-alien-mascot-login-v1-540.webp",
+      headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+    }, {
+      source: "/hero-alien-mascot-login-v1-1024.webp",
+      headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
     }];
   },
   // /_next client chunks + HMR. Without this, opening one host while the

@@ -10,6 +10,8 @@ export function middleware(request: NextRequest) {
   if (
     pathname === "/login" ||
     pathname === "/signup" ||
+    pathname === "/hero-alien-mascot-login-v1-540.webp" ||
+    pathname === "/hero-alien-mascot-login-v1-1024.webp" ||
     pathname.startsWith("/api/") ||
     pathname.startsWith("/_next/") ||
     pathname === "/favicon.ico"
