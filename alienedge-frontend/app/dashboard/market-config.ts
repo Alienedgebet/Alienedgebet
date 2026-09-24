@@ -30,9 +30,9 @@ import type { VerificationData } from "@/components/predictions/VerifyCell";
 // ============================================================
 // DASHBOARD MARKET ADAPTERS
 // Normalizes each chain's flagship endpoint down to a common
-// { fixture, tier?, prob?, score? } shape so the dashboard grid
-// and Elite Convergence feed can render all 11 markets generically
-// without touching engine math. Assumes each engine already
+// { fixture, tier?, prob?, score?, odds?, verification?, ...FixtureRisk } shape
+// so the dashboard grid and Elite Convergence feed can render all markets
+// generically without touching engine math. Assumes each engine already
 // returns picks best-first (consistent with the rest of the app).
 //
 // The 11 markets split into two architectural families:
@@ -76,6 +76,20 @@ type VerifiableRow = { verification?: VerificationData };
 function verifyOf(row: unknown): VerificationData | undefined {
   const v = (row as VerifiableRow | null | undefined)?.verification;
   return v && typeof v === "object" ? v : undefined;
+}
+
+/** Preserve the semantic warning fields while normalizing endpoint-specific rows. */
+function fixtureRiskOf(row: FixtureRisk): FixtureRisk {
+  return {
+    classification: row.classification,
+    is_cup: row.is_cup,
+    is_friendly: row.is_friendly,
+    is_risk_fixture: row.is_risk_fixture,
+    risk_level: row.risk_level,
+    risk_label: row.risk_label,
+    competition: row.competition,
+    league_name: row.league_name,
+  };
 }
 
 export interface MarketConfig {
@@ -136,6 +150,7 @@ export const WIN_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(winApi.getApex(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Category,
         prob: toFiniteNumber(p.Monte_Win_Prob) ?? undefined,
@@ -154,6 +169,7 @@ export const GG_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(ggApi.getSupreme(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Category,
         prob: toFiniteNumber(p.Monte_GG_Prob) ?? undefined,
@@ -170,6 +186,7 @@ export const OVER25_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(over25Api.getApex(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Category,
         prob: toFiniteNumber(p.Super_Monte_Prob) ?? undefined,
@@ -186,6 +203,7 @@ export const OVER15_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(over15Api.getApex(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Tier,
         prob: parseProbability(p.Base_Poisson),
@@ -203,6 +221,7 @@ export const CORNERS_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(cornersApi.getAggregator(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Tier,
         // Master_Score is a numeric STRING in production ("65"), which
@@ -221,6 +240,7 @@ export const UNDERDOG_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(underdogApi.getApex(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Rank,
         prob: parseProbability(p.Monte_UD_Prob),
@@ -241,6 +261,7 @@ export const DRAW_MARKET: MarketConfig = {
       res.draws.map((p) => {
         const drawProb = toFiniteNumber(p.mc_draw_prob);
         return {
+          ...fixtureRiskOf(p),
           fixture: p.fixture,
           tier: p.tier,
           // mc_draw_prob is stored on a 0–1 scale; keep the existing *100
@@ -264,6 +285,7 @@ export const UNDERS_MARKET: MarketConfig = {
       res.u25.map((p) => {
         const u25Prob = toFiniteNumber(p.mc_u25_prob);
         return {
+          ...fixtureRiskOf(p),
           fixture: p.fixture,
           tier: p.u25_tier,
           // mc_u25_prob is stored on a 0–1 scale; keep the existing *100
@@ -284,6 +306,7 @@ export const SOT_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(specialsApi.getSOT(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Verdict,
         prob: parseProbability(p["Poisson_Over_8.5"]),
@@ -301,6 +324,7 @@ export const FHVI_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(specialsApi.getFHVI(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.fixture,
         tier: p.fhvi_label,
         score: toFiniteNumber(p.fhvi_score) ?? undefined,
@@ -317,6 +341,7 @@ export const SHVI_MARKET: MarketConfig = {
   fetcher: (date) =>
     mapResponse(specialsApi.getSHVI(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.fixture,
         tier: p.shvi_label,
         score: toFiniteNumber(p.shvi_score) ?? undefined,
@@ -354,6 +379,7 @@ export const UNDERDOG_2_SOURCE: EliteSourceConfig = {
   fetcher: (date) =>
     mapResponse(underdogApi.getAudit(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.fixture,
         tier: p.Audit_Verdict,
         prob: parseProbability(p.Audit_Real_Prob),
@@ -412,6 +438,7 @@ export const OVER15_INTELLIGENCE_SOURCE: EliteSourceConfig = {
   fetcher: (date) =>
     mapResponse(over15Api.getPsychology(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.Fixture,
         tier: p.Tier,
         prob: parseProbability(p.Base_Poisson),
@@ -441,6 +468,7 @@ export const OVER25_JUDGES_SOURCE: EliteSourceConfig = {
   fetcher: (date) =>
     mapResponse(over25Api.getStage2(date), (res) =>
       res.map((p) => ({
+        ...fixtureRiskOf(p),
         fixture: p.fixture,
         tier: "JUDGES",
         score: toFiniteNumber(p.Votes) ?? undefined,

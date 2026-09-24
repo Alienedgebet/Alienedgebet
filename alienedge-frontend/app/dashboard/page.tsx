@@ -159,6 +159,7 @@ function DashboardOverview() {
           suffix: source.suffix,
           isMock,
           odds: pick.odds,
+          risk: pick,
           verification: pick.verification,
           dnaMarketKey: ELITE_DNA_MARKET_KEYS[source.key],
         });

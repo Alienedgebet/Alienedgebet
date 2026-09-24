@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
-import { TierBadge } from "@/components/predictions/TierBadge";
+import { FixtureRiskTag, isRiskFixture } from "@/components/FixtureRiskTag";
 import {
   PredictionTable,
   type PredictionColumn,
@@ -13,7 +13,6 @@ import { DnaCountBadge } from "@/components/dna/DnaCountBadge";
 import { VerifyCell } from "@/components/predictions/VerifyCell";
 import type { DnaV2FixtureFactors, DnaV2MarketKey } from "@/lib/api";
 import type { MarketConfig, MarketPick } from "./market-config";
-import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
 interface MarketRow {
   config: MarketConfig;
@@ -45,9 +44,8 @@ function safeNumeric(value: unknown): number {
 /**
  * Market Intelligence — rendered through the SAME real <table> component
  * every market page uses (PredictionTable). A real <td> grows to fit its
- * content and the container scrolls horizontally, so long raw tier text
- * can never paint over the fixture column the way the old fixed-width
- * flexbox row did.
+ * content and the container scrolls horizontally, so fixture names and signal
+ * values never collide or force an oversized row.
  */
 export function MarketIntelList({
   rows,
@@ -97,16 +95,17 @@ export function MarketIntelList({
       render: (row) => {
         const { config, isMock } = row;
         const top = row.data[0];
+        const fixtureLabel = top?.fixture || (row.loading ? "Loading market data…" : "No picks today");
         return (
-          <Link
-            href={config.href}
-            prefetch
-            className="group flex flex-col gap-0.5 py-0.5"
-          >
+          <div className="flex flex-col gap-0.5 py-0.5">
             <div className="flex flex-wrap items-center gap-1">
-              <span className="text-xs font-bold leading-tight text-text-primary transition-colors group-hover:text-cyan-400">
+              <Link
+                href={config.href}
+                prefetch
+                className="text-xs font-bold leading-tight text-text-primary transition-colors hover:text-cyan-400"
+              >
                 {config.label}
-              </span>
+              </Link>
               {isMock && (
                 <Badge
                   variant="outline"
@@ -116,29 +115,36 @@ export function MarketIntelList({
                 </Badge>
               )}
             </div>
-            <FixtureRiskTag
-              row={top}
-              label={top?.fixture || (row.loading ? "Loading market data…" : "No picks today")}
-              className="text-[10.5px] font-semibold text-cyan-400"
-            />
-          </Link>
+            <div className="flex min-w-0 items-center gap-1">
+              <Link
+                href={config.href}
+                prefetch
+                className="truncate text-[10.5px] font-semibold text-cyan-400 hover:text-cyan-300"
+              >
+                {fixtureLabel}
+              </Link>
+              {top && isRiskFixture(top) && (
+                <FixtureRiskTag
+                  row={top}
+                  label="Open fixture risk briefing"
+                  showLabel={false}
+                  className="shrink-0"
+                />
+              )}
+            </div>
+          </div>
         );
       },
     },
     {
-      key: "badges",
-      header: "Badges & Odds",
+      key: "signal",
+      header: "Signal & Odds",
       align: "right",
       className: "whitespace-nowrap",
       render: (row) => {
         const top = row.data[0];
         return (
           <div className="flex items-center justify-end gap-1.5 py-0.5">
-            {top?.tier && (
-              <div className="flex shrink-0 scale-90 origin-right">
-                <TierBadge tier={top.tier} pulse={false} />
-              </div>
-            )}
             {top?.prob != null ? (
               <div className="flex items-center gap-1 whitespace-nowrap font-mono text-[11px] font-bold tabular-nums text-white">
                 <span
