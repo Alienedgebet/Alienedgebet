@@ -279,6 +279,10 @@ def run_dna_engine_v2(target_date):
         - Shot Quality Index added (Insidebox vs Outsidebox ratio)
         - Transition Pressure Score added (ball recovery → attack)
         - All heuristic fallbacks preserved exactly from v1
+
+        UNCHANGED by the freshness fix — this function's math is untouched.
+        `computed_at` / `history` metadata is attached by the CALLER after
+        this returns, not inside here, so the calculation itself stays pure.
         """
         if not fixtures:
             return None
@@ -802,6 +806,12 @@ def run_dna_engine_v2(target_date):
     )
 
     # Step 4 — compute style clashes for every fixture (NEW in v2)
+    # home_id / away_id are ADDED here (additive only — no field removed or
+    # renamed) so downstream consumers (dna_profiler.py, dna_v2_market_
+    # factors.py) can join on team ID instead of team NAME, which avoids
+    # duplicate-name collisions. Nothing that already reads this file by its
+    # existing fields (fixture / home_team / away_team / fixture_id /
+    # fixture_date / pillar_clash / ...) is affected.
     print("\n[2.5/3] Computing fixture-level style clashes...")
     fixture_clashes = []
 
@@ -822,19 +832,22 @@ def run_dna_engine_v2(target_date):
             fixture_clashes.append(clash)
             print(f"   ✅ Clash: {clash['fixture']} → Edge: {clash['overall_structural_edge']}")
 
-    # Step 5 — save DNA profiles (v2-specific path)
+    # Step 5 — save DNA profiles (v2-specific path) — FULL GLOBAL LIBRARY,
+    # unchanged behaviour: every team ever profiled stays in this file.
     output_path = os.path.join(DATA_DIR, "team_dna_v2_profiles.json")
     print(f"\n[3/3] Saving DNA library to {output_path}...")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(dna_profiles, f, indent=4)
 
-    # Step 6 — save style clashes (separate file)
+    # Step 6 — save style clashes (separate file) — unchanged behaviour:
+    # this file always reflects only the most recently processed date.
     clashes_path = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
     print(f"[3/3] Saving style clashes to {clashes_path}...")
     with open(clashes_path, "w", encoding="utf-8") as f:
         json.dump(fixture_clashes, f, indent=4)
 
-    # Step 7 — save v1 compatibility copy (Feeds older engines automatically, 0 API calls)
+    # Step 7 — save v1 compatibility copy (Feeds older engines automatically,
+    # 0 API calls) — unchanged behaviour, full global library.
     v1_path = os.path.join(DATA_DIR, "team_dna_profiles.json")
     with open(v1_path, "w", encoding="utf-8") as f:
         json.dump(dna_profiles, f, indent=4)
