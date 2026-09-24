@@ -104,6 +104,8 @@ export interface UseApiResult<T> {
   isRefetching: boolean;
   /** True when the current `data` came from `fallback`, not the live API. */
   isMock: boolean;
+  /** True when the last refresh failed but the previous real payload is retained. */
+  stale: boolean;
   /** Re-runs the fetcher against the current deps without waiting for them to change. */
   refetch: () => void;
 }
@@ -169,6 +171,10 @@ export function useApi<T>(
   );
   const [error, setError] = useState<string | null>(null);
   const [isMock, setIsMock] = useState(initialCached ? false : hasSeed);
+  const [stale, setStale] = useState(false);
+  const dataRef = useRef<T | null>(seeded ?? null);
+  const requestKey = cacheKey ?? JSON.stringify(deps);
+  const requestKeyRef = useRef(requestKey);
   const hasLoadedOnce = useRef(hasSeed || initialCached != null);
   const [refetchTick, setRefetchTick] = useState(0);
   const fallbackRef = useRef(fallback);
@@ -210,7 +216,10 @@ export function useApi<T>(
       const hit = getCached<T>(cacheKey);
       if (hit !== null) {
         setData(hit);
+        dataRef.current = hit;
+        requestKeyRef.current = cacheKey ?? JSON.stringify(deps);
         setIsMock(false);
+        setStale(false);
         setLoading(false);
         setIsRefetching(false);
         setError(null);
@@ -222,9 +231,20 @@ export function useApi<T>(
     }
 
     // ── Cache miss / no key → normal fetch ───────────────────
-    const keepVisible =
-      hasLoadedOnce.current ||
-      resolveFallback(fallbackRef.current) !== undefined;
+    const currentRequestKey = cacheKey ?? JSON.stringify(deps);
+    const sameRequest = requestKeyRef.current === currentRequestKey;
+    if (!sameRequest) {
+      requestKeyRef.current = currentRequestKey;
+      dataRef.current = null;
+      hasLoadedOnce.current = false;
+      setData(null);
+      setStale(false);
+      setIsMock(false);
+    }
+
+    // Keep a real payload visible during refresh failures. A transient timeout
+    // must not make a previously working fixture feed look offline.
+    const keepVisible = sameRequest && hasLoadedOnce.current && dataRef.current !== null;
     setLoading(!keepVisible);
     setIsRefetching(keepVisible);
     setError(null);
@@ -240,9 +260,16 @@ export function useApi<T>(
           setIsMock(true);
           setError(null);
         } else {
-          // C. API/network/timeout/5xx → API FAILURE (never silent demo).
-          setData(null);
-          setIsMock(false);
+          // Keep the last successful real payload visible during a transient
+          // failure. An explicit empty response still replaces it honestly.
+          if (dataRef.current !== null) {
+            setStale(true);
+            setIsMock(false);
+          } else {
+            dataRef.current = null;
+            setData(null);
+            setStale(false);
+          }
           setError(message);
         }
         setLoading(false);
@@ -269,7 +296,16 @@ export function useApi<T>(
           if (empty && demoActive && fb !== undefined) {
             // D. Demo explicitly enabled → DEMO DATA (clearly flagged).
             setData(fb);
+            dataRef.current = fb;
             setIsMock(true);
+            setStale(false);
+            setError(null);
+          } else if (empty && dataRef.current !== null) {
+            // A refresh can briefly observe an empty cache while the pipeline
+            // is being written. Keep the last real snapshot visible instead of
+            // flashing the whole dashboard offline.
+            setStale(true);
+            setIsMock(false);
             setError(null);
           } else {
             // A/B. Real non-empty AND real empty are both served exactly
@@ -277,7 +313,9 @@ export function useApi<T>(
             // result (status=ok, row_count=0) must never become fake picks.
             if (cacheKey) setCached(cacheKey, payload);
             setData(payload);
+            dataRef.current = payload;
             setIsMock(false);
+            setStale(false);
             setError(null);
           }
           setLoading(false);
@@ -323,5 +361,5 @@ export function useApi<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, refetchTick, cacheKey]);
 
-  return { data, loading, error, isRefetching, isMock, refetch };
+  return { data, loading, error, isRefetching, isMock, stale, refetch };
 }
