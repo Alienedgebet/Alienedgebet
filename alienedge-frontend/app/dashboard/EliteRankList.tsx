@@ -100,39 +100,33 @@ export function EliteRankList({
       header: "Match & Market",
       className: "min-w-[150px]",
       render: (it) => (
-        <div className="flex flex-col gap-0.5 py-0.5">
-          <div className="flex flex-wrap items-center gap-1">
-            <Link
-              href={it.href}
-              prefetch
-              className="text-xs font-bold leading-tight text-text-primary transition-colors hover:text-cyan-400"
-            >
-              {it.fixture}
-            </Link>
-            {it.isMock && (
-              <Badge
-                variant="outline"
-                className="h-3.5 shrink-0 border-accent-amber/40 bg-accent-amber/10 px-1 text-[0.55rem] font-bold text-accent-amber"
-              >
-                Demo
-              </Badge>
-            )}
-            {it.risk && isRiskFixture(it.risk) && (
-              <FixtureRiskTag
-                row={it.risk}
-                label="Open fixture risk briefing"
-                showLabel={false}
-                className="shrink-0"
-              />
-            )}
-          </div>
+        <div className="flex min-w-[240px] items-center gap-1.5 whitespace-nowrap py-0.5">
+          {it.risk && isRiskFixture(it.risk) && (
+            <FixtureRiskTag
+              row={it.risk}
+              label={it.fixture}
+              showLabel={false}
+              className="shrink-0"
+            />
+          )}
           <Link
             href={it.href}
             prefetch
-            className="text-[10.5px] font-semibold text-cyan-400 hover:text-cyan-300"
+            className="min-w-0 max-w-[190px] truncate text-xs font-bold leading-tight text-text-primary transition-colors hover:text-cyan-400"
           >
-            #{it.sourceRank} · {it.market}
+            {it.fixture}
           </Link>
+          <span className="max-w-[135px] truncate text-[10.5px] font-semibold text-cyan-400">
+            · {it.market}
+          </span>
+          {it.isMock && (
+            <Badge
+              variant="outline"
+              className="h-3.5 shrink-0 border-accent-amber/40 bg-accent-amber/10 px-1 text-[0.55rem] font-bold text-accent-amber"
+            >
+              Demo
+            </Badge>
+          )}
         </div>
       ),
     },
