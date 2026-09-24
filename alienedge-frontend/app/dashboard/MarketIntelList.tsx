@@ -126,7 +126,7 @@ export function MarketIntelList({
               {top && isRiskFixture(top) && (
                 <FixtureRiskTag
                   row={top}
-                  label="Open fixture risk briefing"
+                  label={top.fixture}
                   showLabel={false}
                   className="shrink-0"
                 />
