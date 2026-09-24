@@ -1,7 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+
+const UPSTREAM_TIMEOUT_MS = 6_000;
 
 /**
  * Same-origin browser-to-backend proxy. BACKEND_API_URL is server-only and is
@@ -28,22 +30,62 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path?: s
 
   const method = request.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
-  const upstream = await fetch(target, {
-    method,
-    headers,
-    body,
-    cache: "no-store",
-    redirect: "manual",
-  });
+  const controller = new AbortController();
+  const abortFromRequest = () => controller.abort();
+  if (request.signal.aborted) controller.abort();
+  else request.signal.addEventListener("abort", abortFromRequest, { once: true });
+  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  let upstream: Response;
+  let responseBody: ArrayBuffer | undefined;
+  try {
+    upstream = await fetch(target, {
+      method,
+      headers,
+      body,
+      cache: "no-store",
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    // Auth responses are tiny; buffer them so the deadline covers the complete
+    // response and a stalled body cannot leave the client waiting.
+    if (path[0] === "auth") responseBody = await upstream.arrayBuffer();
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === "AbortError";
+    return new Response(
+      JSON.stringify({
+        detail: timedOut
+          ? "The service took too long to respond. Please try again."
+          : "The service is temporarily unavailable. Please try again.",
+      }),
+      {
+        status: timedOut ? 504 : 502,
+        headers: { "content-type": "application/json", "cache-control": "no-store" },
+      },
+    );
+  } finally {
+    clearTimeout(timeout);
+    request.signal.removeEventListener("abort", abortFromRequest);
+  }
 
   const responseHeaders = new Headers();
   for (const name of ["content-type", "cache-control", "etag", "vary"]) {
     const value = upstream.headers.get(name);
     if (value) responseHeaders.set(name, value);
   }
-  const setCookie = upstream.headers.get("set-cookie");
-  if (setCookie) responseHeaders.set("set-cookie", setCookie);
-  return new Response(upstream.body, {
+
+  // Node/undici exposes Set-Cookie as separate values. Preserve each value so
+  // a session cookie is not lost or malformed when the response crosses the
+  // Vercel proxy boundary. Keep the single-header fallback for older runtimes.
+  const upstreamHeaders = upstream.headers as Headers & { getSetCookie?: () => string[] };
+  const setCookies = upstreamHeaders.getSetCookie?.() ?? [];
+  if (setCookies.length > 0) {
+    for (const cookie of setCookies) responseHeaders.append("set-cookie", cookie);
+  } else {
+    const setCookie = upstream.headers.get("set-cookie");
+    if (setCookie) responseHeaders.set("set-cookie", setCookie);
+  }
+
+  return new Response(responseBody ?? upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: responseHeaders,
