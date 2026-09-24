@@ -9,6 +9,7 @@ interface EngineRow {
   config: MarketConfig;
   data: MarketPick[];
   isMock: boolean;
+  stale?: boolean;
 }
 
 interface EngineStatusListProps {
@@ -92,7 +93,7 @@ export function EngineStatusList({ rows }: EngineStatusListProps) {
         </span>
       </div>
       <div className="flex-1 divide-y divide-border/60 overflow-y-auto">
-        {rows.map(({ config, data, isMock }) => {
+        {rows.map(({ config, data, isMock, stale }) => {
           const perf = computePerformance(data);
           const style = TIER_STYLES[perf.tier];
           return (
@@ -108,6 +109,7 @@ export function EngineStatusList({ rows }: EngineStatusListProps) {
                   {data.length} pick{data.length === 1 ? "" : "s"}
                   {perf.eliteCount > 0 ? ` · ${perf.eliteCount} elite` : ""}
                   {isMock ? " · Demo" : ""}
+                  {stale ? " · Updating" : ""}
                 </span>
               </span>
               <span className="flex shrink-0 items-center gap-1.5">

@@ -163,6 +163,7 @@ function DashboardOverview() {
     config,
     loading: rawResults[i].loading,
     isRefetching: rawResults[i].isRefetching,
+    stale: rawResults[i].stale,
     ...withFallback(config.key, rawResults[i]),
   }));
 
@@ -227,7 +228,9 @@ function DashboardOverview() {
   const peakConfidence = allElite.length
     ? Math.max(...allElite.map((item) => item.value))
     : 0;
-  const enginesOnline = rawResults.filter((r) => r.error === null).length;
+  const enginesOnline = rawResults.filter(
+    (r) => r.error === null || (r.data?.length ?? 0) > 0
+  ).length;
 
   return (
     <div className="relative flex w-full flex-col gap-4 overflow-x-hidden p-4 sm:p-6">
