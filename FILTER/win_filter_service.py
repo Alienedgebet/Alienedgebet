@@ -141,8 +141,32 @@ def run_win_filter_service(target_date, mode="public", persist=True, **kwargs):
 
     print(f"\n[INFO] Running Win Filter Engine ({mode.upper()} MODE) using source: {os.path.basename(input_csv)}...")
     
-    # Load data from the Poisson Engine
-    df = pd.read_csv(input_csv)
+    # Load data from the Poisson Engine.  A headerless file (the old empty
+    # forecast artifact) is an invalid input, not a zero-pick result.
+    try:
+        df = pd.read_csv(input_csv)
+    except pd.errors.EmptyDataError as exc:
+        raise RuntimeError(
+            f"Win Filter source {os.path.basename(input_csv)} has no CSV header/columns"
+        ) from exc
+    if df.empty:
+        print(f"[INFO] Win Filter source contains no rows: {os.path.basename(input_csv)}")
+        return []
+
+    required_columns = {
+        "fixture_id", "fixture", "side", "team_name", "win_odds",
+        "last_5_wins_overall", "last_5_wins_at_venue",
+        "opp_last_5_conceded_raw", "h2h_wins_last_5", "parity_score",
+    }
+    missing_columns = sorted(required_columns - set(df.columns))
+    if missing_columns:
+        raise RuntimeError(
+            f"Win Filter source {os.path.basename(input_csv)} is missing columns: "
+            f"{', '.join(missing_columns)}"
+        )
+    valid_odds = int(df["win_odds"].notna().sum())
+    print(f"[INFO] Win Filter source rows={len(df)}, valid_odds={valid_odds}, "
+          f"missing_odds={len(df) - valid_odds}")
 
     # ADDITIVE (2026-09-23): production_raw_engine_{date}.csv carries no Poisson
     # probability column, so every Weekly Win row displayed "0%" and the API's

@@ -54,24 +54,63 @@ def assign_poisson_probs(home_lamb, away_lamb):
             
     return round(prob_h * 100, 2), round(prob_d * 100, 2), round(prob_a * 100, 2)
 
+class ForecastDataError(RuntimeError):
+    """Raised when the provider response cannot produce a valid forecast."""
+
+
+def _response_json(response, path):
+    """Return a JSON object or raise a useful provider error.
+
+    api_cache deliberately returns the original response for non-200 statuses.
+    The old forecast loop assumed every response had ``.get()`` and hid the
+    resulting AttributeError with ``except Exception: pass``.  Normalize that
+    boundary here so one bad response is visible and cannot blank the artifact.
+    """
+    status = getattr(response, "status_code", 200)
+    if status != 200:
+        raise ForecastDataError(f"SportMonks GET {path} returned HTTP {status}")
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise ForecastDataError(f"SportMonks GET {path} returned invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ForecastDataError(
+            f"SportMonks GET {path} returned {type(payload).__name__}, expected object"
+        )
+    return payload
+
+
 # -------------------------
 # HTTP & UNLIMITED PAGINATION (STRICT)
 # -------------------------
 def GET(path, params=None):
-    if params is None: params = {}
+    if params is None:
+        params = {}
     params.setdefault("api_token", API_TOKEN)
     url = f"{BASE_URL}{path}"
-    
+    last_error = None
+
     for attempt in range(MAX_RETRIES):
         try:
-            r = requests.get(url, params=params, timeout=30)
-            if r.status_code == 200: return r.json()
-            if r.status_code == 429:
-                time.sleep(2 ** attempt)
+            response = requests.get(url, params=params, timeout=30)
+            if getattr(response, "status_code", None) == 200:
+                return _response_json(response, path)
+            if getattr(response, "status_code", None) == 429:
+                last_error = ForecastDataError(f"SportMonks GET {path} returned HTTP 429")
+                if attempt + 1 < MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+            _response_json(response, path)
+        except ForecastDataError:
+            raise
+        except Exception as exc:
+            last_error = ForecastDataError(f"SportMonks GET {path} failed: {exc}")
+            if attempt + 1 < MAX_RETRIES:
+                time.sleep(1)
                 continue
-        except:
-            time.sleep(1)
-    return {"data":[]}
+            raise last_error from exc
+
+    raise last_error or ForecastDataError(f"SportMonks GET {path} failed")
 
 def sleep_short():
     time.sleep(REQUEST_DELAY)
@@ -166,8 +205,7 @@ def run_win_forecast_engine(target_date=None):
     # 1. Fetch All Daily Matches
     fixtures = fetch_all_fixtures_for_date(target_date)
     if not fixtures:
-        print("[ERROR] No fixtures found.")
-        return
+        raise ForecastDataError(f"No fixtures found for {target_date}")
 
     # 2. Collect History
     team_ids = set()
@@ -177,18 +215,26 @@ def run_win_forecast_engine(target_date=None):
     
     team_histories = {}
     print(f"[INFO] Extracting history for {len(team_ids)} teams...")
+    # The scheduled run targets tomorrow, so history must end relative to
+    # target_date rather than the wall clock date on which the process runs.
+    target_dt = datetime.strptime(target_date, "%Y-%m-%d")
+    history_start = (target_dt - timedelta(days=365)).strftime("%Y-%m-%d")
+    history_end = (target_dt - timedelta(days=1)).strftime("%Y-%m-%d")
     for tid in team_ids:
         # Fetch 40 games to find enough Home/Away specific matches
-        h_data = GET(f"/fixtures/between/{(datetime.now()-timedelta(days=365)).date()}/{(datetime.now()-timedelta(days=1)).date()}/{tid}", 
+        h_data = GET(f"/fixtures/between/{history_start}/{history_end}/{tid}",
                      params={"include":"scores;participants", "filters":"fixtureStates:5", "order":"desc", "per_page": 40})
         team_histories[tid] = h_data.get("data",[])
         sleep_short()
 
     raw_output = []
+    fixture_errors = []
+    valid_odds_rows = 0
 
     # 3. Analysis Layer
     print(f"[INFO] Running Analysis on {len(fixtures)} fixtures...")
     for fx in fixtures:
+        fid = fx.get("id", "<unknown>") if isinstance(fx, dict) else "<unknown>"
         try:
             fid = fx['id']
             parts = fx.get("participants",[])
@@ -199,6 +245,8 @@ def run_win_forecast_engine(target_date=None):
             hid, aid = int(h_p['id']), int(a_p['id'])
 
             odds = sniper_fetch_odds(fid)
+            if odds.get("home") is not None or odds.get("away") is not None:
+                valid_odds_rows += 1
             
             # RECTIFICATION 1: Strict Last 5 H2H
             # FIX: Added order:desc and fixtureStates:5 to pull actual finished matches accurately
@@ -248,7 +296,10 @@ def run_win_forecast_engine(target_date=None):
                 return {
                     "wins": ov_wins, "gs": ov_gs, "gc": ov_gc, "losses": ov_loss,
                     "cs_fail": ov_cs_fail, "even": ov_even, "no_draw_3": no_draw_3,
-                    "v_wins": v_wins, "v_parity": (v_gs + v_gc), "ov_parity": (ov_gs + ov_gc),
+                    # Keep the venue goal fields in this metric contract: the
+                    # emitted forecast rows consume both values below.
+                    "v_wins": v_wins, "v_gs": v_gs, "v_gc": v_gc,
+                    "v_parity": (v_gs + v_gc), "ov_parity": (ov_gs + ov_gc),
                     "lambda": (ov_gs + v_gs) / 10 if (ov_gs + v_gs) > 0 else 0.5
                 }
 
@@ -300,23 +351,51 @@ def run_win_forecast_engine(target_date=None):
                     "parity_even_count": t_m["even"]
                 })
 
-        except Exception: pass
+        except Exception as exc:
+            fixture_errors.append((fid, exc))
+            if len(fixture_errors) <= 5:
+                print(f"[ERROR] Win Forecast fixture {fid} skipped: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+
+    if fixture_errors:
+        print(f"[WARN] Win Forecast skipped {len(fixture_errors)} fixture(s) due to errors.",
+              flush=True)
 
     # 4. RANKING SYSTEM (Highest Poisson Win Prob to Lowest)
-    df = pd.DataFrame(raw_output)
-    if not df.empty:
-        df = df.sort_values(by="poisson_win_prob_num", ascending=False).reset_index(drop=True)
-        # Drop the numeric helper column
-        df = df.drop(columns=["poisson_win_prob_num"])
+    if not raw_output:
+        details = "; ".join(
+            f"fixture {fid}: {type(exc).__name__}: {exc}"
+            for fid, exc in fixture_errors[:3]
+        ) or "no fixture-level error was reported"
+        raise ForecastDataError(
+            f"Win Forecast produced 0 rows for {target_date} "
+            f"from {len(fixtures)} fixture(s): {details}"
+        )
 
-    # Final Save into the correct folder dynamically!
+    df = pd.DataFrame(raw_output)
+    df = df.sort_values(by="poisson_win_prob_num", ascending=False).reset_index(drop=True)
+    # Drop the numeric helper column
+    df = df.drop(columns=["poisson_win_prob_num"])
+
+    # Never write a headerless/blank artifact.  A previous version wrote an
+    # empty DataFrame here, which made every downstream reader fail with
+    # "No columns to parse from file" and gave the second-chance pass no data
+    # to recover.
     output_path = os.path.join(OUTPUT_DIR, f"ranked_win_forecast_{target_date}.csv")
-    df.to_csv(output_path, index=False)
+    tmp_path = output_path + ".tmp"
+    try:
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, output_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
     pd.set_option('display.max_columns', None)
     pd.set_option('display.width', 1000)
+    print(f"[INFO] Win Forecast valid odds fixtures: {valid_odds_rows}/{len(fixtures)}")
     print(f"\n[Done] Base Win Forecast saved to {output_path}")
     print(df.to_string(index=False))
+    return df.to_dict(orient="records")
 
 if __name__ == "__main__":
     run_win_forecast_engine()

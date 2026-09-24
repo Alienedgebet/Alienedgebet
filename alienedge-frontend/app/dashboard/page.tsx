@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi, DEMO_MODE_ENABLED, type UseApiResult } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
-import { getTierClass, marketCacheKey, type DnaV2MarketKey } from "@/lib/api";
+import { marketCacheKey, type DnaV2MarketKey } from "@/lib/api";
 import { isDashboardMarketTab } from "@/lib/dashboard-tabs";
 import { RadialGauge } from "@/components/predictions/RadialGauge";
 import { EngineFeedBar } from "./EngineFeedBar";
@@ -24,6 +24,11 @@ import {
   FHVI_MARKET,
   SHVI_MARKET,
   UNDERDOG_MARKET,
+  UNDERDOG_2_SOURCE,
+  OVER15_INTELLIGENCE_SOURCE,
+  OVER25_JUDGES_SOURCE,
+  ELITE_PICK_SOURCES,
+  selectTopSourceRows,
   type MarketPick,
 } from "./market-config";
 import { MOCK_PICKS } from "./mock-picks";
@@ -50,15 +55,10 @@ function withFallback(
   return { data: [], isMock: false };
 }
 
-const DNA_SUPPORTED_MARKET_KEYS = new Set<string>([
-  "win",
-  "gg",
-  "over25",
-  "over15",
-  "unders",
-  "draw",
-  "corners",
-]);
+const ELITE_DNA_MARKET_KEYS: Partial<Record<string, DnaV2MarketKey>> = {
+  corner_intelligence: "corners",
+  over15_intelligence: "over15",
+};
 
 function DashboardOverview() {
   const { date } = useSelectedDate();
@@ -126,6 +126,25 @@ function DashboardOverview() {
     refreshMs: REFRESH_MS,
   });
 
+  // Elite Picks has its own source adapters. These do not replace the
+  // dashboard market grid above; they only add the requested ranked feeds.
+  const underdog2 = useApi(() => UNDERDOG_2_SOURCE.fetcher(date), [date], {
+    cacheKey: marketCacheKey(UNDERDOG_2_SOURCE.key, date),
+    refreshMs: REFRESH_MS,
+  });
+  const over15Intelligence = useApi(
+    () => OVER15_INTELLIGENCE_SOURCE.fetcher(date),
+    [date],
+    {
+      cacheKey: marketCacheKey(OVER15_INTELLIGENCE_SOURCE.key, date),
+      refreshMs: REFRESH_MS,
+    },
+  );
+  const over25Judges = useApi(() => OVER25_JUDGES_SOURCE.fetcher(date), [date], {
+    cacheKey: marketCacheKey(OVER25_JUDGES_SOURCE.key, date),
+    refreshMs: REFRESH_MS,
+  });
+
   const rawResults = [
     win,
     gg,
@@ -152,52 +171,62 @@ function DashboardOverview() {
     0
   );
 
+  // The grid above still shows all 11 dashboard markets. Elite Picks uses
+  // only the requested source list, with an independent top-five cap per source.
+  const eliteResults = useMemo(
+    () => [
+      underdog2,
+      shvi,
+      fhvi,
+      sot,
+      corners,
+      over15Intelligence,
+      fhvi, // Over 2.5 Intelligence 2 intentionally uses the same FHVI feed.
+      over25Judges,
+    ],
+    [
+      underdog2,
+      shvi,
+      fhvi,
+      sot,
+      corners,
+      over15Intelligence,
+      over25Judges,
+    ],
+  );
+
   const allElite = useMemo(() => {
     const items: EliteRankItem[] = [];
-    DASHBOARD_MARKETS.forEach((config, i) => {
-      const { data, isMock } = withFallback(config.key, rawResults[i]);
-      for (const pick of data) {
-        if (!pick.tier) continue;
-        const cls = getTierClass(pick.tier);
-        if (cls !== "tier-diamond" && cls !== "tier-fire") continue;
-        const value = pick.prob ?? pick.score;
-        if (value == null) continue;
+    ELITE_PICK_SOURCES.forEach((source, sourceIndex) => {
+      const { data, isMock } = withFallback(source.key, eliteResults[sourceIndex]);
+      for (const selected of selectTopSourceRows(source, data)) {
+        const { pick, value, sourceRank } = selected;
         items.push({
-          key: `${config.key}-${pick.fixture}`,
+          key: `${source.key}-${sourceRank}-${pick.fixture}`,
           rank: 0,
+          sourceRank,
           fixture: pick.fixture,
-          market: config.label,
-          href: config.href,
-          tier: pick.tier,
+          market: source.label,
+          href: source.href,
+          tier: pick.tier || source.label,
           value,
-          suffix: pick.prob != null ? "%" : "/100",
+          suffix: source.suffix,
           isMock,
           odds: pick.odds,
           verification: pick.verification,
-          dnaMarketKey: DNA_SUPPORTED_MARKET_KEYS.has(config.key)
-            ? (config.key as DnaV2MarketKey)
-            : undefined,
+          dnaMarketKey: ELITE_DNA_MARKET_KEYS[source.key],
         });
       }
     });
-    items.sort((a, b) => b.value - a.value);
+    // Preserve source order and each source's own rank. Values from different
+    // engines have different units, so a global mixed-value sort is misleading.
     items.forEach((item, i) => (item.rank = i + 1));
     return items;
-  }, [
-    win.data, win.loading, win.isMock,
-    gg.data, gg.loading, gg.isMock,
-    over25.data, over25.loading, over25.isMock,
-    over15.data, over15.loading, over15.isMock,
-    draw.data, draw.loading, draw.isMock,
-    unders.data, unders.loading, unders.isMock,
-    corners.data, corners.loading, corners.isMock,
-    sot.data, sot.loading, sot.isMock,
-    fhvi.data, fhvi.loading, fhvi.isMock,
-    shvi.data, shvi.loading, shvi.isMock,
-    underdog.data, underdog.loading, underdog.isMock,
-  ]);
+  }, [eliteResults]);
 
-  const peakConfidence = allElite[0]?.value ?? 0;
+  const peakConfidence = allElite.length
+    ? Math.max(...allElite.map((item) => item.value))
+    : 0;
   const enginesOnline = rawResults.filter((r) => r.error === null).length;
 
   return (

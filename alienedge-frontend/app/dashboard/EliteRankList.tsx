@@ -19,6 +19,7 @@ import type { DnaV2FixtureFactors, DnaV2MarketKey } from "@/lib/api";
 export interface EliteRankItem {
   key: string;
   rank: number;
+  sourceRank: number;
   fixture: string;
   market: string;
   href: string;
@@ -115,7 +116,7 @@ export function EliteRankList({
             )}
           </div>
           <span className="text-[10.5px] font-semibold text-cyan-400">
-            {it.market}
+            #{it.sourceRank} · {it.market}
           </span>
         </Link>
       ),
@@ -167,7 +168,7 @@ export function EliteRankList({
           </span>
         </div>
         <p className="text-[11px] text-text-dim">
-          Highest ranked AI probability &amp; market intelligence
+          Up to five source-ranked picks per configured intelligence engine
         </p>
       </div>
 
