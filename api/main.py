@@ -792,17 +792,31 @@ def trigger_pipeline(date: str, x_admin_token: Optional[str] = Header(default=No
     ADMIN_TOKEN — this is an ops tool, not something the frontend calls.
     """
     require_admin(x_admin_token)
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD") from exc
+
     python_bin = sys.executable
     log_path = os.path.join(OUTPUT_DIR, f"pipeline_run_{date}.log")
+    child_env = os.environ.copy()
+    child_env["PYTHONUNBUFFERED"] = "1"
     with open(log_path, "a", encoding="utf-8") as log_file:
-        subprocess.Popen(
-            [python_bin, os.path.join(ROOT, "main.py"), f"--date={date}"],
+        process = subprocess.Popen(
+            [python_bin, "-u", os.path.join(ROOT, "main.py"), f"--date={date}"],
             cwd=ROOT,
+            env=child_env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,  # detach fully — survives the API request finishing
         )
-    return {"started": True, "date": date, "log_file": log_path}
+    return {
+        "started": True,
+        "date": date,
+        "pid": process.pid,
+        "log_file": log_path,
+        "output": "detached; poll /api/status/{date} and inspect log_file",
+    }
 
 
 @app.post("/api/admin/cache/clear-status", tags=["Admin"])

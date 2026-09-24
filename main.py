@@ -218,6 +218,36 @@ def _recover_engine_output_from_disk(save_key, save_date=None, engine_name="", f
     return None
 
 
+def _record_engine_failure(engine_name, save_key, save_date, reason):
+    """Record failure without destroying a previously valid same-date snapshot."""
+    if save_key is None:
+        return None
+    _PIPELINE_FAILURES.add(save_key)
+    try:
+        status = store.load_status(save_key, save_date)
+        if (status.get("status") == "ok"
+                and int(status.get("row_count", 0) or 0) > 0):
+            existing, _ = store.load(save_key, save_date, default=None)
+            if existing is not None:
+                path = store.save(
+                    save_key, save_date, existing, status="degraded",
+                    error=reason, guard=bool(save_date),
+                )
+                print(f"   🛡️ Preserved existing snapshot and marked degraded -> {path}")
+                return None
+    except Exception as exc:
+        print(f"   ⚠️ Could not inspect existing {save_key} snapshot: {exc}")
+    path = store.save_failure(save_key, save_date, error=reason)
+    print(f"   ⚠️ recorded failure -> {path}")
+    return None
+
+
+def _mark_dependency_blocked(save_key, save_date, upstream_key, label):
+    """Mark a dependent engine as failed without overwriting good old data."""
+    reason = f"{label} blocked: upstream {upstream_key} is unavailable"
+    _record_engine_failure(label, save_key, save_date, reason)
+
+
 def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs):
     """
     Executes a mathematical engine safely. Checks both in-memory return values
@@ -250,10 +280,13 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
             if res is None:
                 # None-with-no-recovery is an explicit failure state, not "ok"
                 # with null data (store docstring: failures go through
-                # save_failure so /api/status can tell them apart).
-                path = store.save_failure(save_key, save_date,
-                                          error=f"{engine_name}: returned None (no disk fallback)")
-                print(f"   ⚠️ recorded failure -> {path}")
+                # save_failure so /api/status can tell them apart).  Preserve
+                # a valid same-date snapshot as degraded rather than replacing
+                # it with a new empty/failed result.
+                _record_engine_failure(
+                    engine_name, save_key, save_date,
+                    f"{engine_name}: returned None (no disk fallback)",
+                )
             else:
                 # ── 429-DEGRADED GUARD ────────────────────────────────────
                 # A critical engine returning a 0-row result while the shared
@@ -297,14 +330,18 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
                 print(f"   💾 rescued from disk -> {path}")
                 return recovered
 
-            # Check if cache file already exists with good data from a previous run
+            # Preserve a valid same-date snapshot as degraded, but still return
+            # None so dependency gates know this invocation did not succeed.
             existing_cache = f"/var/www/backend/output/cache/{save_key}__{save_date or 'latest'}.json"
             if os.path.exists(existing_cache) and os.path.getsize(existing_cache) > 200:
-                print(f"   🛡️ Retained existing valid cache: {existing_cache}")
+                _record_engine_failure(
+                    engine_name, save_key, save_date,
+                    f"{engine_name}: {e}",
+                )
                 return None
 
             # Only record explicit failure if neither memory, disk, nor cache had data
-            store.save_failure(save_key, save_date, error=f"{engine_name}: {e}")
+            _record_engine_failure(engine_name, save_key, save_date, f"{engine_name}: {e}")
         return None
 
 # ==============================================================================
@@ -343,6 +380,10 @@ _GATE_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 _DEGRADED_RETRY_DELAYS = (180.0, 300.0)  # 3 min, then 5 min
 _RETRY_BUDGET_S = 2700.0                 # total retry wait budget per run (45 min)
 _retry_budget_used = 0.0
+_PIPELINE_FAILURES = set()
+_REQUIRED_WIN_PIPELINE_KEYS = {
+    "win_forecast", "win_psychology", "win_apex", "win_raw",
+}
 
 
 def _429_gate_remaining() -> float:
@@ -606,7 +647,10 @@ def alienedge_master_system(cli_date_override: str = None):
     _safe_exec("Underdog Master Engine", run_underdog_master_engine, target_date, save_key="underdog_audit", save_date=d)
     _safe_exec("Total Visibility Merger", run_total_visibility_merger, target_date, save_key="calibration", save_date=d)
     _safe_exec("Apex Underdog Aggregator", run_apex_underdog_aggregator, target_date, save_key="underdog_apex", save_date=d)
-    _safe_exec("Win Forecast Base Engine", run_win_forecast_engine, target_date, save_key="win_forecast", save_date=d)
+    win_forecast_result = _safe_exec(
+        "Win Forecast Base Engine", run_win_forecast_engine, target_date,
+        save_key="win_forecast", save_date=d,
+    )
     _safe_exec("SH-GG Winner Engine", run_sh_gg_winner_engine, target_date, save_key="sh_gg_winner", save_date=d)
 
     flush_system_ram()
@@ -675,18 +719,26 @@ def alienedge_master_system(cli_date_override: str = None):
     # 10. Wins, U2S & SH Master Vortex
     print("\n> 🏆 Processing Win, U2S, & SH Elite Aggregation...")
     _safe_exec("U2S Psychology Engine", run_u2s_psychology_engine, target_date, save_key="u2s_psychology", save_date=d)
-    _safe_exec("Win Psychology Engine", run_win_psychology_engine, target_date, save_key="win_psychology", save_date=d)
-    # Win Apex DOES take a date argument (run_win_apex_aggregator(target_date)
-    # uses it for every input CSV path — ranked_win_forecast_{date}.csv etc.).
-    # DATE FIX (2026-09-23): it previously got NO date, so on the nightly run
-    # (--date=tomorrow) it read TODAY's CSVs while its output was saved under
-    # TOMORROW's key — the Win Intelligence table then showed yesterday's
-    # fixtures. It is saved under save_date=None ('__latest') AND separately
-    # snapshotted under this date so /api/status/{date} can show when it
-    # last actually ran relative to the date being viewed.
-    win_apex_result = _safe_exec("Win Apex Aggregator", run_win_apex_aggregator, target_date, save_key="win_apex", save_date=None)
-    if win_apex_result is not None:
-        store.save("win_apex", d, win_apex_result, guard=True)
+
+    # Win Psychology and Win Apex consume the dated forecast CSV.  Do not run
+    # them against a missing/failed prerequisite; that used to create secondary
+    # "No columns to parse" failures and misleading green empty snapshots.
+    if win_forecast_result:
+        _safe_exec("Win Psychology Engine", run_win_psychology_engine, target_date,
+                   save_key="win_psychology", save_date=d)
+        win_apex_result = _safe_exec(
+            "Win Apex Aggregator", run_win_apex_aggregator, target_date,
+            save_key="win_apex", save_date=None,
+        )
+        if win_apex_result is not None:
+            store.save("win_apex", d, win_apex_result, guard=True)
+        else:
+            _mark_dependency_blocked("win_apex", d, "win_forecast", "Win Apex Aggregator")
+    else:
+        print("⛔ Win Psychology/Apex skipped: Win Forecast produced no usable rows.")
+        _mark_dependency_blocked("win_psychology", d, "win_forecast", "Win Psychology Engine")
+        _mark_dependency_blocked("win_apex", d, "win_forecast", "Win Apex Aggregator")
+
     _safe_exec("SH Master Vortex", run_sh_master_vortex, target_date, save_key="sh_master", save_date=d)
     _safe_exec("SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, target_date, save_key="sh_8goal", save_date=d)
     _safe_exec("Win Raw Probability Engine", run_win_raw_engine, target_date, save_key="win_raw", save_date=d)
@@ -710,10 +762,18 @@ def alienedge_master_system(cli_date_override: str = None):
                     target_date, mode="public", risk_level=risk,
                     save_key=f"filter_over25__{risk}", save_date=d)
 
-    for risk in ("safe", "balanced", "aggressive"):
-        _safe_exec(f"Filter Win Service ({risk})", run_win_filter_service,
-                    target_date, mode="public", risk_level=risk,
-                    save_key=f"filter_win__{risk}", save_date=d)
+    if win_forecast_result:
+        for risk in ("safe", "balanced", "aggressive"):
+            _safe_exec(f"Filter Win Service ({risk})", run_win_filter_service,
+                       target_date, mode="public", risk_level=risk,
+                       save_key=f"filter_win__{risk}", save_date=d)
+    else:
+        print("⛔ Win filters skipped: Win Forecast is unavailable.")
+        for risk in ("safe", "balanced", "aggressive"):
+            _mark_dependency_blocked(
+                f"filter_win__{risk}", d, "win_forecast",
+                f"Filter Win Service ({risk})",
+            )
     flush_system_ram()
 
     # ── PHASE 12: WEEKLY ENGINE FAMILY (opt-in) ──────────────────────────────
@@ -751,6 +811,13 @@ def _needs_second_chance(key: str, date_str: str) -> bool:
     return False
 
 
+def _win_forecast_healthy(date_str: str) -> bool:
+    """A dated forecast must be a real non-empty ok snapshot for dependents."""
+    status = store.load_status("win_forecast", date_str)
+    return (status.get("status") == "ok"
+            and int(status.get("row_count", 0) or 0) > 0)
+
+
 def alienedge_second_chance(target_date: str) -> int:
     """06:00 safety net: re-run ONLY the critical keys that are missing,
     failed, degraded, or empty for the target date. Full runs stay on the
@@ -779,9 +846,40 @@ def alienedge_second_chance(target_date: str) -> int:
 
     print(f"🔎 {len(stale)} key(s) need a re-run: "
           + ", ".join(k for k, *_ in stale))
+    win_dependents = {
+        "win_psychology", "win_apex",
+        "filter_win__safe", "filter_win__balanced", "filter_win__aggressive",
+    }
+    checked = set()
     for key, label, func, extra in stale:
-        _safe_exec(label, func, target_date, save_key=key, save_date=target_date, **extra)
+        checked.add(key)
+        if key in win_dependents and not _win_forecast_healthy(target_date):
+            print(f"⛔ Skipping {label}: Win Forecast is still unavailable.")
+            _mark_dependency_blocked(key, target_date, "win_forecast", label)
+            continue
+        _safe_exec(label, func, target_date, save_key=key,
+                   save_date=target_date, **extra)
         flush_system_ram()
+
+    # A failed prerequisite invalidates dependent snapshots even when those
+    # snapshots were previously healthy and therefore were not in `stale`.
+    if not _win_forecast_healthy(target_date):
+        for key in win_dependents:
+            if key not in checked:
+                print(f"⛔ Marking {key} blocked: Win Forecast is unavailable.")
+                _mark_dependency_blocked(
+                    key, target_date, "win_forecast", key,
+                )
+                checked.add(key)
+
+    failed = []
+    for key in checked:
+        status = store.load_status(key, target_date)
+        if status.get("status") in {"failed", "degraded", "unreadable", "missing"}:
+            failed.append(f"{key}({status.get('status')})")
+    if failed:
+        print(f"⚠️ SECOND-CHANCE INCOMPLETE: {', '.join(failed)}")
+        return 2
 
     print("\n✅ SECOND-CHANCE PASS COMPLETE")
     return 0
@@ -1037,4 +1135,9 @@ if __name__ == "__main__":
             print(f"   • {_r['date']}/{_r['key']}: existing_fixtures="
                   f"{_r['existing_fixtures']} new_fixtures={_r['new_fixtures']} "
                   f"({_r['reason']})")
+        sys.exit(2)
+
+    win_failures = sorted(_PIPELINE_FAILURES & _REQUIRED_WIN_PIPELINE_KEYS)
+    if win_failures:
+        print(f"\n⚠️ [WIN PIPELINE] required stages failed: {', '.join(win_failures)}")
         sys.exit(2)

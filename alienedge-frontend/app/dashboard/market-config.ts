@@ -86,6 +86,39 @@ export interface MarketConfig {
   fetcher: (date: string) => Promise<AxiosResponse<MarketPick[]>>;
 }
 
+export interface EliteSourceConfig extends MarketConfig {
+  /** Source-specific ranking value. Never compare this value across markets. */
+  rankValue: (pick: MarketPick) => number | null;
+  /** Unit label displayed beside the value in the Elite table. */
+  suffix: string;
+}
+
+export interface RankedElitePick {
+  pick: MarketPick;
+  value: number;
+  sourceRank: number;
+}
+
+/** Select at most five valid rows from one source using that source's metric. */
+export function selectTopSourceRows(
+  source: EliteSourceConfig,
+  rows: MarketPick[],
+): RankedElitePick[] {
+  return rows
+    .map((pick, index) => ({ pick, index, value: source.rankValue(pick) }))
+    .filter(
+      (row): row is { pick: MarketPick; index: number; value: number } =>
+        row.value != null && Number.isFinite(row.value),
+    )
+    .sort((a, b) => b.value - a.value || a.index - b.index)
+    .slice(0, 5)
+    .map((row, index) => ({
+      pick: row.pick,
+      value: row.value,
+      sourceRank: index + 1,
+    }));
+}
+
 function mapResponse<T>(
   promise: Promise<AxiosResponse<T>>,
   map: (data: T) => MarketPick[]
@@ -305,4 +338,126 @@ export const DASHBOARD_MARKETS: MarketConfig[] = [
   FHVI_MARKET,
   SHVI_MARKET,
   UNDERDOG_MARKET,
+];
+
+// ============================================================================
+// ELITE PICK SOURCES — separate from the dashboard market grid.
+// Each source is independently ranked and capped at five rows. Values from
+// different sources are deliberately not compared globally.
+// ============================================================================
+
+export const UNDERDOG_2_SOURCE: EliteSourceConfig = {
+  key: "underdog_2",
+  label: "Underdog 2",
+  href: "/underdog",
+  icon: Swords,
+  fetcher: (date) =>
+    mapResponse(underdogApi.getAudit(date), (res) =>
+      res.map((p) => ({
+        fixture: p.fixture,
+        tier: p.Audit_Verdict,
+        prob: parseProbability(p.Audit_Real_Prob),
+        verification: verifyOf(p),
+      }))
+    ),
+  rankValue: (pick) => pick.prob ?? null,
+  suffix: "%",
+};
+
+export const SHVI_1_SOURCE: EliteSourceConfig = {
+  key: "shvi_1",
+  label: "S H V 1 Intelligence",
+  href: "/shvi",
+  icon: TimerReset,
+  fetcher: SHVI_MARKET.fetcher,
+  rankValue: (pick) => pick.score ?? null,
+  suffix: "/13",
+};
+
+export const FHVI_STREAK_SOURCE: EliteSourceConfig = {
+  key: "fhvi_streak",
+  label: "FHVI Streak Miner",
+  href: "/fhvi",
+  icon: Hourglass,
+  fetcher: FHVI_MARKET.fetcher,
+  rankValue: (pick) => pick.score ?? null,
+  suffix: "/13",
+};
+
+export const SOT_6_5_PLUS_SOURCE: EliteSourceConfig = {
+  key: "sot_6_5_plus",
+  label: "Short On Target Over 6.5+",
+  href: "/sot",
+  icon: Crosshair,
+  fetcher: SOT_MARKET.fetcher,
+  rankValue: (pick) => pick.score ?? null,
+  suffix: " SOT",
+};
+
+export const CORNER_INTELLIGENCE_SOURCE: EliteSourceConfig = {
+  key: "corner_intelligence",
+  label: "Corner Intelligence",
+  href: "/corners",
+  icon: CornerUpRight,
+  fetcher: CORNERS_MARKET.fetcher,
+  rankValue: (pick) => pick.score ?? null,
+  suffix: "/100",
+};
+
+export const OVER15_INTELLIGENCE_SOURCE: EliteSourceConfig = {
+  key: "over15_intelligence",
+  label: "Over 1.5 Intelligence",
+  href: "/over15",
+  icon: Flame,
+  fetcher: (date) =>
+    mapResponse(over15Api.getPsychology(date), (res) =>
+      res.map((p) => ({
+        fixture: p.Fixture,
+        tier: p.Tier,
+        prob: parseProbability(p.Base_Poisson),
+        score: toFiniteNumber(p.Score) ?? undefined,
+        verification: verifyOf(p),
+      }))
+    ),
+  rankValue: (pick) => pick.prob ?? null,
+  suffix: "%",
+};
+
+export const OVER25_INTELLIGENCE_2_SOURCE: EliteSourceConfig = {
+  key: "over25_intelligence_2",
+  label: "Over 2.5 Intelligence 2",
+  href: "/over25",
+  icon: Hourglass,
+  fetcher: FHVI_MARKET.fetcher,
+  rankValue: (pick) => pick.score ?? null,
+  suffix: "/13",
+};
+
+export const OVER25_JUDGES_SOURCE: EliteSourceConfig = {
+  key: "over25_judges",
+  label: "Over 2.5 Judges",
+  href: "/over25",
+  icon: Scale,
+  fetcher: (date) =>
+    mapResponse(over25Api.getStage2(date), (res) =>
+      res.map((p) => ({
+        fixture: p.fixture,
+        tier: "JUDGES",
+        score: toFiniteNumber(p.Votes) ?? undefined,
+        verification: verifyOf(p),
+      }))
+    ),
+  rankValue: (pick) => pick.score ?? null,
+  suffix: " votes",
+};
+
+export const ELITE_PICK_SOURCES: EliteSourceConfig[] = [
+  UNDERDOG_2_SOURCE,
+  SHVI_1_SOURCE,
+  FHVI_STREAK_SOURCE,
+  SOT_6_5_PLUS_SOURCE,
+  CORNER_INTELLIGENCE_SOURCE,
+  OVER15_INTELLIGENCE_SOURCE,
+  OVER25_INTELLIGENCE_2_SOURCE,
+  OVER25_JUDGES_SOURCE,
 ];
