@@ -19,11 +19,45 @@ export function TopBar() {
 
   useEffect(() => {
     let live = true;
-    healthApi
-      .check()
-      .then(() => { if (live) setStatus("online"); })
-      .catch(() => { if (live) setStatus("offline"); });
-    return () => { live = false; };
+    let retryTimer: number | null = null;
+    let intervalTimer: number | null = null;
+    let checking = false;
+
+    const check = async (attempt = 0) => {
+      if (!live || checking) return;
+      checking = true;
+      try {
+        await healthApi.check();
+        if (live) setStatus("online");
+      } catch {
+        if (!live) return;
+        setStatus("checking");
+        if (attempt < 2) {
+          retryTimer = window.setTimeout(
+            () => {
+              retryTimer = null;
+              void check(attempt + 1);
+            },
+            attempt === 0 ? 1_200 : 2_500,
+          );
+        } else {
+          setStatus("offline");
+        }
+      } finally {
+        checking = false;
+      }
+    };
+
+    void check();
+    intervalTimer = window.setInterval(() => {
+      if (retryTimer === null) void check();
+    }, 60_000);
+
+    return () => {
+      live = false;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (intervalTimer !== null) window.clearInterval(intervalTimer);
+    };
   }, []);
 
   return (

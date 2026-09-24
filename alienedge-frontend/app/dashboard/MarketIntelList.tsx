@@ -58,6 +58,7 @@ export function MarketIntelList({
   marketFactors?: Record<string, DnaV2FixtureFactors>;
   date?: string;
 }) {
+  const isSyncing = rows.some((row) => row.loading);
   const columns: PredictionColumn<MarketRow>[] = [
     {
       key: "verify",
@@ -117,7 +118,7 @@ export function MarketIntelList({
             </div>
             <FixtureRiskTag
               row={top}
-              label={top?.fixture || "No picks today"}
+              label={top?.fixture || (row.loading ? "Loading market data…" : "No picks today")}
               className="text-[10.5px] font-semibold text-cyan-400"
             />
           </Link>
@@ -176,7 +177,7 @@ export function MarketIntelList({
             Market Intelligence
           </h2>
           <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-cyan-300">
-            {rows.length} MARKETS
+            {isSyncing ? "SYNCING…" : `${rows.length} MARKETS`}
           </span>
         </div>
         <p className="text-[11px] text-text-dim">

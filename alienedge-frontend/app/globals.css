@@ -439,10 +439,11 @@ body {
 .auth-form { display: grid; gap: 18px; margin-top: 31px; }
 .auth-field { display: grid; gap: 8px; }
 .auth-label { color: #a6b4d4; font-size: 11px; font-weight: 650; letter-spacing: .04em; }
-.auth-input-shell { position: relative; display: flex; align-items: center; }
-.auth-input-icon { position: absolute; left: 14px; width: 16px; height: 16px; color: #63749c; pointer-events: none; transition: color .2s ease; }
-.auth-input-shell:focus-within .auth-input-icon { color: #67e8f9; }
-.auth-password-toggle { position: absolute; right: 13px; display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 6px; color: #6d7da4; background: transparent; cursor: pointer; }
+.auth-input-shell { position: relative; display: flex; align-items: center; width: 100%; }
+.auth-input-shell input { display: block; width: 100%; min-height: 48px; padding: 13px 48px 13px 15px; border: 1px solid rgba(82, 105, 166, .42); border-radius: 10px; outline: none; color: #f0f4ff; background: rgba(4, 9, 23, .72); font: inherit; font-size: .92rem; line-height: 1.2; caret-color: #67e8f9; transition: border-color .2s ease, background .2s ease, box-shadow .2s ease; }
+.auth-input-shell input:focus { border-color: rgba(103, 232, 249, .72); background: rgba(8, 15, 34, .9); box-shadow: 0 0 0 3px rgba(6, 182, 212, .1), inset 0 1px 0 rgba(255, 255, 255, .04); }
+.auth-input-shell input:-webkit-autofill { -webkit-text-fill-color: #f0f4ff; -webkit-box-shadow: 0 0 0 1000px #0b1227 inset; transition: background-color 9999s ease-in-out 0s; }
+.auth-password-toggle { position: absolute; right: 10px; display: grid; width: 30px; height: 30px; place-items: center; border: 0; border-radius: 7px; color: #8b9cc8; background: transparent; cursor: pointer; }
 .auth-password-toggle:hover { color: #a5f3fc; background: rgba(103, 232, 249, .08); }
 .auth-error { margin: 0; padding: 11px 13px; border: 1px solid rgba(248, 113, 113, .3); border-radius: 8px; color: #fca5a5; background: rgba(127, 29, 29, .22); font-size: .78rem; line-height: 1.45; }
 .auth-submit { display: flex; align-items: center; justify-content: space-between; min-height: 51px; margin-top: 5px; padding: 0 16px 0 19px; border: 1px solid rgba(103, 232, 249, .5); border-radius: 10px; color: #04111d; background: linear-gradient(110deg, #67e8f9, #818cf8); box-shadow: 0 0 24px rgba(6, 182, 212, .18), inset 0 1px 0 rgba(255, 255, 255, .5); font-size: .86rem; font-weight: 750; cursor: pointer; transition: transform .2s, box-shadow .2s, filter .2s; }
