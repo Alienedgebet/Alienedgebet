@@ -54,7 +54,7 @@ def run_sh_gg_8goal_aggregator(target_date):
     # -------------------------
     # ⚙️ CONFIGURATION
     # -------------------------
-    API_TOKEN = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
     INPUT_FEED_FILE = os.path.join(OUTPUT_DIR, "sh_gg_winner_feed.json")
     OUTPUT_CSV_FILE = os.path.join(OUTPUT_DIR, f"FINAL_SH_GG_8GOAL_{target_date}.csv")
     REQ_DELAY = 0.2

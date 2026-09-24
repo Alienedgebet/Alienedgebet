@@ -310,11 +310,11 @@ def create_rule(payload: dict) -> dict:
     return normalized
 
 
-def update_rule(rule_id: str, patch: dict) -> dict | None:
+def update_rule(rule_id: str, patch: dict, user_id: str | None = None) -> dict | None:
     with _lock:
         rules = _read_all()
         target = next((r for r in rules if r.get("rule_id") == rule_id), None)
-        if target is None:
+        if target is None or (user_id is not None and target.get("user_id") != user_id):
             return None
         merged = {**target, **patch}
         if any(k in patch for k in ("prematch", "live", "label", "user_id", "minute_window")):

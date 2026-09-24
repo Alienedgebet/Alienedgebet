@@ -16,7 +16,7 @@ load_dotenv()
 # ==============================================================================
 # CONFIGURATION & VS CODE STRICT PATHS
 # ==============================================================================
-API_TOKEN = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
+API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
 BASE_URL  = "https://api.sportmonks.com/v3/football"
 
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

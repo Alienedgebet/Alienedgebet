@@ -7,6 +7,7 @@ import { healthApi } from "@/lib/api";
 import { DateSelector } from "@/components/layout/DateSelector";
 import { useSidebar } from "@/lib/sidebar-context";
 import { useRightPanel } from "@/lib/right-panel-context";
+import { useAuth } from "@/lib/auth-context";
 
 type ApiStatus = "checking" | "online" | "offline";
 
@@ -14,6 +15,7 @@ export function TopBar() {
   const [status, setStatus] = useState<ApiStatus>("checking");
   const { toggle, close: closeSidebar } = useSidebar();
   const { toggle: toggleRightPanel, close: closeRightPanel } = useRightPanel();
+  const { user, logout } = useAuth();
 
   useEffect(() => {
     let live = true;
@@ -112,9 +114,7 @@ export function TopBar() {
           </button>
 
           {/* User Avatar */}
-          <div className="flex h-8 w-8 cursor-pointer select-none items-center justify-center rounded-lg border border-cyan-500/30 bg-gradient-to-tr from-cyan-950 to-blue-900 text-xs font-bold text-cyan-200 shadow-[0_0_10px_rgba(6,182,212,0.2)] transition-transform hover:scale-105 active:scale-95">
-            A
-          </div>
+          <button type="button" onClick={() => void logout()} aria-label="Sign out" title="Sign out" className="flex h-8 w-8 items-center justify-center rounded-lg border border-cyan-500/30 text-xs font-bold text-cyan-200">{user?.email?.[0]?.toUpperCase() || "A"}</button>
         </div>
 
       </div>

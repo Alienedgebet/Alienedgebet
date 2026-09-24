@@ -31,7 +31,7 @@ def run_gold_over_25_engine(target_date):
     # -------------------------
     # CONFIG (100% UNTOUCHED LOGIC)
     # -------------------------
-    API_TOKEN = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
     CHECK_DATE = target_date
     MIN_H2H_GAMES = 2
     REQ_DELAY = 0.2

@@ -36,7 +36,7 @@ def run_over25_forecast_engine(target_date):
     # -------------------------
     # CONFIG (100% UNTOUCHED ENGINE PARAMS)
     # -------------------------
-    API_TOKEN = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
     BASE_URL = "https://api.sportmonks.com/v3/football"
     
     # Market IDs

@@ -30,7 +30,7 @@ def run_o15_apex_engine(target_date=None):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY")
     if not API_KEY:
         print("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
         return []

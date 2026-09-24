@@ -15,7 +15,7 @@ load_dotenv()
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-API_KEY  = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
+API_KEY  = os.getenv("SPORTMONKS_API_KEY")
 BASE_URL = "https://api.sportmonks.com/v3/football"
 
 # --- 🚨 FIXED FOR GOOGLE COLAB & VS CODE COMPATIBILITY 🚨 ---

@@ -10,6 +10,11 @@ master_aggregator/
 
 # ── Environment ─────────────────────────────────────────────
 .env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-*
+.vercel/
 
 # ── Logs / scratch / verification artifacts ─────────────────
 *.log

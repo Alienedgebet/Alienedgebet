@@ -9,7 +9,7 @@ import axios, {
 // Synced to api/main.py — backend is source of truth
 // ============================================================
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const BASE_URL = process.env.NODE_ENV === "production" ? "" : (process.env.NEXT_PUBLIC_API_URL || "");
 
 // ── Endpoint-aware timeouts ───────────────────────────────────────────
 // A single aggressive timeout made large-but-legitimate analytics payloads
@@ -28,6 +28,7 @@ const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25|sot|fhvi|s
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   timeout: DEFAULT_TIMEOUT_MS,
+  withCredentials: true,
   headers: { "Content-Type": "application/json" },
 });
 
@@ -53,7 +54,7 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    console.error("[AlienEdge API]", err?.response?.data || err.message);
+    console.error("[AlienEdge API] request failed", err?.message || "Network error");
     return Promise.reject(err);
   }
 );
@@ -1330,7 +1331,7 @@ export interface UserRuleDef {
   created_at?: string;
 }
 
-export type UserRuleCreate = Omit<UserRuleDef, "rule_id" | "created_at">;
+export type UserRuleCreate = Omit<UserRuleDef, "rule_id" | "created_at" | "user_id">;
 export type UserRulePatch = Partial<
   Pick<UserRuleDef, "label" | "prematch" | "live" | "minute_window" | "active">
 >;
@@ -1600,7 +1601,7 @@ export const teamIntelligenceApi = {
 // ============================================================
 
 export const healthApi = {
-  check: (): Promise<AxiosResponse<HealthResponse>> => api.get("/health"),
+  check: (): Promise<AxiosResponse<HealthResponse>> => api.get("/api/health"),
 };
 
 export const foundationApi = {
@@ -1801,8 +1802,8 @@ export const liveApi = {
 };
 
 export const userRulesApi = {
-  list: (userId: string): Promise<AxiosResponse<UserRuleDef[]>> =>
-    api.get("/api/live/user-rules", { params: { user_id: userId } }),
+  list: (): Promise<AxiosResponse<UserRuleDef[]>> =>
+    api.get("/api/live/user-rules"),
 
   create: (rule: UserRuleCreate): Promise<AxiosResponse<UserRuleDef>> =>
     api.post("/api/live/user-rules", rule),
@@ -1810,12 +1811,12 @@ export const userRulesApi = {
   update: (ruleId: string, patch: UserRulePatch): Promise<AxiosResponse<UserRuleDef>> =>
     api.patch(`/api/live/user-rules/${ruleId}`, patch),
 
-  remove: (ruleId: string, userId: string): Promise<AxiosResponse<void>> =>
-    api.delete(`/api/live/user-rules/${ruleId}`, { params: { user_id: userId } }),
+  remove: (ruleId: string): Promise<AxiosResponse<void>> =>
+    api.delete(`/api/live/user-rules/${ruleId}`),
 
   /** Alerts fired specifically from this user's own saved rules. */
-  getMyAlerts: (userId: string): Promise<AxiosResponse<LiveAlertPick[]>> =>
-    api.get("/api/live/alerts/mine", { params: { user_id: userId } }),
+  getMyAlerts: (): Promise<AxiosResponse<LiveAlertPick[]>> =>
+    api.get("/api/live/alerts/mine"),
 };
 
 export const filterApi = {

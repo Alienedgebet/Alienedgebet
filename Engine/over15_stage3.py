@@ -28,7 +28,7 @@ def run_over15_stage3(target_date):
     for directory in [OUTPUT_DIR, DATA_DIR]:
         os.makedirs(directory, exist_ok=True)
         
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY")
     BASE_URL = "https://api.sportmonks.com/v3/football"
 
     # Head input is the new unified Over 1.5 picks file

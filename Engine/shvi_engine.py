@@ -13,7 +13,7 @@ load_dotenv()
 # ==============================================================================
 # CONFIGURATION & VS CODE STRICT PATHS
 # ==============================================================================
-API_TOKEN = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
+API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
 BASE_URL  = "https://api.sportmonks.com/v3/football"
 
 # --- STRICT VS CODE ARCHITECTURE (Sub-folder compatible) ---

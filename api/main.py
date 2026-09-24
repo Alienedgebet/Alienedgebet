@@ -31,12 +31,14 @@ import sys
 import json
 import math
 import re
+import secrets
 import subprocess
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header, Query, Depends
+from fastapi import FastAPI, HTTPException, Header, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -246,32 +248,67 @@ app = FastAPI(
     title="AlienEdge Prediction API",
     version="4.0.0",
     description="Forensic football prediction engine — disk-first REST interface",
+    docs_url=None if os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower() == "production" else "/docs",
+    redoc_url=None if os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower() == "production" else "/redoc",
+    openapi_url=None if os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower() == "production" else "/openapi.json",
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 _env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
 ALLOW_ORIGINS = [o.strip() for o in _env_origins.split(",") if o.strip()]
-if not ALLOW_ORIGINS:
+if not ALLOW_ORIGINS and os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower() != "production":
     ALLOW_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
-    allow_origin_regex=r"https://.*\.vercel\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+  allow_origins=ALLOW_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "X-Admin-Token", "X-Request-ID"],
 )
 
 
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(request, exc):
-    print(f"[UNHANDLED] {request.url}: {traceback.format_exc()}")
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    request_id = request.headers.get("x-request-id", secrets.token_hex(8))
+    print(f"[UNHANDLED] request_id={request_id} path={request.url.path} error={type(exc).__name__}")
+    return JSONResponse(status_code=500, content={"detail": "Unable to complete the request.", "request_id": request_id})
+
+
+@app.middleware("http")
+async def auth_and_rate_limit(request: Request, call_next):
+    path = request.url.path
+    public_paths = {"/", "/health"}
+    if path.startswith("/api/auth/") or path in public_paths or path.startswith("/api/admin/"):
+        request.state.user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+    user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
+    if not user:
+        return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+    request.state.user = user
+    if not check_rate_limit(f"api:{user['user_id']}", 180, 60):
+        return JSONResponse(status_code=429, content={"detail": "Too many requests. Please try again later."})
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 
 # ── ROUTERS ───────────────────────────────────────────────────────────────────
+from api.auth_store import SESSION_COOKIE, check_rate_limit, get_user_for_session
+from api.auth_router import router as auth_router
 from api.user_rules_router import router as user_rules_router  # noqa: E402
+app.include_router(auth_router)
 app.include_router(user_rules_router)
 
 # ── SETTLEMENT / LIVE SCORES (independent of the pre-match pipeline) ──────────
@@ -281,9 +318,11 @@ from live_cache import get_live_scores_cached  # noqa: E402
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 
-def require_admin(token: Optional[str]):
-    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid or missing admin token")
+def require_admin(token: Optional[str], request: Optional[Request] = None):
+    if not ADMIN_TOKEN or not token or not secrets.compare_digest(str(token), ADMIN_TOKEN):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    if request is not None and not check_rate_limit(f"admin:{request.client.host if request.client else 'unknown'}", 10, 60):
+        raise HTTPException(status_code=429, detail="Too many admin requests. Please try again later.")
 
 
 def to_records(x) -> list:
@@ -770,8 +809,6 @@ def health():
         "status": "ok",
         "service": "AlienEdge Prediction API",
         "version": "4.0.0",
-        "architecture": "disk-first — no live engine calls in request handlers",
-        "server_time": datetime.now().isoformat(),
     }
 
 
@@ -784,14 +821,14 @@ def get_status(date: str):
 
 
 @app.post("/api/admin/run-pipeline/{date}", tags=["Admin"])
-def trigger_pipeline(date: str, x_admin_token: Optional[str] = Header(default=None)):
+def trigger_pipeline(date: str, request: Request, x_admin_token: Optional[str] = Header(default=None)):
     """
     Launches `python main.py --date={date}` as a DETACHED background process
     and returns immediately (HTTP request is not held open for the minutes a
     full run takes). Poll /api/status/{date} to watch it complete. Requires
     ADMIN_TOKEN — this is an ops tool, not something the frontend calls.
     """
-    require_admin(x_admin_token)
+    require_admin(x_admin_token, request)
     try:
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError as exc:
@@ -820,11 +857,11 @@ def trigger_pipeline(date: str, x_admin_token: Optional[str] = Header(default=No
 
 
 @app.post("/api/admin/cache/clear-status", tags=["Admin"])
-def noop_cache_clear(x_admin_token: Optional[str] = Header(default=None)):
+def noop_cache_clear(request: Request, x_admin_token: Optional[str] = Header(default=None)):
     """No in-memory cache exists in this architecture (pure disk-first), so
     there is nothing to clear — this endpoint is kept only so any old ops
     tooling pointed at a 'clear cache' URL gets a clean 200 instead of 404."""
-    require_admin(x_admin_token)
+    require_admin(x_admin_token, request)
     return {"cleared": 0, "note": "disk-first architecture has no in-memory cache to clear"}
 
 
@@ -1563,7 +1600,10 @@ def get_live_orchestrator():
 
 
 @app.get("/api/live/alerts", tags=["Live"])
-def get_live_alerts():
+def get_live_alerts(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
     path = os.path.join(OUTPUT_DIR, "ready_to_push.json")
     if not os.path.exists(path):
         return []
@@ -1575,7 +1615,10 @@ def get_live_alerts():
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
+                    if row.get("user_id") not in (None, user["user_id"]):
+                        continue
+                    rows.append(row)
                 except json.JSONDecodeError:
                     continue
     except Exception:

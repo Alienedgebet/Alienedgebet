@@ -34,7 +34,7 @@ def run_supreme_corner_evolution(target_date):
     # -------------------------
     # CONFIGURATION (UNTOUCHED)
     # -------------------------
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY")
     BASE_URL = "https://api.sportmonks.com/v3/football"
 
     # DYNAMIC FILE MAPPING (Syncing with your VS Folders)

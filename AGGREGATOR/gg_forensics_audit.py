@@ -35,7 +35,7 @@ def run_gg_forensic_aggregator(target_date):
     # -------------------------
     # CONFIGURATION
     # -------------------------
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY")
     BASE_URL = "https://api.sportmonks.com/v3/football"
     
     # User's Belief Rules (PRESERVED)

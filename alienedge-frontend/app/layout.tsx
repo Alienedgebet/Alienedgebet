@@ -4,6 +4,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { DateProvider } from "@/lib/date-context";
 import { SidebarProvider } from "@/lib/sidebar-context";
 import { RightPanelProvider } from "@/lib/right-panel-context";
+import { AuthGate, AuthProvider } from "@/lib/auth-context";
 
 export const metadata: Metadata = {
   title: "AlienEdge — Football Intelligence Platform",
@@ -19,13 +20,17 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark h-full">
       <body className="min-h-full bg-bg-primary text-text-primary antialiased">
-        <DateProvider>
-          <SidebarProvider>
-            <RightPanelProvider>
-              <AppShell>{children}</AppShell>
-            </RightPanelProvider>
-          </SidebarProvider>
-        </DateProvider>
+        <AuthProvider>
+          <AuthGate>
+            <DateProvider>
+              <SidebarProvider>
+                <RightPanelProvider>
+                  <AppShell>{children}</AppShell>
+                </RightPanelProvider>
+              </SidebarProvider>
+            </DateProvider>
+          </AuthGate>
+        </AuthProvider>
       </body>
     </html>
   );
