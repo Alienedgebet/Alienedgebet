@@ -9,6 +9,7 @@ interface EngineFeedBarProps {
   enginesOnline: number;
   enginesTotal: number;
   peakConfidence: number;
+  isLoading?: boolean;
 }
 
 export function EngineFeedBar({
@@ -17,6 +18,7 @@ export function EngineFeedBar({
   enginesOnline,
   enginesTotal,
   peakConfidence,
+  isLoading = false,
 }: EngineFeedBarProps) {
   return (
     <div className="w-full space-y-2.5">
@@ -29,9 +31,9 @@ export function EngineFeedBar({
           <span className="text-xs font-bold uppercase tracking-wider text-text-primary">
             Engine Feed
           </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-400 border border-emerald-500/20">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-            LIVE
+          <span className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium" style={{ borderColor: isLoading ? "rgba(245,158,11,.3)" : "rgba(34,197,94,.3)", background: isLoading ? "rgba(245,158,11,.1)" : "rgba(34,197,94,.1)", color: isLoading ? "#fbbf24" : "#34d399" }}>
+            <span className={cn("h-1.5 w-1.5 rounded-full", isLoading ? "bg-amber-400 animate-pulse" : "bg-emerald-400 animate-ping")} />
+            {isLoading ? "SYNCING" : "LIVE"}
           </span>
         </div>
         <p className="hidden text-[11px] text-text-dim sm:block">

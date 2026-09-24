@@ -9,6 +9,8 @@ interface EngineRow {
   config: MarketConfig;
   data: MarketPick[];
   isMock: boolean;
+  loading: boolean;
+  error?: string | null;
   stale?: boolean;
 }
 
@@ -74,7 +76,8 @@ const TIER_STYLES: Record<PerfTier, { dot: string; text: string }> = {
  * count), not whether its API request happened to succeed.
  */
 export function EngineStatusList({ rows }: EngineStatusListProps) {
-  const withSignal = rows.filter((r) => r.data.length > 0).length;
+  const withSignal = rows.filter((r) => !r.loading && r.data.length > 0).length;
+  const isSyncing = rows.some((r) => r.loading);
   const overallAvg = (() => {
     const values = rows
       .flatMap((r) => r.data.map((p) => p.prob ?? p.score))
@@ -88,14 +91,20 @@ export function EngineStatusList({ rows }: EngineStatusListProps) {
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold text-text-primary">Engine Performance</h2>
         <span className="font-mono text-2xs text-accent-green">
-          {withSignal}/{rows.length} live
-          {overallAvg != null ? ` · ${overallAvg}% avg` : ""}
+          {isSyncing ? "Syncing…" : `${withSignal}/${rows.length} live`}
+          {!isSyncing && overallAvg != null ? ` · ${overallAvg}% avg` : ""}
         </span>
       </div>
       <div className="flex-1 divide-y divide-border/60 overflow-y-auto">
-        {rows.map(({ config, data, isMock, stale }) => {
+        {rows.map(({ config, data, isMock, loading, error, stale }) => {
           const perf = computePerformance(data);
-          const style = TIER_STYLES[perf.tier];
+          const pending = loading && data.length === 0;
+          const failed = !loading && Boolean(error) && data.length === 0;
+          const style = pending
+            ? { dot: "bg-amber-400 animate-pulse", text: "text-amber-300" }
+            : failed
+              ? { dot: "bg-accent-red", text: "text-accent-red" }
+              : TIER_STYLES[perf.tier];
           return (
             <Link
               key={config.key}
@@ -106,16 +115,17 @@ export function EngineStatusList({ rows }: EngineStatusListProps) {
               <span className="flex min-w-0 flex-col">
                 <span className="truncate text-text-secondary">{config.label}</span>
                 <span className="font-mono text-[0.65rem] text-text-dim">
-                  {data.length} pick{data.length === 1 ? "" : "s"}
-                  {perf.eliteCount > 0 ? ` · ${perf.eliteCount} elite` : ""}
+                  {pending ? "Loading…" : `${data.length} pick${data.length === 1 ? "" : "s"}`}
+                  {!pending && !failed && perf.eliteCount > 0 ? ` · ${perf.eliteCount} elite` : ""}
                   {isMock ? " · Demo" : ""}
                   {stale ? " · Updating" : ""}
+                  {failed ? " · Unavailable" : ""}
                 </span>
               </span>
               <span className="flex shrink-0 items-center gap-1.5">
                 <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", style.dot)} />
                 <span className={cn("font-mono text-2xs whitespace-nowrap", style.text)}>
-                  {perf.avgConfidence != null ? `${perf.avgConfidence}%` : perf.label}
+                  {failed ? "Unavailable" : perf.avgConfidence != null ? `${perf.avgConfidence}%` : pending ? "Syncing" : perf.label}
                 </span>
               </span>
             </Link>

@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 export interface AuthUser {
@@ -8,38 +8,90 @@ export interface AuthUser {
   created_at?: number;
 }
 
+const SESSION_CHECK_TIMEOUT_MS = 10_000;
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
+  const [user, setUserState] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [retryToken, setRetryToken] = useState(0);
 
   useEffect(() => {
     let active = true;
-    fetch("/api/auth/me", { credentials: "include", cache: "no-store" })
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      SESSION_CHECK_TIMEOUT_MS,
+    );
+
+    fetch("/api/auth/me", {
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+    })
       .then(async (response) => {
-        if (!response.ok) return null;
+        // A 401 is the only definitive signed-out response. Other failures are
+        // transient session-check failures and must not destroy the current
+        // session or redirect a logged-in user to the login page.
+        if (response.status === 401) return null;
+        if (!response.ok) {
+          throw new Error(
+            response.status === 503
+              ? "The session service is temporarily unavailable."
+              : "Unable to verify your session right now.",
+          );
+        }
         return (await response.json()) as { user?: AuthUser };
       })
       .then((result) => {
-        if (active) setUser(result?.user ?? null);
+        if (!active) return;
+        setUserState(result?.user ?? null);
+        setSessionError(null);
       })
-      .catch(() => {
-        if (active) setUser(null);
+      .catch((error: unknown) => {
+        if (!active) return;
+        setSessionError(
+          error instanceof Error
+            ? error.message
+            : "Unable to verify your session right now.",
+        );
       })
       .finally(() => {
+        window.clearTimeout(timeout);
         if (active) setLoading(false);
       });
+
     return () => {
       active = false;
+      controller.abort();
+      window.clearTimeout(timeout);
     };
+  }, [retryToken]);
+
+  const setUser = useCallback((nextUser: AuthUser | null) => {
+    setUserState(nextUser);
+    if (nextUser) setSessionError(null);
+  }, []);
+
+  const retrySession = useCallback(() => {
+    setSessionError(null);
+    setLoading(true);
+    setRetryToken((token) => token + 1);
   }, []);
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
-    setUser(null);
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    } finally {
+      setUserState(null);
+      setSessionError(null);
+    }
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, setUser, logout }}>
+    <AuthContext.Provider
+      value={{ user, loading, sessionError, setUser, retrySession, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -48,29 +100,64 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 const AuthContext = React.createContext<{
   user: AuthUser | null;
   loading: boolean;
+  sessionError: string | null;
   setUser: (user: AuthUser | null) => void;
+  retrySession: () => void;
   logout: () => Promise<void>;
-}>({ user: null, loading: true, setUser: () => {}, logout: async () => {} });
+}>({
+  user: null,
+  loading: true,
+  sessionError: null,
+  setUser: () => {},
+  retrySession: () => {},
+  logout: async () => {},
+});
 
 export function useAuth() {
   return React.useContext(AuthContext);
 }
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, sessionError, retrySession } = useAuth();
   const router = useRouter();
   const pathname = usePathname() || "";
   const isAuthPage = pathname === "/login" || pathname === "/signup";
 
   useEffect(() => {
-    if (!loading && !user && !isAuthPage) {
+    // Redirect only after a definitive unauthenticated response. Transient
+    // session-check failures are handled by the recovery state below.
+    if (!loading && !sessionError && !user && !isAuthPage) {
       router.replace(`/login?next=${encodeURIComponent(pathname || "/dashboard")}`);
     }
-  }, [isAuthPage, loading, pathname, router, user]);
+  }, [isAuthPage, loading, pathname, router, sessionError, user]);
 
   if (loading && !isAuthPage) {
     return <div className="flex min-h-screen items-center justify-center bg-bg-primary text-sm text-text-secondary">Checking your session…</div>;
   }
+
+  if (!isAuthPage && !user && sessionError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg-primary px-6 text-center">
+        <div className="max-w-md space-y-3">
+          <p className="text-sm font-semibold text-text-primary">
+            We couldn&apos;t verify your session
+          </p>
+          <p className="text-xs leading-5 text-text-secondary">
+            Your session is still safe. The data service is catching up, so retry
+            without signing in again.
+          </p>
+          <button
+            type="button"
+            onClick={retrySession}
+            className="rounded-lg border border-accent-cyan/40 bg-accent-cyan/10 px-4 py-2 text-xs font-semibold text-accent-cyan transition-colors hover:bg-accent-cyan/20"
+          >
+            Retry session check
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!isAuthPage && !user) return null;
   return <>{children}</>;
 }

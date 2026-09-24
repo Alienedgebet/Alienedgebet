@@ -1,5 +1,6 @@
 "use client";
 
+import { Loader2 } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { TierBadge } from "@/components/predictions/TierBadge";
@@ -60,11 +61,13 @@ export function EliteRankList({
   emptyMessage,
   marketFactors,
   date,
+  isLoading = false,
 }: {
   items: EliteRankItem[];
   emptyMessage: string;
   marketFactors?: Record<string, DnaV2FixtureFactors>;
   date: string;
+  isLoading?: boolean;
 }) {
   const columns: PredictionColumn<EliteRankItem>[] = [
     {
@@ -173,13 +176,20 @@ export function EliteRankList({
       </div>
 
       {/* ── REAL TABLE — grows + scrolls sideways, never overlaps ────── */}
-      <div className="flex-1">
-        <PredictionTable
-          columns={columns}
-          data={items}
-          rowKey={(it) => it.key}
-          emptyMessage={emptyMessage}
-        />
+      <div className="flex flex-1 items-center justify-center py-10 text-center text-xs text-text-dim">
+        {isLoading ? (
+          <span className="inline-flex items-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin text-accent-cyan" />
+            Loading elite picks…
+          </span>
+        ) : (
+          <PredictionTable
+            columns={columns}
+            data={items}
+            rowKey={(it) => it.key}
+            emptyMessage={emptyMessage}
+          />
+        )}
       </div>
     </div>
   );

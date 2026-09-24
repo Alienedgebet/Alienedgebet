@@ -162,6 +162,7 @@ function DashboardOverview() {
   const marketRows = DASHBOARD_MARKETS.map((config, i) => ({
     config,
     loading: rawResults[i].loading,
+    error: rawResults[i].error,
     isRefetching: rawResults[i].isRefetching,
     stale: rawResults[i].stale,
     ...withFallback(config.key, rawResults[i]),
@@ -228,8 +229,9 @@ function DashboardOverview() {
   const peakConfidence = allElite.length
     ? Math.max(...allElite.map((item) => item.value))
     : 0;
+  const isLoading = rawResults.some((r) => r.loading) || eliteResults.some((r) => r.loading);
   const enginesOnline = rawResults.filter(
-    (r) => r.error === null || (r.data?.length ?? 0) > 0
+    (r) => !r.loading && (r.error === null || (r.data?.length ?? 0) > 0)
   ).length;
 
   return (
@@ -242,6 +244,7 @@ function DashboardOverview() {
         enginesOnline={enginesOnline}
         enginesTotal={DASHBOARD_MARKETS.length}
         peakConfidence={peakConfidence}
+        isLoading={isLoading}
       />
 
       <HeroCarousel
@@ -258,6 +261,7 @@ function DashboardOverview() {
             emptyMessage="No elite-tier picks yet for this date."
             marketFactors={dnaV2?.market_factors}
             date={date}
+            isLoading={isLoading && allElite.length === 0}
           />
         </div>
 
