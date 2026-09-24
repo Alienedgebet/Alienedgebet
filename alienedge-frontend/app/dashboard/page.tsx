@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSelectedDate } from "@/lib/date-context";
-import { useApi, DEMO_MODE_ENABLED, type UseApiResult } from "@/lib/use-api";
+import { useApiBatch, DEMO_MODE_ENABLED, type UseApiBatchItem, type UseApiResult } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { marketCacheKey, type DnaV2MarketKey } from "@/lib/api";
 import { isDashboardMarketTab } from "@/lib/dashboard-tabs";
@@ -70,80 +70,24 @@ function DashboardOverview() {
   // shared and disk-cached (2-min TTL) behind all twelve endpoints.
   const REFRESH_MS = 60_000;
 
-  const win = useApi(() => WIN_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.win,
-    cacheKey: marketCacheKey(WIN_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const gg = useApi(() => GG_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.gg,
-    cacheKey: marketCacheKey(GG_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const over25 = useApi(() => OVER25_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.over25,
-    cacheKey: marketCacheKey(OVER25_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const over15 = useApi(() => OVER15_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.over15,
-    cacheKey: marketCacheKey(OVER15_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const draw = useApi(() => DRAW_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.draw,
-    cacheKey: marketCacheKey(DRAW_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const unders = useApi(() => UNDERS_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.unders,
-    cacheKey: marketCacheKey(UNDERS_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const corners = useApi(() => CORNERS_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.corners,
-    cacheKey: marketCacheKey(CORNERS_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const sot = useApi(() => SOT_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.sot,
-    cacheKey: marketCacheKey(SOT_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const fhvi = useApi(() => FHVI_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.fhvi,
-    cacheKey: marketCacheKey(FHVI_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const shvi = useApi(() => SHVI_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.shvi,
-    cacheKey: marketCacheKey(SHVI_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const underdog = useApi(() => UNDERDOG_MARKET.fetcher(date), [date], {
-    fallback: MOCK_PICKS.underdog,
-    cacheKey: marketCacheKey(UNDERDOG_MARKET.key, date),
-    refreshMs: REFRESH_MS,
-  });
-
-  // Elite Picks has its own source adapters. These do not replace the
-  // dashboard market grid above; they only add the requested ranked feeds.
-  const underdog2 = useApi(() => UNDERDOG_2_SOURCE.fetcher(date), [date], {
-    cacheKey: marketCacheKey(UNDERDOG_2_SOURCE.key, date),
-    refreshMs: REFRESH_MS,
-  });
-  const over15Intelligence = useApi(
-    () => OVER15_INTELLIGENCE_SOURCE.fetcher(date),
-    [date],
-    {
-      cacheKey: marketCacheKey(OVER15_INTELLIGENCE_SOURCE.key, date),
-      refreshMs: REFRESH_MS,
-    },
-  );
-  const over25Judges = useApi(() => OVER25_JUDGES_SOURCE.fetcher(date), [date], {
-    cacheKey: marketCacheKey(OVER25_JUDGES_SOURCE.key, date),
-    refreshMs: REFRESH_MS,
-  });
+  const batchItems = useMemo<UseApiBatchItem<MarketPick[]>[]>(() => [
+    { key: WIN_MARKET.key, fetcher: () => WIN_MARKET.fetcher(date), cacheKey: marketCacheKey(WIN_MARKET.key, date), fallback: MOCK_PICKS.win },
+    { key: GG_MARKET.key, fetcher: () => GG_MARKET.fetcher(date), cacheKey: marketCacheKey(GG_MARKET.key, date), fallback: MOCK_PICKS.gg },
+    { key: OVER25_MARKET.key, fetcher: () => OVER25_MARKET.fetcher(date), cacheKey: marketCacheKey(OVER25_MARKET.key, date), fallback: MOCK_PICKS.over25 },
+    { key: OVER15_MARKET.key, fetcher: () => OVER15_MARKET.fetcher(date), cacheKey: marketCacheKey(OVER15_MARKET.key, date), fallback: MOCK_PICKS.over15 },
+    { key: DRAW_MARKET.key, fetcher: () => DRAW_MARKET.fetcher(date), cacheKey: marketCacheKey(DRAW_MARKET.key, date), fallback: MOCK_PICKS.draw },
+    { key: UNDERS_MARKET.key, fetcher: () => UNDERS_MARKET.fetcher(date), cacheKey: marketCacheKey(UNDERS_MARKET.key, date), fallback: MOCK_PICKS.unders },
+    { key: CORNERS_MARKET.key, fetcher: () => CORNERS_MARKET.fetcher(date), cacheKey: marketCacheKey(CORNERS_MARKET.key, date), fallback: MOCK_PICKS.corners },
+    { key: SOT_MARKET.key, fetcher: () => SOT_MARKET.fetcher(date), cacheKey: marketCacheKey(SOT_MARKET.key, date), fallback: MOCK_PICKS.sot },
+    { key: FHVI_MARKET.key, fetcher: () => FHVI_MARKET.fetcher(date), cacheKey: marketCacheKey(FHVI_MARKET.key, date), fallback: MOCK_PICKS.fhvi },
+    { key: SHVI_MARKET.key, fetcher: () => SHVI_MARKET.fetcher(date), cacheKey: marketCacheKey(SHVI_MARKET.key, date), fallback: MOCK_PICKS.shvi },
+    { key: UNDERDOG_MARKET.key, fetcher: () => UNDERDOG_MARKET.fetcher(date), cacheKey: marketCacheKey(UNDERDOG_MARKET.key, date), fallback: MOCK_PICKS.underdog },
+    { key: UNDERDOG_2_SOURCE.key, fetcher: () => UNDERDOG_2_SOURCE.fetcher(date), cacheKey: marketCacheKey(UNDERDOG_2_SOURCE.key, date), fallback: MOCK_PICKS.underdog },
+    { key: OVER15_INTELLIGENCE_SOURCE.key, fetcher: () => OVER15_INTELLIGENCE_SOURCE.fetcher(date), cacheKey: marketCacheKey(OVER15_INTELLIGENCE_SOURCE.key, date), fallback: MOCK_PICKS.over15 },
+    { key: OVER25_JUDGES_SOURCE.key, fetcher: () => OVER25_JUDGES_SOURCE.fetcher(date), cacheKey: marketCacheKey(OVER25_JUDGES_SOURCE.key, date), fallback: MOCK_PICKS.over25 },
+  ], [date]);
+  const batchResults = useApiBatch(batchItems, [date], { refreshMs: REFRESH_MS, demo: true });
+  const [win, gg, over25, over15, draw, unders, corners, sot, fhvi, shvi, underdog, underdog2, over15Intelligence, over25Judges] = batchResults;
 
   const rawResults = [
     win,

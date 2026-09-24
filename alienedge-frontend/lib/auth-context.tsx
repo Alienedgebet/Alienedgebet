@@ -1,5 +1,5 @@
 "use client";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 export interface AuthUser {
@@ -8,10 +8,11 @@ export interface AuthUser {
   created_at?: number;
 }
 
-const SESSION_CHECK_TIMEOUT_MS = 10_000;
+const SESSION_CHECK_TIMEOUT_MS = 3_000;
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUserState] = useState<AuthUser | null>(null);
+  const userRef = useRef<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
@@ -45,7 +46,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
       .then((result) => {
         if (!active) return;
-        setUserState(result?.user ?? null);
+        // A login can complete while the initial session check is still in
+        // flight. Never let that older 401 response erase the fresh user.
+        if (userRef.current) {
+          setSessionError(null);
+          return;
+        }
+        userRef.current = result?.user ?? null;
+        setUserState(userRef.current);
         setSessionError(null);
       })
       .catch((error: unknown) => {
@@ -69,6 +77,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [retryToken]);
 
   const setUser = useCallback((nextUser: AuthUser | null) => {
+    userRef.current = nextUser;
     setUserState(nextUser);
     if (nextUser) setSessionError(null);
   }, []);
@@ -83,6 +92,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     } finally {
+      userRef.current = null;
       setUserState(null);
       setSessionError(null);
     }
@@ -131,7 +141,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
   }, [isAuthPage, loading, pathname, router, sessionError, user]);
 
-  if (loading && !isAuthPage) {
+  if (loading && !isAuthPage && !user) {
     return <div className="flex min-h-screen items-center justify-center bg-bg-primary text-sm text-text-secondary">Checking your session…</div>;
   }
 

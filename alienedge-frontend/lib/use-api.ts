@@ -41,19 +41,51 @@ interface CacheEntry<T> {
 }
 
 const apiCache = new Map<string, CacheEntry<unknown>>();
+const PERSISTENT_CACHE_PREFIX = "alienedge:api-cache:";
+const PERSISTENT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function getPersistentCached<T>(key: string): T | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(`${PERSISTENT_CACHE_PREFIX}${key}`);
+    if (!raw) return null;
+    const entry = JSON.parse(raw) as CacheEntry<T>;
+    if (!entry || Date.now() - Number(entry.ts) > PERSISTENT_CACHE_TTL_MS) {
+      window.localStorage.removeItem(`${PERSISTENT_CACHE_PREFIX}${key}`);
+      return null;
+    }
+    return entry.data;
+  } catch {
+    return null;
+  }
+}
 
 function getCached<T>(key: string): T | null {
   const entry = apiCache.get(key) as CacheEntry<T> | undefined;
-  if (!entry) return null;
-  if (Date.now() - entry.ts > CACHE_TTL_MS) {
-    apiCache.delete(key);
-    return null;
+  if (entry) {
+    if (Date.now() - entry.ts > CACHE_TTL_MS) {
+      apiCache.delete(key);
+    } else {
+      return entry.data;
+    }
   }
-  return entry.data;
+  const persistent = getPersistentCached<T>(key);
+  if (persistent !== null) {
+    apiCache.set(key, { data: persistent as unknown, ts: Date.now() });
+  }
+  return persistent;
 }
 
 function setCached<T>(key: string, data: T): void {
-  apiCache.set(key, { data: data as unknown, ts: Date.now() });
+  const entry: CacheEntry<T> = { data, ts: Date.now() };
+  apiCache.set(key, { data: data as unknown, ts: entry.ts });
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.setItem(`${PERSISTENT_CACHE_PREFIX}${key}`, JSON.stringify(entry));
+    } catch {
+      // Storage can be unavailable in private browsing; memory caching still works.
+    }
+  }
 }
 
 /** Invalidate all cache entries that start with a given prefix. */
@@ -109,6 +141,115 @@ export interface UseApiResult<T> {
   /** Re-runs the fetcher against the current deps without waiting for them to change. */
   refetch: () => void;
 }
+export interface UseApiBatchItem<T> {
+  key: string;
+  fetcher: () => Promise<AxiosResponse<T>>;
+  cacheKey?: string;
+  fallback?: T | (() => T);
+}
+
+export interface UseApiBatchOptions {
+  refreshMs?: number;
+  demo?: boolean;
+}
+
+/**
+ * Fetch independent market feeds in parallel while allowing each result to
+ * paint as soon as it settles. Promise.allSettled keeps one slow/failed market
+ * from blocking the rest of the dashboard.
+ */
+export function useApiBatch<T>(
+  items: UseApiBatchItem<T>[],
+  deps: DependencyList,
+  options?: UseApiBatchOptions,
+): UseApiResult<T>[] {
+  const demoActive = options?.demo ?? DEMO_MODE_ENABLED;
+  const requestKey = items.map((item) => item.key).join("|");
+  const initial = items.map((item) => {
+    const cached = item.cacheKey ? getCached<T>(item.cacheKey) : null;
+    const fallback = demoActive ? resolveFallback(item.fallback) : undefined;
+    const seeded = cached ?? fallback ?? null;
+    return {
+      data: seeded,
+      loading: seeded === null,
+      error: null as string | null,
+      isRefetching: seeded !== null,
+      isMock: cached === null && seeded !== null,
+      stale: false,
+      refetch: () => {},
+    };
+  });
+  const [results, setResults] = useState<UseApiResult<T>[]>(initial);
+  const activeKeyRef = useRef(requestKey);
+  const [refetchTick, setRefetchTick] = useState(0);
+
+  useEffect(() => {
+    const refreshMs = options?.refreshMs ?? 0;
+    if (refreshMs <= 0) return;
+    const timer = window.setInterval(() => setRefetchTick((value) => value + 1), refreshMs);
+    return () => window.clearInterval(timer);
+  }, [options?.refreshMs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (activeKeyRef.current !== requestKey) {
+      activeKeyRef.current = requestKey;
+      setResults(initial);
+    } else {
+      setResults((previous) => previous.map((result) => ({
+        ...result,
+        loading: result.data === null,
+        isRefetching: result.data !== null,
+        error: null,
+      })));
+    }
+
+    const requests = items.map((item, index) => Promise.resolve()
+      .then(item.fetcher)
+      .then((response) => {
+        if (cancelled) return response;
+        const payload = response.data;
+        const empty = isEmptyPayload(payload);
+        setResults((previous) => previous.map((result, resultIndex) => {
+          if (resultIndex !== index) return result;
+          const fallback = demoActive ? resolveFallback(item.fallback) : undefined;
+          if (empty && fallback !== undefined) {
+            return { ...result, data: fallback, loading: false, isRefetching: false, isMock: true, stale: false, error: null };
+          }
+          if (empty && result.data !== null) {
+            return { ...result, loading: false, isRefetching: false, isMock: false, stale: true, error: null };
+          }
+          if (item.cacheKey) setCached(item.cacheKey, payload);
+          return { ...result, data: payload, loading: false, isRefetching: false, isMock: false, stale: false, error: null };
+        }));
+        return response;
+      })
+      .catch((error: unknown) => {
+        if (cancelled) throw error;
+        const message = isAxiosError(error)
+          ? extractErrorDetail(error) ?? error.message
+          : error instanceof Error
+            ? error.message
+            : "Request failed";
+        setResults((previous) => previous.map((result, resultIndex) => resultIndex === index
+          ? { ...result, loading: false, isRefetching: false, stale: result.data !== null, error: message }
+          : result));
+        throw error;
+      }));
+
+    void Promise.allSettled(requests);
+    return () => { cancelled = true; };
+    // The caller memoizes `items`; requestKey changes when the feed set changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [...deps, refetchTick, requestKey]);
+
+  return results.map((result) => ({
+    ...result,
+    refetch: () => setRefetchTick((value) => value + 1),
+  }));
+}
+
+
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -178,7 +319,9 @@ export function useApi<T>(
   const hasLoadedOnce = useRef(hasSeed || initialCached != null);
   const [refetchTick, setRefetchTick] = useState(0);
   const fallbackRef = useRef(fallback);
-  fallbackRef.current = fallback;
+  useEffect(() => {
+    fallbackRef.current = fallback;
+  }, [fallback]);
   // Tick bookkeeping: a refetchTick CHANGE means an explicit refresh (manual
   // `refetch()` or the refreshMs poller) — such a re-run must BYPASS the
   // session cache and hit the network, otherwise polling would be swallowed
@@ -349,11 +492,10 @@ export function useApi<T>(
     // a genuinely down backend still surfaces its error after the retry.
     let attempts = 0;
     let t2: number | undefined;
-    const t = window.setTimeout(run, 0);
+    run();
 
     return () => {
       cancelled = true;
-      window.clearTimeout(t);
       if (t2 !== undefined) window.clearTimeout(t2);
     };
     // cacheKey is a derived string that changes when deps change, so it is
