@@ -5,12 +5,15 @@ import { AlertTriangle, ShieldAlert, Trophy, Handshake } from "lucide-react";
 
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 /**
@@ -51,43 +54,65 @@ export function isRiskFixture(row?: FixtureRiskRow | null): boolean {
   return Boolean(row.is_risk_fixture || row.is_cup || row.is_friendly);
 }
 
+function humanizeRiskValue(value?: string | null): string | null {
+  if (!value || value.trim().toLowerCase() === "unknown") return null;
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 export function FixtureRiskTag({
   row,
   label,
   className,
   textClassName,
+  showLabel = true,
 }: {
   row?: FixtureRiskRow | null;
   label: React.ReactNode;
   className?: string;
   textClassName?: string;
+  showLabel?: boolean;
 }) {
   const risky = isRiskFixture(row);
   const isFriendly = Boolean(row?.is_friendly);
   const isCup = Boolean(row?.is_cup);
 
   if (!risky) {
-    return <span className={className}>{label}</span>;
+    return <span className={className}>{showLabel ? label : null}</span>;
   }
 
+  const kind = isFriendly ? "friendly" : isCup ? "cup" : "general";
   const title = isFriendly ? "Friendly match" : isCup ? "Cup match" : "High-risk fixture";
-  const headline = isFriendly
-    ? "This is a FRIENDLY match"
+  const headline = isFriendly ? "Friendly match" : isCup ? "Cup match" : "High-risk fixture";
+  const explanation = isFriendly
+    ? "Friendly fixtures often involve rotated squads, late lineup decisions, and uncertain motivation. Historical form and team-strength signals carry less predictive weight here."
     : isCup
-      ? "This is a CUP match"
-      : "This is a high-risk fixture";
+      ? "Cup fixtures can reward rotation, tactical variation, and late lineup decisions. Treat the model output as informational rather than a high-confidence selection."
+      : "This fixture carries a higher uncertainty profile. Lineups, tactical intent, and motivation can change late, reducing the reliability of form-based signals.";
+  const competition = row?.league_name || row?.competition;
+  const riskValue = humanizeRiskValue(row?.risk_label) || humanizeRiskValue(row?.risk_level);
+  const metadata = [
+    competition ? { label: "Competition", value: competition } : null,
+    riskValue ? { label: "Risk profile", value: riskValue } : null,
+  ].filter((item): item is { label: string; value: string } => Boolean(item));
+  const Icon = isFriendly ? Handshake : isCup ? Trophy : ShieldAlert;
+  const chipLabel = isFriendly ? "Friendly" : isCup ? "Cup" : "Risk";
 
   const chip = (
     <span
       className={cn(
-        "ml-1.5 inline-flex items-center gap-1 rounded-md border px-1.5 py-px align-middle font-mono text-[9px] font-black uppercase tracking-wider transition-colors",
+        "inline-flex items-center gap-1 rounded-md border px-1.5 py-px align-middle font-mono text-[9px] font-black uppercase tracking-wider transition-colors",
+        !showLabel && "ml-0",
         isFriendly
           ? "border-rose-500/50 bg-rose-950/60 text-rose-300 group-hover:bg-rose-900/60"
-          : "border-amber-500/50 bg-amber-950/60 text-amber-300 group-hover:bg-amber-900/60"
+          : isCup
+            ? "border-amber-500/50 bg-amber-950/60 text-amber-300 group-hover:bg-amber-900/60"
+            : "border-rose-500/50 bg-rose-950/60 text-rose-300 group-hover:bg-rose-900/60"
       )}
     >
-      {isFriendly ? <Handshake className="h-2.5 w-2.5" /> : <Trophy className="h-2.5 w-2.5" />}
-      {isFriendly ? "Friendly" : "Cup"}
+      <Icon className="h-2.5 w-2.5" />
+      {chipLabel}
     </span>
   );
 
@@ -102,52 +127,82 @@ export function FixtureRiskTag({
               "focus-visible:ring-2 focus-visible:ring-rose-400/70",
               className
             )}
-            title={`${title} — tap for details`}
             aria-label={`${title}. ${String(label ?? "")} — open risk warning`}
           >
-            <span className={cn("truncate group-hover:underline", textClassName)}>{label}</span>
+            <span className={cn("truncate group-hover:underline", !showLabel && "sr-only", textClassName)}>{label}</span>
             {chip}
           </button>
         }
       />
-      <DialogContent className="max-w-md border-rose-500/40 bg-[#120a12] text-slate-100 ring-rose-500/30">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-base font-black uppercase tracking-wide text-rose-300">
-            <ShieldAlert className="h-4 w-4" />
-            {headline}
-          </DialogTitle>
-          <DialogDescription className="space-y-3 text-xs leading-relaxed text-slate-300">
-            <p className="text-sm font-semibold text-rose-200">
-              This is {isFriendly ? "a friendly" : "a cup"} match — highly risky and
-              unpredictable in nature.
-            </p>
-            <p>
-              Squads and starting lineups are rotated and often decided late, competition
-              intensity and motivation are unknown, and historical form carries far less
-              predictive weight. Treat any model output for this fixture as informational only.
-            </p>
-            <ul className="list-disc space-y-1 pl-4 text-[11px] text-slate-400">
-              <li>
-                Competition:{" "}
-                <span className="font-mono text-slate-300">{row?.league_name || "—"}</span>
-                {row?.competition ? (
-                  <>
-                    {" "}
-                    (<span className="font-mono">{row.competition}</span>)
-                  </>
-                ) : null}
-              </li>
-              <li>
-                Risk level:{" "}
-                <span className="font-mono text-slate-300">{row?.risk_level || "unknown"}</span>
-              </li>
-              <li className="break-all">
-                Fixture ID:{" "}
-                <span className="font-mono text-slate-400">{row?.fixture_id ?? "—"}</span>
-              </li>
-            </ul>
-          </DialogDescription>
+      <DialogContent
+        className={cn(
+          "max-w-[calc(100%-2rem)] gap-0 overflow-hidden rounded-2xl border bg-bg-elevated/95 p-0 text-text-primary shadow-elevated ring-0 backdrop-blur-xl sm:max-w-lg",
+          kind === "cup"
+            ? "border-amber-400/30"
+            : "border-rose-400/30"
+        )}
+      >
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent-cyan/70 to-transparent" />
+        <DialogHeader className="relative gap-0 border-b border-border-bright/70 bg-gradient-card p-6">
+          <div className="flex items-center gap-4">
+            <div
+              className={cn(
+                "flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border shadow-inner",
+                kind === "cup"
+                  ? "border-amber-400/35 bg-amber-400/10 text-amber-300"
+                  : "border-rose-400/35 bg-rose-400/10 text-rose-300"
+              )}
+            >
+              <Icon className="h-5 w-5" aria-hidden />
+            </div>
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-text-muted">
+                Fixture intelligence
+              </p>
+              <DialogTitle className="mt-1 text-xl font-bold tracking-tight text-text-primary">
+                {headline}
+              </DialogTitle>
+              <p className="mt-1 truncate text-sm font-semibold text-text-secondary">
+                {String(label ?? "")}
+              </p>
+            </div>
+          </div>
         </DialogHeader>
+
+        <DialogDescription className="block px-6 py-5 text-sm leading-relaxed text-text-secondary">
+          <span className="block">{explanation}</span>
+          {metadata.length > 0 && (
+            <span className="mt-5 grid grid-cols-1 gap-3 border-t border-border-bright/60 pt-4 sm:grid-cols-2">
+              {metadata.map((item) => (
+                <span key={item.label} className="min-w-0">
+                  <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-text-muted">
+                    {item.label}
+                  </span>
+                  <span className="mt-1 block truncate text-sm font-semibold text-text-primary">
+                    {item.value}
+                  </span>
+                </span>
+              ))}
+            </span>
+          )}
+        </DialogDescription>
+
+        <DialogFooter className="mx-0 mb-0 rounded-b-2xl border-t border-border-bright/70 bg-bg-card/35 px-6 py-4 sm:justify-end">
+          <DialogClose
+            render={
+              <Button
+                className={cn(
+                  "min-w-28 rounded-lg font-semibold text-white shadow-inner",
+                  kind === "cup"
+                    ? "bg-accent-amber text-black hover:bg-amber-400"
+                    : "bg-accent-indigo hover:bg-indigo-400"
+                )}
+              />
+            }
+          >
+            Understood
+          </DialogClose>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

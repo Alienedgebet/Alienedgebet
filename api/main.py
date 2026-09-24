@@ -1071,7 +1071,9 @@ def get_win_apex(date: str):
     data, _generated_at = store.load("win_apex", date, default=None)
     if data is None:
         data = []
-    rows = _settled(ensure_defaults(data, WIN_APEX_DEFAULTS), "win", date)
+    rows = ensure_defaults(data, WIN_APEX_DEFAULTS)
+    rows = _with_fixture_risk(rows, date)
+    rows = _settled(rows, "win", date)
     return _with_intelligent_pass("win_apex", rows, date)
 
 
