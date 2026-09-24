@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { AuthShell } from "@/components/auth/AuthShell";
 import { useAuth, type AuthUser } from "@/lib/auth-context";
 
@@ -28,13 +28,34 @@ function isAbortError(error: unknown): boolean {
 }
 
 function safeDestination(value: string | null): string {
-  return value && value.startsWith("/") && !value.startsWith("//")
-    ? value
-    : "/dashboard";
+  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) {
+    return "/dashboard";
+  }
+
+  try {
+    const origin = window.location.origin;
+    const destination = new URL(value, origin);
+    let normalizedPath: string;
+    try {
+      normalizedPath = decodeURIComponent(destination.pathname);
+    } catch {
+      return "/dashboard";
+    }
+    normalizedPath = normalizedPath.replace(/\/+$/, "").toLowerCase();
+    if (
+      destination.origin !== origin ||
+      normalizedPath === "/login" ||
+      normalizedPath === "/signup"
+    ) {
+      return "/dashboard";
+    }
+    return `${destination.pathname}${destination.search}${destination.hash}`;
+  } catch {
+    return "/dashboard";
+  }
 }
 
 export default function LoginPage() {
-  const router = useRouter();
   const params = useSearchParams();
   const { setUser } = useAuth();
   const [email, setEmail] = useState("");
@@ -68,7 +89,11 @@ export default function LoginPage() {
         throw new Error("The sign-in response did not include a valid session. Please try again.");
       }
       setUser(data.user);
-      router.replace(safeDestination(params.get("next")));
+      // End the login screen deterministically after a valid login response.
+      // The new document rehydrates AuthProvider from the session cookie.
+      setBusy(false);
+      window.location.replace(safeDestination(params.get("next")));
+      return;
     } catch (err) {
       setError(
         isAbortError(err)
