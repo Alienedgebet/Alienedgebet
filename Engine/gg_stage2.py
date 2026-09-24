@@ -35,7 +35,7 @@ def run_gg_engine_stage2(target_date):
     # -------------------------
     # CONFIG (100% UNTOUCHED ENGINE PARAMS)
     # -------------------------
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "ilM1T5gw3IYpJEmnnlLnaB9wKfmF0U6qtvmuV18am7uaGjNN21er7umReP7P"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY")
     BASE_URL = "https://api.sportmonks.com/v3/football"
     TEAM_LOOKBACK_DAYS = 365
     REQUEST_DELAY_SEC = 0.18

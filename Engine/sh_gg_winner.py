@@ -31,7 +31,7 @@ def run_sh_gg_winner_engine(target_date):
     # -------------------------
     # CONFIG (100% UNTOUCHED LOGIC)
     # -------------------------
-    API_TOKEN = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
     MIN_H2H_GAMES = 2
     REQ_DELAY = 0.2
     

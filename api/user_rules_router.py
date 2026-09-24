@@ -17,10 +17,11 @@ import sys
 import json
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # project root
+from api.auth_store import check_rate_limit
 from LIVE_SCANNER.user_rules_store import (
     list_rules,
     create_rule,
@@ -85,7 +86,9 @@ class MinuteWindow(BaseModel):
 
 
 class UserRuleIn(BaseModel):
-    user_id: str
+    # Accepted for wire compatibility, but the server replaces it with the
+    # authenticated user ID before persistence.
+    user_id: Optional[str] = None
     label: str = "Untitled Rule"
     prematch: PrematchCondition
     live: LiveCondition
@@ -104,40 +107,58 @@ class UserRulePatch(BaseModel):
 # ==============================================================================
 # CRUD
 # ==============================================================================
+def _rate(request: Request, bucket: str, limit: int) -> None:
+    if not check_rate_limit(f"{bucket}:{request.client.host if request.client else 'unknown'}", limit, 60):
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+
+
 @router.get("/user-rules")
-def get_user_rules(user_id: str = Query(..., description="Anonymous or account user id")):
-    return list_rules(user_id=user_id)
+def get_user_rules(request: Request, user_id: Optional[str] = Query(None)):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return list_rules(user_id=user["user_id"])
 
 
 @router.post("/user-rules", status_code=201)
-def post_user_rule(payload: UserRuleIn):
-    # exclude_none so optional fields the client didn't set (e.g. `flag`
-    # on a `type: rate` prematch condition) aren't sent through as
-    # explicit None and don't confuse the store's dict-based validators.
+def post_user_rule(payload: UserRuleIn, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    _rate(request, f"rule:{user['user_id']}", 30)
+    clean = payload.model_dump(exclude_none=True)
+    clean["user_id"] = user["user_id"]
     try:
-        return create_rule(payload.model_dump(exclude_none=True))
-    except RuleValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        return create_rule(clean)
+    except RuleValidationError:
+        raise HTTPException(status_code=422, detail="The alert rule is invalid.")
 
 
 @router.patch("/user-rules/{rule_id}")
-def patch_user_rule(rule_id: str, patch: UserRulePatch):
+def patch_user_rule(rule_id: str, patch: UserRulePatch, request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    _rate(request, f"rule:{user['user_id']}", 30)
     clean_patch = {
         k: (v.model_dump(exclude_none=True) if hasattr(v, "model_dump") else v)
         for k, v in patch.model_dump(exclude_none=True).items()
     }
     try:
-        updated = update_rule(rule_id, clean_patch)
-    except RuleValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        updated = update_rule(rule_id, clean_patch, user_id=user["user_id"])
+    except RuleValidationError:
+        raise HTTPException(status_code=422, detail="The alert rule is invalid.")
     if updated is None:
         raise HTTPException(status_code=404, detail="Rule not found.")
     return updated
 
 
 @router.delete("/user-rules/{rule_id}", status_code=204)
-def delete_user_rule(rule_id: str, user_id: str = Query(...)):
-    ok = delete_rule(rule_id, user_id)
+def delete_user_rule(rule_id: str, request: Request, user_id: Optional[str] = Query(None)):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    ok = delete_rule(rule_id, user["user_id"])
     if not ok:
         raise HTTPException(status_code=404, detail="Rule not found or not owned by this user.")
     return None
@@ -148,7 +169,10 @@ def delete_user_rule(rule_id: str, user_id: str = Query(...)):
 # down to only this user's fired alerts.
 # ==============================================================================
 @router.get("/alerts/mine")
-def get_my_alerts(user_id: str = Query(...), limit: int = Query(50, le=200)):
+def get_my_alerts(request: Request, user_id: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=200)):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
     if not os.path.exists(READY_TO_PUSH_FILE):
         return []
 
@@ -163,7 +187,7 @@ def get_my_alerts(user_id: str = Query(...), limit: int = Query(50, le=200)):
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if row.get("user_id") == user_id:
+                if row.get("user_id") == user["user_id"]:
                     rows.append(row)
     except OSError:
         return []

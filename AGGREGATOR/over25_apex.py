@@ -47,7 +47,7 @@ def _valid_fixture_id(fid):
 
 class ApexO25Aggregator:
     def __init__(self):
-        self.api_key = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+        self.api_key = os.getenv("SPORTMONKS_API_KEY")
         self.base_url = "https://api.sportmonks.com/v3/football"
         os.makedirs(MASTER_DIR, exist_ok=True)
         os.makedirs(OUTPUT_DIR, exist_ok=True)

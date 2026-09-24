@@ -35,7 +35,7 @@ def run_o25_psychology_engine(target_date=None):
     # ==============================================================================
     # 1. CONFIGURATION & SETUP
     # ==============================================================================
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY")
     if not API_KEY:
         print("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
         return[]

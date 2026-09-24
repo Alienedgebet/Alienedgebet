@@ -1,4 +1,7 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { usePathname } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TopBar } from "@/components/layout/TopBar";
 import { RightPanelLazy } from "@/components/layout/RightPanelLazy";
@@ -9,6 +12,8 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
+  const pathname = usePathname();
+  if (pathname === "/login" || pathname === "/signup") return <>{children}</>;
   return (
     <>
       <NavigationProgressBar />

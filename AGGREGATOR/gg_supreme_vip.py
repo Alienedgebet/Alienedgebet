@@ -102,7 +102,7 @@ def run_supreme_gg_aggregator(target_date=None):
 
     # -------------------------
 
-    API_KEY = os.getenv("SPORTMONKS_API_KEY") or "hD4F4FIFwNW5BxKa6Y0fCCLtB0KkiNRxtULDdsrO3VPss1IMV4HJihBkxwI4"
+    API_KEY = os.getenv("SPORTMONKS_API_KEY")
 
     BASE_URL = "https://api.sportmonks.com/v3/football"
 

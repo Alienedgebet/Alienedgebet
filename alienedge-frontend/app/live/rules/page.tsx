@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { SlidersHorizontal, Trash2, Loader2, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
-import { useLocalUserId } from "@/lib/use-local-user";
 import {
   userRulesApi,
   PREMATCH_FLAG_OPTIONS,
@@ -165,7 +165,8 @@ function describeRule(rule: UserRuleDef): { pre: string; live: string; window: s
 }
 
 export default function LiveRulesPage() {
-  const userId = useLocalUserId();
+  const { user } = useAuth();
+  const userId = user?.user_id || null;
 
   const [rules, setRules] = useState<UserRuleDef[]>([]);
   const [loading, setLoading] = useState(true);
@@ -202,7 +203,7 @@ export default function LiveRulesPage() {
     if (!userId) return;
     setLoading(true);
     userRulesApi
-      .list(userId)
+      .list()
       .then((res) => setRules(res.data))
       .catch(() => setError("Could not load your saved rules — showing none for now."))
       .finally(() => setLoading(false));
@@ -253,7 +254,6 @@ export default function LiveRulesPage() {
       const live = buildLive(liveType, liveSide, liveMinValue, keyLostSide, keyLostCount);
 
       await userRulesApi.create({
-        user_id: userId,
         label: label.trim() || "Untitled Rule",
         prematch,
         live,
@@ -283,7 +283,7 @@ export default function LiveRulesPage() {
     if (!userId) return;
     setRules((prev) => prev.filter((r) => r.rule_id !== rule.rule_id));
     try {
-      await userRulesApi.remove(rule.rule_id, userId);
+      await userRulesApi.remove(rule.rule_id);
     } catch {
       reload();
     }
