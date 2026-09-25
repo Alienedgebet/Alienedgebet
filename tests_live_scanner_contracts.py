@@ -263,6 +263,200 @@ class LiveScannerContractTests(unittest.TestCase):
             {"home": 0, "away": 0, "display": "—"},
         )
 
+    # ── BUG 2: ONE MARKET MUST BE TRACKED ONCE ────────────────────────────
+    # Dedup keyed on the raw pick object (including free-text `reason`), so
+    # "TO_SCORE/away" with two different justifications became two predictions,
+    # and "O2.5" vs "OVER_2.5" were treated as different markets.
+
+    def test_normalize_pick_collapses_market_aliases(self):
+        key, pick = stage2.normalize_pick(
+            {"type": "O2.5", "target_loc": None})
+        self.assertEqual(key, "OVER_2.5:match")
+        self.assertEqual(pick["market"], "OVER_2.5")
+
+        key, pick = stage2.normalize_pick({"type": "OVER_2.5"})
+        self.assertEqual(key, "OVER_2.5:match")
+
+        key, _ = stage2.normalize_pick({"type": "U2.5"})
+        self.assertEqual(key, "UNDER_2.5:match")
+
+    def test_normalize_pick_keeps_targets_distinct(self):
+        home, _ = stage2.normalize_pick(
+            {"type": "TO_SCORE", "target_loc": "home"})
+        away, _ = stage2.normalize_pick(
+            {"type": "TO_SCORE", "target_loc": "away"})
+        self.assertNotEqual(home, away)
+
+    def test_pick_feed_dedup_ignores_reason_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "feed.json"
+            path.write_text(json.dumps({
+                "1": [
+                    {"type": "TO_SCORE", "target_loc": "away",
+                     "reason": "Favorite defense collapsing"},
+                    {"type": "TO_SCORE", "target_loc": "away",
+                     "reason": "Home GK liability"},
+                    {"type": "O2.5"},
+                    {"type": "OVER_2.5"},
+                ]
+            }), encoding="utf-8")
+            merged = {}
+            for fid, picks in stage2._read_pick_feed(str(path)).items():
+                existing = merged.setdefault(fid, [])
+                seen = {p.get("canonical_key") for p in existing}
+                for pick in picks:
+                    key, normalized = stage2.normalize_pick(pick)
+                    if normalized is None or key in seen:
+                        continue
+                    existing.append(normalized)
+                    seen.add(key)
+            # O2.5 and OVER_2.5 collapse; the two TO_SCORE rows collapse.
+            self.assertEqual(len(merged["1"]), 2)
+            self.assertEqual(
+                {p["canonical_key"] for p in merged["1"]},
+                {"OVER_2.5:match", "TO_SCORE:away"},
+            )
+
+    def test_stage2_state_key_is_stable_not_index_based(self):
+        # Index-based keys reset history whenever the feed is reordered.
+        key_a, _ = stage2.normalize_pick({"type": "TO_SCORE", "target_loc": "away"})
+        key_b, _ = stage2.normalize_pick({"type": "TO_SCORE", "target_loc": "away"})
+        self.assertEqual(key_a, key_b)
+        self.assertNotIn("0_", key_a)
+
+    # ── BUG 3/5: BOX ENTRIES WERE PERMANENTLY ZERO ─────────────────────────
+    # The provider never emits the codes the engine read, so box was always 0
+    # and "Box touch diff" could never pass.
+
+    def test_stage2_box_stat_prefers_a_code_the_provider_actually_sends(self):
+        # "shots-insidebox" is present in the live feed; the two box-touch codes
+        # are not, which is why box was permanently 0.
+        self.assertEqual(stage2.BOX_STAT_CODES[0], "shots-insidebox")
+        self.assertIn("shots-insidebox", stage2.BOX_STAT_CODES)
+        self.assertTrue(stage2.BOX_STAT_FALLBACK)
+
+    def test_stage2_box_none_is_unavailable_not_zero(self):
+        self.assertIsNone(stage2._opt_box({"box": None}))
+        self.assertEqual(stage2._opt_box({"box": 7}), 7)
+        # A missing box must not be scored as zero pressure.
+        ctx = self._stage2_ctx(
+            home={"shots-insidebox": 9, "dangerous-attacks": 40, "corners": 6},
+            away={"shots-insidebox": 1, "dangerous-attacks": 8, "corners": 1},
+        )
+        ctx["home"]["stats"]["box"] = 9
+        ctx["away"]["stats"]["box"] = 1
+        passed, note = stage2.engine_2_structural_stacker(ctx, "home")
+        self.assertTrue(passed)
+        self.assertIn("Box entry diff 8", note)
+
+    def test_stage2_forensic_handles_missing_box_without_crashing(self):
+        # box=None previously made `opp_box >= 3` raise TypeError in production.
+        ctx = self._stage2_ctx(impact={"home": {"gk_risk": True}})
+        ctx["away"]["stats"]["box"] = None
+        state, note = stage2.new_engine_forensic_investigation(
+            ctx, {"target_loc": "home"})
+        self.assertIn(state, (stage2.V_SUPPORTED, stage2.V_CONTRADICTED))
+        self.assertIn("PROTECTED", note)
+
+    def test_stage2_board_reports_box_unavailable_flag(self):
+        entry = stage2._summary_board_entry(
+            {"id": 7, "name": "A vs B", "state": {"state": "LIVE"}})
+        self.assertIn("box_available", entry["statistics"]["home"])
+        self.assertIsNone(entry["statistics"]["home"]["box_entries"])
+
+    # ── P5: RAISED THRESHOLDS ─────────────────────────────────────────────
+    def test_stage2_engine1_requires_more_than_three_combined_sot(self):
+        self.assertEqual(stage2.ENGINE1_MIN_COMBINED_SOT, 3)
+        ctx = self._stage2_ctx(
+            home={"shots-on-target": 2}, away={"shots-on-target": 1})
+        ok, note = stage2.engine_1_rule_validator(ctx, {"type": "OVER_2.5"})
+        self.assertFalse(ok)          # exactly 3 is NOT enough
+        self.assertIn("> 3", note)
+
+        ctx["away"]["stats"]["shots-on-target"] = 2   # combined 4
+        ok, note = stage2.engine_1_rule_validator(ctx, {"type": "OVER_2.5"})
+        self.assertTrue(ok)
+        self.assertIn("SOT combined 4", note)
+
+    def test_stage2_structure_ratios_are_sixty_percent(self):
+        self.assertEqual(stage2.MIN_DA_RATIO, 0.60)
+        self.assertEqual(stage2.MIN_SOT_RATIO, 0.60)
+        self.assertEqual(stage2.MIN_BOX_TOUCH_DIFF, 4)
+        self.assertEqual(stage2.MIN_RECENT_KEY_EVENTS, 4)
+
+    def test_stage2_da_ratio_below_sixty_fails(self):
+        ctx = self._stage2_ctx(
+            home={"dangerous-attacks": 4, "corners": 0, "shots-on-target": 0},
+            away={"dangerous-attacks": 6, "corners": 0, "shots-on-target": 0},
+        )
+        ctx["home"]["stats"]["box"] = 0
+        ctx["away"]["stats"]["box"] = 0
+        _passed, note = stage2.engine_2_structural_stacker(ctx, "home")
+        # 4/10 = 40% is below the 60% bar.
+        self.assertIn("DA ratio 40% ≥ 60%: ❌", note)
+
+    def test_stage2_momentum_requires_four_key_events(self):
+        ctx = self._stage2_ctx(minute=60)
+        for i in range(3):
+            ctx["events"].append({
+                "participant_id": "7", "minute": 55 + i,
+                "type": {"code": "shot-on-target"},
+            })
+        ok, note = stage2.engine_3_momentum_escalator(ctx, "7")
+        self.assertFalse(ok)
+        self.assertIn("3 ≥ 4", note)
+
+        ctx["events"].append({
+            "participant_id": "7", "minute": 59,
+            "type": {"code": "goal"},
+        })
+        ok, _note = stage2.engine_3_momentum_escalator(ctx, "7")
+        self.assertTrue(ok)
+
+    # ── P4: SETTLED PREDICTIONS ARE NOT "UNKNOWN" ─────────────────────────
+    def test_settled_prediction_reports_its_outcome_not_unknown(self):
+        stage, note = stage2.prediction_lifecycle_step(
+            {"type": "GG"}, "SETTLED", stage2.V_SETTLED, 90, True)
+        self.assertEqual(stage, "SETTLED")
+        self.assertIn("Outcome", note)
+
+    def test_prediction_lifecycle_names_each_stage(self):
+        pick = {"type": "GG"}
+        self.assertEqual(
+            stage2.prediction_lifecycle_step(
+                pick, "TRIGGERED", stage2.V_SUPPORTED, 45, False)[0],
+            "TRIGGERED")
+        self.assertEqual(
+            stage2.prediction_lifecycle_step(
+                pick, "WAITING", stage2.V_SUPPORTED, 30, False)[0],
+            "SUPPORTED")
+        self.assertEqual(
+            stage2.prediction_lifecycle_step(
+                pick, "WAITING", stage2.V_CONTRADICTED, 30, False)[0],
+            "REJECTED")
+        self.assertEqual(
+            stage2.prediction_lifecycle_step(
+                pick, "WAITING", stage2.V_INSUFFICIENT, 30, False)[0],
+            "MONITORING")
+        self.assertEqual(
+            stage2.prediction_lifecycle_step(
+                pick, "WAITING", stage2.V_NEUTRAL, 30, False)[0],
+            "MONITORING")
+
+    # ── P6: STAGE 1 MUST NOT EMIT BOTH O/U DIRECTIONS ────────────────────
+    def test_stage1_high_rotation_does_not_emit_both_directions(self):
+        source = Path(
+            "LIVE_SCANNER/live_stage1_prematch.py").read_text(encoding="utf-8")
+        rotation_block = source.split("match_picks =[]", 1)[1].split(
+            "h_odd, o25, kp", 1)[0]
+        self.assertIn('match_picks.append({"type": "U2.5"})', rotation_block)
+        # The old line emitted both directions from one condition.
+        self.assertNotIn('{"type": "O2.5"}', rotation_block)
+        self.assertNotIn(
+            'match_picks.extend([{"type": "U2.5"}, {"type": "O2.5"}])',
+            rotation_block,
+        )
+
     def test_stage2_board_entry_exposes_structured_contract(self):
         entry = stage2._summary_board_entry({
             "id": 42,
@@ -286,7 +480,7 @@ class LiveScannerContractTests(unittest.TestCase):
             self.assertEqual(
                 set(entry["statistics"][side]),
                 {"possession", "shots_on_target", "dangerous_attacks",
-                 "corners", "box_entries"},
+                 "corners", "box_entries", "box_available"},
             )
 
     def test_stage5_preserves_team_ids_and_explicit_breach(self):

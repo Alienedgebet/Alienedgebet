@@ -131,8 +131,14 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
                 "count": len(raw_data),
                 "data": raw_data
             }
-            with open(LIVE_CACHE_FILE, "w", encoding="utf-8") as f:
+            # Write atomically (tmp + os.replace). Truncate-then-dump left a
+            # window where any concurrent reader saw truncated JSON, which is
+            # exactly how a healthy cache gets read as corrupt. Same pattern
+            # already used by _write_json_atomic() below.
+            _tmp_cache = LIVE_CACHE_FILE + ".tmp"
+            with open(_tmp_cache, "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, indent=2)
+            os.replace(_tmp_cache, LIVE_CACHE_FILE)
             print(f"[LIVE CACHE] refreshed: {len(raw_data)} in-play fixture(s)")
 
             # GATE 2b (FT-SNAPSHOT RECOVERY): a 200 + EMPTY payload is still a
@@ -254,8 +260,9 @@ def get_prematch_fixtures_cached(target_date: str, force_refresh: bool = False) 
                 "count": len(all_fixtures),
                 "data": all_fixtures
             }
-            with open(cache_path, "w", encoding="utf-8") as f:
+            with open(cache_path + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, indent=2)
+            os.replace(cache_path + ".tmp", cache_path)
         except Exception: pass
 
     return all_fixtures

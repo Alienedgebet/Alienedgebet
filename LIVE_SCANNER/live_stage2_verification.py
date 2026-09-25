@@ -86,11 +86,29 @@ API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
 BASE_URL  = "https://api.sportmonks.com/v3/football/livescores/inplay"
 HISTORY_URL = "https://api.sportmonks.com/v3/football"
 
-# ── THRESHOLDS (lowered to 50% so alerts trigger in real match conditions) ──
-MIN_DA_RATIO        = 0.50   # was 0.62
-MIN_SOT_RATIO       = 0.50   # was 0.60
-MIN_BOX_TOUCH_DIFF  = 2      # was 4
+# ── VALIDATION THRESHOLDS ───────────────────────────────────────────────────
+# Raised from the 50%-era values on request: a single weak signal must not be
+# able to carry a prediction. Engine 1's combined-SOT bar was set to 5 and then
+# relaxed to 3 on request, because >5 suppressed almost every alert (1 of 28
+# predictions reached SUPPORTED on the first cycle after tightening).
+MIN_DA_RATIO        = 0.60   # was 0.50
+MIN_SOT_RATIO       = 0.60   # was 0.50
+MIN_BOX_TOUCH_DIFF  = 4      # was 2
 MIN_MOMENTUM_FACTOR = 1.10   # was 1.30
+MIN_CORNER_DIFF     = 2
+
+# Engine 1 — combined shots on target required; passes when total > this value,
+# i.e. 4 or more.
+ENGINE1_MIN_COMBINED_SOT = 3
+# Engine 3 — recent key events inside the lookback window.
+MIN_RECENT_KEY_EVENTS = 4
+
+# The provider does not emit "touches-in-opposition-box" or "attacks-in-box",
+# so the previous box source was permanently 0 and the box signal could never
+# contribute to Engine 2. "shots-insidebox" is a real, available stat; the
+# fallback keeps the engine useful if a future feed omits it too.
+BOX_STAT_CODES = ("shots-insidebox", "attacks-in-box", "touches-in-opposition-box")
+BOX_STAT_FALLBACK = "shots-total"
 
 # ── VALIDATION GATE POLICY ───────────────────────────────────────────────────
 # Validators no longer return a loose boolean. Each one reports one of four
@@ -100,6 +118,9 @@ V_SUPPORTED    = "SUPPORTED"
 V_CONTRADICTED = "CONTRADICTED"
 V_NEUTRAL      = "NEUTRAL"
 V_INSUFFICIENT = "INSUFFICIENT_DATA"
+# A settled prediction is not "unknown" — it has a definitive outcome, so its
+# gate verdict is no longer on display.
+V_SETTLED      = "SETTLED"
 
 # A standard alert requires genuine agreement across the three statistical
 # engines. This replaces the old `passed_count >= 1` rule, which let a single
@@ -157,6 +178,49 @@ def safe_get(d, *keys, default=None):
     return cur
 
 
+# ── CANONICAL MARKET IDENTITY ───────────────────────────────────────────────
+# The Stage 1 and Stage 3 feeds each spell the same market differently
+# ("O2.5" vs "OVER_2.5"), and both attach a free-text `reason`. Deduping on
+# the raw object therefore treated one market as several. Every market now
+# resolves to exactly one canonical key so a fixture can never track the same
+# market twice and validation state stays stable across cycles.
+MARKET_ALIASES = {
+    "O2.5":        "OVER_2.5",
+    "OVER2.5":     "OVER_2.5",
+    "OVER":        "OVER_2.5",
+    "U2.5":        "UNDER_2.5",
+    "UNDER2.5":    "UNDER_2.5",
+    "UNDER":       "UNDER_2.5",
+    "GG":          "GG",
+    "BTTS":        "GG",
+    "GG_OVER_2.5": "GG_OVER_2.5",
+    "TO_SCORE":    "TO_SCORE",
+    "SCORE":       "TO_SCORE",
+}
+
+
+def normalize_pick(pick):
+    """
+    Return (canonical_key, normalized_pick) for a feed pick.
+
+    canonical_key identifies the MARKET only: (market, target). The `reason`
+    text is deliberately excluded so two spellings of one market collapse into
+    a single tracked prediction.
+    """
+    if not isinstance(pick, dict):
+        return None, None
+    raw_type = str(pick.get("type", "")).strip().upper().replace(" ", "")
+    market = MARKET_ALIASES.get(raw_type, raw_type or "UNKNOWN")
+    target = pick.get("target_loc") or "match"
+    key = f"{market}:{target}"
+    normalized = dict(pick)
+    normalized["type"] = market
+    normalized["target_loc"] = target
+    normalized["market"] = market
+    normalized["canonical_key"] = key
+    return key, normalized
+
+
 def _read_pick_feed(path):
     """Read either the Stage 1 or Stage 3 fixture-keyed pick feed."""
     try:
@@ -180,25 +244,28 @@ def _read_pick_feed(path):
 
 
 def _load_pick_feeds():
-    """Merge Stage 1 and Stage 3 picks without making either feed authoritative.
+    """
+    Merge Stage 1 and Stage 3 picks into ONE canonical list per fixture.
 
     Stage 1 is the older strategic feed; Stage 3 is the lineup/forensic feed.
     Both can legitimately contain the same fixture, and an empty Stage 1 file
     must not make the validator blind to current Stage 3 picks.
+
+    Dedup is by canonical MARKET key rather than the raw pick object, so the
+    same market is never tracked twice regardless of which feed spelled it
+    differently or what justification text it carried.
     """
     merged = {}
     for path in (PREDICTIONS_FILE, INCOMING_PREDICTIONS_FILE):
         for fid, picks in _read_pick_feed(path).items():
             existing = merged.setdefault(fid, [])
-            seen = {json.dumps(p, sort_keys=True, default=str) for p in existing
-                    if isinstance(p, dict)}
+            seen = {p.get("canonical_key") for p in existing}
             for pick in picks:
-                if not isinstance(pick, dict):
+                key, normalized = normalize_pick(pick)
+                if normalized is None or key in seen:
                     continue
-                key = json.dumps(pick, sort_keys=True, default=str)
-                if key not in seen:
-                    existing.append(pick)
-                    seen.add(key)
+                existing.append(normalized)
+                seen.add(key)
     return merged
 
 
@@ -208,6 +275,23 @@ def _stat_int(stats, key):
         return int(float(stats.get(key, 0) or 0))
     except (TypeError, ValueError, AttributeError):
         return 0
+
+
+def _opt_box(stats):
+    """
+    Box entries, or None when the feed did not supply them.
+
+    None means "unavailable" and is deliberately distinct from 0. The engine
+    must not convert missing box data into "zero box pressure" and then judge
+    against it as though the team genuinely had no presence in the box.
+    """
+    value = stats.get("box")
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _fixture_state_code(fixture):
@@ -269,12 +353,18 @@ def _score_for_board(fixture):
 
 
 def _empty_statistics():
-    """Same statistics shape as a live row, so the frontend renders uniformly."""
-    blank = {
-        "possession": 0, "shots_on_target": 0, "dangerous_attacks": 0,
-        "corners": 0, "box_entries": 0,
-    }
-    return {"home": dict(blank), "away": dict(blank)}
+    """Same statistics shape as a live row, so the frontend renders uniformly.
+
+    `box_entries` is None (not 0) because the provider frequently omits the box
+    stat entirely; a zero there would read as "no box pressure" rather than
+    "unknown".
+    """
+    def side():
+        return {
+            "possession": 0, "shots_on_target": 0, "dangerous_attacks": 0,
+            "corners": 0, "box_entries": None, "box_available": False,
+        }
+    return {"home": side(), "away": side()}
 
 
 def _period_label(minute):
@@ -431,12 +521,17 @@ def engine_1_rule_validator(data, pick):
     def get_s(d, k): return int(d.get(k, 0))
 
     if "OVER" in ptype or "GG" in ptype:
-        result = (get_s(h_s, 'shots-on-target') + get_s(a_s, 'shots-on-target')) >= 2  # was 3
-        return result, f"SOT combined {get_s(h_s,'shots-on-target')+get_s(a_s,'shots-on-target')} ≥ 2"
+        total = get_s(h_s, 'shots-on-target') + get_s(a_s, 'shots-on-target')
+        result = total > ENGINE1_MIN_COMBINED_SOT
+        return result, (
+            f"SOT combined {total} > {ENGINE1_MIN_COMBINED_SOT}: "
+            f"{'✅' if result else '❌'}"
+        )
 
     if "UNDER" in ptype:
-        result = (get_s(h_s, 'shots-on-target') + get_s(a_s, 'shots-on-target')) <= 1
-        return result, f"SOT combined {get_s(h_s,'shots-on-target')+get_s(a_s,'shots-on-target')} ≤ 1"
+        total = get_s(h_s, 'shots-on-target') + get_s(a_s, 'shots-on-target')
+        result = total <= 1
+        return result, f"SOT combined {total} ≤ 1: {'✅' if result else '❌'}"
 
     if "WIN" in ptype or "SCORE" in ptype:
         sot_ok = get_s(exp, 'shots-on-target') >= 1
@@ -458,16 +553,25 @@ def engine_2_structural_stacker(data, target_loc):
     # Match-level markets (O2.5 / U2.5 / GG) have no single target side.
     # Evaluate BOTH teams using their combined two-team match data instead
     # of a home/away dominance split. Do NOT map None → "home".
-    if target_loc is None:
+    if target_loc is None or target_loc == "match":
         h = data['home']['stats']
         a = data['away']['stats']
         tot_sot = get_s(h, 'shots-on-target') + get_s(a, 'shots-on-target')
-        tot_box = get_s(h, 'box') + get_s(a, 'box')
-        sot_ok  = tot_sot >= 2
-        box_ok  = tot_box >= 2
-        return (sot_ok or box_ok), (
-            f"Combined SOT {tot_sot} ≥ 2: {'✅' if sot_ok else '❌'} | "
-            f"Combined box touches {tot_box} ≥ 2: {'✅' if box_ok else '❌'}"
+        box_vals = [_opt_box(h), _opt_box(a)]
+        if all(v is not None for v in box_vals):
+            tot_box = int(box_vals[0]) + int(box_vals[1])
+            sot_ok  = tot_sot > ENGINE1_MIN_COMBINED_SOT
+            box_ok  = tot_box > ENGINE1_MIN_COMBINED_SOT
+            return (sot_ok or box_ok), (
+                f"Combined SOT {tot_sot} > {ENGINE1_MIN_COMBINED_SOT}: {'✅' if sot_ok else '❌'} | "
+                f"Combined box entries {tot_box} > {ENGINE1_MIN_COMBINED_SOT}: {'✅' if box_ok else '❌'}"
+            )
+        # Box entries genuinely unavailable — judge on SOT alone and say so
+        # rather than silently treating missing data as zero pressure.
+        sot_ok = tot_sot > ENGINE1_MIN_COMBINED_SOT
+        return sot_ok, (
+            f"Combined SOT {tot_sot} > {ENGINE1_MIN_COMBINED_SOT}: "
+            f"{'✅' if sot_ok else '❌'} | box entries unavailable"
         )
 
     if target_loc == "match": target_loc = "home"
@@ -490,14 +594,21 @@ def engine_2_structural_stacker(data, target_loc):
     signals.append(f"SOT ratio {sot_ratio:.0%} ≥ {MIN_SOT_RATIO:.0%}: {'✅' if sot_ok else '❌'}")
     if sot_ok: signal_pass.append(True)
 
-    box_diff = int(exp.get('box', 0)) - int(opp.get('box', 0))
-    box_ok   = box_diff >= MIN_BOX_TOUCH_DIFF
-    signals.append(f"Box touch diff {box_diff} ≥ {MIN_BOX_TOUCH_DIFF}: {'✅' if box_ok else '❌'}")
-    if box_ok: signal_pass.append(True)
+    box_exp = _opt_box(exp)
+    box_opp = _opt_box(opp)
+    if box_exp is not None and box_opp is not None:
+        box_diff = box_exp - box_opp
+        box_ok   = box_diff >= MIN_BOX_TOUCH_DIFF
+        signals.append(
+            f"Box entry diff {box_diff} ≥ {MIN_BOX_TOUCH_DIFF}: {'✅' if box_ok else '❌'}"
+        )
+        if box_ok: signal_pass.append(True)
+    else:
+        signals.append("Box entries unavailable — signal not scored")
 
     corn_diff = get_s(exp, 'corners') - get_s(opp, 'corners')
-    corn_ok   = corn_diff >= 2
-    signals.append(f"Corner diff {corn_diff} ≥ 2: {'✅' if corn_ok else '❌'}")
+    corn_ok   = corn_diff >= MIN_CORNER_DIFF
+    signals.append(f"Corner diff {corn_diff} ≥ {MIN_CORNER_DIFF}: {'✅' if corn_ok else '❌'}")
     if corn_ok: signal_pass.append(True)
 
     passed = len(signal_pass) >= 2
@@ -518,8 +629,11 @@ def engine_3_momentum_escalator(data, target_id):
                 if safe_get(e, "type", "code") in ["corner", "shot-on-target", "goal"]:
                     recent += 1
 
-    passed = recent >= 2
-    return passed, f"Recent key events in last 12 min: {recent} ≥ 2: {'✅' if passed else '❌'}"
+    passed = recent >= MIN_RECENT_KEY_EVENTS
+    return passed, (
+        f"Recent key events in last 12 min: {recent} ≥ {MIN_RECENT_KEY_EVENTS}: "
+        f"{'✅' if passed else '❌'}"
+    )
 
 # ==============================================================================
 # FORENSIC INVESTIGATION ENGINE
@@ -542,11 +656,16 @@ def new_engine_forensic_investigation(ctx, pick):
 
     opp_sot = int(opp_stats.get('shots-on-target', 0))
     opp_da  = int(opp_stats.get('dangerous-attacks', 0))
-    opp_box = int(opp_stats.get('box', 0))
+    # Box may be None (provider omits the source codes) — only count it when the
+    # feed actually gave us a number, otherwise the SOT/DA branches still judge.
+    opp_box = _opt_box(opp_stats)
 
     if has_red or gk_liability:
-        # Lowered thresholds: was sot≥2, da≥20, box≥5
-        if opp_sot >= 1 or opp_da >= 10 or opp_box >= 3:
+        # A real exploitable gap. `opp_box` is None when the feed omits the box
+        # source codes, so it must not be compared numerically in that case —
+        # the SOT/DA branches still carry the verdict on their own.
+        box_signal = opp_box is not None and opp_box >= 3
+        if opp_sot >= 1 or opp_da >= 10 or box_signal:
             return V_SUPPORTED, "EXPLOITED (Opponent utilizing structural gap)"
         return V_CONTRADICTED, "PROTECTED (Team covering the structural gap)"
     elif personnel_gap:
@@ -591,6 +710,27 @@ def old_engine_statistical_judge(ctx, pick):
     return state, f"STATS_{passed_count}/3", detail
 
 
+def prediction_lifecycle_step(pick, status, combined_state, minute, settled):
+    """
+    Describe WHERE this prediction currently sits in its live lifecycle.
+
+    Code 2 validates predictions one at a time, so each card must state plainly
+    what stage it has reached and why, instead of leaving the reader to infer
+    it from a verdict chip. Returns (stage_label, explanation).
+    """
+    if settled:
+        return "SETTLED", "Outcome decided"
+    if status == "TRIGGERED":
+        return "TRIGGERED", f"Alert fired at {minute}'"
+    if combined_state == V_SUPPORTED:
+        return "SUPPORTED", "Both validators agree — awaiting confirmation"
+    if combined_state == V_CONTRADICTED:
+        return "REJECTED", "Live evidence contradicts this prediction"
+    if combined_state == V_INSUFFICIENT:
+        return "MONITORING", "Partial evidence — still accumulating"
+    return "MONITORING", "No exploitable condition yet"
+
+
 def combine_validation_states(forensic_state, stats_state):
     """
     Combine the forensic and statistical verdicts into one gate state.
@@ -614,6 +754,7 @@ STATE_GLYPH = {
     V_CONTRADICTED: "❌",
     V_NEUTRAL:      "➖",
     V_INSUFFICIENT: "⏳",
+    V_SETTLED:      "🏁",
 }
 
 # ==============================================================================
@@ -684,10 +825,17 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             )
             continue
 
-        p_key  = f"{idx}_{pick['type']}"
-        ptype  = pick.get('type', 'UNKNOWN')
+        # State is keyed on the canonical MARKET, not the list index. Index
+        # keys meant a reordered or deduped feed reset every prediction's
+        # history, and duplicates at different indices tracked separately.
+        p_key  = pick.get("canonical_key") or normalize_pick(pick)[0] or f"{idx}_{pick['type']}"
+        ptype  = pick.get('market') or pick.get('type', 'UNKNOWN')
         target = pick.get('target_loc', 'match')
         label  = f"{ptype} ({target})" if target != 'match' else ptype
+        # Once a pick is settled its gate verdict is history — the settlement
+        # is the answer, so the raw counters must not be shown as UNKNOWN.
+        if ptype in ("U2.5", "O2.5", "UNDER_2.5", "OVER_2.5"):
+            label = ptype
 
         # ── DONE CHECK ──────────────────────────────────────────────────────
         done, done_reason = check_if_done(ctx, pick)
@@ -699,14 +847,23 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 print(f"\n🏁 PICK SETTLED | {name} | Min {minute}'")
                 print(f"   Pick   : {label}")
                 print(f"   Result : {done_reason}")
-            else:
-                match_summary_lines.append(f"   ✅ [{label}] Already settled")
+            # A settled prediction has a definitive answer. The gate verdicts are
+            # no longer meaningful, so they are recorded as SETTLED rather than
+            # left missing for the UI to render as UNKNOWN.
+            stage, stage_note = prediction_lifecycle_step(
+                pick, "SETTLED", V_SETTLED, minute, True)
             prediction_rows.append({
                 "key":         p_key,
                 "label":       label,
                 "type":        ptype,
                 "target":      target,
                 "status":      "SETTLED",
+                "stage":       stage,
+                "stage_note":  stage_note,
+                "signal":      V_SETTLED,
+                "forensic":    V_SETTLED,
+                "statistics":  V_SETTLED,
+                "stats_label": "SETTLED",
                 "settlement":  done_reason,
                 "triggered":   True,
                 "minute":      minute,
@@ -760,13 +917,18 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 line = f"   ⏳ [{label}] 30' check: {_state_text()}"
                 match_summary_lines.append(line)
 
-            prediction_rows.append({
-                "key":           p_key,
-                "label":         label,
-                "type":          ptype,
-                "target":        target,
-                "status":        "QUEUED" if gate_open else "MONITORING",
-                "signal":        combined_state,
+                stage, stage_note = prediction_lifecycle_step(
+                    pick, "QUEUED" if gate_open else "MONITORING",
+                    combined_state, minute, False)
+                prediction_rows.append({
+                    "key":           p_key,
+                    "label":         label,
+                    "type":          ptype,
+                    "target":        target,
+                    "status":        "QUEUED" if gate_open else "MONITORING",
+                    "stage":         stage,
+                    "stage_note":    stage_note,
+                    "signal":        combined_state,
                 "forensic":      forensic_state,
                 "statistics":    stats_state,
                 "stats_label":   o_note,
@@ -822,12 +984,16 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 line = f"   🔥 [{label}] SUPREME ALERT FIRED @ {minute}' (score {score_at_trigger})"
                 match_summary_lines.append(line)
 
+                stage, stage_note = prediction_lifecycle_step(
+                    pick, "TRIGGERED", combined_state, minute, False)
                 prediction_rows.append({
                     "key":           p_key,
                     "label":         label,
                     "type":          ptype,
                     "target":        target,
                     "status":        "TRIGGERED",
+                    "stage":         stage,
+                    "stage_note":    stage_note,
                     "signal":        combined_state,
                     "forensic":      forensic_state,
                     "statistics":    stats_state,
@@ -851,12 +1017,17 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             # trigger facts preserved, even on later cycles.
             if not prediction_rows or prediction_rows[-1].get("key") != p_key:
                 prior = VALIDATED_ALERTS.get(alert_key, {})
+                prior_stage, prior_note = prediction_lifecycle_step(
+                    pick, "TRIGGERED" if prior else "MONITORING",
+                    combined_state, minute, False)
                 prediction_rows.append({
                     "key":              p_key,
                     "label":            label,
                     "type":             ptype,
                     "target":           target,
                     "status":           "TRIGGERED" if prior else "MONITORING",
+                    "stage":            prior_stage,
+                    "stage_note":       prior_note,
                     "signal":           combined_state,
                     "forensic":         forensic_state,
                     "statistics":       stats_state,
@@ -879,12 +1050,16 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             else:
                 match_summary_lines.append(f"   💤 [{label}] Final strike window — gap closed")
 
+            stage, stage_note = prediction_lifecycle_step(
+                pick, "STRIKE_WINDOW", combined_state, minute, False)
             prediction_rows.append({
                 "key":           p_key,
                 "label":         label,
                 "type":          ptype,
                 "target":        target,
                 "status":        "STRIKE_WINDOW",
+                "stage":         stage,
+                "stage_note":    stage_note,
                 "signal":        combined_state,
                 "forensic":      forensic_state,
                 "statistics":    stats_state,
@@ -903,12 +1078,17 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             line = f"   👁️  [{label}] {state_label} @ {minute}' | {_state_text()}"
             match_summary_lines.append(line)
 
+            open_status = "QUEUED" if state_label.startswith("Queued") else "WAITING"
+            stage, stage_note = prediction_lifecycle_step(
+                pick, open_status, combined_state, minute, False)
             prediction_rows.append({
                 "key":           p_key,
                 "label":         label,
                 "type":          ptype,
                 "target":        target,
-                "status":        "QUEUED" if state_label.startswith("Queued") else "WAITING",
+                "status":        open_status,
+                "stage":         stage,
+                "stage_note":    stage_note,
                 "signal":        combined_state,
                 "forensic":      forensic_state,
                 "statistics":    stats_state,
@@ -925,9 +1105,9 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
     # The entry is now a structured contract rather than a bag of text lines:
     # the frontend renders score / period / statistics / predictions directly
     # and no longer has to parse prose to show the live state.
-    period_label = "FULL TIME" if minute >= 90 else (
-        "SECOND HALF" if minute > 45 else "FIRST HALF"
-    )
+    period_label = _period_label(minute)
+    home_stats = ctx['home']['stats']
+    away_stats = ctx['away']['stats']
     cycle_log.append({
         "name":         name,
         "minute":       minute,
@@ -946,18 +1126,20 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
         "updated_at":   datetime.now().isoformat(),
         "statistics": {
             "home": {
-                "possession":        _stat_int(ctx['home']['stats'], 'ball-possession'),
-                "shots_on_target":   _stat_int(ctx['home']['stats'], 'shots-on-target'),
-                "dangerous_attacks": _stat_int(ctx['home']['stats'], 'dangerous-attacks'),
-                "corners":           _stat_int(ctx['home']['stats'], 'corners'),
-                "box_entries":       _stat_int(ctx['home']['stats'], 'box'),
+                "possession":        _stat_int(home_stats, 'ball-possession'),
+                "shots_on_target":   _stat_int(home_stats, 'shots-on-target'),
+                "dangerous_attacks": _stat_int(home_stats, 'dangerous-attacks'),
+                "corners":           _stat_int(home_stats, 'corners'),
+                "box_entries":       _opt_box(home_stats),
+                "box_available":     _opt_box(home_stats) is not None,
             },
             "away": {
-                "possession":        _stat_int(ctx['away']['stats'], 'ball-possession'),
-                "shots_on_target":   _stat_int(ctx['away']['stats'], 'shots-on-target'),
-                "dangerous_attacks": _stat_int(ctx['away']['stats'], 'dangerous-attacks'),
-                "corners":           _stat_int(ctx['away']['stats'], 'corners'),
-                "box_entries":       _stat_int(ctx['away']['stats'], 'box'),
+                "possession":        _stat_int(away_stats, 'ball-possession'),
+                "shots_on_target":   _stat_int(away_stats, 'shots-on-target'),
+                "dangerous_attacks": _stat_int(away_stats, 'dangerous-attacks'),
+                "corners":           _stat_int(away_stats, 'corners'),
+                "box_entries":       _opt_box(away_stats),
+                "box_available":     _opt_box(away_stats) is not None,
             },
         },
         "predictions":   prediction_rows,
@@ -978,9 +1160,11 @@ def extract_live_context(fixture):
 
     stats = {
         "home": {"ball-possession": 0, "attacks": 0, "dangerous-attacks": 0,
-                 "shots-on-target": 0, "corners": 0, "box": 0},
+                 "shots-on-target": 0, "corners": 0, "box": None,
+                 "box_source": None},
         "away": {"ball-possession": 0, "attacks": 0, "dangerous-attacks": 0,
-                 "shots-on-target": 0, "corners": 0, "box": 0}
+                 "shots-on-target": 0, "corners": 0, "box": None,
+                 "box_source": None}
     }
     for s in fixture.get("statistics", []):
         pid  = str(s.get("participant_id"))
@@ -991,8 +1175,22 @@ def extract_live_context(fixture):
         side = "home" if pid == h_id else ("away" if pid == a_id else None)
         if not side or not code: continue
         stats[side][code] = val
-        if code in ["touches-in-opposition-box", "attacks-in-box"]:
-            stats[side]["box"] += val
+
+    # Box entries: the provider never emits "touches-in-opposition-box" or
+    # "attacks-in-box", which left this permanently 0 and made the Engine 2 box
+    # signal impossible to satisfy. Prefer a code the feed actually carries and
+    # record which source was used. `None` means genuinely unavailable, which is
+    # NOT the same as a real 0 — the engine must not read it as zero pressure.
+    for side in ("home", "away"):
+        for candidate in BOX_STAT_CODES:
+            if candidate in stats[side]:
+                stats[side]["box"] = float(stats[side][candidate])
+                stats[side]["box_source"] = candidate
+                break
+        else:
+            if BOX_STAT_FALLBACK in stats[side]:
+                stats[side]["box"] = float(stats[side][BOX_STAT_FALLBACK])
+                stats[side]["box_source"] = BOX_STAT_FALLBACK
 
     scores = {"home": 0, "away": 0}
     for s in fixture.get("scores", []):

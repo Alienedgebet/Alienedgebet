@@ -678,8 +678,14 @@ def run_prematch_engine():
                     print(f"\n[PRE-MATCH STRATEGIC PREDICTIONS]")
                     
                     if (h['miss'] + a['miss']) >= 9:
-                        print("- [PICK] UNDER 2.5 or OVER 2.5: High structural rotation.")
-                        match_picks.extend([{"type": "U2.5"}, {"type": "O2.5"}])
+                        # Heavily rotated sides at BOTH ends of an O/U market is
+                        # not evidence for both directions. High rotation
+                        # degrades attacking quality, so the only defensible read
+                        # from this condition alone is UNDER 2.5. Emitting U2.5
+                        # and O2.5 together made one of them unresolvable by
+                        # construction.
+                        print("- [PICK] UNDER 2.5: High structural rotation degrades attacking quality.")
+                        match_picks.append({"type": "U2.5"})
                     if h['gk_out']:
                         print(f"-[PICK] {a['name'].upper()} TO SCORE: {h['name']} Keeper Liability.")
                         match_picks.append({"type": "TO_SCORE", "target_loc": "away"})
