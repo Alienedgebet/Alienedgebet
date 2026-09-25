@@ -20,7 +20,7 @@ PREMATCH_CACHE_FILE = os.path.join(DATA_DIR, "live_prematch_cache.json")
 
 API_KEY = os.getenv("SPORTMONKS_API_KEY")
 
-LIVE_TTL = 120      # 120 seconds (2 minutes) for in-play scores & stats
+LIVE_TTL = 45       # 45s: scanner-cycle freshness for prompt FT detection
 PREMATCH_TTL = 900  # 900 seconds (15 minutes) for lineups & formations
 
 

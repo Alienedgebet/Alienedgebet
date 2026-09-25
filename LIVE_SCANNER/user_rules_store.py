@@ -74,6 +74,7 @@ VALID_CHEMISTRY_LEVELS = {
     "strong",
     "weak",
     "very weak",
+    "unavailable",
 }
 
 # Stage 1 team audit — fields confirmed in prematch_team_audit.json

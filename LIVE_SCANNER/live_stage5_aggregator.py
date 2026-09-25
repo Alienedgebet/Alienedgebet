@@ -58,26 +58,42 @@ def run_master_aggregator():
         audit = next((item for item in danger_data if str(item.get('fixture_id', '')) == str(f_key)), None)
         
         if not audit:
-            # Fallback: Try matching by alphabetical name key (Your brilliant fix!)
-            incoming_name_key = get_match_key(f_key)
-            audit = next((item for item in danger_data if get_match_key(item.get('fixture', '')) == incoming_name_key), None)
+            # Stage 3 keys this feed by fixture ID. A numeric ID is not a team
+            # name, so only use the name fallback for a real name-shaped key.
+            incoming_name = str(f_key) if not str(f_key).isdigit() else ""
+            incoming_name_key = get_match_key(incoming_name) if incoming_name else ""
+            if incoming_name_key:
+                audit = next((item for item in danger_data
+                              if get_match_key(item.get('fixture', '')) == incoming_name_key), None)
 
         if not audit:
             print(f"  [DROP] Could not find Live Danger data for Pre-Match target: {f_key}")
             continue
 
         # --- EXTRACT DATA PILLARS ---
-        h = audit['home_team']
-        a = audit['away_team']
-        
-        h_missing_pos = [p['pos'] for p in h.get('missing_details',[])]
-        a_missing_pos = [p['pos'] for p in a.get('missing_details',[])]
-        
-        h_missing_count = len(h.get('missing_details',[]))
-        a_missing_count = len(a.get('missing_details',[]))
-        
-        h_breach = (h_missing_count >= CHAOS_THRESHOLD) or ("Goalkeeper" in h_missing_pos)
-        a_breach = (a_missing_count >= CHAOS_THRESHOLD) or ("Goalkeeper" in a_missing_pos)
+        h = audit.get('home_team', {})
+        a = audit.get('away_team', {})
+
+        h_missing_pos = [p.get('pos') for p in h.get('missing_details', [])
+                         if isinstance(p, dict)]
+        a_missing_pos = [p.get('pos') for p in a.get('missing_details', [])
+                         if isinstance(p, dict)]
+
+        h_missing_count = len(h.get('missing_details', []))
+        a_missing_count = len(a.get('missing_details', []))
+
+        # Stage 4 already owns the breach decision. Recompute only for legacy
+        # rows that predate the explicit field.
+        if "breach" in h:
+            h_breach = h.get("breach")
+        else:
+            h_breach = ((h_missing_count >= CHAOS_THRESHOLD)
+                        or ("Goalkeeper" in h_missing_pos))
+        if "breach" in a:
+            a_breach = a.get("breach")
+        else:
+            a_breach = ((a_missing_count >= CHAOS_THRESHOLD)
+                        or ("Goalkeeper" in a_missing_pos))
 
         # 2. TACTICAL SYNC (Formation vs Style)
         def get_sync(team):
@@ -131,6 +147,15 @@ def run_master_aggregator():
         if h_breach or a_breach or style_align == "🔥 OPEN": chemistry["Over1.5"] = "Excellent"
         else: chemistry["Over1.5"] = "Strong"
 
+        if h_breach is None or a_breach is None or style_align == "⚠️ UNAVAILABLE":
+            # Missing Stage 4 evidence is not a negative or positive market
+            # signal. Keep it explicit so user rules cannot fire on a fake
+            # Tight/Strong chemistry label.
+            chemistry = {market: "Unavailable" for market in (
+                "Gg", "Corner", "Home Win", "Away Win",
+                "Over2.5", "Under3.5", "Over1.5",
+            )}
+
         # 🚨 THE SYNDICATE PRINTOUT (Shows the boss the data!)
         print(f"\n[{audit.get('fixture_id', 'Unknown')}] {audit.get('fixture', 'Unknown Match')}")
         print(f" └─ Tactical Alignment: {style_align} | H-Sync: {h_sync} | A-Sync: {a_sync}")
@@ -145,8 +170,20 @@ def run_master_aggregator():
             "fixture_id": audit.get('fixture_id', f_key),
             "incoming_probabilities": incoming_picks,
             "danger_report": {
-                "home": {"status": h.get('danger_level', 'SAFE'), "sync": h_sync, "breach": h_breach},
-                "away": {"status": a.get('danger_level', 'SAFE'), "sync": a_sync, "breach": a_breach}
+                "home": {
+                    "id": h.get('id', ''),
+                    "team_name": h.get('team_name', ''),
+                    "status": h.get('danger_level', 'UNAVAILABLE'),
+                    "data_available": h.get('data_available', True),
+                    "sync": h_sync, "breach": h_breach
+                },
+                "away": {
+                    "id": a.get('id', ''),
+                    "team_name": a.get('team_name', ''),
+                    "status": a.get('danger_level', 'UNAVAILABLE'),
+                    "data_available": a.get('data_available', True),
+                    "sync": a_sync, "breach": a_breach
+                }
             },
             "match_chemistry_list": chemistry 
         })

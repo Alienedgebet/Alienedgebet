@@ -312,7 +312,12 @@ app.include_router(auth_router)
 app.include_router(user_rules_router)
 
 # ── SETTLEMENT / LIVE SCORES (independent of the pre-match pipeline) ──────────
-from settlement_service import settle_predictions, extract_match_data, load_finished_archive  # noqa: E402
+from settlement_service import (
+    settle_predictions,
+    extract_match_data,
+    load_finished_archive,
+    load_ft_snapshot,
+)  # noqa: E402
 from live_cache import get_live_scores_cached  # noqa: E402
 
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
@@ -1436,8 +1441,10 @@ def get_live_validation():
             if isinstance(board, dict) and board.get("total_tracked") is not None
             else (len(state) if isinstance(state, (list, dict)) else 0)
         ),
+        "retained_finished": board.get("retained_finished", 0) if isinstance(board, dict) else 0,
         "alerts": alert_list,
         "matches": board.get("matches", []) if isinstance(board, dict) else [],
+        "errors": board.get("errors", []) if isinstance(board, dict) else [],
     }
 
 
@@ -1452,8 +1459,8 @@ def _live_index() -> dict:
       2. extract_match_data()      → the existing settlement standardizer, so
         score/state/minute come out in exactly the shape settlement already
         uses everywhere else.
-      3. load_finished_archive(_today()) → keeps a finished fixture reported
-        after it leaves the transient in-play feed (FT rows).
+      3. load_finished_archive(_today()) and load_ft_snapshot(_today()) →
+         keep finished fixtures reported after they leave the transient feed.
 
     Minute follows the LIVE_SCANNER stage-6 extract_minute() pattern: time →
     state → periods → events → kickoff-elapsed fallback (HT → 45',
@@ -1471,6 +1478,21 @@ def _live_index() -> dict:
                 "state": "FT" if md.get("is_finished") else "",
                 "is_finished": bool(md.get("is_finished")),
             }
+    except Exception:
+        pass
+    # The FT snapshot is written as soon as the provider exposes a final
+    # result, before the nightly archive exists. It must be part of the live
+    # read universe or a just-finished fixture disappears from the verifier.
+    try:
+        for fid, md in (load_ft_snapshot(_today()) or {}).items():
+            md = md if isinstance(md, dict) else {}
+            if md.get("is_finished"):
+                idx[str(fid)] = {
+                    "score": md.get("ft_score") or "0-0",
+                    "minute": int(md.get("minute", 0) or 0),
+                    "state": "FT",
+                    "is_finished": True,
+                }
     except Exception:
         pass
     try:
@@ -1503,7 +1525,7 @@ def _live_index() -> dict:
             if not isinstance(p, dict):
                 continue
             m = (p.get("time", {}).get("minute") if isinstance(p.get("time"), dict) else None) \
-                or p.get("minute") or p.get("length")
+                or p.get("minute") or p.get("minutes") or p.get("length")
             if m:
                 found.append(int(m))
         if fx.get("events"):
@@ -1548,12 +1570,19 @@ def _live_index_cached() -> dict:
     cache file's (mtime_ns, size) — identical to settlement's archive-cache
     invalidation. Falls back to rebuilding when the stat fails (missing file,
     unreadable dir) so a changed feed is never served stale."""
-    raw = os.path.join(DATA_DIR, "live_inplay_cache.json")
-    try:
-        st = os.stat(raw)
-        sig = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        sig = None
+    sources = [
+        os.path.join(DATA_DIR, "live_inplay_cache.json"),
+        os.path.join(DATA_DIR, "ft_result_snapshot.json"),
+        os.path.join(OUTPUT_DIR, f"archive_{_today()}.json"),
+    ]
+    sig_parts = []
+    for source in sources:
+        try:
+            st = os.stat(source)
+            sig_parts.append((source, st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig_parts.append((source, None, None))
+    sig = tuple(sig_parts)
     if _LIVE_INDEX_CACHE["sig"] != sig or not _LIVE_INDEX_CACHE["idx"]:
         try:
             _LIVE_INDEX_CACHE["idx"] = _live_index()

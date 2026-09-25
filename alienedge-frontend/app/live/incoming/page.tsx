@@ -178,7 +178,7 @@ function DangerSideCell({
         {side.danger_level}
       </span>
       <span className="font-mono text-2xs text-text-dim">
-        {side.vulnerability_pct}% · GK {side.gk_leak.toFixed(2)}
+        {side.vulnerability_pct === null ? "N/A" : `${side.vulnerability_pct}%`} · GK {side.gk_leak === null ? "N/A" : side.gk_leak.toFixed(2)}
       </span>
     </span>
   );

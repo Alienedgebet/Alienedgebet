@@ -66,6 +66,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 PREDICTIONS_FILE     = os.path.join(DATA_DIR, "live_predictions.json")
+INCOMING_PREDICTIONS_FILE = os.path.join(DATA_DIR, "incoming_predictions.json")
 VALIDATED_OUTPUT_FILE = os.path.join(DATA_DIR, "validated_picks.json")
 # NOTE: stage 2 keeps its own FLAT squad cache ({pid: {...}}) and must not
 # read the shared squad_cache.json written by stages 1/3/6 in the NEW
@@ -137,6 +138,132 @@ def safe_get(d, *keys, default=None):
         if not isinstance(cur, dict) or k not in cur: return default
         cur = cur[k]
     return cur
+
+
+def _read_pick_feed(path):
+    """Read either the Stage 1 or Stage 3 fixture-keyed pick feed."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    result = {}
+    for fid, value in raw.items():
+        if isinstance(value, list):
+            picks = value
+        elif isinstance(value, dict):
+            picks = value.get("picks", [])
+        else:
+            picks = []
+        if isinstance(picks, list) and picks:
+            result[str(fid)] = picks
+    return result
+
+
+def _load_pick_feeds():
+    """Merge Stage 1 and Stage 3 picks without making either feed authoritative.
+
+    Stage 1 is the older strategic feed; Stage 3 is the lineup/forensic feed.
+    Both can legitimately contain the same fixture, and an empty Stage 1 file
+    must not make the validator blind to current Stage 3 picks.
+    """
+    merged = {}
+    for path in (PREDICTIONS_FILE, INCOMING_PREDICTIONS_FILE):
+        for fid, picks in _read_pick_feed(path).items():
+            existing = merged.setdefault(fid, [])
+            seen = {json.dumps(p, sort_keys=True, default=str) for p in existing
+                    if isinstance(p, dict)}
+            for pick in picks:
+                if not isinstance(pick, dict):
+                    continue
+                key = json.dumps(pick, sort_keys=True, default=str)
+                if key not in seen:
+                    existing.append(pick)
+                    seen.add(key)
+    return merged
+
+
+def _fixture_state_code(fixture):
+    state = fixture.get("state")
+    if isinstance(state, dict):
+        return str(state.get("state") or state.get("short_name") or "").upper()
+    return str(state or "").upper()
+
+
+def _fixture_is_finished(fixture):
+    token = _fixture_state_code(fixture)
+    return token in {"FT", "AET", "AP", "FT_PEN", "PEN", "FINISHED", "ENDED",
+                     "FULL-TIME", "FULL TIME", "FULL_TIME"} or token.startswith("FT_")
+
+
+def _fixture_is_scheduled(fixture):
+    token = _fixture_state_code(fixture)
+    return token in {"NS", "TBD", "POSTPONED", "CANCELLED", "CANCELED"}
+
+
+def _fixture_minute_for_board(fixture):
+    found = []
+    time_obj = fixture.get("time")
+    if isinstance(time_obj, dict):
+        try: found.append(int(time_obj.get("minute", 0) or 0))
+        except (TypeError, ValueError): pass
+    state_obj = fixture.get("state")
+    if isinstance(state_obj, dict):
+        try: found.append(int(state_obj.get("minute", 0) or 0))
+        except (TypeError, ValueError): pass
+    for period in fixture.get("periods", []) or []:
+        if not isinstance(period, dict): continue
+        value = (period.get("minute") or period.get("minutes")
+                 or period.get("length"))
+        try:
+            if value is not None: found.append(int(value))
+        except (TypeError, ValueError): pass
+    for event in fixture.get("events", []) or []:
+        try:
+            value = event.get("minute")
+            if value is not None: found.append(int(value))
+        except (AttributeError, TypeError, ValueError): pass
+    return max(found or [0])
+
+
+def _score_for_board(fixture):
+    goals = {"home": 0, "away": 0}
+    for entry in fixture.get("scores", []) or []:
+        if not isinstance(entry, dict): continue
+        desc = str(entry.get("description") or "").upper()
+        if "CURRENT" not in desc and "FULL_TIME" not in desc and desc != "FT":
+            continue
+        score = entry.get("score") if isinstance(entry.get("score"), dict) else entry
+        side = str(score.get("participant") or "").lower()
+        try: value = int(float(score.get("goals", 0) or 0))
+        except (TypeError, ValueError): value = 0
+        if side in goals: goals[side] = max(goals[side], value)
+    return f"{goals['home']}-{goals['away']}"
+
+
+def _summary_board_entry(fixture, retained_finished=False):
+    """Create a visible board row without requiring an attached prediction."""
+    finished = _fixture_is_finished(fixture)
+    scheduled = _fixture_is_scheduled(fixture)
+    if finished:
+        lines = ["🏁 FINISHED RESULT RETAINED — settlement snapshot is available."]
+    elif scheduled:
+        lines = ["⏳ SCHEDULED — retained in the live verification universe; awaiting kickoff."]
+    else:
+        lines = ["👁️ LIVE — retained in the live verification universe; no actionable pick attached."]
+    return {
+        "name": fixture.get("name") or str(fixture.get("id", "Unknown")),
+        "id": str(fixture.get("id", "")),
+        "minute": _fixture_minute_for_board(fixture),
+        "score": _score_for_board(fixture),
+        "lines": lines,
+        "status": "FINISHED" if finished else "SCHEDULED" if scheduled else "LIVE",
+        "is_finished": finished,
+        "retained_finished": retained_finished,
+    }
+
 
 def GET(url, params=None):
     if params is None: params = {}
@@ -397,11 +524,20 @@ def check_if_done(ctx, pick):
     ptype = str(pick.get('type', '')).upper()
     side  = pick.get('target_loc')
 
-    if "GG"      in ptype and h_g > 0 and a_g > 0:              return True, "GG settled ✅"
+    # GG_OVER_2.5 is a compound market: 1-1 satisfies GG but does not settle
+    # Over 2.5. Check the compound condition before the single-market branches.
+    is_gg = "GG" in ptype
+    is_over25 = "OVER_2.5" in ptype or "OVER2.5" in ptype
+    if is_gg and is_over25:
+        if h_g > 0 and a_g > 0 and (h_g + a_g) >= 3:
+            return True, "GG + Over 2.5 settled ✅"
+        return False, ""
+    if is_gg and h_g > 0 and a_g > 0:
+        return True, "GG settled ✅"
     if "TO_SCORE" in ptype:
         if side == "home" and h_g > 0:                           return True, "Home scored ✅"
         if side == "away" and a_g > 0:                           return True, "Away scored ✅"
-    if "OVER_2.5" in ptype and (h_g + a_g) >= 3:                return True, "Over 2.5 settled ✅"
+    if is_over25 and (h_g + a_g) >= 3:                       return True, "Over 2.5 settled ✅"
     if "OVER"     in ptype and "CORNER" in ptype and (h_c + a_c) >= 10: return True, "Corner over settled ✅"
     return False, ""
 
@@ -600,8 +736,12 @@ def extract_live_context(fixture):
 
     current_minute = 0
     for p in fixture.get("periods", []):
-        m = p.get("time", {}).get("minute") or p.get("minute") or p.get("length")
-        if m and int(m) > current_minute: current_minute = int(m)
+        # SportMonks in-play periods expose elapsed match time as `minutes`.
+        m = (p.get("time", {}).get("minute") if isinstance(p.get("time"), dict) else None)
+        m = m or p.get("minute") or p.get("minutes") or p.get("length")
+        if m:
+            try: current_minute = max(current_minute, int(m))
+            except (TypeError, ValueError): pass
     if current_minute == 0 and fixture.get("events"):
         emins = [int(e.get("minute", 0)) for e in fixture["events"] if e.get("minute")]
         if emins: current_minute = max(emins)
@@ -636,9 +776,14 @@ def extract_live_context(fixture):
     }
     for e in fixture.get("events", []):
         code = safe_get(e, "type", "code")
-        loc  = "home" if str(e.get("participant_id")) == h_id else "away"
-        if code == "red-card":    impact[loc]["reds"] += 1
-        if code == "substitution":
+        loc = ("home" if h_id and str(e.get("participant_id")) == h_id
+               else "away" if a_id and str(e.get("participant_id")) == a_id
+               else None)
+        if not loc:
+            continue
+        if code == "red-card" and loc in impact:
+            impact[loc]["reds"] += 1
+        if code == "substitution" and loc in impact:
             p_off = str(e.get("player_id"))
             if p_off in cache[f"{loc[0]}_key"]:
                 impact[loc]["key_sub_off"] += 1
@@ -693,6 +838,23 @@ def print_cycle_board(cycle_log, total_live, total_tracked, cycle_number):
 # ==============================================================================
 # 📦 MAIN ENGINE EXECUTION
 # ==============================================================================
+def _finished_snapshot_board_entry(std):
+    """Render a retained standardized FT snapshot as a visible board row."""
+    fid = str(std.get("fixture_id") or "")
+    if not fid:
+        return None
+    return {
+        "name": f"{std.get('home_team') or 'Home'} vs {std.get('away_team') or 'Away'}",
+        "id": fid,
+        "minute": int(std.get("minute", 0) or 0) or 90,
+        "score": std.get("ft_score") or "—",
+        "lines": ["🏁 FINISHED RESULT RETAINED — settlement snapshot is available."],
+        "status": "FINISHED",
+        "is_finished": True,
+        "retained_finished": True,
+    }
+
+
 def run_live_validator_once(cycle_number=1):
     """One validation cycle (no own loop).
 
@@ -711,11 +873,7 @@ def run_live_validator_once(cycle_number=1):
 
     load_memory()
 
-    try:
-        with open(PREDICTIONS_FILE, 'r') as f:
-            FEED_A = json.load(f)
-    except Exception:
-        FEED_A = {}
+    FEED_A = _load_pick_feeds()
 
     cycle_log = []
 
@@ -724,35 +882,74 @@ def run_live_validator_once(cycle_number=1):
     except ImportError:
         from live_cache import get_live_scores_cached
 
-    live_matches = get_live_scores_cached()
-    tracked_count = 0
+    live_matches = get_live_scores_cached() or []
+    live_ids = {str(fx.get("id")) for fx in live_matches if isinstance(fx, dict)}
+    live_finished_ids = {
+        str(fx.get("id")) for fx in live_matches
+        if isinstance(fx, dict) and _fixture_is_finished(fx)
+    }
     # FIX 3: fixture-level processing errors used to vanish into stdout
     # (⚠️  Error processing …), leaving downstream consumers unable to
     # distinguish "no picks" / "pending" from "processing failed".
     # Collect them here and expose them additively on the board.
     fixture_errors = []
 
+    retained_finished = 0
     for fx in live_matches:
-        f_id = str(fx.get("id"))
-        if f_id in FEED_A:
-            tracked_count += 1
-            try:
+        if not isinstance(fx, dict):
+            continue
+        f_id = str(fx.get("id") or "")
+        picks = FEED_A.get(f_id, [])
+        before = len(cycle_log)
+        try:
+            if picks and not _fixture_is_scheduled(fx):
                 ctx = extract_live_context(fx)
-                process_triple_phase_audit(ctx, FEED_A[f_id], cycle_log)
-            except Exception as e:
-                print(f"  ⚠️  Error processing {f_id}: {e}")
-                fixture_errors.append({
-                    "fixture_id": f_id,
-                    "error":      str(e),
-                    "timestamp":  datetime.now().isoformat()
-                })
+                process_triple_phase_audit(ctx, picks, cycle_log)
+            else:
+                entry = _summary_board_entry(fx)
+                if picks:
+                    entry["lines"].append(
+                        f"📌 {len(picks)} actionable pick(s) queued for kickoff."
+                    )
+                cycle_log.append(entry)
+        except Exception as e:
+            print(f"  ⚠️  Error processing {f_id}: {e}")
+            if len(cycle_log) == before:
+                cycle_log.append(_summary_board_entry(fx))
+            fixture_errors.append({
+                "fixture_id": f_id,
+                "error":      str(e),
+                "timestamp":  datetime.now().isoformat()
+            })
 
+    # Finished results can disappear from /livescores/inplay before the next
+    # request. Merge the same persistent FT snapshot used by settlement so the
+    # verifier retains the result instead of reverting to an empty universe.
+    try:
+        from settlement_service import load_ft_snapshot
+        snapshot_date = datetime.now().strftime("%Y-%m-%d")
+        for fid, std in (load_ft_snapshot(snapshot_date) or {}).items():
+            if str(fid) in live_finished_ids:
+                continue
+            entry = _finished_snapshot_board_entry(std)
+            if entry:
+                cycle_log.append(entry)
+                retained_finished += 1
+    except Exception as e:
+        fixture_errors.append({
+            "fixture_id": "FT_SNAPSHOT",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    tracked_count = len(cycle_log)
     print_cycle_board(cycle_log, len(live_matches), tracked_count, cycle_number)
 
     board = {
         "cycle":        cycle_number,
         "total_live":   len(live_matches),
         "total_tracked": tracked_count,
+        "retained_finished": retained_finished,
         "matches":      cycle_log,
         # Additive field: only populated when a fixture actually failed to
         # process. An empty list means every tracked fixture was processed.
@@ -770,54 +967,16 @@ def run_live_validator_once(cycle_number=1):
 
 
 def run_live_validator_engine():
+    """Legacy standalone entry point; use the same all-fixture cycle as the relay."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(DATA_DIR,   exist_ok=True)
-
+    os.makedirs(DATA_DIR, exist_ok=True)
     if not API_TOKEN:
         print("CRITICAL: SPORTMONKS_API_KEY is missing!")
         return {}
-
-    load_memory()
-
-    try:
-        with open(PREDICTIONS_FILE, 'r') as f: FEED_A = json.load(f)
-    except:
-        FEED_A = {}
-
-    cycle_number  = 0
-    print(f"\n{'─'*80}")
-    print(f"  🛡️  LIVE VALIDATOR ENGINE ONLINE")
-    print(f"  Tracking {len(FEED_A)} pre-match targets")
-    print(f"  Thresholds: DA≥{MIN_DA_RATIO:.0%} | SOT≥{MIN_SOT_RATIO:.0%} | Box diff≥{MIN_BOX_TOUCH_DIFF}")
-    print(f"{'─'*80}\n")
-
+    cycle_number = 0
     while True:
         cycle_number += 1
-        cycle_log = []
-
-        try:
-            from backend.live_cache import get_live_scores_cached
-        except ImportError:
-            from live_cache import get_live_scores_cached
-
-        live_matches = get_live_scores_cached()
-        tracked_count = 0
-    
-
-        for fx in live_matches:
-            f_id = str(fx.get("id"))
-            if f_id in FEED_A:
-                tracked_count += 1
-                try:
-                    ctx = extract_live_context(fx)
-                    process_triple_phase_audit(ctx, FEED_A[f_id], cycle_log)
-                except Exception as e:
-                    print(f"  ⚠️  Error processing {f_id}: {e}")
-
-        # ── END-OF-CYCLE BOARD ───────────────────────────────────────────────
-        print_cycle_board(cycle_log, len(live_matches), tracked_count, cycle_number)
-
-        save_memory()
+        run_live_validator_once(cycle_number)
         time.sleep(40)
 
 
