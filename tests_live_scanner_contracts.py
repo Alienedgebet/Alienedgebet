@@ -7,12 +7,31 @@ restart the live service.
 import contextlib
 import io
 import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import notifications as notify
 from LIVE_SCANNER import live_stage2_verification as stage2
+
+
+def _patch_notify_paths(tmp):
+    """
+    Redirect every notification file into a temp dir.
+
+    Notification tests must never write to the live data/ or output/
+    directories, or running the suite would create real subscriptions and
+    events that the running scanner would then try to deliver.
+    """
+    notify.OUTPUT_DIR = tmp
+    notify.DATA_DIR = tmp
+    notify.EVENTS_FILE = os.path.join(tmp, "push_events.jsonl")
+    notify.SUBS_FILE = os.path.join(tmp, "push_subscriptions.json")
+    notify.SENT_FILE = os.path.join(tmp, "push_sent.json")
+    notify.DELIVERED_FILE = os.path.join(tmp, "push_delivered.json")
 from LIVE_SCANNER import live_stage4_danger as stage4
 from LIVE_SCANNER import live_stage5_aggregator as stage5
 from LIVE_SCANNER import live_stage6_alerts as stage6
@@ -442,6 +461,144 @@ class LiveScannerContractTests(unittest.TestCase):
             stage2.prediction_lifecycle_step(
                 pick, "WAITING", stage2.V_NEUTRAL, 30, False)[0],
             "MONITORING")
+
+    # ── PUSH NOTIFICATIONS ─────────────────────────────────────────────────
+    def test_only_triggered_and_settled_are_notifiable(self):
+        # SUPPORTED is reversible, so it must never be announced.
+        self.assertEqual(notify.ALLOWED_EVENTS, {"TRIGGERED", "SETTLED"})
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            for event in ("SUPPORTED", "REJECTED", "NEUTRAL", "MONITORING", ""):
+                self.assertIsNone(
+                    notify.emit_event(event, "1", "A v B", "GG", "match"))
+
+    def test_event_is_recorded_once_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            first = notify.emit_event("TRIGGERED", "1", "A v B", "GG", "match",
+                                      minute=45)
+            again = notify.emit_event("TRIGGERED", "1", "A v B", "GG", "match",
+                                      minute=45)
+            self.assertIsNotNone(first)
+            self.assertIsNone(again, "same event must not be recorded twice")
+            self.assertEqual(len(notify.read_events()), 1)
+
+    def test_distinct_markets_are_separate_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.emit_event("TRIGGERED", "1", "A v B", "TO_SCORE", "home")
+            notify.emit_event("TRIGGERED", "1", "A v B", "TO_SCORE", "away")
+            notify.emit_event("TRIGGERED", "1", "A v B", "GG", "match")
+            self.assertEqual(len(notify.read_events()), 3)
+
+    def test_events_are_not_resent_after_delivery(self):
+        # The log is append-only history; without a delivered marker the
+        # dispatcher would re-send the same events every cycle.
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.emit_event("SETTLED", "1", "A v B", "GG", "match",
+                              settlement="GG settled ✅")
+            self.assertEqual(len(notify.pending_events()), 1)
+            notify.mark_delivered([notify.read_events()[0]["key"]])
+            self.assertEqual(notify.pending_events(), [])
+            # History is still available for the in-app list.
+            self.assertEqual(len(notify.read_events()), 1)
+
+    def test_subscription_is_per_user_and_reversible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            keys = {"p256dh": "abc", "auth": "def"}
+            notify.save_subscription("u1", "https://push/1", keys)
+            notify.save_subscription("u2", "https://push/2", keys)
+            self.assertEqual(len(notify.list_subscriptions()), 2)
+            notify.update_prefs("u1", {"triggered": False})
+            self.assertFalse(notify.get_prefs("u1")["triggered"])
+            # One user's preference must not affect the other.
+            self.assertTrue(notify.get_prefs("u2")["triggered"])
+            self.assertTrue(notify.delete_subscription("u1"))
+            self.assertFalse(notify.delete_subscription("u1"))
+            self.assertIn("u2", notify.list_subscriptions())
+
+    def test_prefs_respect_event_toggle_when_dispatching(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            subs = {"u1": {"endpoint": "https://push/1",
+                           "keys": {"p256dh": "a", "auth": "b"},
+                           "prefs": {"triggered": False, "settled": True}}}
+            event = {"event": "TRIGGERED", "key": "k", "market": "GG",
+                     "target": "match", "fixture": "A v B"}
+            sent = []
+            original = notify._send_one
+            notify._send_one = lambda *a, **k: (sent.append(1), "sent")[1]
+            try:
+                notify.dispatch([event], subs)
+                self.assertEqual(len(sent), 0, "toggled-off event must be skipped")
+                subs["u1"]["prefs"]["triggered"] = True
+                notify.dispatch([event], subs)
+                self.assertEqual(len(sent), 1)
+            finally:
+                notify._send_one = original
+
+    def test_dead_endpoint_is_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription("gone", "https://push/gone",
+                                     {"p256dh": "a", "auth": "b"})
+            notify.save_subscription("keep", "https://push/keep",
+                                     {"p256dh": "a", "auth": "b"})
+            original = notify._send_one
+            notify._send_one = lambda sub, *a, **k: (
+                "gone" if "gone" in sub["endpoint"] else "sent")
+            try:
+                notify.dispatch([{"event": "SETTLED", "key": "k",
+                                  "market": "GG", "target": "match"}])
+                self.assertNotIn("gone", notify.list_subscriptions())
+                self.assertIn("keep", notify.list_subscriptions())
+            finally:
+                notify._send_one = original
+
+    def test_dispatch_without_vapid_keys_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            subs = {"u1": {"endpoint": "https://push/1",
+                           "keys": {"p256dh": "a", "auth": "b"}, "prefs": {}}}
+            # Patch the resolver: _vapid_keys() intentionally re-reads .env,
+            # so clearing os.environ alone would not remove the keys.
+            with patch.object(notify, "_vapid_keys", lambda: (None, None)):
+                summary = notify.dispatch(
+                    [{"event": "TRIGGERED", "key": "k", "market": "GG",
+                      "target": "match"}], subs)
+            self.assertEqual(summary["sent"], 0)
+            self.assertEqual(summary["skipped"], 1)
+
+    def test_payload_text_reflects_the_outcome(self):
+        won = notify.build_payload({
+            "event": "SETTLED", "market": "TO_SCORE", "target": "away",
+            "settlement": "Away scored ✅", "fixture": "A v B",
+            "final_score": "2-1"})
+        self.assertTrue(won["title"].startswith("✅"))
+        lost = notify.build_payload({
+            "event": "SETTLED", "market": "O2.5", "target": "match",
+            "settlement": "Over 2.5 lost ❌", "fixture": "A v B"})
+        self.assertTrue(lost["title"].startswith("❌"))
+        armed = notify.build_payload({
+            "event": "TRIGGERED", "market": "GG", "target": "match",
+            "minute": 45, "score_at_trigger": "2-0", "fixture": "A v B"})
+        self.assertIn("45'", armed["body"])
+        self.assertIn("2-0", armed["body"])
+
+    def test_emit_event_never_raises_on_bad_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            self.assertIsNone(notify.emit_event(
+                "TRIGGERED", None, None, None, None, minute="not-an-int"))
+
+    def test_stage2_notify_helpers_survive_notification_failure(self):
+        # A broken notification must never abandon the remaining predictions.
+        ctx = self._stage2_ctx()
+        with patch.dict(sys.modules, {"notifications": None}):
+            stage2._notify_triggered(ctx, "GG", "GG", "match", 45, "1-0")
+            stage2._notify_settled(ctx, "GG", "GG", "match", "GG settled ✅")
 
     # ── P6: STAGE 1 MUST NOT EMIT BOTH O/U DIRECTIONS ────────────────────
     def test_stage1_high_rotation_does_not_emit_both_directions(self):

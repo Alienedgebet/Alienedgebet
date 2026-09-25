@@ -1,37 +1,54 @@
 #!/bin/bash
-# AlienEdge Livekeeper (2026-09-20) — backstop watchdog for the live scanner.
+# AlienEdge Livekeeper
 #
-# Complements the main.py interlock: if the scanner was SIGKILLed (OOM) or the
-# box rebooted mid-pipeline and atexit never ran, this restarts it — but ONLY
-# while no main.py run is active (never fights the interlock).
+# Purpose: keep the 24/7 live scanner running, but ONLY when the pre-match
+# daily pipeline (main.py) is not running. Both hit the same SportMonks quota,
+# so the scanner is deliberately left down while the pipeline works; the
+# 10-minute timer brings it back afterwards.
 #
-# Owner: alienedge-livekeeper.timer (every 10 min)
-set -u
-UNIT=alienedge-live.service
-PATTERN=run_live_scanner_24_7.py
+# Idempotent: safe to run on every timer tick. Never restarts a healthy
+# service, and never races the pipeline.
+#
+# NOTE: this script went missing at some point, which left
+# alienedge-livekeeper.service failing with 203/EXEC - meaning the watchdog
+# had no watchdog and a stopped scanner stayed down. Reinstated as a tracked
+# file so it cannot silently disappear again.
 
-main_running() {
-    pgrep -f "/var/www/backend/main.py" >/dev/null 2>&1
+set -uo pipefail
+
+# Overridable so the decision logic can be exercised in tests without
+# touching real services. Defaults are the production units.
+LIVE_UNIT="${ALIENEDGE_LIVE_UNIT:-alienedge-live.service}"
+PIPE_UNIT="${ALIENEDGE_PIPE_UNIT:-alienedge-pipeline.service}"
+LOG="${ALIENEDGE_LIVEKEEPER_LOG:-/var/www/backend/output/livekeeper.log}"
+
+log() {
+    mkdir -p "$(dirname "$LOG")" 2>/dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
 }
 
-if main_running; then
-    echo "[livekeeper] main.py active — interlock owns the scanner, standing down"
-    exit 0
+# Only root may act on these units; the timer runs as root but be explicit.
+if ! systemctl is-active --quiet "$LIVE_UNIT"; then
+    # Scanner is down. Only revive it when the pipeline is not competing.
+    if systemctl is-active --quiet "$PIPE_UNIT" || pgrep -f "main\.py" >/dev/null 2>&1; then
+        log "SKIP: $LIVE_UNIT is down but the pre-match pipeline is running."
+        exit 0
+    fi
+
+    log "ACTION: $LIVE_UNIT is down and no pipeline is running - starting it."
+    if systemctl start "$LIVE_UNIT"; then
+        sleep 5
+        if systemctl is-active --quiet "$LIVE_UNIT"; then
+            log "OK: $LIVE_UNIT is active again."
+        else
+            log "WARN: $LIVE_UNIT did not come up cleanly."
+        fi
+    else
+        log "ERROR: failed to start $LIVE_UNIT."
+        exit 1
+    fi
+else
+    log "OK: $LIVE_UNIT already active - nothing to do."
 fi
 
-# "enabled" includes activating/restart backoff states.
-if systemctl is-enabled --quiet "$UNIT" 2>/dev/null && \
-   systemctl is-active --quiet "$UNIT" 2>/dev/null; then
-    exit 0
-fi
-
-# Process alive but unit showing dead/inactive? Trust the process (stop in
-# progress); systemd will settle it.
-if pgrep -f "$PATTERN" >/dev/null 2>&1; then
-    echo "[livekeeper] process present, unit not yet active — waiting"
-    exit 0
-fi
-
-echo "[livekeeper] scanner DOWN and no main.py running — restarting ${UNIT}"
-systemctl start "$UNIT" && echo "[livekeeper] restart issued OK" \
-    || echo "[livekeeper] ERROR: restart failed"
+exit 0
