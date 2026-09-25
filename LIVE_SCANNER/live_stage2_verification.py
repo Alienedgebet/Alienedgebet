@@ -92,6 +92,23 @@ MIN_SOT_RATIO       = 0.50   # was 0.60
 MIN_BOX_TOUCH_DIFF  = 2      # was 4
 MIN_MOMENTUM_FACTOR = 1.10   # was 1.30
 
+# ── VALIDATION GATE POLICY ───────────────────────────────────────────────────
+# Validators no longer return a loose boolean. Each one reports one of four
+# states so that "nothing bad happened" can never be counted as positive
+# predictive evidence (it used to return True for MAINTAINED / STABLE).
+V_SUPPORTED    = "SUPPORTED"
+V_CONTRADICTED = "CONTRADICTED"
+V_NEUTRAL      = "NEUTRAL"
+V_INSUFFICIENT = "INSUFFICIENT_DATA"
+
+# A standard alert requires genuine agreement across the three statistical
+# engines. This replaces the old `passed_count >= 1` rule, which let a single
+# weak signal (reported as STATS_1/3) pass the whole validator.
+STATS_MIN_ENGINES_FOR_PASS = 2
+# A single engine out of three is not a rejection either — it is explicitly
+# "not enough evidence yet" so the board can say so honestly.
+STATS_PARTIAL_ENGINES = 1
+
 SQUAD_CACHE           = {}
 MATCH_CONTEXT_CACHE   = {}
 MATCH_VALIDATION_STATE = {}
@@ -185,6 +202,14 @@ def _load_pick_feeds():
     return merged
 
 
+def _stat_int(stats, key):
+    """Provider stats arrive as floats (or occasionally strings/None)."""
+    try:
+        return int(float(stats.get(key, 0) or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
 def _fixture_state_code(fixture):
     state = fixture.get("state")
     if isinstance(state, dict):
@@ -243,6 +268,30 @@ def _score_for_board(fixture):
     return f"{goals['home']}-{goals['away']}"
 
 
+def _empty_statistics():
+    """Same statistics shape as a live row, so the frontend renders uniformly."""
+    blank = {
+        "possession": 0, "shots_on_target": 0, "dangerous_attacks": 0,
+        "corners": 0, "box_entries": 0,
+    }
+    return {"home": dict(blank), "away": dict(blank)}
+
+
+def _period_label(minute):
+    if minute >= 90: return "FULL TIME"
+    if minute > 45:  return "SECOND HALF"
+    if minute > 0:   return "FIRST HALF"
+    return "PRE-MATCH"
+
+
+def _score_parts(display):
+    try:
+        home, away = str(display).split("-", 1)
+        return {"home": int(home), "away": int(away), "display": display}
+    except (ValueError, AttributeError):
+        return {"home": 0, "away": 0, "display": display}
+
+
 def _summary_board_entry(fixture, retained_finished=False):
     """Create a visible board row without requiring an attached prediction."""
     finished = _fixture_is_finished(fixture)
@@ -253,15 +302,24 @@ def _summary_board_entry(fixture, retained_finished=False):
         lines = ["⏳ SCHEDULED — retained in the live verification universe; awaiting kickoff."]
     else:
         lines = ["👁️ LIVE — retained in the live verification universe; no actionable pick attached."]
+    f_id = str(fixture.get("id", ""))
+    minute = _fixture_minute_for_board(fixture)
+    score = _score_for_board(fixture)
     return {
         "name": fixture.get("name") or str(fixture.get("id", "Unknown")),
-        "id": str(fixture.get("id", "")),
-        "minute": _fixture_minute_for_board(fixture),
-        "score": _score_for_board(fixture),
+        "id": f_id,
+        "fixture_id": f_id,
+        "minute": minute,
+        "score": score,
+        "score_parts": _score_parts(score),
         "lines": lines,
         "status": "FINISHED" if finished else "SCHEDULED" if scheduled else "LIVE",
+        "period": _period_label(minute),
         "is_finished": finished,
         "retained_finished": retained_finished,
+        "updated_at": datetime.now().isoformat(),
+        "statistics": _empty_statistics(),
+        "predictions": [],
     }
 
 
@@ -467,6 +525,13 @@ def engine_3_momentum_escalator(data, target_id):
 # FORENSIC INVESTIGATION ENGINE
 # ==============================================================================
 def new_engine_forensic_investigation(ctx, pick):
+    """
+    Returns (state, note) where state is one of the four V_* values.
+
+    The previous version returned True for "nothing bad happened"
+    (MAINTAINED / STABLE), which made a quiet match look like positive
+    predictive evidence. Those cases are now NEUTRAL: explicitly not support.
+    """
     target_side   = "home" if pick.get('target_loc') == "home" else "away"
     opponent_side = "away" if target_side == "home" else "home"
 
@@ -482,36 +547,74 @@ def new_engine_forensic_investigation(ctx, pick):
     if has_red or gk_liability:
         # Lowered thresholds: was sot≥2, da≥20, box≥5
         if opp_sot >= 1 or opp_da >= 10 or opp_box >= 3:
-            return True,  "EXPLOITED (Opponent utilizing structural gap)"
-        else:
-            return False, "PROTECTED (Team covering the structural gap)"
+            return V_SUPPORTED, "EXPLOITED (Opponent utilizing structural gap)"
+        return V_CONTRADICTED, "PROTECTED (Team covering the structural gap)"
     elif personnel_gap:
         if opp_da >= 8 or opp_sot >= 1:   # was da≥15, sot≥1
-            return True,  "WEAKENED (Substitution impact detected)"
-        else:
-            return True,  "STABLE (Personnel change managed)"
-    else:
-        return True, "MAINTAINED (No structural fracture detected)"
+            return V_SUPPORTED, "WEAKENED (Substitution impact detected)"
+        # A managed personnel change is not evidence that a team will score.
+        return V_NEUTRAL, "STABLE (Personnel change managed — not evidence)"
+    return V_NEUTRAL, "MAINTAINED (No structural fracture — not evidence)"
 
 # ==============================================================================
 # COMBINED STATISTICAL JUDGE
 # ==============================================================================
 def old_engine_statistical_judge(ctx, pick):
+    """
+    Returns (state, label, detail).
+
+    THRESHOLD POLICY CHANGE: the old rule was `passed_count >= 1`, so a single
+    weak engine out of three produced an overall pass (surfaced as STATS_1/3).
+    A standard pass now requires STATS_MIN_ENGINES_FOR_PASS genuine engines;
+    exactly one engine is reported as INSUFFICIENT_DATA rather than a pass.
+    """
     e1_pass, e1_note = engine_1_rule_validator(ctx, pick)
     e2_pass, e2_note = engine_2_structural_stacker(ctx, pick.get('target_loc'))
     e3_pass, e3_note = engine_3_momentum_escalator(ctx, pick.get('target_id'))
 
-    passed_count = sum([e1_pass, e2_pass, e3_pass])
-    # Lowered from 2/3 to 1/3 so partial evidence still surfaces
-    overall_pass = passed_count >= 1
+    passed_count = sum([bool(e1_pass), bool(e2_pass), bool(e3_pass)])
+
+    if passed_count >= STATS_MIN_ENGINES_FOR_PASS:
+        state = V_SUPPORTED
+    elif passed_count == STATS_PARTIAL_ENGINES:
+        state = V_INSUFFICIENT
+    else:
+        state = V_CONTRADICTED
 
     detail = (
         f"\n         Engine 1 (Rule)       : {'✅ PASS' if e1_pass else '❌ FAIL'} → {e1_note}"
         f"\n         Engine 2 (Structure)  : {'✅ PASS' if e2_pass else '❌ FAIL'} → {e2_note}"
         f"\n         Engine 3 (Momentum)   : {'✅ PASS' if e3_pass else '❌ FAIL'} → {e3_note}"
         f"\n         Combined              : {passed_count}/3 engines passed"
+        f" (need {STATS_MIN_ENGINES_FOR_PASS}/3 for a standard pass)"
     )
-    return overall_pass, f"STATS_{passed_count}/3", detail
+    return state, f"STATS_{passed_count}/3", detail
+
+
+def combine_validation_states(forensic_state, stats_state):
+    """
+    Combine the forensic and statistical verdicts into one gate state.
+
+    An alert is only SUPPORTED when BOTH dimensions agree. Anything short of
+    that is reported honestly as monitoring rather than as a pass.
+    """
+    if forensic_state == V_SUPPORTED and stats_state == V_SUPPORTED:
+        return V_SUPPORTED
+    if forensic_state == V_CONTRADICTED or stats_state == V_CONTRADICTED:
+        return V_CONTRADICTED
+    if forensic_state == V_INSUFFICIENT or stats_state == V_INSUFFICIENT:
+        return V_INSUFFICIENT
+    return V_NEUTRAL
+
+
+# State → short board glyph. Kept here so the console board, the persisted
+# board and the frontend all describe the same verdict the same way.
+STATE_GLYPH = {
+    V_SUPPORTED:    "✅",
+    V_CONTRADICTED: "❌",
+    V_NEUTRAL:      "➖",
+    V_INSUFFICIENT: "⏳",
+}
 
 # ==============================================================================
 # DONE CHECK
@@ -561,6 +664,7 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
         MATCH_VALIDATION_STATE[f_id] = {}
 
     match_summary_lines = []
+    prediction_rows = []
 
     for idx, pick in enumerate(picks):
         # ── HARDENING: never let a malformed/non-actionable entry kill ──
@@ -597,19 +701,53 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 print(f"   Result : {done_reason}")
             else:
                 match_summary_lines.append(f"   ✅ [{label}] Already settled")
+            prediction_rows.append({
+                "key":         p_key,
+                "label":       label,
+                "type":        ptype,
+                "target":      target,
+                "status":      "SETTLED",
+                "settlement":  done_reason,
+                "triggered":   True,
+                "minute":      minute,
+                "final_score": f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+            })
             continue
 
         if MATCH_VALIDATION_STATE[f_id].get(p_key) == "DONE":
             match_summary_lines.append(f"   ✅ [{label}] Previously settled")
+            prediction_rows.append({
+                "key":         p_key,
+                "label":       label,
+                "type":        ptype,
+                "target":      target,
+                "status":      "SETTLED",
+                "settlement":  "Settled in an earlier cycle",
+                "triggered":   True,
+                "minute":      minute,
+                "final_score": f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+            })
             continue
 
         # ── RUN BOTH ENGINES ────────────────────────────────────────────────
-        new_ok, n_note   = new_engine_forensic_investigation(ctx, pick)
-        old_ok, o_note, engine_detail = old_engine_statistical_judge(ctx, pick)
+        forensic_state, n_note   = new_engine_forensic_investigation(ctx, pick)
+        stats_state, o_note, engine_detail = old_engine_statistical_judge(ctx, pick)
+        combined_state = combine_validation_states(forensic_state, stats_state)
+        # The gate opens only when BOTH dimensions independently say SUPPORTED.
+        # A single weak signal (the old STATS_1/3 case) can no longer pass.
+        gate_open = combined_state == V_SUPPORTED
+        new_ok = forensic_state == V_SUPPORTED
+        old_ok = stats_state == V_SUPPORTED
+
+        def _state_text():
+            return (
+                f"Forensic {STATE_GLYPH[forensic_state]}{forensic_state} | "
+                f"Stats {STATE_GLYPH[stats_state]}{stats_state}"
+            )
 
         # ── PHASE 1: 30-MINUTE HANDSHAKE ────────────────────────────────────
         if 30 <= minute < 45 and p_key not in MATCH_VALIDATION_STATE[f_id]:
-            if new_ok and old_ok:
+            if gate_open:
                 MATCH_VALIDATION_STATE[f_id][p_key] = {"pass_30": True}
                 line = f"   🤝 [{label}] 30' HANDSHAKE PASSED — Saved to state"
                 match_summary_lines.append(line)
@@ -619,16 +757,36 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 print(f"   Stats      : {o_note}{engine_detail}")
                 print(f"   Status     : ✅ Both engines passed — pick queued for 45' confirmation")
             else:
-                line = (
-                    f"   ⏳ [{label}] 30' check: "
-                    f"Forensic {'✅' if new_ok else '❌'} | Stats {'✅' if old_ok else '❌'}"
-                )
+                line = f"   ⏳ [{label}] 30' check: {_state_text()}"
                 match_summary_lines.append(line)
+
+            prediction_rows.append({
+                "key":           p_key,
+                "label":         label,
+                "type":          ptype,
+                "target":        target,
+                "status":        "QUEUED" if gate_open else "MONITORING",
+                "signal":        combined_state,
+                "forensic":      forensic_state,
+                "statistics":    stats_state,
+                "stats_label":   o_note,
+                "forensic_note": n_note,
+                "triggered":     False,
+                "minute":        minute,
+                "score_at_trigger": None,
+                "final_score":   None,
+                "settlement":    None,
+            })
 
         # ── PHASE 2: 45-MINUTE SUPREME ALERT ────────────────────────────────
         elif minute >= 45 and MATCH_VALIDATION_STATE[f_id].get(p_key, {}).get("pass_30"):
             alert_key = f"{f_id}_{p_key}_ALERT"
-            if new_ok and old_ok and alert_key not in ALERT_HISTORY_CACHE:
+            if gate_open and alert_key not in ALERT_HISTORY_CACHE:
+
+                # Capture the score at the instant the alert fires. Settlement
+                # compares against this, so it must be recorded at trigger time
+                # and never recomputed from a later cycle.
+                score_at_trigger = f"{ctx['home']['goals']}-{ctx['away']['goals']}"
 
                 # ════════════════════════════════════════════════════════════
                 # 🔥 SUPREME ALERT FIRED
@@ -652,22 +810,65 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                     "target":            target,
                     "forensic_note":     n_note,
                     "stats_note":        o_note,
+                    "forensic_state":    forensic_state,
+                    "statistics_state":  stats_state,
+                    "combined_state":    combined_state,
                     "minute_triggered":  minute,
-                    "scores":            f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+                    "scores":            score_at_trigger,
+                    "score_at_trigger":  score_at_trigger,
                     "timestamp":         datetime.now().isoformat()
                 }
 
-                line = f"   🔥 [{label}] SUPREME ALERT FIRED @ {minute}'"
+                line = f"   🔥 [{label}] SUPREME ALERT FIRED @ {minute}' (score {score_at_trigger})"
                 match_summary_lines.append(line)
+
+                prediction_rows.append({
+                    "key":           p_key,
+                    "label":         label,
+                    "type":          ptype,
+                    "target":        target,
+                    "status":        "TRIGGERED",
+                    "signal":        combined_state,
+                    "forensic":      forensic_state,
+                    "statistics":    stats_state,
+                    "stats_label":   o_note,
+                    "forensic_note": n_note,
+                    "triggered":     True,
+                    "minute":        minute,
+                    "trigger_minute": minute,
+                    "score_at_trigger": score_at_trigger,
+                    "final_score":   None,
+                    "settlement":    None,
+                })
 
             elif alert_key in ALERT_HISTORY_CACHE:
                 match_summary_lines.append(f"   🔥 [{label}] Alert already fired — monitoring")
             else:
-                line = (
-                    f"   ⏳ [{label}] 45'+ waiting: "
-                    f"Forensic {'✅' if new_ok else '❌'} | Stats {'✅' if old_ok else '❌'}"
-                )
+                line = f"   ⏳ [{label}] 45'+ waiting: {_state_text()}"
                 match_summary_lines.append(line)
+
+            # A pick that already fired keeps a row on the board with its
+            # trigger facts preserved, even on later cycles.
+            if not prediction_rows or prediction_rows[-1].get("key") != p_key:
+                prior = VALIDATED_ALERTS.get(alert_key, {})
+                prediction_rows.append({
+                    "key":              p_key,
+                    "label":            label,
+                    "type":             ptype,
+                    "target":           target,
+                    "status":           "TRIGGERED" if prior else "MONITORING",
+                    "signal":           combined_state,
+                    "forensic":         forensic_state,
+                    "statistics":       stats_state,
+                    "stats_label":      o_note,
+                    "forensic_note":    n_note,
+                    "triggered":        bool(prior),
+                    "minute":           minute,
+                    "trigger_minute":   prior.get("minute_triggered"),
+                    "score_at_trigger": prior.get("score_at_trigger") or prior.get("scores"),
+                    "final_score":      None,
+                    "settlement":       None,
+                })
 
         # ── PHASE 3: 60-70 FINAL STRIKE WINDOW ──────────────────────────────
         elif 60 <= minute <= 70 and pick['type'] in ["TO_SCORE", "OVER_2.5"]:
@@ -678,22 +879,88 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             else:
                 match_summary_lines.append(f"   💤 [{label}] Final strike window — gap closed")
 
+            prediction_rows.append({
+                "key":           p_key,
+                "label":         label,
+                "type":          ptype,
+                "target":        target,
+                "status":        "STRIKE_WINDOW",
+                "signal":        combined_state,
+                "forensic":      forensic_state,
+                "statistics":    stats_state,
+                "stats_label":   o_note,
+                "forensic_note": n_note,
+                "triggered":     False,
+                "minute":        minute,
+                "score_at_trigger": None,
+                "final_score":   None,
+                "settlement":    None,
+            })
+
         # ── PRE-30 MONITORING ────────────────────────────────────────────────
         else:
             state_label = "Queued for 45'" if MATCH_VALIDATION_STATE[f_id].get(p_key, {}).get("pass_30") else "Monitoring"
-            line = (
-                f"   👁️  [{label}] {state_label} @ {minute}' | "
-                f"Forensic {'✅' if new_ok else '❌'} | Stats {'✅' if old_ok else '❌'}"
-            )
+            line = f"   👁️  [{label}] {state_label} @ {minute}' | {_state_text()}"
             match_summary_lines.append(line)
 
-    # Collect this match's summary for the end-of-cycle board
+            prediction_rows.append({
+                "key":           p_key,
+                "label":         label,
+                "type":          ptype,
+                "target":        target,
+                "status":        "QUEUED" if state_label.startswith("Queued") else "WAITING",
+                "signal":        combined_state,
+                "forensic":      forensic_state,
+                "statistics":    stats_state,
+                "stats_label":   o_note,
+                "forensic_note": n_note,
+                "triggered":     False,
+                "minute":        minute,
+                "score_at_trigger": None,
+                "final_score":   None,
+                "settlement":    None,
+            })
+
+    # Collect this match's summary for the end-of-cycle board.
+    # The entry is now a structured contract rather than a bag of text lines:
+    # the frontend renders score / period / statistics / predictions directly
+    # and no longer has to parse prose to show the live state.
+    period_label = "FULL TIME" if minute >= 90 else (
+        "SECOND HALF" if minute > 45 else "FIRST HALF"
+    )
     cycle_log.append({
-        "name":   name,
-        "minute": minute,
-        "id":     f_id,
-        "lines":  match_summary_lines,
-        "score":  f"{ctx['home']['goals']}-{ctx['away']['goals']}"
+        "name":         name,
+        "minute":       minute,
+        "id":           f_id,
+        "fixture_id":   f_id,
+        "lines":        match_summary_lines,
+        "score":        f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+        "score_parts": {
+            "home":    ctx['home']['goals'],
+            "away":    ctx['away']['goals'],
+            "display": f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+        },
+        "status":       "LIVE",
+        "period":       period_label,
+        "is_finished":  False,
+        "updated_at":   datetime.now().isoformat(),
+        "statistics": {
+            "home": {
+                "possession":        _stat_int(ctx['home']['stats'], 'ball-possession'),
+                "shots_on_target":   _stat_int(ctx['home']['stats'], 'shots-on-target'),
+                "dangerous_attacks": _stat_int(ctx['home']['stats'], 'dangerous-attacks'),
+                "corners":           _stat_int(ctx['home']['stats'], 'corners'),
+                "box_entries":       _stat_int(ctx['home']['stats'], 'box'),
+            },
+            "away": {
+                "possession":        _stat_int(ctx['away']['stats'], 'ball-possession'),
+                "shots_on_target":   _stat_int(ctx['away']['stats'], 'shots-on-target'),
+                "dangerous_attacks": _stat_int(ctx['away']['stats'], 'dangerous-attacks'),
+                "corners":           _stat_int(ctx['away']['stats'], 'corners'),
+                "box_entries":       _stat_int(ctx['away']['stats'], 'box'),
+            },
+        },
+        "predictions":   prediction_rows,
     })
 
 # ==============================================================================
@@ -843,15 +1110,23 @@ def _finished_snapshot_board_entry(std):
     fid = str(std.get("fixture_id") or "")
     if not fid:
         return None
+    minute = int(std.get("minute", 0) or 0) or 90
+    score = std.get("ft_score") or "—"
     return {
         "name": f"{std.get('home_team') or 'Home'} vs {std.get('away_team') or 'Away'}",
         "id": fid,
-        "minute": int(std.get("minute", 0) or 0) or 90,
-        "score": std.get("ft_score") or "—",
+        "fixture_id": fid,
+        "minute": minute,
+        "score": score,
+        "score_parts": _score_parts(score),
         "lines": ["🏁 FINISHED RESULT RETAINED — settlement snapshot is available."],
         "status": "FINISHED",
+        "period": _period_label(minute),
         "is_finished": True,
         "retained_finished": True,
+        "updated_at": datetime.now().isoformat(),
+        "statistics": _empty_statistics(),
+        "predictions": [],
     }
 
 

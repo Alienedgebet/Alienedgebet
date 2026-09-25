@@ -9,22 +9,17 @@ import {
   X,
   ChevronRight,
   Activity,
-  Flame,
-  Zap,
   AlertTriangle,
-  CheckCircle2,
-  Clock,
-  TrendingUp,
   Target,
-  Cpu,
 } from "lucide-react";
 import {
   liveApi,
   type LivePrematchAudit,
   type LivePrematchTeamAudit,
   type LiveValidationBoard,
-  type LiveValidationMatch,
   type LiveValidationPick,
+  type LiveValidationPrediction,
+  type LiveValidationSideStats,
 } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
 import {
@@ -59,40 +54,71 @@ function boardFrom(data: LiveValidationBoard | null): LiveValidationBoard {
   return data ?? EMPTY_VALIDATION_BOARD;
 }
 
-function formatPick(
-  p: string | { type: string; target_loc?: string },
-  homeName: string,
-  awayName: string
-): string {
-  if (typeof p === "string") return p;
-  if (p.type === "TO_SCORE" && p.target_loc === "home") {
-    return `${homeName.toUpperCase()} TO SCORE`;
-  }
-  if (p.type === "TO_SCORE" && p.target_loc === "away") {
-    return `${awayName.toUpperCase()} TO SCORE`;
-  }
-  if (p.type === "U2.5" || p.type === "O2.5") {
-    return p.type === "U2.5" ? "UNDER 2.5" : "OVER 2.5";
-  }
-  return p.target_loc ? `${p.type} (${p.target_loc})` : p.type;
+// ── CODE 1 PRESENTATION HELPERS (frontend only — no engine change) ────────
+// Code 1 deliberately does NOT render its own pre-match picks. The `picks`
+// array stays on the payload and is still handed to Code 2 unchanged through
+// `onOpenDetails` → `setSelectedAudit`, so only the disclosure is removed.
+
+type RiskLevel = "clear" | "elevated" | "heavy";
+
+/**
+ * A side carrying more than 3 missing key players is treated as heavy risk so
+ * the user can see at a glance which team must be taken seriously.
+ * 0–1 missing = clear, 2–3 = elevated, 4+ = heavy.
+ */
+function missingRisk(count: number): RiskLevel {
+  if (count > 3) return "heavy";
+  if (count >= 2) return "elevated";
+  return "clear";
 }
 
-function pickReason(
-  p: string | { type: string; target_loc?: string },
-  row: LivePrematchAudit
-): string {
-  if (typeof p === "string") return p;
-  if (p.type === "U2.5" || p.type === "O2.5") {
-    return "High structural rotation.";
+const RISK_LABEL: Record<RiskLevel, string> = {
+  clear: "STRENGTH INTACT",
+  elevated: "ELEVATED RISK",
+  heavy: "HEAVY RISK",
+};
+
+const RISK_BADGE_CLASS: Record<RiskLevel, string> = {
+  clear: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+  elevated: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+  heavy: "border-rose-500/60 bg-rose-500/15 text-rose-300",
+};
+
+const RISK_RAIL_CLASS: Record<RiskLevel, string> = {
+  clear: "border-l-emerald-500/40",
+  elevated: "border-l-amber-500/60",
+  heavy: "border-l-rose-500",
+};
+
+const RISK_BORDER_CLASS: Record<RiskLevel, string> = {
+  clear: "border-border/70",
+  elevated: "border-amber-500/30",
+  heavy: "border-rose-500/40",
+};
+
+/** Plain-English read of a team's pre-match risk so metrics need no decoding. */
+function teamRiskSummary(team: LivePrematchTeamAudit): string {
+  const miss = team.miss ?? 0;
+  const level = missingRisk(miss);
+  const gk = team.gk_out
+    ? "Goalkeeper down — goal is exposed"
+    : "Goalkeeper secure";
+  if (level === "heavy") {
+    return `${miss} key players missing — heavy risk. ${gk}. Treat this side as compromised for the rest of the match.`;
   }
-  if (p.type === "TO_SCORE" && p.target_loc === "away") {
-    return `${row.home?.team_name ?? "HOME"} Keeper Liability.`;
+  if (level === "elevated") {
+    return `${miss} key players missing — moderate risk, weakened structure. ${gk}.`;
   }
-  if (p.type === "TO_SCORE" && p.target_loc === "home") {
-    return `${row.away?.team_name ?? "AWAY"} Keeper Liability.`;
-  }
-  if (p.type === "GG") return "Both teams starting vulnerable keepers.";
-  return p.type;
+  return miss === 1
+    ? `1 key player missing — watch for a drop in intensity. ${gk}.`
+    : `Full-strength spine — no key players missing. ${gk}.`;
+}
+
+/** Render an odds value, or an explicit dash when the feed had none. */
+function oddsCell(value: number | null | undefined): string {
+  return value === null || value === undefined || Number.isNaN(value)
+    ? "—"
+    : String(value);
 }
 
 const validationAlertColumns: PredictionColumn<LiveValidationPick>[] = [
@@ -166,6 +192,7 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
   const _lWingMiss = team.l_wing_miss ?? false;
   const _rWingMiss = team.r_wing_miss ?? false;
   const _players = team.players ?? [];
+  const risk = missingRisk(_miss);
 
   const getExplanation = (key: MetricTooltipKey) => {
     switch (key) {
@@ -185,17 +212,43 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
   };
 
   return (
-    <div className="rounded-lg border border-border/70 bg-bg-elevated/30 relative">
+    <div
+      className={cn(
+        "relative overflow-hidden rounded-lg border border-l-2 bg-bg-elevated/30",
+        RISK_RAIL_CLASS[risk],
+        RISK_BORDER_CLASS[risk]
+      )}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2">
         <div>
           <p className="text-2xs uppercase tracking-wide text-text-dim">{_loc}</p>
           <p className="text-sm font-semibold text-text-primary">{_teamName}</p>
         </div>
-        <div className="flex flex-wrap gap-1.5 font-mono text-2xs">
+        <div className="flex flex-wrap items-center gap-1.5 font-mono text-2xs">
+          <span
+            className={cn(
+              "rounded border px-1.5 py-0.5 font-bold",
+              RISK_BADGE_CLASS[risk]
+            )}
+            title={
+              _miss > 3
+                ? "More than 3 key players missing — heavy risk"
+                : "Key player absence level"
+            }
+          >
+            {RISK_LABEL[risk]}
+          </span>
           <button
             type="button"
             onClick={() => setActiveTooltip(activeTooltip === "miss" ? null : "miss")}
-            className="rounded border border-border-bright px-1.5 py-0.5 text-text-secondary transition-colors hover:border-accent-indigo"
+            className={cn(
+              "rounded border px-1.5 py-0.5 transition-colors",
+              risk === "heavy"
+                ? "border-rose-500/60 bg-rose-500/15 font-bold text-rose-300 hover:bg-rose-500/25"
+                : risk === "elevated"
+                  ? "border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                  : "border-border-bright text-text-secondary hover:border-accent-indigo"
+            )}
             title="Tap to reveal definition"
           >
             miss {_miss}
@@ -254,6 +307,18 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
         {(_lWingMiss || _rWingMiss) &&
           ` · Wings L${_lWingMiss ? "✗" : "✓"}/R${_rWingMiss ? "✗" : "✓"}`}
       </p>
+      <p
+        className={cn(
+          "border-b border-border/50 px-3 py-1.5 text-2xs leading-relaxed",
+          risk === "heavy"
+            ? "bg-rose-500/10 font-semibold text-rose-200"
+            : risk === "elevated"
+              ? "bg-amber-500/5 text-amber-200/90"
+              : "text-text-secondary"
+        )}
+      >
+        {teamRiskSummary(team)}
+      </p>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[520px] text-left text-2xs">
           <thead className="bg-bg-elevated/60 font-mono text-text-dim">
@@ -267,8 +332,16 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-border/40">
-            {_players.map((p, i) => (
-              <tr key={`${p.name}-${p.pos}-${i}`} className="hover:bg-bg-elevated/40">
+            {_players.map((p, i) => {
+              const isMissing = p.status.includes("MISSING");
+              return (
+              <tr
+                key={`${p.name}-${p.pos}-${i}`}
+                className={cn(
+                  "hover:bg-bg-elevated/40",
+                  isMissing && "bg-rose-500/10"
+                )}
+              >
                 <td className="px-3 py-1.5 font-medium text-text-primary">{p.name}</td>
                 <td className="px-2 py-1.5 text-text-secondary">{p.pos}</td>
                 <td className="px-2 py-1.5 text-right font-mono">{p.apps}</td>
@@ -277,8 +350,8 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
                 <td
                   className={cn(
                     "px-3 py-1.5 font-semibold",
-                    p.status.includes("MISSING")
-                      ? "text-accent-amber"
+                    isMissing
+                      ? "text-rose-400"
                       : p.status.toLowerCase().includes("liability") ||
                           p.status.toLowerCase().includes("risk") ||
                           p.status.toLowerCase().includes("leak")
@@ -286,10 +359,16 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
                         : "text-text-secondary"
                   )}
                 >
+                  {isMissing && (
+                    <span className="mr-1 font-mono font-black" aria-hidden="true">
+                      ■
+                    </span>
+                  )}
                   {p.status}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -301,6 +380,301 @@ function TeamAuditPanel({ team }: { team: LivePrematchTeamAudit }) {
   );
 }
 
+/**
+ * Pre-match vs live odds comparison.
+ *
+ * No live-odds feed exists in the system today — every odds call in the
+ * engines is `/odds/pre-match/fixtures/{id}`. The live column therefore reads
+ * optional `live_odds_*` fields and shows an explicit "not available" state
+ * when they are absent, rather than a blank or a stale pre-match number. If a
+ * live feed is ever wired into the same payload, this block renders real
+ * values and a shortened/drifted indicator with no further frontend work.
+ */
+function OddsComparisonBlock({ row }: { row: LivePrematchAudit }) {
+  const markets: Array<{
+    label: string;
+    pre: number | null | undefined;
+    live: number | null | undefined;
+  }> = [
+    { label: "HOME", pre: row.odds_home_win, live: row.live_odds_home_win },
+    { label: "AWAY", pre: row.odds_away_win, live: row.live_odds_away_win },
+    { label: "O2.5", pre: row.odds_o25, live: row.live_odds_o25 },
+  ];
+  const hasLiveOdds = markets.some(
+    (m) => m.live !== null && m.live !== undefined
+  );
+
+  return (
+    <div className="border-b border-border/50 px-4 py-2.5">
+      <div className="mb-1.5 flex items-center justify-between">
+        <p className="text-2xs font-semibold uppercase tracking-wide text-text-dim">
+          Odds comparison
+        </p>
+        {!hasLiveOdds && (
+          <span className="font-mono text-[10px] uppercase text-amber-300/80">
+            live odds — not available
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        {markets.map((m) => {
+          const hasLive = m.live !== null && m.live !== undefined;
+          const shift =
+            hasLive && m.pre !== null && m.pre !== undefined
+              ? (m.live as number) - (m.pre as number)
+              : null;
+          return (
+            <div
+              key={m.label}
+              className="rounded-md border border-border/60 bg-bg-elevated/30 px-2 py-1.5"
+            >
+              <p className="font-mono text-[10px] uppercase tracking-wide text-text-dim">
+                {m.label}
+              </p>
+              <p className="mt-0.5 flex items-baseline gap-1.5 font-mono">
+                <span className="text-sm font-bold text-text-primary">
+                  {oddsCell(m.pre)}
+                </span>
+                <span className="text-[9px] uppercase text-text-dim">pre</span>
+              </p>
+              <p className="mt-0.5 flex items-baseline gap-1.5 font-mono">
+                {hasLive ? (
+                  <>
+                    <span className="text-sm font-bold text-cyan-300">
+                      {oddsCell(m.live)}
+                    </span>
+                    {shift !== null && Math.abs(shift) >= 0.01 && (
+                      <span
+                        className={cn(
+                          "text-[9px] font-bold",
+                          shift < 0 ? "text-emerald-400" : "text-slate-400"
+                        )}
+                        title="Shorter odds = more money backing this market"
+                      >
+                        {shift < 0 ? "▲ SHORTENED" : "▼ DRIFTED"}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="font-mono text-[10px] uppercase text-text-dim">
+                    live n/a
+                  </span>
+                )}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── CODE 2 PRESENTATION ───────────────────────────────────────────────────
+// The gate reports one of four states instead of a pass/fail, so the UI
+// colour-codes the verdict instead of implying everything passed.
+
+type VerdictTone = "good" | "bad" | "wait" | "flat";
+
+const VERDICT_STYLE: Record<string, { label: string; tone: VerdictTone }> = {
+  SUPPORTED: { label: "SUPPORTED", tone: "good" },
+  CONTRADICTED: { label: "CONTRADICTED", tone: "bad" },
+  INSUFFICIENT_DATA: { label: "NEED MORE DATA", tone: "wait" },
+  NEUTRAL: { label: "NEUTRAL", tone: "flat" },
+};
+
+const VERDICT_TONE_CLASS: Record<VerdictTone, string> = {
+  good: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+  bad: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+  wait: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+  flat: "border-white/15 bg-white/5 text-slate-300",
+};
+
+const PREDICTION_STATUS_STYLE: Record<string, string> = {
+  SETTLED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+  TRIGGERED: "border-amber-500/50 bg-amber-500/10 text-amber-300",
+  STRIKE_WINDOW: "border-indigo-500/40 bg-indigo-500/10 text-indigo-300",
+  QUEUED: "border-cyan-500/40 bg-cyan-500/10 text-cyan-300",
+  MONITORING: "border-white/15 bg-white/5 text-slate-300",
+  WAITING: "border-white/15 bg-white/5 text-slate-300",
+};
+
+function VerdictChip({ state }: { state?: string }) {
+  const style = VERDICT_STYLE[state ?? ""] ?? {
+    label: "UNKNOWN",
+    tone: "flat" as VerdictTone,
+  };
+  return (
+    <span
+      className={cn(
+        "rounded-md border px-2 py-0.5 font-mono text-[10px] font-bold",
+        VERDICT_TONE_CLASS[style.tone]
+      )}
+    >
+      {style.label}
+    </span>
+  );
+}
+
+function PredictionLifecycleCard({
+  prediction,
+}: {
+  prediction: LiveValidationPrediction;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-xl border bg-black/40 p-3",
+        prediction.status === "SETTLED"
+          ? "border-emerald-500/30"
+          : prediction.status === "TRIGGERED"
+            ? "border-amber-500/40"
+            : "border-white/10"
+      )}
+    >
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <span className="font-mono text-xs font-black text-white">
+          {prediction.label}
+        </span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <VerdictChip state={prediction.signal} />
+          <span
+            className={cn(
+              "rounded-md border px-2 py-0.5 font-mono text-[10px] font-bold",
+              PREDICTION_STATUS_STYLE[prediction.status] ??
+                PREDICTION_STATUS_STYLE.MONITORING
+            )}
+          >
+            {prediction.status.replace("_", " ")}
+          </span>
+        </div>
+      </div>
+
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] sm:grid-cols-3">
+        <div className="flex items-center justify-between gap-2">
+          <dt className="text-slate-500">Forensic</dt>
+          <dd>
+            <VerdictChip state={prediction.forensic} />
+          </dd>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <dt className="text-slate-500">Statistics</dt>
+          <dd>
+            <VerdictChip state={prediction.statistics} />
+          </dd>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <dt className="text-slate-500">Engines</dt>
+          <dd className="text-slate-300">{prediction.stats_label ?? "—"}</dd>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <dt className="text-slate-500">Trigger</dt>
+          <dd className="text-slate-300">
+            {prediction.trigger_minute != null
+              ? `${prediction.trigger_minute}'`
+              : "—"}
+          </dd>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <dt className="text-slate-500">Score at trigger</dt>
+          <dd className="text-slate-300">{prediction.score_at_trigger ?? "—"}</dd>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <dt className="text-slate-500">Final score</dt>
+          <dd className="text-slate-300">{prediction.final_score ?? "—"}</dd>
+        </div>
+      </dl>
+
+      {prediction.settlement && (
+        <p className="mt-2 border-t border-white/10 pt-2 font-mono text-[11px] font-bold text-emerald-300">
+          Settlement: {prediction.settlement}
+        </p>
+      )}
+    </div>
+  );
+}
+
+const LIVE_STAT_ROWS: Array<{
+  key: keyof LiveValidationSideStats;
+  label: string;
+  suffix?: string;
+}> = [
+  { key: "possession", label: "Possession", suffix: "%" },
+  { key: "shots_on_target", label: "Shots on target" },
+  { key: "dangerous_attacks", label: "Dangerous attacks" },
+  { key: "corners", label: "Corners" },
+  { key: "box_entries", label: "Box entries" },
+];
+
+function LiveStatsPanel({
+  statistics,
+  homeName,
+  awayName,
+}: {
+  statistics?: { home: LiveValidationSideStats; away: LiveValidationSideStats };
+  homeName: string;
+  awayName: string;
+}) {
+  if (!statistics) return null;
+  const hasData = LIVE_STAT_ROWS.some(
+    (r) => statistics.home[r.key] > 0 || statistics.away[r.key] > 0
+  );
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h4 className="text-2xs font-bold uppercase tracking-wider text-slate-300">
+          Live team statistics
+        </h4>
+        {!hasData && (
+          <span className="font-mono text-[10px] uppercase text-slate-500">
+            awaiting provider statistics
+          </span>
+        )}
+      </div>
+      <table className="w-full font-mono text-[11px]">
+        <thead className="text-[10px] uppercase text-slate-500">
+          <tr>
+            <th className="py-1 text-left font-medium">{homeName}</th>
+            <th className="py-1 text-center font-medium">Statistic</th>
+            <th className="py-1 text-right font-medium">{awayName}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {LIVE_STAT_ROWS.map((row) => {
+            const home = statistics.home[row.key];
+            const away = statistics.away[row.key];
+            const lead = home === away ? "" : home > away ? "home" : "away";
+            return (
+              <tr key={row.key} className="border-t border-white/5">
+                <td
+                  className={cn(
+                    "py-1 font-bold",
+                    lead === "home" ? "text-cyan-300" : "text-slate-400"
+                  )}
+                >
+                  {home}
+                  {row.suffix ?? ""}
+                </td>
+                <td className="py-1 text-center text-slate-500">{row.label}</td>
+                <td
+                  className={cn(
+                    "py-1 text-right font-bold",
+                    lead === "away" ? "text-cyan-300" : "text-slate-400"
+                  )}
+                >
+                  {away}
+                  {row.suffix ?? ""}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function PrematchAuditCard({
   row,
   onOpenDetails,
@@ -308,160 +682,110 @@ function PrematchAuditCard({
   row: LivePrematchAudit;
   onOpenDetails: (row: LivePrematchAudit) => void;
 }) {
+  const combinedRisk = missingRisk(row.combined_miss ?? 0);
+  const status = (row.status_text ?? "").toUpperCase();
+  const isLive = status.includes("LIVE");
+  const isFinished = status.includes("FINISH") || /\bFT\b/.test(status);
+
   return (
     <article className="glass overflow-hidden rounded-xl border border-white/10 shadow-panel transition-all hover:border-cyan-500/30">
-      {/* ── CARD HEADER: Match Name + Dedicated Arrow Button (No Overlap) ── */}
-      <div className="flex items-center justify-between border-b border-border/70 bg-bg-elevated/20 px-4 py-2.5">
-        <div className="flex flex-1 min-w-0 items-center gap-2">
+      {/* ── CARD HEADER: Match + Status + Risk + Arrow ──────────────────── */}
+      <div className="flex items-center justify-between gap-2 border-b border-border/70 bg-bg-elevated/20 px-4 py-2.5">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => onOpenDetails(row)}
             className="group/btn flex items-center gap-1.5 text-left transition-colors"
           >
-            <h3 className="text-sm font-bold text-text-primary group-hover/btn:text-cyan-400 transition-colors">
-              MATCH: {row.fixture}
+            <h3 className="text-sm font-bold text-text-primary transition-colors group-hover/btn:text-cyan-400">
+              {row.fixture}
             </h3>
           </button>
-          <span className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1.5 py-0.2 font-mono text-[10px] font-bold text-accent-amber shrink-0">
-            miss {row.combined_miss}
+
+          <span
+            className={cn(
+              "shrink-0 rounded border px-1.5 py-0.2 font-mono text-[10px] font-bold",
+              isLive
+                ? "border-rose-500/40 bg-rose-950/40 text-rose-300"
+                : isFinished
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                  : "border-white/15 bg-white/5 text-slate-300"
+            )}
+          >
+            {row.status_text || "UNKNOWN"}
+          </span>
+
+          <span
+            className={cn(
+              "shrink-0 rounded border px-1.5 py-0.2 font-mono text-[10px] font-bold",
+              RISK_BADGE_CLASS[combinedRisk]
+            )}
+            title="Combined key-player absence across both teams"
+          >
+            {RISK_LABEL[combinedRisk]} · {row.combined_miss} MISSING
           </span>
         </div>
 
-        {/* Dedicated Arrow Button (Only this and the title trigger navigation) */}
         <button
           type="button"
           onClick={() => onOpenDetails(row)}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-cyan-500/30 bg-cyan-950/40 text-cyan-300 hover:bg-cyan-500/20 hover:scale-105 transition-all ml-2 shadow-sm"
-          title="Open Code 2 & 3 In-Play Cockpit"
+          className="ml-2 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-cyan-500/30 bg-cyan-950/40 text-cyan-300 shadow-sm transition-all hover:scale-105 hover:bg-cyan-500/20"
+          title="Open Code 2 live validation"
         >
           <ChevronRight className="h-4 w-4" />
         </button>
       </div>
 
-      {/* Subheader: ID, Kickoff, Odds scan */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 bg-bg-elevated/10 px-4 py-1.5 font-mono text-[11px] text-text-dim">
-        <span>ID {row.fixture_id} · KICKOFF: {row.kickoff_utc} UTC ({row.status_text})</span>
-        <span className="text-text-secondary">
-          ODDS SCAN &gt; Home: {row.odds_home_win ?? "—"} | Away: {row.odds_away_win ?? "—"} | O2.5: {row.odds_o25 ?? "—"}
-        </span>
+      {/* ── PURPOSE STRIP: Code 1 contract + fixture meta ──────────────── */}
+      <div className="border-b border-border/50 bg-bg-elevated/10 px-4 py-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <span className="font-semibold uppercase tracking-wide text-cyan-300/90">
+            Code 1 · Pre-match evidence
+          </span>
+          <span className="text-text-dim">
+            Predictions are intentionally not shown here — select the fixture
+            to open the Code 2 validator.
+          </span>
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center justify-between gap-2 font-mono text-[10px] text-text-dim">
+          <span>KICKOFF {row.kickoff_utc} UTC</span>
+          <span className="text-text-dim/60">ID {row.fixture_id}</span>
+        </div>
       </div>
+
+      {/* ── RISK STRIP: per-team absence severity ──────────────────────── */}
+      <div className="grid grid-cols-1 gap-2 border-b border-border/50 px-4 py-2 sm:grid-cols-2">
+        {(["home", "away"] as const).map((side) => {
+          const team = row[side];
+          const level = missingRisk(team?.miss ?? 0);
+          return (
+            <div
+              key={side}
+              className={cn(
+                "flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-2xs",
+                RISK_BADGE_CLASS[level]
+              )}
+            >
+              <span className="truncate font-semibold text-text-primary">
+                {team?.team_name ?? (side === "home" ? "HOME" : "AWAY")}
+              </span>
+              <span className="shrink-0 font-mono font-bold">
+                {team?.gk_out ? "GK DOWN" : "GK OK"} · {team?.miss ?? 0} MISSING
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── ODDS COMPARISON: PRE-MATCH vs LIVE ──────────────────────────── */}
+      <OddsComparisonBlock row={row} />
 
       {/* Lineup Panels (Interactive without triggering navigation) */}
       <div className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-2">
         <TeamAuditPanel team={row.home} />
         <TeamAuditPanel team={row.away} />
       </div>
-
-      {/* Predictions & Killer Rules */}
-      <div className="space-y-2.5 border-t border-border/70 px-4 py-3">
-        <div>
-          <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-text-dim">
-            [PRE-MATCH STRATEGIC PREDICTIONS]
-          </p>
-          <ul className="space-y-1">
-            {(row.picks ?? []).map((p, i) => (
-              <li key={i} className="font-mono text-2xs text-cyan-300">
-                - [PICK] {formatPick(p, row.home?.team_name ?? "HOME", row.away?.team_name ?? "AWAY")}
-                {typeof p !== "string" && (
-                  <span className="text-text-dim">: {pickReason(p, row)}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-        {(row.killer_rules ?? []).length > 0 && (
-          <div>
-            <p className="mb-1 text-2xs font-semibold uppercase tracking-wide text-accent-red">
-              [ADVANCED KILLER RULES TRIGGERED]
-            </p>
-            <ul className="space-y-0.5">
-              {(row.killer_rules ?? []).map((r) => (
-                <li key={r} className="font-mono text-2xs text-accent-amber">
-                  *** {r}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
     </article>
-  );
-}
-
-// ── HIGH-TECH MISSION CARD PARSER FOR CODE 2 ───────────────────────────────
-function FormattedPickCard({ line }: { line: string }) {
-  const isSettled = line.includes("SETTLED");
-  const isHandshake = line.includes("HANDSHAKE");
-  const isSupreme = line.includes("SUPREME");
-  const isStrike = line.includes("FINAL STRIKE");
-  const isWaiting = line.includes("waiting") || line.includes("Queued");
-
-  // Extract label inside brackets [ ... ]
-  const labelMatch = line.match(/\[(.*?)\]/);
-  const label = labelMatch ? labelMatch[1] : "MISSION TARGET";
-
-  // Clean description text
-  const cleanLine = line.replace(/^[^\w\s\[]+/, "").trim();
-
-  return (
-    <div
-      className={cn(
-        "rounded-xl border p-3.5 backdrop-blur-md transition-all shadow-sm",
-        isSettled
-          ? "border-emerald-500/30 bg-emerald-950/25 shadow-[0_0_12px_rgba(16,185,129,0.12)]"
-          : isSupreme
-          ? "border-amber-500/50 bg-amber-950/30 shadow-[0_0_15px_rgba(245,158,11,0.2)] animate-pulse"
-          : isHandshake
-          ? "border-cyan-500/40 bg-cyan-950/30 shadow-[0_0_12px_rgba(6,182,212,0.15)]"
-          : isStrike
-          ? "border-indigo-500/40 bg-indigo-950/30 shadow-[0_0_12px_rgba(99,102,241,0.15)]"
-          : "border-white/10 bg-black/40"
-      )}
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-        <div className="flex items-center gap-2">
-          <span className="rounded-md border border-white/20 bg-white/5 px-2 py-0.5 font-mono text-xs font-black text-white">
-            🎯 {label}
-          </span>
-        </div>
-
-        {/* Status Chip */}
-        <div>
-          {isSettled && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] font-black text-emerald-300">
-              <CheckCircle2 className="h-3 w-3" />
-              SETTLED &amp; VERIFIED
-            </span>
-          )}
-          {isHandshake && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 font-mono text-[10px] font-black text-cyan-300">
-              🤝 30&apos; HANDSHAKE PASSED
-            </span>
-          )}
-          {isSupreme && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-black text-amber-300 animate-pulse">
-              <Flame className="h-3 w-3" />
-              🔥 45&apos; SUPREME ALERT
-            </span>
-          )}
-          {isStrike && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-black text-indigo-300">
-              ⚡ STRIKE WINDOW (60&apos;–70&apos;)
-            </span>
-          )}
-          {isWaiting && !isSettled && !isHandshake && !isSupreme && (
-            <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-950/40 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300">
-              <Clock className="h-3 w-3" />
-              45&apos; CONFIRMATION QUEUE
-            </span>
-          )}
-        </div>
-      </div>
-
-      <p className="font-mono text-xs text-slate-300 leading-relaxed mt-1">
-        {cleanLine}
-      </p>
-    </div>
   );
 }
 
@@ -472,9 +796,13 @@ export default function LivePage() {
     fallback: MOCK_LIVE_PREMATCH_AUDIT,
     cacheKey: "live-edges-prematch",
   });
+  // Code 2 must stay live while the cockpit is open. Without a refresh
+  // interval the modal could show 0-0 at 24' long after the match moved on,
+  // because the board is only fetched once on mount.
   const validation = useApi(() => liveApi.getValidation(), [], {
     fallback: MOCK_LIVE_VALIDATION,
     cacheKey: "live-edges-validation",
+    refreshMs: selectedAudit ? 15_000 : 0,
   });
 
   const auditRows = liveRows(asAuditList(prematch.data));
@@ -514,6 +842,12 @@ export default function LivePage() {
   // Selected match live validation instance
   const activeValidation = matchedValidationMatches[0];
 
+  // The structured prediction list is Code 2's primary output. Older boards
+  // written before the contract change carry no `predictions` array, so fall
+  // back to an empty list rather than rendering a misleading empty state.
+  const activePredictions: LiveValidationPrediction[] =
+    activeValidation?.predictions ?? [];
+
   return (
     <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
       
@@ -524,15 +858,17 @@ export default function LivePage() {
             <Radio className="h-4 w-4 text-accent-indigo animate-pulse" />
           </div>
           <div>
-            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary flex items-center gap-2">
-              Live Monitor
-              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.2 font-mono text-[9px] font-bold text-emerald-400">
-                CODE 1 STRATEGIC AUDIT
-              </span>
-            </h1>
-            <p className="text-[11px] text-text-secondary">
-              Key-11 lineups, GK liabilities &amp; odds scan. Tap fixture or arrow to open Code 2 &amp; 3 in-play validation.
-            </p>
+              <h1 className="text-sm font-black uppercase tracking-wider text-text-primary flex items-center gap-2">
+                Live Match Edges
+                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.2 font-mono text-[9px] font-bold text-emerald-400">
+                  CODE 1 EVIDENCE
+                </span>
+              </h1>
+              <p className="text-[11px] text-text-secondary">
+                Code 1 reveals pre-match evidence only — key-player gaps, goalkeeper
+                liability and market odds. It does not show predictions. Open a
+                fixture to reach the Code 2 live validator.
+              </p>
           </div>
         </div>
       </div>
@@ -543,14 +879,15 @@ export default function LivePage() {
           <div className="flex items-center gap-2">
             <Shield className="h-4 w-4 text-cyan-400" />
             <h2 className="text-xs font-bold uppercase tracking-wider text-text-primary">
-              Prematch Strategic Audit
+              Code 1 — Pre-Match Evidence
             </h2>
             <span className="rounded-full bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.2 font-mono text-[9px] font-bold text-cyan-300">
               {stats.fixtures} FIXTURES
             </span>
           </div>
           <p className="text-[11px] text-text-dim hidden sm:block">
-            Tap match title or arrow to view in-play validation
+            Evidence only, no predictions. Use it to read each side&apos;s risk, then
+            open the fixture for Code 2 validation.
           </p>
         </div>
 
@@ -575,78 +912,130 @@ export default function LivePage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-lg p-3 sm:p-5 overflow-y-auto">
           <div className="relative w-full max-w-4xl glass rounded-2xl border border-cyan-500/30 bg-[#070b14] p-4 sm:p-6 shadow-[0_0_50px_rgba(6,182,212,0.15)] max-h-[92vh] overflow-y-auto">
             
-            {/* ── COCKPIT LIVE MATCH HEADER ───────────────────────────── */}
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4 mb-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 shadow-[0_0_15px_rgba(6,182,212,0.4)]">
-                  <Cpu className="h-5 w-5 text-white" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="rounded-full border border-rose-500/40 bg-rose-950/40 px-2 py-0.5 font-mono text-[10px] font-black text-rose-400 animate-pulse flex items-center gap-1">
-                      <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-ping" />
-                      {activeValidation ? `${activeValidation.minute}' LIVE` : "IN-PLAY AUDIT"}
+            {/* ── CODE 2: STICKY LIVE MATCH HEADER (score first) ─────── */}
+            <div className="sticky top-0 z-10 -mx-4 mb-5 border-b border-white/10 bg-[#070b14]/95 px-4 pb-4 pt-1 backdrop-blur-md sm:-mx-6 sm:px-6">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full border border-cyan-500/40 bg-cyan-950/40 px-2 py-0.5 font-mono text-[10px] font-black uppercase tracking-wider text-cyan-300">
+                      Code 2 — Live Validator
                     </span>
-                    <span className="font-mono text-xs text-slate-400">
-                      ID: {selectedAudit.fixture_id}
-                    </span>
+                    {activeValidation?.status && (
+                      <span className="rounded-full border border-white/15 bg-white/5 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-300">
+                        {activeValidation.status}
+                      </span>
+                    )}
                   </div>
-                  <h2 className="text-lg font-black text-white mt-0.5">
+                  <h2 className="mt-1 text-lg font-black text-white">
                     {selectedAudit.fixture}
                   </h2>
-                </div>
-              </div>
-
-              {/* Neon Score Display */}
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl border border-cyan-500/30 bg-cyan-950/40 px-4 py-1.5 text-center shadow-inner">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-cyan-300 block">
-                    Live Score
-                  </span>
-                  <span className="font-mono text-lg font-black text-white">
-                    {activeValidation ? activeValidation.score : "0 - 0"}
-                  </span>
                 </div>
 
                 <button
                   type="button"
                   onClick={() => setSelectedAudit(null)}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-slate-400 hover:text-white hover:border-white/20 transition-all"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-white/5 text-slate-400 transition-all hover:border-white/20 hover:text-white"
+                  aria-label="Close cockpit"
                 >
                   <X className="h-4 w-4" />
                 </button>
+              </div>
+
+              {/* Score and minute are the primary visual element. */}
+              <div className="mt-3 flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-bold text-white">
+                    {selectedAudit.home.team_name}
+                  </span>
+                  <span className="rounded-xl border border-cyan-500/40 bg-cyan-950/50 px-4 py-1 text-center font-mono text-2xl font-black text-white shadow-inner">
+                    {activeValidation?.score_parts?.display ??
+                      activeValidation?.score ??
+                      "0 - 0"}
+                  </span>
+                  <span className="text-sm font-bold text-white">
+                    {selectedAudit.away.team_name}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-slate-400">
+                  {activeValidation?.minute != null && (
+                    <span className="rounded border border-white/10 bg-white/5 px-2 py-0.5 font-bold text-white">
+                      {activeValidation.minute}&apos;
+                    </span>
+                  )}
+                  {activeValidation?.period && (
+                    <span>{activeValidation.period}</span>
+                  )}
+                  {activeValidation?.updated_at && (
+                    <span className="text-slate-500">
+                      data {activeValidation.updated_at.slice(11, 19)} UTC
+                    </span>
+                  )}
+                  <span className="text-slate-600">ID {selectedAudit.fixture_id}</span>
+                </div>
               </div>
             </div>
 
             <div className="space-y-6">
               
-              {/* ── CODE 2: MULTI-PICK VALIDATION MISSION STREAM ──────── */}
+              {/* ── CODE 2: PREDICTION LIFECYCLE (main objective) ─────── */}
               <section className="flex flex-col gap-3">
                 <div className="flex items-center justify-between border-b border-white/5 pb-2">
                   <div className="flex items-center gap-2">
                     <ShieldCheck className="h-4 w-4 text-emerald-400" />
                     <h3 className="text-xs font-black uppercase tracking-wider text-white">
-                      Code 2 — Live Validation Engine
+                      Predictions for this match
                     </h3>
                   </div>
                   <span className="font-mono text-[10px] text-slate-400">
-                    Cycle #{board.cycle || "14"} · Real-time State Verification
+                    Cycle #{board.cycle || "—"} ·{" "}
+                    {activePredictions.length} tracked
+                    {validation.isRefetching ? " · refreshing…" : ""}
                   </span>
                 </div>
 
-                {/* Validation Mission Cards */}
-                {matchedValidationMatches.length === 0 || !activeValidation?.lines.length ? (
-                  <p className="text-xs text-text-dim italic p-4 bg-bg-elevated/30 rounded-xl border border-white/5 font-mono text-center">
-                    No active live validation tracking entries for this fixture yet.
+                {activePredictions.length === 0 ? (
+                  <p className="rounded-xl border border-white/5 bg-bg-elevated/30 p-4 text-center font-mono text-xs italic text-text-dim">
+                    No predictions are attached to this fixture yet. Code 2
+                    validates whatever Code 1 hands it once picks exist.
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 gap-2.5">
-                    {activeValidation.lines.map((line, idx) => (
-                      <FormattedPickCard key={idx} line={line} />
+                    {activePredictions.map((prediction) => (
+                      <PredictionLifecycleCard
+                        key={prediction.key}
+                        prediction={prediction}
+                      />
                     ))}
                   </div>
                 )}
               </section>
+
+              {/* ── CODE 2: LIVE TEAM STATISTICS ────────────────────────── */}
+              {activeValidation?.statistics && (
+                <section className="rounded-2xl border border-white/10 bg-black/40 p-4">
+                  <LiveStatsPanel
+                    statistics={activeValidation.statistics}
+                    homeName={selectedAudit.home.team_name}
+                    awayName={selectedAudit.away.team_name}
+                  />
+                </section>
+              )}
+
+              {/* ── CODE 2: VALIDATION DETAIL (raw board log) ───────────── */}
+              {activeValidation?.lines?.length ? (
+                <section className="flex flex-col gap-2">
+                  <h3 className="text-2xs font-bold uppercase tracking-wider text-slate-400">
+                    Cycle detail
+                  </h3>
+                  <div className="rounded-xl border border-white/5 bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-slate-400">
+                    {activeValidation.lines.map((line, idx) => (
+                      <p key={idx} className="whitespace-pre-wrap">
+                        {line.trim()}
+                      </p>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
 
               {/* ── CODE 3A: FORENSIC INVESTIGATION COCKPIT ────────────── */}
               <section className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/40 p-4">
