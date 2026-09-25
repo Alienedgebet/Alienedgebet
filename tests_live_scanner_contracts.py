@@ -144,6 +144,151 @@ class LiveScannerContractTests(unittest.TestCase):
         base["away"]["goals"] = 2
         self.assertTrue(stage2.check_if_done(base, pick)[0])
 
+    # ── CODE 2 VALIDATION GATE ────────────────────────────────────────────
+    # The forensic validator used to return True for "nothing bad happened"
+    # (MAINTAINED / STABLE) and the statistical judge used `passed_count >= 1`,
+    # so a single weak signal passed the whole validator (STATS_1/3).
+
+    @staticmethod
+    def _stage2_ctx(**overrides):
+        blank = {
+            "shots-on-target": 0, "dangerous-attacks": 0,
+            "box": 0, "corners": 0, "ball-possession": 50,
+        }
+        ctx = {
+            "id": "1", "name": "Home vs Away", "minute": 50,
+            "home": {"goals": 0, "stats": dict(blank)},
+            "away": {"goals": 0, "stats": dict(blank)},
+            "impact": {
+                "home": {"reds": 0, "gk_risk": False, "key_sub_off": 0},
+                "away": {"reds": 0, "gk_risk": False, "key_sub_off": 0},
+            },
+            "events": [],
+        }
+        for key, value in overrides.items():
+            if key in ("home", "away"):
+                ctx[key]["stats"].update(value)
+            elif key == "impact":
+                for side, patch in value.items():
+                    ctx["impact"][side].update(patch)
+            else:
+                ctx[key] = value
+        return ctx
+
+    def test_stage2_forensic_neutral_is_not_positive_evidence(self):
+        quiet = self._stage2_ctx()
+        state, note = stage2.new_engine_forensic_investigation(
+            quiet, {"target_loc": "home"})
+        self.assertEqual(state, stage2.V_NEUTRAL)
+        self.assertIn("not evidence", note)
+
+        managed = self._stage2_ctx(impact={"home": {"key_sub_off": 1}})
+        state, note = stage2.new_engine_forensic_investigation(
+            managed, {"target_loc": "home"})
+        self.assertEqual(state, stage2.V_NEUTRAL)
+        self.assertIn("not evidence", note)
+
+    def test_stage2_forensic_supported_requires_real_exploitable_gap(self):
+        exploited = self._stage2_ctx(
+            impact={"home": {"gk_risk": True}},
+            away={"shots-on-target": 2},
+        )
+        self.assertEqual(
+            stage2.new_engine_forensic_investigation(
+                exploited, {"target_loc": "home"})[0],
+            stage2.V_SUPPORTED,
+        )
+
+        protected = self._stage2_ctx(impact={"home": {"gk_risk": True}})
+        self.assertEqual(
+            stage2.new_engine_forensic_investigation(
+                protected, {"target_loc": "home"})[0],
+            stage2.V_CONTRADICTED,
+        )
+
+    def test_stage2_single_engine_cannot_pass_the_gate(self):
+        # Exactly one of three engines can pass: for a TO_SCORE home pick the
+        # rule validator is satisfied (home SOT >= 1 and home DA ahead), while
+        # structure (ratios/diffs) and momentum (recent events) both fail.
+        weak = self._stage2_ctx(
+            minute=20,
+            home={"shots-on-target": 1, "dangerous-attacks": 6,
+                  "box": 0, "corners": 0},
+            away={"shots-on-target": 5, "dangerous-attacks": 4,
+                  "box": 0, "corners": 0},
+        )
+        pick = {"type": "TO_SCORE", "target_loc": "home", "target_id": "1"}
+        self.assertTrue(stage2.engine_1_rule_validator(weak, pick)[0])
+        self.assertFalse(stage2.engine_2_structural_stacker(weak, "home")[0])
+        self.assertFalse(stage2.engine_3_momentum_escalator(weak, "1")[0])
+
+        state, label, _ = stage2.old_engine_statistical_judge(weak, pick)
+        self.assertEqual(label, "STATS_1/3")
+        self.assertEqual(state, stage2.V_INSUFFICIENT)
+        self.assertNotEqual(state, stage2.V_SUPPORTED)
+
+    def test_stage2_strong_evidence_passes_the_gate(self):
+        strong = self._stage2_ctx(
+            home={"shots-on-target": 5, "dangerous-attacks": 40,
+                  "box": 8, "corners": 5},
+            away={"shots-on-target": 1, "dangerous-attacks": 10,
+                  "box": 1, "corners": 1},
+        )
+        state, _, _ = stage2.old_engine_statistical_judge(
+            strong, {"type": "TO_SCORE", "target_loc": "home",
+                     "target_id": "1"})
+        self.assertEqual(state, stage2.V_SUPPORTED)
+
+    def test_stage2_combined_gate_needs_both_dimensions(self):
+        self.assertEqual(
+            stage2.combine_validation_states(
+                stage2.V_SUPPORTED, stage2.V_SUPPORTED),
+            stage2.V_SUPPORTED,
+        )
+        # Every other combination must not report a pass.
+        for forensic in (stage2.V_SUPPORTED, stage2.V_NEUTRAL,
+                         stage2.V_INSUFFICIENT, stage2.V_CONTRADICTED):
+            for stats in (stage2.V_SUPPORTED, stage2.V_NEUTRAL,
+                          stage2.V_INSUFFICIENT, stage2.V_CONTRADICTED):
+                if forensic == stage2.V_SUPPORTED and stats == stage2.V_SUPPORTED:
+                    continue
+                self.assertNotEqual(
+                    stage2.combine_validation_states(forensic, stats),
+                    stage2.V_SUPPORTED,
+                )
+
+    def test_stage2_score_parts_tolerates_missing_score(self):
+        self.assertEqual(
+            stage2._score_parts("—"),
+            {"home": 0, "away": 0, "display": "—"},
+        )
+
+    def test_stage2_board_entry_exposes_structured_contract(self):
+        entry = stage2._summary_board_entry({
+            "id": 42,
+            "name": "Home vs Away",
+            "state": {"state": "LIVE"},
+            "scores": [
+                {"description": "CURRENT",
+                 "score": {"participant": "home", "goals": 2}},
+                {"description": "CURRENT",
+                 "score": {"participant": "away", "goals": 1}},
+            ],
+        })
+        # The frontend renders these fields directly instead of parsing `lines`.
+        for field in ("fixture_id", "score_parts", "period", "status",
+                      "updated_at", "statistics", "predictions"):
+            self.assertIn(field, entry)
+        self.assertEqual(entry["score_parts"],
+                         {"home": 2, "away": 1, "display": "2-1"})
+        self.assertEqual(set(entry["statistics"]), {"home", "away"})
+        for side in ("home", "away"):
+            self.assertEqual(
+                set(entry["statistics"][side]),
+                {"possession", "shots_on_target", "dangerous_attacks",
+                 "corners", "box_entries"},
+            )
+
     def test_stage5_preserves_team_ids_and_explicit_breach(self):
         danger = [{
             "fixture": "Home vs Away",

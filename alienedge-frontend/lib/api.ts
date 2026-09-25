@@ -1012,6 +1012,16 @@ export interface LivePrematchAudit {
   odds_home_win: number | null;
   odds_away_win: number | null;
   odds_o25: number | null;
+  /**
+   * Optional live-odds mirror of the three pre-match markets above. No live
+   * odds feed is produced by the engines today, so these are normally
+   * undefined and the UI shows an explicit "not available" state. They are
+   * declared so a future live feed renders without a frontend change.
+   */
+  live_odds_home_win?: number | null;
+  live_odds_away_win?: number | null;
+  live_odds_o25?: number | null;
+  live_odds_updated_at?: string | null;
   home: LivePrematchTeamAudit;
   away: LivePrematchTeamAudit;
   picks: Array<string | { type: string; target_loc?: string }>;
@@ -1043,6 +1053,47 @@ export interface LiveValidationPick {
   timestamp: string;
 }
 
+/** Code 2 validator verdict for one dimension of the gate. */
+export type LiveValidationState =
+  | "SUPPORTED"
+  | "CONTRADICTED"
+  | "NEUTRAL"
+  | "INSUFFICIENT_DATA";
+
+/** One canonical prediction tracked through its live lifecycle by Code 2. */
+export interface LiveValidationPrediction {
+  key: string;
+  label: string;
+  type: string;
+  target: string;
+  status:
+    | "WAITING"
+    | "QUEUED"
+    | "MONITORING"
+    | "TRIGGERED"
+    | "STRIKE_WINDOW"
+    | "SETTLED";
+  signal?: LiveValidationState;
+  forensic?: LiveValidationState;
+  statistics?: LiveValidationState;
+  stats_label?: string;
+  forensic_note?: string;
+  triggered?: boolean;
+  minute?: number;
+  trigger_minute?: number | null;
+  score_at_trigger?: string | null;
+  final_score?: string | null;
+  settlement?: string | null;
+}
+
+export interface LiveValidationSideStats {
+  possession: number;
+  shots_on_target: number;
+  dangerous_attacks: number;
+  corners: number;
+  box_entries: number;
+}
+
 /** Stage 2 VALIDATION BOARD match — mirrors print_cycle_board cycle_log entry. */
 export interface LiveValidationMatch {
   name: string;
@@ -1053,6 +1104,14 @@ export interface LiveValidationMatch {
   status?: "SCHEDULED" | "LIVE" | "FINISHED";
   is_finished?: boolean;
   retained_finished?: boolean;
+  /** Structured contract (Code 2). The fields below are all optional so a
+   *  board written before the contract change still renders. */
+  fixture_id?: string;
+  score_parts?: { home: number; away: number; display: string };
+  period?: string;
+  updated_at?: string;
+  statistics?: { home: LiveValidationSideStats; away: LiveValidationSideStats };
+  predictions?: LiveValidationPrediction[];
 }
 
 /** Stage 2 full board: tracks stage 1 picks through triple-phase audit. */
