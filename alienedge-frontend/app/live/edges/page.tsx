@@ -31,6 +31,7 @@ import {
   type PredictionColumn,
 } from "@/components/predictions";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PushToggle } from "./PushToggle";
 import { cn } from "@/lib/utils";
 
 function asAuditList(data: unknown): LivePrematchAudit[] {
@@ -1092,6 +1093,9 @@ export default function LivePage() {
                   </div>
                 </section>
               ) : null}
+
+              {/* ── MATCH ALERTS (opt-in push) ─────────────────────────── */}
+              <PushToggle />
 
               {/* ── CODE 3A: FORENSIC INVESTIGATION COCKPIT ────────────── */}
               <section className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/40 p-4">

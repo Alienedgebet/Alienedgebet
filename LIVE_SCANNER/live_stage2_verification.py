@@ -790,6 +790,42 @@ def check_if_done(ctx, pick):
 # 🔥 TRIPLE PHASE AUDIT — FULL VISIBLE OUTPUT PER MATCH PER PICK
 # ════════════════════════════════════════════════════════════════════════════
 # ==============================================================================
+def _notify_triggered(ctx, label, ptype, target, minute, score_at_trigger):
+    """
+    Record a TRIGGERED notification event.
+
+    Wrapped so a notification problem can never raise into the live audit
+    loop, which would otherwise abandon the remaining predictions for this
+    fixture. SUPPORTED is intentionally not emitted - it is reversible.
+    """
+    try:
+        from notifications import emit_event
+        emit_event(
+            "TRIGGERED",
+            ctx["id"], ctx.get("name"),
+            ptype, target,
+            minute=minute, trigger_minute=minute,
+            score_at_trigger=score_at_trigger,
+        )
+    except Exception:
+        pass
+
+
+def _notify_settled(ctx, label, ptype, target, settlement):
+    """Record a SETTLED notification event (final result). Never raises."""
+    try:
+        from notifications import emit_event
+        emit_event(
+            "SETTLED",
+            ctx["id"], ctx.get("name"),
+            ptype, target,
+            settlement=settlement,
+            final_score=f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+        )
+    except Exception:
+        pass
+
+
 def process_triple_phase_audit(ctx, picks, cycle_log):
     """
     Full visible validation board for every pick in every tracked match.
@@ -852,6 +888,7 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             # left missing for the UI to render as UNKNOWN.
             stage, stage_note = prediction_lifecycle_step(
                 pick, "SETTLED", V_SETTLED, minute, True)
+            _notify_settled(ctx, label, ptype, target, done_reason)
             prediction_rows.append({
                 "key":         p_key,
                 "label":       label,
@@ -983,6 +1020,8 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
 
                 line = f"   🔥 [{label}] SUPREME ALERT FIRED @ {minute}' (score {score_at_trigger})"
                 match_summary_lines.append(line)
+                _notify_triggered(ctx, label, ptype, target,
+                                  minute, score_at_trigger)
 
                 stage, stage_note = prediction_lifecycle_step(
                     pick, "TRIGGERED", combined_state, minute, False)
@@ -1435,6 +1474,19 @@ def run_live_validator_once(cycle_number=1):
         print(f"Error saving validation board: {e}", file=sys.stderr)
 
     save_memory()
+
+    # ── PUSH NOTIFICATIONS (best effort) ──────────────────────────────────
+    # Runs after the board is written so a notification problem can never
+    # interfere with validation. Fully wrapped: delivery must never raise into
+    # the live cycle. Set ALIENEDGE_PUSH=0 to disable without a code change.
+    if os.getenv("ALIENEDGE_PUSH", "1") not in ("0", "false", "False"):
+        try:
+            import notifications as _notify
+            summary = _notify.dispatch(_notify.pending_events(limit=50))
+            if summary.get("sent"):
+                print(f"   📲 push dispatched: {summary}")
+        except Exception as exc:
+            print(f"   📲 push dispatch skipped: {exc}", file=sys.stderr)
 
     return board
 

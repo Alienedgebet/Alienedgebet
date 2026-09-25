@@ -308,8 +308,10 @@ async def auth_and_rate_limit(request: Request, call_next):
 from api.auth_store import SESSION_COOKIE, check_rate_limit, get_user_for_session
 from api.auth_router import router as auth_router
 from api.user_rules_router import router as user_rules_router  # noqa: E402
+from api.notifications_router import router as notifications_router  # noqa: E402
 app.include_router(auth_router)
 app.include_router(user_rules_router)
+app.include_router(notifications_router)
 
 # ── SETTLEMENT / LIVE SCORES (independent of the pre-match pipeline) ──────────
 from settlement_service import (
