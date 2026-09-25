@@ -29,12 +29,14 @@ export function VerifyCell({ data }: { data?: VerificationData }) {
   // Corners rows expose the per-team split; SOT rows expose theirs. Prefer
   // whichever split this row actually carries so the cell reads e.g.
   // "5+4=9" instead of a bare FT score.
-  const splitScore =
-    data.h_corners !== undefined && data.a_corners !== undefined
-      ? `${data.h_corners}+${data.a_corners}=${data.total_corners}`
-      : data.h_sot !== undefined && data.a_sot !== undefined
-        ? `${data.h_sot}+${data.a_sot}=${data.total_sot}`
-        : data.score;
+  const hasCornerSplit =
+    data.h_corners !== undefined && data.a_corners !== undefined;
+  const hasSotSplit = data.h_sot !== undefined && data.a_sot !== undefined;
+  const splitScore = hasCornerSplit
+    ? `${data.h_corners}+${data.a_corners}=${data.total_corners ?? (data.h_corners ?? 0) + (data.a_corners ?? 0)}`
+    : hasSotSplit
+      ? `${data.h_sot}+${data.a_sot}=${data.total_sot ?? (data.h_sot ?? 0) + (data.a_sot ?? 0)}`
+      : undefined;
 
   // 1. LIVE IN-PLAY STATE
   if (data.status === "LIVE" || data.verdict === "IN_PLAY") {
@@ -44,7 +46,7 @@ export function VerifyCell({ data }: { data?: VerificationData }) {
         title={data.note || "Live in play"}
       >
         <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-ping" />
-        <span>{data.score || "0-0"}</span>
+        <span>{splitScore ?? data.score ?? "0-0"}</span>
         {data.minute && <span className="text-[10px] text-amber-400/80">{data.minute}&apos;</span>}
       </div>
     );
@@ -52,9 +54,7 @@ export function VerifyCell({ data }: { data?: VerificationData }) {
 
   // 2. FINISHED: WON STATE
   if (data.verdict === "WON") {
-    const displayScore = data.h_corners !== undefined && data.a_corners !== undefined
-      ? `${data.h_corners}+${data.a_corners}=${data.total_corners}`
-      : data.score;
+    const displayScore = splitScore ?? data.score;
     return (
       <div
         className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-950/50 px-2 py-0.5 font-mono text-xs font-bold text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
@@ -67,9 +67,7 @@ export function VerifyCell({ data }: { data?: VerificationData }) {
   }
 
   // 3. FINISHED: LOST STATE
-  const displayScore = data.h_corners !== undefined && data.a_corners !== undefined
-    ? `${data.h_corners}+${data.a_corners}=${data.total_corners}`
-    : data.score;
+  const displayScore = splitScore ?? data.score;
   return (
     <div
       className="inline-flex items-center gap-1 rounded-md border border-rose-500/40 bg-rose-950/50 px-2 py-0.5 font-mono text-xs font-bold text-rose-300 shadow-[0_0_12px_rgba(244,63,94,0.2)]"

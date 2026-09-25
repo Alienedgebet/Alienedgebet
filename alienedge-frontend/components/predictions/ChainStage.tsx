@@ -27,6 +27,8 @@ interface ChainStageProps<T> {
    * Defaults to the global NEXT_PUBLIC_DEMO_MODE switch.
    */
   demo?: boolean;
+  /** Poll interval for live/finished verification updates. */
+  refreshMs?: number;
 }
 
 /**
@@ -49,6 +51,7 @@ export function ChainStage<T>({
   defaultOpen,
   fallbackData,
   demo,
+  refreshMs,
 }: ChainStageProps<T>) {
   // Cache key = stable stage title + serialised deps (includes date).
   // Means: navigate away → come back → instant paint from cache (no spinner).
@@ -58,6 +61,7 @@ export function ChainStage<T>({
     fallback: fallbackData,
     cacheKey,
     demo,
+    refreshMs,
   });
 
   const liveRows = Array.isArray(data) ? data : [];
