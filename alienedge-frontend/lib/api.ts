@@ -71,11 +71,24 @@ api.interceptors.response.use(
 const RAW_CACHE_TTL_MS = 3 * 60 * 1000; // matches useApi's cache TTL
 const rawCache = new Map<string, { data: unknown; ts: number }>();
 const inflight = new Map<string, Promise<AxiosResponse<unknown>>>();
+let rawCacheGeneration = 0;
+
+/**
+ * Force the next explicit refresh to bypass the shared raw-response snapshot.
+ * The generation guard prevents an older in-flight request from repopulating
+ * the cache after a refresh has already started.
+ */
+export function clearRawCache(): void {
+  rawCache.clear();
+  inflight.clear();
+  rawCacheGeneration += 1;
+}
 
 export function cachedGet<T>(
   url: string,
   config?: AxiosRequestConfig
 ): Promise<AxiosResponse<T>> {
+  const generation = rawCacheGeneration;
   const hit = rawCache.get(url);
   if (hit && Date.now() - hit.ts < RAW_CACHE_TTL_MS) {
     return Promise.resolve({
@@ -92,10 +105,14 @@ export function cachedGet<T>(
   const request = api
     .get<T>(url, config)
     .then((res) => {
-      rawCache.set(url, { data: res.data, ts: Date.now() });
+      if (generation === rawCacheGeneration) {
+        rawCache.set(url, { data: res.data, ts: Date.now() });
+      }
       return res;
     })
-    .finally(() => inflight.delete(url));
+    .finally(() => {
+      if (generation === rawCacheGeneration) inflight.delete(url);
+    });
   inflight.set(url, request as Promise<AxiosResponse<unknown>>);
   return request;
 }

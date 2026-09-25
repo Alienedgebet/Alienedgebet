@@ -541,8 +541,9 @@ def grade_row(market_type, row, actual_match):
         }
 
     # 2. LIVE IN-PLAY STATE
+    m = str(market_type).lower()
     if not is_finished:
-        return {
+        live_payload = {
             "status": "LIVE",
             "score": ft_score,
             "minute": minute,
@@ -550,9 +551,29 @@ def grade_row(market_type, row, actual_match):
             "badge_text": f"{ft_score} ({minute}')",
             "note": f"Match in play ({minute}')"
         }
+        # Keep the live market metric visible in Verify as well as the final
+        # result. Other markets continue to show the football score.
+        if m == "sot":
+            live_payload.update({
+                "h_sot": int(actual_match.get("h_sot", 0)),
+                "a_sot": int(actual_match.get("a_sot", 0)),
+                "total_sot": int(actual_match.get(
+                    "total_sot",
+                    int(actual_match.get("h_sot", 0)) + int(actual_match.get("a_sot", 0)),
+                )),
+            })
+        elif m == "corners":
+            live_payload.update({
+                "h_corners": int(actual_match.get("h_corners", 0)),
+                "a_corners": int(actual_match.get("a_corners", 0)),
+                "total_corners": int(actual_match.get(
+                    "total_corners",
+                    int(actual_match.get("h_corners", 0)) + int(actual_match.get("a_corners", 0)),
+                )),
+            })
+        return live_payload
 
     # 3. SETTLED / FINISHED STATE (Market-Aware Math)
-    m = str(market_type).lower()
     h_ft = actual_match["h_ft"]
     a_ft = actual_match["a_ft"]
     tot_g = actual_match["total_goals"]
@@ -618,23 +639,17 @@ def grade_row(market_type, row, actual_match):
         note = f"{tot_g} goals ({ft_score})"
 
     # --- CORNERS (verify the TOTAL, not the corner winner) ---
-    # The old branch graded every pick against `row.get("Corner_Line") or
-    # 9.5` — but NO corner payload in this system stores a Corner_Line
-    # column, so the fallback silently graded everything against a fixed
-    # 9.5 line instead of the pick's own predicted total. For a corner
-    # TOTAL market the result is home_corners + away_corners compared with
-    # the pick's line: OVER L is WON when total >= L (AlienEdge canonical
-    # line: 8, e.g. 5+4=9 → OVER 8 WON). The note exposes the actual
-    # counts so the UI can show "5+4=9 vs line 8".
+    # The corner market is a fixed 7+ total threshold: the result is the
+    # combined home + away corner count, independent of the displayed pick
+    # projection. The note exposes both team counts for the UI.
     elif m in ["corners"]:
         tot_c = actual_match["total_corners"]
         h_c = int(actual_match.get("h_corners", 0))
         a_c = int(actual_match.get("a_corners", 0))
         if tot_c <= 0:
             # 0-0 corners almost always means the finished snapshot carries
-            # no corner statistics (verified: 21 finished fixtures across
-            # the Sep 10-13 archives have 0+0). Grading those as LOST (or
-            # WON on an under) would be a fabricated verdict — stay PENDING.
+            # no corner statistics. Grading those as LOST would fabricate a
+            # verdict, so keep the row pending until real stats are available.
             return {
                 "status": "FINISHED",
                 "score": ft_score,
@@ -646,21 +661,9 @@ def grade_row(market_type, row, actual_match):
                 "a_corners": a_c,
                 "total_corners": tot_c,
             }
-        line = 8.0  # AlienEdge canonical OVER 8 threshold
-        for k in ("predicted_corners", "expected_total_corners",
-                  "Total_Exp", "total_exp"):
-            v = row.get(k)
-            if v is None:
-                continue
-            try:
-                pred = float(str(v).replace("%", ""))
-            except (TypeError, ValueError):
-                continue
-            if pred > 0:
-                line = max(8.0, float(round(pred)))
-                break
+        line = 7  # user-confirmed combined-corner threshold: 7+
         won = tot_c >= line
-        note = f"{h_c}+{a_c}={tot_c} corners vs line {line:g} → {'OVER' if won else 'UNDER'}"
+        note = f"{h_c}+{a_c}={tot_c} corners vs line {line} → {'OVER' if won else 'UNDER'}"
 
     # --- SECOND HALF GOALS (SHVI) ---
     elif m in ["shvi", "sh_goal"]:

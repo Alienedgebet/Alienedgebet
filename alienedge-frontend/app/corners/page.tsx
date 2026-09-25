@@ -195,6 +195,7 @@ export default function CornersPage() {
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No aggregator picks for this date."
           fallbackData={MOCK_CORNER_AGG}
+          refreshMs={60_000}
         />
       </div>
 
@@ -209,6 +210,7 @@ export default function CornersPage() {
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No stage 2 picks for this date."
           fallbackData={MOCK_CORNER_S2}
+          refreshMs={60_000}
         />
       </div>
 

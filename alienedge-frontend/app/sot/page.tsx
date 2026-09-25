@@ -80,6 +80,7 @@ export default function SOTPage() {
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No S.O.T. picks for this date."
           fallbackData={MOCK_SOT}
+          refreshMs={60_000}
         />
       </div>
     </div>

@@ -3,7 +3,7 @@ import sys
 import time
 import json
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,6 +23,39 @@ API_KEY = os.getenv("SPORTMONKS_API_KEY")
 LIVE_TTL = 120      # 120 seconds (2 minutes) for in-play scores & stats
 PREMATCH_TTL = 900  # 900 seconds (15 minutes) for lineups & formations
 
+
+
+def _persist_finished_from_live(raw_data):
+    """Persist every finished fixture visible in a live-feed payload.
+
+    The live feed is cached on disk, so a finished fixture can be observed in
+    one response and disappear before the next network fetch. Run this same
+    extractor for fresh responses, fresh disk-cache hits, and stale-cache
+    fallbacks; the snapshot writer is additive and will not downgrade a
+    previously captured score.
+    """
+    try:
+        from settlement_service import extract_match_data, write_ft_snapshot
+
+        finished_by_date = {}
+        for fx in raw_data or []:
+            if not isinstance(fx, dict):
+                continue
+            std = extract_match_data(fx)
+            if not std.get("is_finished"):
+                continue
+            fx_date = std.get("match_date") or datetime.now().strftime("%Y-%m-%d")
+            finished_by_date.setdefault(fx_date, []).append(std)
+
+        if not finished_by_date:
+            return 0
+        write_ft_snapshot(finished_by_date)
+        return sum(len(rows) for rows in finished_by_date.values())
+    except Exception as exc:
+        # Snapshot emission must never break the live cache read/write path.
+        print(f"[FT SNAPSHOT] update failed (non-fatal): {exc}")
+        return 0
+
 # ── GATE 1: LIVE IN-PLAY SHARED CACHE (Used by Settlement, Code 2, and Code 6) ──
 def get_live_scores_cached(force_refresh: bool = False) -> list:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -34,6 +67,7 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
             with open(LIVE_CACHE_FILE, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             if (now - payload.get("timestamp", 0)) < LIVE_TTL and payload.get("data"):
+                _persist_finished_from_live(payload["data"])
                 return payload["data"]
         except Exception:
             pass
@@ -68,6 +102,7 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
                     if _stale.get("data"):
                         print("[API GATE] live_cache: shared cooldown active — "
                               "serving stale cache without refetch")
+                        _persist_finished_from_live(_stale["data"])
                         return _stale["data"]
                 except Exception:
                     pass
@@ -112,7 +147,11 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
             # result can never be downgraded by an archive row.
             if not raw_data:
                 try:
-                    from settlement_service import write_ft_snapshot, load_ft_snapshot
+                    from settlement_service import (
+                        load_finished_archive,
+                        load_ft_snapshot,
+                        write_ft_snapshot,
+                    )
                     _today = datetime.now().strftime("%Y-%m-%d")
                     _dates = {_today, (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")}
                     _have = set()
@@ -143,31 +182,12 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
 
             # FT RESULT SNAPSHOT: persist finished fixtures so settlement can
             # use them after the fixture leaves the inplay feed (before the
-            # nightly archive runs). Hardened:
-            #   * A 200 + empty data response (the 429-storm shape) now MERGES
-            #     into the snapshot instead of being ignored — the merge keeps
-            #     existing entries, so this is additive and safe.
-            #   * On a real fetch, finished fixtures are captured EVEN when
-            #     extract_match_data could not read a final score (they carry
-            #     score_available=False and are upgraded later — dropping them
-            #     made the match invisible to settlement forever).
-            try:
-                from settlement_service import extract_match_data, write_ft_snapshot
-                finished_by_date = {}
-                for fx in raw_data:
-                    if not isinstance(fx, dict):
-                        continue
-                    std = extract_match_data(fx)
-                    if std.get("is_finished"):
-                        fx_date = std.get("match_date") or datetime.now().strftime("%Y-%m-%d")
-                        finished_by_date.setdefault(fx_date, []).append(std)
-                if finished_by_date:
-                    write_ft_snapshot(finished_by_date)
-                    n = sum(len(v) for v in finished_by_date.values())
-                    print(f"[FT SNAPSHOT] {n} finished fixture(s) persisted from in-play feed")
-            except Exception as _ft_err:
-                # Snapshot emission must never break the live cache write.
-                print(f"[FT SNAPSHOT] update failed (non-fatal): {_ft_err}")
+            # nightly archive runs). The helper is deliberately shared with
+            # disk-cache hits so a short-lived FT response cannot disappear
+            # between two network fetches.
+            n = _persist_finished_from_live(raw_data)
+            if n:
+                print(f"[FT SNAPSHOT] {n} finished fixture(s) persisted from in-play feed")
 
             return raw_data
     except Exception as e:
@@ -177,7 +197,9 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
     if os.path.exists(LIVE_CACHE_FILE):
         try:
             with open(LIVE_CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f).get("data", [])
+                stale_data = json.load(f).get("data", [])
+            _persist_finished_from_live(stale_data)
+            return stale_data
         except Exception: pass
 
     return []

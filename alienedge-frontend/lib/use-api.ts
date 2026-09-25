@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type DependencyList } from "react";
 import { isAxiosError, type AxiosError, type AxiosResponse } from "axios";
+import { clearRawCache } from "@/lib/api";
 
 // ============================================================
 // GENERIC DATA-FETCHING HOOK
@@ -182,6 +183,7 @@ export function useApiBatch<T>(
   const [results, setResults] = useState<UseApiResult<T>[]>(initial);
   const activeKeyRef = useRef(requestKey);
   const [refetchTick, setRefetchTick] = useState(0);
+  const lastTickRef = useRef(0);
 
   useEffect(() => {
     const refreshMs = options?.refreshMs ?? 0;
@@ -192,6 +194,9 @@ export function useApiBatch<T>(
 
   useEffect(() => {
     let cancelled = false;
+    const explicitRefresh = refetchTick !== lastTickRef.current;
+    lastTickRef.current = refetchTick;
+    if (explicitRefresh) clearRawCache();
     if (activeKeyRef.current !== requestKey) {
       activeKeyRef.current = requestKey;
       setResults(initial);
@@ -355,6 +360,7 @@ export function useApi<T>(
     // reach the network, defeating the whole point of polling.
     const explicitRefresh = refetchTick !== lastTickRef.current;
     lastTickRef.current = refetchTick;
+    if (explicitRefresh) clearRawCache();
     if (cacheKey && !explicitRefresh) {
       const hit = getCached<T>(cacheKey);
       if (hit !== null) {
