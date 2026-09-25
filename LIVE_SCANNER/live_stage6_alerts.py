@@ -622,137 +622,116 @@ class SupremeOrchestrator:
             self.run_single_cycle()
             time.sleep(45)
 
+    def _process_live_fixture(self, fx, db):
+        """Analyze one fixture; callers isolate failures per fixture."""
+        f_id = str(fx.get("id", ""))
+        pre = db.get(f_id, {})
+        if not pre and db:
+            name_key = self._name_key(fx.get("name", ""))
+            for db_entry in db.values():
+                db_name = self._name_key(
+                    db_entry.get("fixture", db_entry.get("name", ""))
+                )
+                if db_name and db_name == name_key:
+                    pre = db_entry
+                    break
+
+        minute = self.extract_minute(fx)
+        if not minute or minute <= 0:
+            return None
+
+        self.update_market_settlement(f_id, fx)
+        h_s, a_s = self.extract_stats(fx)
+        intel = self.Brain.analyze_match_state(
+            f_id, h_s, a_s, minute, fx.get("events", [])
+        )
+        ctx = self.extract_impact_context(fx)
+        structural = self.Detective.investigate(ctx, pre)
+        key_loss = self._track_key_player_loss(f_id, ctx, fx)
+        fixture_name = fx.get("name", f_id)
+
+        user_alerts = self.UserLogic.evaluate(
+            f_id, intel, structural, pre, minute, key_loss,
+            list_rules(active_only=True)
+        )
+        fired_this = []
+        for ua in user_alerts:
+            tier = ua.get("tier")
+            alert_id = ua.get("id")
+            if (tier in ["🔥 PREMIUM", "✅ STANDARD"]
+                    and alert_id not in ALERT_HISTORY):
+                self.fire_alert(
+                    f_id, fixture_name, tier, ua.get("msg", ""),
+                    ua.get("conf", 0), minute,
+                    user_id=ua.get("user_id"),
+                    rule_id=ua.get("rule_id"),
+                    rule_label=ua.get("rule_label"),
+                )
+                ALERT_HISTORY.add(alert_id)
+                fired_this.append(ua)
+            elif tier == "📊 MONITOR":
+                fired_this.append(ua)
+
+        self.process_ai_gates(f_id, fixture_name, minute, intel, structural, pre)
+        return {
+            "name": fixture_name,
+            "id": f_id,
+            "minute": minute,
+            "conf": intel["match"]["confidence_score"],
+            "h_pressure": intel["match"]["h_pressure_share"],
+            "a_pressure": intel["match"]["a_pressure_share"],
+            "chaos": intel["match"]["chaos_index"],
+            "h_xg": intel["home"]["live_xg"],
+            "a_xg": intel["away"]["live_xg"],
+            "h_sot": intel["home"]["sot"],
+            "a_sot": intel["away"]["sot"],
+            "structural": structural.get("status", "OK"),
+            "key_loss": key_loss,
+            "alerts": fired_this,
+            "in_db": bool(pre),
+        }
+
+
     def run_single_cycle(self):
-        """One full analysis pass: prematch load, live context, alerts,
-        and orchestrator-board save. Called by run() and by the 24/7
-        runner so Stage 6 does not block the shared scheduler with its
-        own infinite loop."""
+        """Run one full pass, isolating bad fixtures from the cycle board."""
         self.cycle += 1
         db = self.load_all_prematch_data()
-
         if not db:
-            logging.info(
-                "[MOCK MODE] No prematch report found. "
-                "Live-only monitoring active."
-            )
-
+            logging.info("[MOCK MODE] No prematch report found. Live-only monitoring active.")
         self.maintenance_thread(db)
 
+        live_data = []
+        cycle_matches = []
+        fixture_errors = []
         try:
-            live_data = self.fetch_live_scores()
-            live_ids  = {str(fx['id']) for fx in live_data}
-
+            live_data = self.fetch_live_scores() or []
+            if not live_data:
+                logging.warning("Stage 6 live feed returned no fixtures; preserving previous board")
+                return
+            live_ids = {str(fx.get("id")) for fx in live_data if isinstance(fx, dict)}
             self.cleanup_stale_memory(live_ids)
-
-            # ── FIX: Build name→fixture_id map for fallback matching ──
-            # Code 2's live_predictions.json uses fixture IDs from the
-            # scheduled endpoint. The inplay endpoint may return the
-            # same fixture under a different ID in some competitions.
-            # We build a name-based lookup as a fallback.
-            live_name_map = {}
             for fx in live_data:
-                name_key = self._name_key(fx.get('name', ''))
-                live_name_map[name_key] = str(fx['id'])
-
-            cycle_matches = []
-
-            for fx in live_data:
-                f_id     = str(fx['id'])
-                pre      = db.get(f_id, {})
-
-                # ── FIX: Name-based fallback for prematch context ──────
-                # If the scheduled fixture ID doesn't match the live ID,
-                # try matching by team names
-                if not pre and db:
-                    name_key = self._name_key(fx.get('name', ''))
-                    for db_fid, db_entry in db.items():
-                        db_name = self._name_key(
-                            db_entry.get('fixture',
-                            db_entry.get('name', ''))
-                        )
-                        if db_name and db_name == name_key:
-                            pre = db_entry
-                            break
-
-                minute   = self.extract_minute(fx)
-                if not minute or minute <= 0: continue
-
-                self.update_market_settlement(f_id, fx)
-
-                h_s, a_s = self.extract_stats(fx)
-                intel    = self.Brain.analyze_match_state(
-                    f_id, h_s, a_s, minute, fx.get('events', [])
-                )
-                ctx        = self.extract_impact_context(fx)
-                structural = self.Detective.investigate(ctx, pre)
-
-                # NEW: real live key-player-lost tracking, ported from
-                # the same idea as live_stage2_verification.py — but
-                # self-contained here so Code 6 doesn't depend on Stage
-                # 2 running. Key-11 sets are built lazily once both
-                # squads are cached, then substitution events are
-                # checked against those sets every cycle.
-                key_loss = self._track_key_player_loss(f_id, ctx, fx)
-
-                fixture_name = fx.get('name', f_id)
-
-                active_rules = list_rules(active_only=True)
-
-                user_alerts   = self.UserLogic.evaluate(
-                    f_id, intel, structural, pre, minute, key_loss, active_rules
-                )
-                fired_this    = []
-
-                for ua in user_alerts:
-                    if (ua['tier'] in ["🔥 PREMIUM","✅ STANDARD"] and
-                            ua['id'] not in ALERT_HISTORY):
-                        self.fire_alert(
-                            f_id, fixture_name,
-                            ua['tier'], ua['msg'], ua['conf'], minute,
-                            user_id=ua.get('user_id'),
-                            rule_id=ua.get('rule_id'),
-                            rule_label=ua.get('rule_label'),
-                        )
-                        ALERT_HISTORY.add(ua['id'])
-                        fired_this.append(ua)
-                    elif ua['tier'] == "📊 MONITOR":
-                        fired_this.append(ua)
-
-                self.process_ai_gates(
-                    f_id, fixture_name, minute,
-                    intel, structural, pre
-                )
-
-                cycle_matches.append({
-                    "name":       fixture_name,
-                    "id":         f_id,
-                    "minute":     minute,
-                    "conf":       intel['match']['confidence_score'],
-                    "h_pressure": intel['match']['h_pressure_share'],
-                    "a_pressure": intel['match']['a_pressure_share'],
-                    "chaos":      intel['match']['chaos_index'],
-                    "h_xg":       intel['home']['live_xg'],
-                    "a_xg":       intel['away']['live_xg'],
-                    "h_sot":      intel['home']['sot'],
-                    "a_sot":      intel['away']['sot'],
-                    "structural": structural.get('status','OK'),
-                    "key_loss":   key_loss,
-                    "alerts":     fired_this,
-                    "in_db":      bool(pre)
-                })
-
-            self.print_orchestrator_board(
-                cycle_matches, len(live_data), len(db)
-            )
-            self.save_orchestrator_board(
-                cycle_matches, len(live_data), len(db)
-            )
-            self.save_live_dashboard(
-                cycle_matches, len(live_data), len(db)
-            )
-
-        except Exception as e:
-            logging.error(f"Engine Loop Failure: {e}")
+                if not isinstance(fx, dict):
+                    continue
+                try:
+                    match = self._process_live_fixture(fx, db)
+                    if match is not None:
+                        cycle_matches.append(match)
+                except Exception as exc:
+                    fixture_id = str(fx.get("id", ""))
+                    logging.exception("Stage 6 fixture %s failed: %s", fixture_id, exc)
+                    fixture_errors.append({
+                        "fixture_id": fixture_id,
+                        "error": str(exc),
+                    })
+            if not cycle_matches:
+                logging.warning("Stage 6 found no processable live fixtures; preserving previous board")
+                return
+            self.print_orchestrator_board(cycle_matches, len(live_data), len(db))
+            self.save_orchestrator_board(cycle_matches, len(live_data), len(db), fixture_errors)
+            self.save_live_dashboard(cycle_matches, len(live_data), len(db), fixture_errors)
+        except Exception as exc:
+            logging.exception("Engine Loop Failure: %s", exc)
 
 
 
@@ -815,13 +794,15 @@ class SupremeOrchestrator:
     # wrote — the endpoint always returned []. This board is a compact snapshot
     # of the orchestrator cycle (same data the console prints), so persist it
     # here for the API to serve.
-    def save_live_dashboard(self, cycle_matches, total_live, total_db):
+    def save_live_dashboard(self, cycle_matches, total_live, total_db,
+                           fixture_errors=None):
         try:
             payload = {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "total_live": total_live,
                 "total_db": total_db,
                 "matches": cycle_matches,
+                "errors": fixture_errors or [],
             }
             tmp_path = LIVE_DASHBOARD_FILE + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -865,7 +846,7 @@ class SupremeOrchestrator:
                     print(f"       ⚠️  Structural: {struct}")
                 if m['alerts']:
                     for ua in m['alerts']:
-                        print(f"       {ua['tier']} → {ua['msg']}")
+                        print(f"       {ua.get('tier', '📊 MONITOR')} → {ua.get('msg', '')}")
                 else:
                     print("       No alerts this cycle.")
 
@@ -874,21 +855,23 @@ class SupremeOrchestrator:
             print(f"  🔥 SESSION ALERTS FIRED: {len(SESSION_ALERTS)}")
             for a in SESSION_ALERTS[-5:]:
                 print(
-                    f"    [{a['tier']}] {a['fixture']} | "
-                    f"Min {a['minute']}' | Conf {a['conf']}% | "
-                    f"{a['msg'][:55]}"
+                    f"    [{a.get('level', a.get('tier', 'UNKNOWN'))}] {a.get('fixture', 'Unknown')} | "
+                    f"Min {a.get('minute', '?')}' | Conf {a.get('confidence', a.get('conf', 0))}% | "
+                    f"{a.get('msg', '')[:55]}"
                 )
 
                 print(f"{'═'*80}\n")
 
     # ── NEW: JSON BOARD SNAPSHOT (for the API process to read) ─────────────
-    def save_orchestrator_board(self, cycle_matches, total_live, total_db):
+    def save_orchestrator_board(self, cycle_matches, total_live, total_db,
+                               fixture_errors=None):
         board = {
             "session":   SESSION_ID,
             "cycle":     self.cycle,
             "total_live": total_live,
             "total_db":   total_db,
             "matches":   cycle_matches,
+            "errors":    fixture_errors or [],
         }
         try:
             tmp_path = ORCHESTRATOR_BOARD_FILE + ".tmp"
@@ -1234,9 +1217,12 @@ class SupremeOrchestrator:
         if isinstance(fx.get("state"), dict):
             found.append(int(fx.get("state").get("minute", 0)))
         for p in fx.get("periods", []):
-            m = (p.get("time", {}).get("minute") or
-                 p.get("minute") or p.get("length"))
-            if m: found.append(int(m))
+            period_time = p.get("time") if isinstance(p.get("time"), dict) else {}
+            m = (period_time.get("minute") or p.get("minute")
+                 or p.get("minutes") or p.get("length"))
+            if m:
+                try: found.append(int(m))
+                except (TypeError, ValueError): pass
         if fx.get("events"):
             emins = [int(e.get("minute",0))
                      for e in fx["events"] if e.get("minute")]

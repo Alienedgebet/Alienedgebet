@@ -29,6 +29,10 @@ OUTPUT_FILE = os.path.join(DATA_DIR, "danger_audit.json")
 # squad_cache_stage1_prematch.json / squad_cache_stage3_incoming.json.
 HISTORY_CACHE_FILE = os.path.join(DATA_DIR, "danger_history_cache.json")
 HISTORY_TTL = 6 * 3600      # 6h: a team is refetched at most 4x/day, not ~1900x
+# Bump this whenever the history payload needs fields that older entries lack.
+# Without a schema marker, a cache entry created before statistics were
+# requested would keep manufacturing zero dangerous-attack averages for hours.
+HISTORY_CACHE_SCHEMA = 2
 # 2026-09-20: 400 teams x full raw payloads (lineups incl.) reached 932MB on
 # disk and ~2.5GB+ RSS on every cycle load -> the OOM-kill loop that killed the
 # scanner 5x (Sep 19/20) and an API worker. 60 teams keeps the file ~250MB and
@@ -114,6 +118,19 @@ def safe_float(x: Any, default: float = 0.0) -> float:
     try: return float(str(x).strip().replace(",", "").rstrip("%"))
     except: return default
 
+def resolve_participants(parts):
+    """Return provider-identified home/away participants, or (None, None).
+
+    SportMonks does not guarantee participant array order. Location metadata is
+    the authoritative side contract; guessing by position reverses live cards.
+    """
+    home = next((p for p in parts
+                 if (p.get("meta") or {}).get("location") == "home"), None)
+    away = next((p for p in parts
+                 if (p.get("meta") or {}).get("location") == "away"), None)
+    return home, away
+
+
 def extract_stat_entries(fx: Dict[str,Any], team_id: int) -> Dict[str, float]:
     """🚨 FIX: Bulletproof Participant Mapping! No more blind spots. 🚨"""
     stats_raw = fx.get("statistics") or[]
@@ -149,7 +166,10 @@ def _load_history_cache():
     now = time.time()
     if isinstance(raw, dict):
         for k, v in raw.items():
-            if isinstance(v, dict) and (now - v.get("at", 0)) < HISTORY_TTL and v.get("data"):
+            if (isinstance(v, dict)
+                    and v.get("schema") == HISTORY_CACHE_SCHEMA
+                    and (now - v.get("at", 0)) < HISTORY_TTL
+                    and v.get("data")):
                 _history_cache[k] = v
     print(f"[HISTORY CACHE] loaded {len(_history_cache)} team histories "
           f"(TTL {HISTORY_TTL // 3600}h)")
@@ -165,7 +185,10 @@ def _save_history_cache():
     try:
         now = time.time()
         items = [(k, v) for k, v in _history_cache.items()
-                 if isinstance(v, dict) and (now - v.get("at", 0)) < HISTORY_TTL and v.get("data")]
+                  if (isinstance(v, dict)
+                      and v.get("schema") == HISTORY_CACHE_SCHEMA
+                      and (now - v.get("at", 0)) < HISTORY_TTL
+                      and v.get("data"))]
         items.sort(key=lambda kv: kv[1].get("at", 0), reverse=True)
         items = items[:HISTORY_CACHE_MAX_TEAMS]
         if not items:
@@ -201,7 +224,10 @@ def get_key_players_forensics(team_id: int):
         history = cached.get("data") or []
     else:
         resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{t_id}", params={
-            "include": "lineups.details.type;lineups.player.position;scores;participants",
+            # Dangerous Attacks is consumed by compute_style_analysis(). The
+            # previous cache and request omitted statistics, so missing data was
+            # silently coerced to 0.0 and every team looked Defensive.
+            "include": "lineups.details.type;lineups.player.position;scores;participants;statistics;statistics.type",
             "filter": "fixtureStates:5",
             "per_page": 50
         })
@@ -215,7 +241,9 @@ def get_key_players_forensics(team_id: int):
                       f"({resp.get('_failure')}) — reusing cached history "
                       f"({len(history)} fixtures).")
         elif history:
-            _history_cache[str(t_id)] = {"at": time.time(), "data": history}
+            _history_cache[str(t_id)] = {
+                "at": time.time(), "schema": HISTORY_CACHE_SCHEMA, "data": history
+            }
 
     for fx in history:
         # Keeper Conceded Calculation Fallback
@@ -281,13 +309,20 @@ def compute_style_analysis(history, team_id: int):
     t_id = int(team_id)
     for r in recent:
         ent = extract_stat_entries(r, t_id)
-        metrics["da"].append(ent.get("Dangerous Attacks", 0))
-    
-    avg_da = sum(metrics["da"])/len(metrics["da"]) if metrics["da"] else 0.0
-    
+        # Absence is not a measured zero. Keep an explicit unavailable state
+        # so downstream chemistry cannot present missing data as a real 0 DA.
+        if "Dangerous Attacks" in ent:
+            metrics["da"].append(ent["Dangerous Attacks"])
+
+    if not metrics["da"]:
+        return {"label": "Unavailable", "score": None, "da": None,
+                "available": False}
+
+    avg_da = sum(metrics["da"])/len(metrics["da"])
     # Lowered from >45 to >36 so it actually catches attacking teams!
     label = "Attacking" if avg_da > 36 else "Defensive" if avg_da < 28 else "Balanced"
-    return {"label": label, "score": round(avg_da/10, 2), "da": avg_da}
+    return {"label": label, "score": round(avg_da/10, 2), "da": avg_da,
+            "available": True}
 
 # ------------------------------------------------------------------------------
 # 🚀 MAIN PIPELINE (WRAPPED FOR ARCHITECTURE)
@@ -347,14 +382,18 @@ def run_danger_forensic_aggregator():
 
             parts = fx.get("participants",[])
             if len(parts) < 2: continue
-            h_p, a_p = parts[0], parts[1]
+            h_p, a_p = resolve_participants(parts)
+            # Do not guess sides from provider ordering. A reversed danger card
+            # silently reverses every downstream home/away market signal.
+            if h_p is None or a_p is None:
+                continue
             
             def audit_side(team_id, team_name):
                 t_id = int(team_id)
                 key_monument, history = get_key_players_forensics(t_id)
                 current_starters = {int(l['player_id']) for l in starters_all if int(l.get('team_id', 0)) == t_id}
                 
-                starting_gk_leak = 0.0
+                starting_gk_leak = None
                 for pid in current_starters:
                     if key_monument.get(pid, {}).get('pos') == "Goalkeeper":
                         starting_gk_leak = key_monument[pid]['c_p90']
@@ -370,15 +409,22 @@ def run_danger_forensic_aggregator():
                         m_weight += w
                         if info['pos'] == "Goalkeeper": gk_hole = True
                 
-                v_pct = (m_weight / t_weight * 100) if t_weight > 0 else 0
-                breached = (len(missing_details) >= CHAOS_THRESHOLD) or gk_hole
+                # No historical key-player data is an unavailable audit, not a
+                # safe team and not a 0.0 goalkeeper concession rate.
+                data_available = bool(key_monument)
+                v_pct = (m_weight / t_weight * 100) if t_weight > 0 else None
+                breached = (None if not data_available else
+                            ((len(missing_details) >= CHAOS_THRESHOLD) or gk_hole))
                 style = compute_style_analysis(history, t_id)
-                
+
                 return {
                     "team_name": team_name, "id": t_id, "breach": breached,
-                    "danger_level": "🔴 DANGER" if breached else "✅ SAFE",
-                    "vulnerability_pct": round(v_pct, 1),
+                    "data_available": data_available,
+                    "danger_level": ("⚪ UNAVAILABLE" if not data_available
+                                     else "🔴 DANGER" if breached else "✅ SAFE"),
+                    "vulnerability_pct": (round(v_pct, 1) if v_pct is not None else None),
                     "gk_leak": starting_gk_leak,
+                    "gk_leak_available": starting_gk_leak is not None,
                     "missing_details": missing_details,
                     "formation": next((f['formation'] for f in fx.get('formations',[]) if int(f['participant_id']) == t_id), "N/A"),
                     "style": style
@@ -388,19 +434,30 @@ def run_danger_forensic_aggregator():
             away_audit = audit_side(a_p['id'], a_p['name'])
 
             # 🚨 FIX: Tactical Alignment Handshake (Lowered to > 35 to catch open matches)
-            style_align = "🔥 OPEN" if home_audit['style']['da'] > 35 and away_audit['style']['da'] > 35 else "⚠️ TIGHT"
+            home_da = home_audit['style'].get('da')
+            away_da = away_audit['style'].get('da')
+            style_align = (
+                "🔥 OPEN"
+                if isinstance(home_da, (int, float)) and isinstance(away_da, (int, float))
+                and home_da > 35 and away_da > 35
+                else "⚠️ TIGHT"
+                if isinstance(home_da, (int, float)) and isinstance(away_da, (int, float))
+                else "⚠️ UNAVAILABLE"
+            )
             
             # --- DYNAMIC SYMMETRIC BTTS (GG) LOGIC ---
             h_leak = home_audit['gk_leak']
             a_leak = away_audit['gk_leak']
-            
+            leak = lambda value, threshold: isinstance(value, (int, float)) and value >= threshold
+
             gg_label = "Weak"
-            if h_leak >= 1.50 and a_leak >= 1.50:
+            if leak(h_leak, 1.50) and leak(a_leak, 1.50):
                 gg_label = "Excellent"
-            elif (h_leak >= 1.40 and a_leak >= 1.50 and home_audit['breach']) or \
-                 (a_leak >= 1.40 and h_leak >= 1.50 and away_audit['breach']):
+            elif ((leak(h_leak, 1.40) and leak(a_leak, 1.50) and home_audit['breach']) or
+                  (leak(a_leak, 1.40) and leak(h_leak, 1.50) and away_audit['breach'])):
                 gg_label = "Very Strong"
-            elif (h_leak >= 1.40 and a_leak >= 1.50) or (a_leak >= 1.40 and h_leak >= 1.50):
+            elif ((leak(h_leak, 1.40) and leak(a_leak, 1.50)) or
+                  (leak(a_leak, 1.40) and leak(h_leak, 1.50))):
                 gg_label = "Strong"
             elif style_align == "🔥 OPEN" and (home_audit['breach'] or away_audit['breach']):
                 gg_label = "Strong"
@@ -411,7 +468,12 @@ def run_danger_forensic_aggregator():
                 "home_team": home_audit, "away_team": away_audit,
                 "style_alignment": style_align,
                 "match_chemistry_list": {
-                    "Corner": "Elite" if home_audit['style']['da'] > 65 or away_audit['style']['da'] > 65 else "Strong",
+                    "Corner": (
+                        "Elite"
+                        if ((isinstance(home_da, (int, float)) and home_da > 65)
+                            or (isinstance(away_da, (int, float)) and away_da > 65))
+                        else "Strong"
+                    ),
                     "Gg": gg_label
                 }
             }
@@ -422,7 +484,9 @@ def run_danger_forensic_aggregator():
             print(f"MATCH: {match_card['fixture']} (ID: {match_card['fixture_id']})")
             print(f"Handshake: [ Alignment: {match_card['style_alignment']} | GG: {gg_label} ]")
             for side, data in[("HOME", home_audit), ("AWAY", away_audit)]:
-                print(f"  [{side}] {data['team_name']} -> {data['danger_level']} ({data['vulnerability_pct']}% Damage | GK Leak: {data['gk_leak']:.2f})")
+                print(f"  [{side}] {data['team_name']} -> {data['danger_level']} ("
+                      f"{data['vulnerability_pct'] if data['vulnerability_pct'] is not None else 'N/A'}% Damage | "
+                      f"GK Leak: {data['gk_leak'] if data['gk_leak'] is not None else 'N/A'})")
                 if data['missing_details']:
                     missing_str = ", ".join([f"{p['name']} ({p['pos']})" for p in data['missing_details']])
                     print(f"    MISSING: {missing_str}")

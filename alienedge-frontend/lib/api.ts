@@ -1050,6 +1050,9 @@ export interface LiveValidationMatch {
   id: string;
   score: string;
   lines: string[];
+  status?: "SCHEDULED" | "LIVE" | "FINISHED";
+  is_finished?: boolean;
+  retained_finished?: boolean;
 }
 
 /** Stage 2 full board: tracks stage 1 picks through triple-phase audit. */
@@ -1057,6 +1060,8 @@ export interface LiveValidationBoard {
   cycle: number;
   total_live: number;
   total_tracked: number;
+  retained_finished?: number;
+  errors?: Array<{ fixture_id: string; error: string; timestamp?: string }>;
   matches: LiveValidationMatch[];
   alerts: LiveValidationPick[];
 }
@@ -1084,24 +1089,28 @@ export interface LiveDangerReport {
   home_team: {
     team_name: string;
     id: number;
-    breach: boolean;
+    breach: boolean | null;
     danger_level: string;
-    vulnerability_pct: number;
-    gk_leak: number;
+    data_available?: boolean;
+    vulnerability_pct: number | null;
+    gk_leak: number | null;
+    gk_leak_available?: boolean;
     missing_details: Array<{ name: string; pos: string }>;
     formation: string;
-    style: { label: string; score: number; da: number };
+    style: { label: string; score: number | null; da: number | null; available?: boolean };
   };
   away_team: {
     team_name: string;
     id: number;
-    breach: boolean;
+    breach: boolean | null;
     danger_level: string;
-    vulnerability_pct: number;
-    gk_leak: number;
+    data_available?: boolean;
+    vulnerability_pct: number | null;
+    gk_leak: number | null;
+    gk_leak_available?: boolean;
     missing_details: Array<{ name: string; pos: string }>;
     formation: string;
-    style: { label: string; score: number; da: number };
+    style: { label: string; score: number | null; da: number | null; available?: boolean };
   };
   style_alignment: string;
   match_chemistry_list: {
@@ -1126,8 +1135,8 @@ export interface LiveAggregatorReport {
   fixture_id: string;
   incoming_probabilities: Record<string, unknown>[];
   danger_report: {
-    home: { status: string; sync: string; breach: boolean };
-    away: { status: string; sync: string; breach: boolean };
+    home: { id?: number | string; team_name?: string; status: string; data_available?: boolean; sync: string; breach: boolean | null };
+    away: { id?: number | string; team_name?: string; status: string; data_available?: boolean; sync: string; breach: boolean | null };
   };
   match_chemistry_list: Record<string, string>;
   live?: {
@@ -1299,7 +1308,8 @@ export type ChemistryLevel =
   | "very strong"
   | "strong"
   | "weak"
-  | "very weak";
+  | "very weak"
+  | "unavailable";
 
 export type RuleSide = "home" | "away" | "any";
 
@@ -1387,6 +1397,7 @@ export const CHEMISTRY_LEVEL_OPTIONS: { value: ChemistryLevel; label: string }[]
   { value: "strong", label: "Strong" },
   { value: "weak", label: "Weak" },
   { value: "very weak", label: "Very Weak" },
+  { value: "unavailable", label: "Unavailable" },
 ];
 
 /** Live condition types offering a per-side selector (home/away/any). */
@@ -2035,6 +2046,7 @@ export const getTierDotColor = (tier: string): string => {
 
 export const getChemistryColor = (chemistry: string): string => {
   const c = chemistry.toLowerCase();
+  if (c.includes("unavailable")) return "text-text-dim";
   if (c.includes("excellent") || c.includes("elite")) return "text-accent-green";
   if (c.includes("very strong") || c.includes("strong"))
     return "text-accent-cyan";
