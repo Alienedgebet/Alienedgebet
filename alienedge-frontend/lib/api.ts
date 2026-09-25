@@ -1058,7 +1058,16 @@ export type LiveValidationState =
   | "SUPPORTED"
   | "CONTRADICTED"
   | "NEUTRAL"
-  | "INSUFFICIENT_DATA";
+  | "INSUFFICIENT_DATA"
+  | "SETTLED";
+
+/** Where a prediction currently sits in its live lifecycle. */
+export type LivePredictionStage =
+  | "MONITORING"
+  | "SUPPORTED"
+  | "REJECTED"
+  | "TRIGGERED"
+  | "SETTLED";
 
 /** One canonical prediction tracked through its live lifecycle by Code 2. */
 export interface LiveValidationPrediction {
@@ -1073,6 +1082,8 @@ export interface LiveValidationPrediction {
     | "TRIGGERED"
     | "STRIKE_WINDOW"
     | "SETTLED";
+  stage?: LivePredictionStage;
+  stage_note?: string;
   signal?: LiveValidationState;
   forensic?: LiveValidationState;
   statistics?: LiveValidationState;
@@ -1091,7 +1102,9 @@ export interface LiveValidationSideStats {
   shots_on_target: number;
   dangerous_attacks: number;
   corners: number;
-  box_entries: number;
+  /** null when the provider did not supply a box-touch stat for this side. */
+  box_entries: number | null;
+  box_available?: boolean;
 }
 
 /** Stage 2 VALIDATION BOARD match — mirrors print_cycle_board cycle_log entry. */

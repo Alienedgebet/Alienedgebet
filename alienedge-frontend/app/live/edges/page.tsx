@@ -476,11 +476,20 @@ function OddsComparisonBlock({ row }: { row: LivePrematchAudit }) {
 
 type VerdictTone = "good" | "bad" | "wait" | "flat";
 
+const STAGE_STYLE: Record<string, string> = {
+  MONITORING: "border-white/15 bg-white/5 text-slate-300",
+  SUPPORTED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+  REJECTED: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+  TRIGGERED: "border-amber-500/50 bg-amber-500/10 text-amber-300",
+  SETTLED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+};
+
 const VERDICT_STYLE: Record<string, { label: string; tone: VerdictTone }> = {
   SUPPORTED: { label: "SUPPORTED", tone: "good" },
   CONTRADICTED: { label: "CONTRADICTED", tone: "bad" },
   INSUFFICIENT_DATA: { label: "NEED MORE DATA", tone: "wait" },
   NEUTRAL: { label: "NEUTRAL", tone: "flat" },
+  SETTLED: { label: "SETTLED", tone: "good" },
 };
 
 const VERDICT_TONE_CLASS: Record<VerdictTone, string> = {
@@ -521,11 +530,12 @@ function PredictionLifecycleCard({
 }: {
   prediction: LiveValidationPrediction;
 }) {
+  const settled = prediction.status === "SETTLED";
   return (
     <div
       className={cn(
         "rounded-xl border bg-black/40 p-3",
-        prediction.status === "SETTLED"
+        settled
           ? "border-emerald-500/30"
           : prediction.status === "TRIGGERED"
             ? "border-amber-500/40"
@@ -537,7 +547,20 @@ function PredictionLifecycleCard({
           {prediction.label}
         </span>
         <div className="flex flex-wrap items-center gap-1.5">
-          <VerdictChip state={prediction.signal} />
+          {/* Lifecycle stage is the primary read: it says where this
+              prediction is in its live validation, one at a time. */}
+          {prediction.stage && (
+            <span
+              className={cn(
+                "rounded-md border px-2 py-0.5 font-mono text-[10px] font-black",
+                STAGE_STYLE[prediction.stage] ?? STAGE_STYLE.MONITORING
+              )}
+              title={prediction.stage_note}
+            >
+              {prediction.stage}
+            </span>
+          )}
+          {!settled && <VerdictChip state={prediction.signal} />}
           <span
             className={cn(
               "rounded-md border px-2 py-0.5 font-mono text-[10px] font-bold",
@@ -550,23 +573,33 @@ function PredictionLifecycleCard({
         </div>
       </div>
 
+      {prediction.stage_note && (
+        <p className="mb-2 font-mono text-[11px] text-slate-400">
+          {prediction.stage_note}
+        </p>
+      )}
+
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] sm:grid-cols-3">
-        <div className="flex items-center justify-between gap-2">
-          <dt className="text-slate-500">Forensic</dt>
-          <dd>
-            <VerdictChip state={prediction.forensic} />
-          </dd>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <dt className="text-slate-500">Statistics</dt>
-          <dd>
-            <VerdictChip state={prediction.statistics} />
-          </dd>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <dt className="text-slate-500">Engines</dt>
-          <dd className="text-slate-300">{prediction.stats_label ?? "—"}</dd>
-        </div>
+        {!settled && (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-slate-500">Forensic</dt>
+              <dd>
+                <VerdictChip state={prediction.forensic} />
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-slate-500">Statistics</dt>
+              <dd>
+                <VerdictChip state={prediction.statistics} />
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <dt className="text-slate-500">Engines</dt>
+              <dd className="text-slate-300">{prediction.stats_label ?? "—"}</dd>
+            </div>
+          </>
+        )}
         <div className="flex items-center justify-between gap-2">
           <dt className="text-slate-500">Trigger</dt>
           <dd className="text-slate-300">
@@ -594,8 +627,11 @@ function PredictionLifecycleCard({
   );
 }
 
+// Only the numeric statistics are rendered as a home/away comparison.
+// `box_available` is a boolean flag on the same object and is intentionally
+// not part of this list.
 const LIVE_STAT_ROWS: Array<{
-  key: keyof LiveValidationSideStats;
+  key: Exclude<keyof LiveValidationSideStats, "box_available">;
   label: string;
   suffix?: string;
 }> = [
@@ -616,8 +652,12 @@ function LiveStatsPanel({
   awayName: string;
 }) {
   if (!statistics) return null;
+  // `box_entries` is null when the provider did not supply it, so a plain
+  // `> 0` comparison is invalid. Treat null as "no data", not as zero.
+  const num = (v: number | null | undefined) =>
+    typeof v === "number" && !Number.isNaN(v) ? v : 0;
   const hasData = LIVE_STAT_ROWS.some(
-    (r) => statistics.home[r.key] > 0 || statistics.away[r.key] > 0
+    (r) => num(statistics.home[r.key]) > 0 || num(statistics.away[r.key]) > 0
   );
 
   return (
@@ -642,9 +682,20 @@ function LiveStatsPanel({
         </thead>
         <tbody>
           {LIVE_STAT_ROWS.map((row) => {
-            const home = statistics.home[row.key];
-            const away = statistics.away[row.key];
-            const lead = home === away ? "" : home > away ? "home" : "away";
+            const homeRaw = statistics.home[row.key];
+            const awayRaw = statistics.away[row.key];
+            const homeMissing =
+              homeRaw === null || homeRaw === undefined;
+            const awayMissing =
+              awayRaw === null || awayRaw === undefined;
+            // A missing stat never "leads" — otherwise an absent value would
+            // render as 0 and look like the other side was winning.
+            const lead =
+              homeMissing || awayMissing || homeRaw === awayRaw
+                ? ""
+                : num(homeRaw) > num(awayRaw)
+                  ? "home"
+                  : "away";
             return (
               <tr key={row.key} className="border-t border-white/5">
                 <td
@@ -653,8 +704,9 @@ function LiveStatsPanel({
                     lead === "home" ? "text-cyan-300" : "text-slate-400"
                   )}
                 >
-                  {home}
-                  {row.suffix ?? ""}
+                  {homeMissing
+                    ? "n/a"
+                    : `${num(homeRaw)}${row.suffix ?? ""}`}
                 </td>
                 <td className="py-1 text-center text-slate-500">{row.label}</td>
                 <td
@@ -663,8 +715,9 @@ function LiveStatsPanel({
                     lead === "away" ? "text-cyan-300" : "text-slate-400"
                   )}
                 >
-                  {away}
-                  {row.suffix ?? ""}
+                  {awayMissing
+                    ? "n/a"
+                    : `${num(awayRaw)}${row.suffix ?? ""}`}
                 </td>
               </tr>
             );
@@ -913,7 +966,10 @@ export default function LivePage() {
           <div className="relative w-full max-w-4xl glass rounded-2xl border border-cyan-500/30 bg-[#070b14] p-4 sm:p-6 shadow-[0_0_50px_rgba(6,182,212,0.15)] max-h-[92vh] overflow-y-auto">
             
             {/* ── CODE 2: STICKY LIVE MATCH HEADER (score first) ─────── */}
-            <div className="sticky top-0 z-10 -mx-4 mb-5 border-b border-white/10 bg-[#070b14]/95 px-4 pb-4 pt-1 backdrop-blur-md sm:-mx-6 sm:px-6">
+            {/* Header is a normal block, not a sticky element with negative
+                margins: the negative offsets clipped the first line of text
+                when the modal was scrolled. */}
+            <div className="relative z-10 mb-5 rounded-xl border border-white/10 bg-[#070b14] p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
@@ -1046,82 +1102,223 @@ export default function LivePage() {
                   </h3>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
-                  {/* GK Exploit Radar */}
-                  <div className="rounded-xl border border-rose-500/20 bg-rose-950/20 p-3 flex flex-col justify-between">
-                    <span className="text-[10px] uppercase text-slate-400 font-bold">GK Exploit Status</span>
-                    <span className={cn(
-                      "text-sm font-black mt-1",
-                      selectedAudit.home.gk_out || selectedAudit.away.gk_out
-                        ? "text-rose-400 animate-pulse"
-                        : "text-emerald-400"
-                    )}>
-                      {selectedAudit.home.gk_out || selectedAudit.away.gk_out
-                        ? "🔴 EXPLOITED (Gap Active)"
-                        : "🟢 PROTECTED (Wall Solid)"}
-                    </span>
-                    <span className="text-[10px] text-slate-400 mt-1">
-                      Opponent attacking structural fracture
-                    </span>
-                  </div>
-
-                  {/* Key Player Loss */}
-                  <div className="rounded-xl border border-amber-500/20 bg-amber-950/20 p-3 flex flex-col justify-between">
-                    <span className="text-[10px] uppercase text-slate-400 font-bold">Key-11 Personnel Gap</span>
-                    <span className="text-sm font-black text-amber-300 mt-1">
-                      {selectedAudit.combined_miss} Missing Starters
-                    </span>
-                    <span className="text-[10px] text-slate-400 mt-1">
-                      KMV: {selectedAudit.home.kmv.toFixed(0)}%H / {selectedAudit.away.kmv.toFixed(0)}%A
-                    </span>
-                  </div>
-
-                  {/* Opponent In-Play Pressure */}
-                  <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/20 p-3 flex flex-col justify-between">
-                    <span className="text-[10px] uppercase text-slate-400 font-bold">Opponent Pressure Penetration</span>
-                    <span className="text-sm font-black text-cyan-300 mt-1">
-                      HIGH PENETRATION
-                    </span>
-                    <span className="text-[10px] text-slate-400 mt-1">
-                      SOT ≥ 1 · DA ≥ 10 · Box Attacks ≥ 3
-                    </span>
-                  </div>
+                {/* Goalkeeper exposure is reported PER TEAM. The previous
+                    version collapsed both sides into a single "EXPLOITED"
+                    verdict with no indication of which goalkeeper was at risk. */}
+                <div className="grid grid-cols-1 gap-3 font-mono sm:grid-cols-2">
+                  {(
+                    [
+                      ["Home", selectedAudit.home],
+                      ["Away", selectedAudit.away],
+                    ] as const
+                  ).map(([side, team]) => {
+                    const gkDown = Boolean(team?.gk_out);
+                    return (
+                      <div
+                        key={side}
+                        className={cn(
+                          "rounded-xl border p-3",
+                          gkDown
+                            ? "border-rose-500/30 bg-rose-950/20"
+                            : "border-emerald-500/20 bg-emerald-950/10"
+                        )}
+                      >
+                        <p className="text-[10px] font-bold uppercase text-slate-400">
+                          {side} — {team?.team_name ?? "?"}
+                        </p>
+                        <p
+                          className={cn(
+                            "mt-1 text-sm font-black",
+                            gkDown ? "text-rose-400" : "text-emerald-400"
+                          )}
+                        >
+                          {gkDown ? "🔴 GK EXPOSED" : "🟢 GK PROTECTED"}
+                        </p>
+                        <p className="mt-1 text-[10px] text-slate-400">
+                          {team?.gk_status || "No goalkeeper note"}
+                        </p>
+                        <p className="mt-1 text-[10px] text-slate-400">
+                          Missing key players:{" "}
+                          <span
+                            className={cn(
+                              "font-bold",
+                              (team?.miss ?? 0) > 3
+                                ? "text-rose-400"
+                                : "text-slate-300"
+                            )}
+                          >
+                            {team?.miss ?? 0}
+                          </span>{" "}
+                          · KMV {Number(team?.kmv ?? 0).toFixed(0)}%
+                        </p>
+                      </div>
+                    );
+                  })}
                 </div>
+
+                {/* Pressure is COMPUTED from the live statistics shown above,
+                    not asserted. This panel previously always read
+                    "HIGH PENETRATION" even when the board showed 0 box
+                    entries on both sides. */}
+                {(() => {
+                  const stats = activeValidation?.statistics;
+                  if (!stats) {
+                    return (
+                      <p className="rounded-lg border border-white/5 bg-white/5 p-3 font-mono text-[11px] text-slate-400">
+                        No live statistics for this fixture yet — pressure
+                        cannot be assessed.
+                      </p>
+                    );
+                  }
+                  const boxValues = [
+                    stats.home.box_entries,
+                    stats.away.box_entries,
+                  ];
+                  const boxAvailable = boxValues.every(
+                    (v) => v !== null && v !== undefined
+                  );
+                  const levels = [
+                    {
+                      label: "Shots on target",
+                      value: Math.max(
+                        stats.home.shots_on_target,
+                        stats.away.shots_on_target
+                      ),
+                      // Mirrors the engine's Engine 1 bar (combined SOT > 3,
+                      // i.e. 4+). Keeping these in sync is what stops the panel
+                      // contradicting the real verdicts again.
+                      need: 4,
+                    },
+                    {
+                      label: "Dangerous attacks",
+                      value: Math.max(
+                        stats.home.dangerous_attacks,
+                        stats.away.dangerous_attacks
+                      ),
+                      need: 10,
+                    },
+                    {
+                      label: "Box entries",
+                      value: boxAvailable
+                        ? Math.max(
+                            Number(boxValues[0]),
+                            Number(boxValues[1])
+                          )
+                        : null,
+                      need: 3,
+                    },
+                  ];
+                  const met = levels.filter(
+                    (l) => l.value !== null && l.value >= l.need
+                  );
+                  const verdict =
+                    met.length >= 2
+                      ? { text: "HIGH PRESSURE", cls: "text-rose-300" }
+                      : met.length === 1
+                        ? { text: "MODERATE PRESSURE", cls: "text-amber-300" }
+                        : { text: "LOW PRESSURE", cls: "text-slate-400" };
+                  return (
+                    <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/20 p-3 font-mono">
+                      <p className="text-[10px] font-bold uppercase text-slate-400">
+                        Combined attacking pressure (best side)
+                      </p>
+                      <p className={cn("mt-1 text-sm font-black", verdict.cls)}>
+                        {verdict.text}
+                      </p>
+                      <ul className="mt-1.5 space-y-0.5 text-[10px] text-slate-400">
+                        {levels.map((l) => (
+                          <li key={l.label}>
+                            {l.value === null
+                              ? `${l.label}: unavailable`
+                              : `${l.label} ${l.value} ${l.value >= l.need ? "≥" : "<"} ${l.need} ${l.value >= l.need ? "✅" : "❌"}`}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  );
+                })()}
               </section>
 
-              {/* ── CODE 3B: STATISTICAL JUDGE (TRIPLE ENGINES) ───────── */}
+              {/* ── CODE 3B: PER-PREDICTION ENGINE VERDICTS ────────────── */}
               <section className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/40 p-4">
                 <div className="flex items-center justify-between border-b border-white/10 pb-2">
                   <div className="flex items-center gap-2">
                     <Target className="h-4 w-4 text-cyan-400" />
                     <h3 className="text-xs font-black uppercase tracking-wider text-white">
-                      Code 3B — Combined Statistical Judge
+                      Code 3B — Engine Verdicts Per Prediction
                     </h3>
                   </div>
-                  <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-0.5 font-mono text-[10px] font-bold text-emerald-300">
-                    STATS: 3/3 ENGINES PASSED
+                  <span className="font-mono text-[10px] text-slate-400">
+                    per prediction · not a match-wide verdict
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
-                  <div className="rounded-xl border border-white/5 bg-white/5 p-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Engine 1 · Rule Validator</p>
-                    <p className="text-emerald-400 font-bold mt-1">✅ PASS</p>
-                    <p className="text-[10px] text-slate-400 mt-0.5">SOT combined ≥ 2 · DA superiority confirmed</p>
+                {/* The previous Code 3B panel was static JSX that always
+                    rendered "3/3 ENGINES PASSED" with three hardcoded ✅
+                    cards, directly contradicting the real per-prediction
+                    counters above. The engines are market-specific, so the
+                    only honest presentation is one row per prediction. */}
+                {activePredictions.length === 0 ? (
+                  <p className="rounded-lg border border-white/5 bg-white/5 p-3 text-center font-mono text-[11px] text-slate-400">
+                    No predictions to score yet.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[520px] text-left font-mono text-[11px]">
+                      <thead className="text-[10px] uppercase text-slate-500">
+                        <tr>
+                          <th className="py-1.5 pr-2 font-medium">Prediction</th>
+                          <th className="py-1.5 pr-2 font-medium">Stage</th>
+                          <th className="py-1.5 pr-2 font-medium">Engines</th>
+                          <th className="py-1.5 pr-2 font-medium">Forensic</th>
+                          <th className="py-1.5 font-medium">Statistics</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {activePredictions.map((p) => (
+                          <tr
+                            key={p.key}
+                            className="border-t border-white/5 align-top"
+                          >
+                            <td className="py-1.5 pr-2 font-bold text-white">
+                              {p.label}
+                            </td>
+                            <td className="py-1.5 pr-2">
+                              {p.stage ? (
+                                <span
+                                  className={cn(
+                                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                                    STAGE_STYLE[p.stage] ??
+                                      STAGE_STYLE.MONITORING
+                                  )}
+                                >
+                                  {p.stage}
+                                </span>
+                              ) : (
+                                <span className="text-slate-500">—</span>
+                              )}
+                            </td>
+                            <td className="py-1.5 pr-2 text-slate-300">
+                              {p.stats_label ?? "—"}
+                            </td>
+                            <td className="py-1.5 pr-2 text-slate-300">
+                              {p.forensic ?? "—"}
+                            </td>
+                            <td className="py-1.5 text-slate-300">
+                              {p.statistics ?? "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+                      A prediction passes only when its forensic and
+                      statistics dimensions both read SUPPORTED. Counters are
+                      market-specific, so different rows may legitimately show
+                      different engine counts.
+                    </p>
                   </div>
-
-                  <div className="rounded-xl border border-white/5 bg-white/5 p-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Engine 2 · Structural Stacker</p>
-                    <p className="text-emerald-400 font-bold mt-1">✅ PASS</p>
-                    <p className="text-[10px] text-slate-400 mt-0.5">DA ratio ≥ 50% · Box touch diff ≥ 2 · Corners diff ≥ 2</p>
-                  </div>
-
-                  <div className="rounded-xl border border-white/5 bg-white/5 p-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase">Engine 3 · Momentum Escalator</p>
-                    <p className="text-emerald-400 font-bold mt-1">✅ PASS</p>
-                    <p className="text-[10px] text-slate-400 mt-0.5">Recent key events ≥ 2 in last 12 minutes</p>
-                  </div>
-                </div>
+                )}
               </section>
 
               {/* ── CODE 3C: SUPREME CONFIRMATIONS TABLE ─────────────── */}
