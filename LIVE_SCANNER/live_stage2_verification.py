@@ -1165,23 +1165,30 @@ def locked_verdict_at_45(gate_state, data, stats_state=None):
     """
     THE UNDER 2.5 RULE — a decision is produced at 45' every single time.
 
-    THE USER'S RULE: at 45' the pick is LIKELY when the CONDITION holds OR when
-    2 of the 3 engines agree. Four possible outcomes, no fifth:
+    THE USER'S RULE: the ENGINE decides. The scoreline only breaks ties.
 
-      VOID      — 3+ goals already scored. ARITHMETIC, not opinion.
-      LIKELY    — the condition holds, or the engines reached 2 of 3.
-      UNCLEAR   — 2 goals already (on the line, zero more allowed), or the
-                  evidence genuinely cannot say.
-      UNLIKELY  — the evidence works against it, but it can STILL come in.
+    Order of authority, highest first:
+      1. ARITHMETIC — 3+ goals already scored means VOID. A fact about the
+         scoreline, not a judgement, so no engine is consulted.
+      2. THE ENGINES — 2 of 3 agreeing is LIKELY; 0 of 3 (the engines
+         actively reading pressure against the under) is UNLIKELY. This is
+         the engine's own intelligence and it is what decides.
+      3. TIEBREAK — at 1 of 3 the engines are split and cannot decide, so
+         only then does the scoreline speak: 0-1 goals LIKELY, 2 UNCLEAR.
 
-    WHY "REJECTED" IS GONE. The old chain returned FINAL_REJECTED whenever the
-    engines did not confirm the pick. That is a category error twice over:
-    "the engines cannot confirm it" is not "the market is wrong", and 0 goals at
-    45' is POSITIVE evidence for an under, not an absence of it. The old code
-    also treated a moderate combined SOT as refutation, so an ordinary 0-0
-    first half was locked as rejected and stayed wrong for the rest of the
-    match. A 45' reading is a probability; the honest words are LIKELY,
-    UNLIKELY, VOID and UNCLEAR.
+    The scoreline must NOT override a clear engine read. A first pass got
+    this wrong and returned LIKELY for 0 goals before consulting the
+    engines, so a goalless half under 20 shots on target still printed
+    LIKELY. That is exactly the "Code 2 ignores its own intelligence"
+    behaviour under investigation, so it is now impossible: an engine
+    verdict is checked before any goal count.
+
+    WHY "REJECTED" IS GONE. The old chain returned FINAL_REJECTED whenever
+    the engines did not confirm the pick. That is a category error twice over:
+    "the engines cannot confirm it" is not "the market is wrong", and a weak
+    reading treated as refutation is how an ordinary 0-0 half got locked as
+    rejected and stayed wrong for the rest of the match. A 45' reading is a
+    probability; the honest words are LIKELY, UNLIKELY, VOID and UNCLEAR.
 
     `stats_state` is the statistical judge's own state, passed in so the
     "2 of 3 engines" condition can be honoured directly. It is optional so
@@ -1199,77 +1206,72 @@ def locked_verdict_at_45(gate_state, data, stats_state=None):
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
 
-    # ── ARITHMETIC FIRST ──────────────────────────────────────────────────
-    # 3 goals already means the market is dead. That is a FACT, not evidence,
-    # and it is the ONLY case allowed to end the pick without a judgement.
+    # ══════════════════════════════════════════════════════════════════════
+    # THE ENGINE DECIDES. THE SCORELINE ONLY BREAKS TIES.
+    # ══════════════════════════════════════════════════════════════════════
+    # The user's instruction: "I hope the team score at 45 wasn't the thing
+    # that determine[s] likely/unlikely/void, but the ENGINE itself tells me
+    # how it all works."
+    #
+    # A first pass got this wrong: it returned LIKELY for 0 goals BEFORE
+    # looking at the engines, so a goalless half under relentless pressure
+    # (engines 0 of 3, CONTRADICTED) still printed LIKELY. That is precisely
+    # the "Code 2 ignores its own intelligence" behaviour being complained
+    # about, and it is a bug, not a design choice.
+    #
+    # The order below is therefore: ARITHMETIC, then the three engines, then
+    # the scoreline ONLY as a tiebreak between the engines.
+
+    # ── 1. ARITHMETIC — the one thing that outranks the engines ───────────
+    # 3+ goals means the market is mathematically dead. This is a fact about
+    # the scoreline, not a judgement, so it needs no engine agreement.
     if total_goals >= 3:
         return VERDICT_VOID, (
             f"VOID at 45': UNDER 2.5 already lost ({total_goals} goals scored) "
             f"— arithmetic, not a prediction"
         )
 
-    # ── CONDITION: the 2-of-3 engine agreement ────────────────────────────
-    # Passing this overrides an otherwise UNCLEAR goal count: the engines
-    # agree the under is on track, so the board must say so.
+    # ── 2. THE ENGINES ARE THE VERDICT ────────────────────────────────────
+    # 2 of 3 engines agreeing is a real, independent read of the match: shots
+    # on target, box entries, and recent momentum. It decides the verdict.
     if stats_state == V_SUPPORTED or gate_state == V_SUPPORTED:
-        if total_goals == 0:
-            return VERDICT_LIKELY, (
-                f"LIKELY at 45': 0 goals and the engines agree "
-                f"(2 of 3) — up to 2 more still allowed"
-            )
-        if total_goals == 1:
-            return VERDICT_LIKELY, (
-                f"LIKELY at 45': 1 goal and the engines agree "
-                f"(2 of 3) — up to 1 more still allowed"
-            )
         return VERDICT_LIKELY, (
-            f"LIKELY at 45': 2 goals with the engines agreeing "
-            f"(2 of 3) — no further goal allowed"
+            f"LIKELY at 45': the engines agree, 2 of 3 — "
+            f"{total_goals} goal(s) scored, combined SOT {sot}"
         )
 
-    # ── CONDITION: the scoreline on its own ───────────────────────────────
-    # 0 or 1 goal at 45' is positive evidence for the under and does not need
-    # engine agreement. This is what a goalless first half now reads as.
+    # 0 of 3 engines agreeing is the engine actively reading pressure AGAINST
+    # the under. This is evidence, so it is UNLIKELY — never "rejected", and
+    # never overridden by a low goal count. A goalless half under 20 shots is
+    # a match running away from the under, and the board must say so.
+    if stats_state == V_CONTRADICTED or gate_state == V_CONTRADICTED:
+        return VERDICT_UNLIKELY, (
+            f"UNLIKELY at 45': the engines read pressure against the under, "
+            f"0 of 3 — {total_goals} goal(s) scored, combined SOT {sot}. "
+            f"It can still come in"
+        )
+
+    # ── 3. TIEBREAK — 1 of 3 engines: the engines are split ───────────────
+    # Only here, with the engines unable to decide, does the scoreline speak.
     if total_goals == 0:
         if sot <= UNDER_SOT_MAX_STRONG:
             return VERDICT_LIKELY, (
-                f"LIKELY at 45': 0 goals, combined SOT {sot} "
-                f"(≤ {UNDER_SOT_MAX_STRONG}) — strongly on track"
+                f"LIKELY at 45': engines split 1 of 3, but 0 goals and combined "
+                f"SOT {sot} (≤ {UNDER_SOT_MAX_STRONG}) — strongly on track"
             )
         return VERDICT_LIKELY, (
-            f"LIKELY at 45': 0 goals, combined SOT {sot} — "
-            f"up to 2 more still allowed"
+            f"LIKELY at 45': engines split 1 of 3, but 0 goals with combined "
+            f"SOT {sot} — up to 2 more still allowed"
         )
     if total_goals == 1:
         return VERDICT_LIKELY, (
-            f"LIKELY at 45': 1 goal, combined SOT {sot} — "
-            f"up to 1 more still allowed"
+            f"LIKELY at 45': engines split 1 of 3, but 1 goal with combined "
+            f"SOT {sot} — up to 1 more still allowed"
         )
-
-    # 2 goals at 45' is ON THE LINE: the under survives only if no more goal is
-    # scored. On its own that is a genuine coin-toss, so it is reported as
-    # UNCLEAR. But if the engines have ALSO read sustained pressure against the
-    # under, that is real evidence and the honest word is UNLIKELY — still not
-    # "rejected", because the pick can still come in.
     if total_goals == 2:
-        if gate_state == V_CONTRADICTED:
-            return VERDICT_UNLIKELY, (
-                f"UNLIKELY at 45': 2 goals already and the engines read pressure "
-                f"against the under (combined SOT {sot}) — it can still come in"
-            )
         return VERDICT_UNCERTAIN, (
-            f"UNCLEAR at 45': 2 goals already — the under survives only if no "
-            f"further goal is scored (combined SOT {sot})"
-        )
-
-    # ── CONTRADICTED BY THE ENGINES ───────────────────────────────────────
-    # Defensive: with 0-1 goals the scoreline condition above already decided
-    # LIKELY, and 3+ goals is VOID, so reaching here means the engine state is
-    # contradictory in a way the scoreline cannot resolve.
-    if gate_state == V_CONTRADICTED:
-        return VERDICT_UNLIKELY, (
-            f"UNLIKELY at 45': the engines read pressure against the under "
-            f"(combined SOT {sot}) — it can still come in"
+            f"UNCLEAR at 45': engines split 1 of 3 and 2 goals already — the "
+            f"under survives only if no further goal is scored (SOT {sot})"
         )
 
     if sot == 0:

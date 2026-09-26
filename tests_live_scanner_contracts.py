@@ -908,15 +908,46 @@ class LiveValidationLedgerTests(unittest.TestCase):
         self.assertEqual(verdict, stage2.VERDICT_UNLIKELY)
         self.assertIn("UNLIKELY", note)
 
-    def test_under_goalless_45_is_likely_even_with_pressure(self):
-        # THE REPORTED BUG. At 45' a 0-0 is the best possible position for an
-        # under: 0 of the 3 goals are spent and up to 2 may still come. It must
-        # never be rejected, whatever the shot count says.
-        for gate in (stage2.V_NEUTRAL, stage2.V_INSUFFICIENT,
-                     stage2.V_CONTRADICTED, stage2.V_SUPPORTED):
-            verdict, _ = stage2.locked_verdict_at_45(
-                gate, self._ctx(home=0, away=0, h_sot=2, a_sot=1))
-            self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+    def test_under_goalless_45_follows_the_engines_not_the_scoreline(self):
+        # THE USER'S RULE: the ENGINE decides; the scoreline only breaks ties.
+        # A first pass returned LIKELY for 0 goals BEFORE consulting the
+        # engines, so a goalless half under relentless pressure (engines 0 of 3)
+        # still printed LIKELY. That made Code 2 ignore its own intelligence.
+        # 0-0 must now track the engine verdict exactly.
+        # 2 of 3 agreeing -> LIKELY.
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_SUPPORTED, self._ctx(home=0, away=0, h_sot=2, a_sot=1),
+            stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+        self.assertIn("2 of 3", note)
+        # 0 of 3 - the engines reading pressure AGAINST the under -> UNLIKELY,
+        # even though nobody has scored. A goalless half under 20 shots is a
+        # match running away from the under and the board must say so.
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_CONTRADICTED, self._ctx(home=0, away=0, h_sot=10, a_sot=10),
+            stage2.V_CONTRADICTED)
+        self.assertEqual(verdict, stage2.VERDICT_UNLIKELY)
+        self.assertIn("0 of 3", note)
+        # 1 of 3 - the engines are split, so the scoreline breaks the tie.
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_INSUFFICIENT, self._ctx(home=0, away=0, h_sot=2, a_sot=1),
+            stage2.V_INSUFFICIENT)
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+        self.assertIn("1 of 3", note)
+
+    def test_scoreline_never_overrides_a_clear_engine_verdict(self):
+        # Exhaustively: whatever the goal count, an engine verdict wins. Only
+        # a split engine (1 of 3) may consult the scoreline.
+        for goals in (0, 1, 2):
+            for gate, stats, expected in (
+                (stage2.V_SUPPORTED, stage2.V_SUPPORTED, stage2.VERDICT_LIKELY),
+                (stage2.V_CONTRADICTED, stage2.V_CONTRADICTED,
+                 stage2.VERDICT_UNLIKELY),
+            ):
+                verdict, _ = stage2.locked_verdict_at_45(
+                    gate, self._ctx(home=goals, away=0, h_sot=6, a_sot=6), stats)
+                self.assertEqual(verdict, expected,
+                                 f"{goals} goals, {stats} should be {expected}")
 
     def test_under_one_goal_at_45_is_likely(self):
         verdict, _ = stage2.locked_verdict_at_45(
