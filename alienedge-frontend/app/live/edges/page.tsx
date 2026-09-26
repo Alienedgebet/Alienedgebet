@@ -514,6 +514,15 @@ const READ_STATE_STYLE: Record<string, string> = {
   UNCLEAR: "border-white/15 bg-white/5 text-slate-300",
 };
 
+// The 30' -> 45' comparison: how the match MOVED between the two checkpoints.
+const COMPARISON_STYLE: Record<string, string> = {
+  STRENGTHENED: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+  HELD: "border-white/15 bg-white/5 text-slate-300",
+  WEAKENED: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+  COLLAPSED: "border-rose-500/30 bg-rose-500/10 text-rose-300",
+  NO_BASELINE: "border-white/10 bg-white/[0.03] text-slate-500",
+};
+
 function LedgerVerdictChip({ verdict }: { verdict?: string | null }) {
   if (!verdict) return null;
   const style = LEDGER_VERDICT_STYLE[verdict] ?? {
@@ -1102,6 +1111,8 @@ export default function LivePage() {
       state: string;
       kind: "pick" | "read";
       minute: number | null;
+      comparison?: string;
+      comparisonNote?: string;
     };
     const rows: Omit<BoardRow, "n">[] = [];
 
@@ -1109,7 +1120,6 @@ export default function LivePage() {
       // A settled or finished fixture has no live decision left to show.
       if (m.is_finished) continue;
       for (const p of m.predictions ?? []) {
-        // Settled picks are filtered out above, so this cannot be SETTLED.
         if (p.status === "SETTLED") continue;
         rows.push({
           fixtureId: String(m.id),
@@ -1118,6 +1128,8 @@ export default function LivePage() {
           state: p.verdict ?? p.status ?? "MONITORING",
           kind: "pick",
           minute: p.minute ?? m.minute ?? null,
+          comparison: p.comparison_30_45,
+          comparisonNote: p.comparison_note,
         });
       }
       if (m.live_read) {
@@ -1196,14 +1208,15 @@ export default function LivePage() {
           </p>
         ) : (
           <div className="max-h-80 overflow-y-auto">
-            <table className="w-full min-w-[540px] text-left font-mono text-[11px]">
+            <table className="w-full min-w-[640px] text-left font-mono text-[11px]">
               <thead className="sticky top-0 bg-black/95 text-[9px] uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="w-8 py-1.5 pr-2 font-medium">#</th>
                   <th className="py-1.5 pr-2 font-medium">Match</th>
                   <th className="py-1.5 pr-2 font-medium">Market</th>
                   <th className="py-1.5 pr-2 font-medium">State</th>
-                  <th className="py-1.5 font-medium">Min</th>
+                  <th className="py-1.5 pr-2 font-medium">30&apos;&rarr;45&apos;</th>
+                  <th className="py-1.5 font-medium">Now</th>
                 </tr>
               </thead>
               <tbody>
@@ -1249,6 +1262,22 @@ export default function LivePage() {
                           ? r.state.replace("_", " ")
                           : (LEDGER_VERDICT_STYLE[r.state]?.label ?? r.state)}
                       </span>
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      {r.comparison ? (
+                        <span
+                          className={cn(
+                            "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                            COMPARISON_STYLE[r.comparison] ??
+                              "border-white/15 bg-white/5 text-slate-400"
+                          )}
+                          title={r.comparisonNote}
+                        >
+                          {r.comparison.replace("_", " ")}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
                     </td>
                     <td className="py-1.5 text-slate-400">
                       {r.minute != null ? `${r.minute}'` : "—"}

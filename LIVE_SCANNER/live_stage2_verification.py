@@ -387,28 +387,89 @@ def _fixture_is_scheduled(fixture):
 
 
 def _fixture_minute_for_board(fixture):
-    found = []
-    time_obj = fixture.get("time")
-    if isinstance(time_obj, dict):
-        try: found.append(int(time_obj.get("minute", 0) or 0))
-        except (TypeError, ValueError): pass
+    """
+    The elapsed MATCH minute, for board display.
+
+    This previously took max() across every period, every event, the state
+    block and the wall clock. A live fixture's periods are labelled PER HALF, so
+    a 2nd-half period carries the elapsed time of that half, not of the match.
+    Peñarol vs Boston River reported "1st-half: 46" and "2nd-half: 56", and
+    max() reported 56 for a match that was really around minute 56 — which is
+    correct by luck there, but on any match whose second half has run longer
+    than its first it over-reports, and the board then fires checkpoints the
+    match has not reached. It now shares the single resolution used by
+    extract_live_context so the board and the engine can never disagree.
+    """
+    return _resolve_match_minute(fixture)
+
+
+def _resolve_match_minute(fixture):
+    """
+    THE MATCH MINUTE — the single most important number in this module.
+
+    Resolved in strict priority order. Periods are interpreted by WHICH HALF
+    they represent rather than by taking the largest number, because a
+    per-half elapsed time is not a match time.
+    """
+    current_minute = 0
     state_obj = fixture.get("state")
+    state_token = ""
     if isinstance(state_obj, dict):
-        try: found.append(int(state_obj.get("minute", 0) or 0))
-        except (TypeError, ValueError): pass
-    for period in fixture.get("periods", []) or []:
-        if not isinstance(period, dict): continue
-        value = (period.get("minute") or period.get("minutes")
-                 or period.get("length"))
+        state_token = str(state_obj.get("state") or state_obj.get("short_name") or "")
+
+    # Period semantics, established against the live feed:
+    #   `minutes` on a period is CUMULATIVE MATCH TIME, not the elapsed time of
+    #   that half. A 2nd-half period reading 56 means the match is at 56', and a
+    #   completed 1st half reading 46 means 46'. Verified on the live fixtures:
+    #   Peñarol 1st=46 (ended), 2nd=56 (ticking) -> match minute 56.
+    #   St. Vincent 1st=47 (ended), 2nd=85 (ticking) -> match minute 85.
+    #   Goiás 1st=49 (ended), 2nd=55 (ticking) -> match minute 55.
+    #
+    # So the correct reading is simply the TICKING period's `minutes` — the one
+    # currently in progress. The earlier bug took max() across every period AND
+    # every event, so a late goal event (e.g. minute 70 in a match at 48')
+    # could push the board past a checkpoint the match had not reached.
+    periods = [p for p in (fixture.get("periods") or []) if isinstance(p, dict)]
+    ordered = sorted(periods, key=lambda p: str(p.get("sort_order") or 0))
+    running = None
+    widest_complete = 0
+    for p in ordered:
+        desc = str(p.get("description") or "").lower()
         try:
-            if value is not None: found.append(int(value))
-        except (TypeError, ValueError): pass
-    for event in fixture.get("events", []) or []:
-        try:
-            value = event.get("minute")
-            if value is not None: found.append(int(value))
-        except (AttributeError, TypeError, ValueError): pass
-    return max(found or [0])
+            mins = int(p.get("minutes") or 0)
+        except (TypeError, ValueError):
+            mins = 0
+        if p.get("ended") is None and p.get("ticking"):
+            running = mins
+        else:
+            # A completed period still tells us how far the match got, but it
+            # must never outrank the period actually in progress.
+            widest_complete = max(widest_complete, mins)
+    if running:
+        current_minute = running
+    elif widest_complete:
+        current_minute = widest_complete
+    if current_minute == 0 and fixture.get("events"):
+        emins = [int(e.get("minute", 0)) for e in fixture["events"]
+                 if e.get("minute")]
+        if emins:
+            current_minute = max(emins)
+    if current_minute == 0:
+        current_minute = safe_get(fixture, "time", "minute", default=0)
+    if current_minute == 0 and isinstance(state_obj, dict):
+        current_minute = safe_get(fixture, "state", "minute", default=0)
+    if current_minute == 0 and fixture.get("starting_at_timestamp"):
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        elapsed = (now_ts - int(fixture["starting_at_timestamp"])) // 60
+        # Halftime sits around 50-60 minutes of wall clock; the 15-minute
+        # break is not match time, so it is subtracted for the second half.
+        if 0 < elapsed <= 50:      current_minute = elapsed
+        elif 50 < elapsed <= 60:  current_minute = 45   # halftime
+        elif 60 < elapsed <= 110: current_minute = elapsed - 15
+        elif elapsed > 110:       current_minute = 90
+    if current_minute == 0 and "FULL" in state_token.upper():
+        current_minute = 90
+    return current_minute
 
 
 def _score_for_board(fixture):
@@ -1273,6 +1334,110 @@ def reconcile_pre_and_main(pre_verdict, main_verdict):
     )
 
 
+# ==============================================================================
+# THE 30' -> 45' COMPARISON
+# ==============================================================================
+# The user described Code 2's original function as having "a function that
+# compare what happen at 30th minute to the 45th". reconcile_pre_and_main
+# only compared the two verdict WORDS. What is actually wanted is a
+# measurement of how the match MOVED between the two checkpoints: did the
+# evidence for the pick strengthen, hold, or collapse?
+#
+# This compares the live statistics captured at 30' against those at 45'. It
+# introduces no new mathematics — it reports the DELTA between two readings
+# that the same three engines already produced.
+COMPARE_STRENGTHENED = "STRENGTHENED"
+COMPARE_HELD         = "HELD"
+COMPARE_WEAKENED     = "WEAKENED"
+COMPARE_COLLAPSED    = "COLLAPSED"
+COMPARE_NO_BASELINE  = "NO_BASELINE"
+
+
+def _live_snapshot(ctx, stats_label=None, verdict=None):
+    """
+    Capture the live picture at a checkpoint so two readings can be compared.
+
+    Records only facts already on the board — goals, combined shots on target
+    and how many of the three engines passed. No new statistics are invented.
+    `engines_passed` is parsed from the engine label ("STATS_2/3") so the
+    snapshot cannot disagree with what the board already displays.
+    """
+    goals = 0
+    sot = 0
+    for side in ("home", "away"):
+        try:
+            goals += int(ctx[side]["goals"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        try:
+            sot += int(ctx[side]["stats"].get("shots-on-target", 0) or 0)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    passed = 0
+    text = str(stats_label or "")
+    if "STATS_" in text:
+        try:
+            passed = int(text.split("STATS_")[1].split("/")[0])
+        except (IndexError, ValueError):
+            passed = 0
+    return {"goals": goals, "sot": sot, "engines_passed": passed,
+            "verdict": verdict, "label": stats_label}
+
+
+def compare_observation_to_verdict(snap30, snap45):
+    """
+    Compare the 30' observation against the 45' verdict.
+
+    `snap30` and `snap45` are the same shape:
+        {"goals": int, "sot": int, "engines_passed": int, "verdict": str}
+
+    Returns (comparison, note) where comparison is one of STRENGTHENED / HELD /
+    WEAKENED / COLLAPSED / NO_BASELINE. This is a description of how the match
+    developed, never a new verdict — the 45' verdict remains authoritative.
+    """
+    if not snap30 or not snap45:
+        return COMPARE_NO_BASELINE, (
+            "No 30' observation was recorded, so nothing to compare against")
+    try:
+        g30, g45 = int(snap30.get("goals", 0)), int(snap45.get("goals", 0))
+        s30, s45 = int(snap30.get("sot", 0)), int(snap45.get("sot", 0))
+        e30 = int(snap30.get("engines_passed", 0))
+        e45 = int(snap45.get("engines_passed", 0))
+    except (TypeError, ValueError):
+        return COMPARE_NO_BASELINE, "Insufficient recorded data to compare"
+
+    new_goals = g45 - g30
+    new_sot = s45 - s30
+    engine_move = e45 - e30
+
+    # Arithmetic collapse: the market died between the two checkpoints.
+    token = str(snap45.get("verdict") or "").upper()
+    if token == VERDICT_VOID or new_goals >= 2:
+        return COMPARE_COLLAPSED, (
+            f"30'→45': {new_goals} goal(s) and {new_sot} more shot(s) on "
+            f"target — the market collapsed after the 30' read"
+        )
+    # The engines moved, which is the primary signal.
+    if engine_move > 0:
+        return COMPARE_STRENGTHENED, (
+            f"30'→45': engines {e30}/3 → {e45}/3 — the evidence strengthened "
+            f"({new_goals} goal(s), {new_sot} more shot(s) on target)"
+        )
+    if engine_move < 0:
+        return COMPARE_WEAKENED, (
+            f"30'→45': engines {e30}/3 → {e45}/3 — the evidence weakened "
+            f"({new_goals} goal(s), {new_sot} more shot(s) on target)"
+        )
+    # Engines unchanged: the match itself still moved, so say so honestly.
+    if new_goals or new_sot:
+        return COMPARE_HELD, (
+            f"30'→45': engines held at {e45}/3 while the match moved on "
+            f"({new_goals} goal(s), {new_sot} more shot(s) on target)"
+        )
+    return COMPARE_HELD, (
+        f"30'→45': engines held at {e45}/3 and nothing changed on the pitch")
+
+
 def locked_verdict_at_45(gate_state, data, stats_state=None):
     """
     THE UNDER 2.5 RULE — a decision is produced at 45' every single time.
@@ -1871,6 +2036,11 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 pre_verdict = VERDICT_UNCERTAIN
             entry["verdict_30"] = pre_verdict
             entry["verdict_30_minute"] = minute
+            # Capture the live picture at 30' so the 45' checkpoint can compare
+            # what actually happened on the pitch between the two readings. This
+            # is the "function that compares 30' to 45'" — without a recorded
+            # baseline there is nothing to compare against.
+            entry["snapshot_30"] = _live_snapshot(ctx, o_note)
             # `late_30` is a permanent, honest record that the 30-45 window was
             # missed. It is never used to skip the pre-verdict.
             entry["late_30"] = bool(minute >= CHECKPOINT_MAIN_MINUTE)
@@ -1915,6 +2085,16 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             entry["overruled"] = overruled
             entry["final"] = bool(is_locked_market)
             entry["verdict_note"] = verdict_note
+            # THE 30' -> 45' COMPARISON. This is the function the user
+            # described: it measures how the match actually MOVED between the
+            # two checkpoints, rather than only comparing two verdict words.
+            snap30 = entry.get("snapshot_30")
+            snap45 = _live_snapshot(ctx, o_note, main_verdict)
+            entry["snapshot_45"] = snap45
+            comparison, compare_note = compare_observation_to_verdict(
+                snap30, snap45)
+            entry["comparison_30_45"] = comparison
+            entry["comparison_note"] = compare_note
             _record_checkpoint(minute, combined_state,
                                f"45' main verdict: {main_verdict} ({verdict_note})")
 
@@ -2153,13 +2333,30 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             # expression without brackets binds as
             # `(main or pre) or (APPROVED_WATCH if gate else UNCERTAIN)`,
             # which silently ignores the pre-verdict. This is explicit.
-            if main_verdict:
+            #
+            # BUG FIXED: the old fallback showed APPROVED_WATCH purely because
+            # the gate happened to be open, at ANY minute. The board therefore
+            # displayed "APPROVED" against a 16th-minute match, before a single
+            # judge checkpoint had been reached — exactly the "approving under
+            # at 10 minutes, on what ground?" complaint.
+            #
+            # Code 2's contract: the 30' observation, the 45' verdict and the
+            # 60' final validation are the ONLY things that may be reported. An
+            # open gate is an internal signal, never a verdict, so before 30'
+            # the pick is simply MONITORING and says so.
+            if final60_verdict and not entry.get("locked"):
+                row["verdict"] = final60_verdict
+                row["verdict_note"] = entry.get("verdict_60_note")
+            elif main_verdict:
                 row["verdict"] = main_verdict
             elif pre_verdict:
                 row["verdict"] = pre_verdict
-            elif gate_open:
-                row["verdict"] = VERDICT_APPROVED_WATCH
+            elif minute < CHECKPOINT_PRE_MINUTE:
+                # Before the 30' observation. Nothing has been judged yet.
+                row["verdict"] = None
             else:
+                # 30' has passed (or was missed) but no verdict was recorded
+                # yet — genuinely undecided, not approved.
                 row["verdict"] = VERDICT_UNCERTAIN
             # PHASE 1: the 60' final validation supersedes the 45' verdict for
             # every market that is not locked at 45'. Without this the board
@@ -2174,6 +2371,10 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             row["late_45"] = bool(entry.get("late_45"))
             row["late_60"] = bool(entry.get("late_60"))
             row["backfilled"] = bool(entry.get("backfilled"))
+            # The 30' -> 45' comparison, so the board shows how the match moved
+            # between the two checkpoints rather than only the final word.
+            row["comparison_30_45"] = entry.get("comparison_30_45")
+            row["comparison_note"] = entry.get("comparison_note")
             row["trigger_only"] = bool(
                 minute > TRIGGER_ONLY_AFTER_MINUTE
                 and (final60_verdict or entry.get("locked")))
@@ -2299,27 +2500,9 @@ def extract_live_context(fixture):
             side = safe_get(s, "score", "participant", default="").lower()
             if side in scores: scores[side] = int(g)
 
-    current_minute = 0
-    for p in fixture.get("periods", []):
-        # SportMonks in-play periods expose elapsed match time as `minutes`.
-        m = (p.get("time", {}).get("minute") if isinstance(p.get("time"), dict) else None)
-        m = m or p.get("minute") or p.get("minutes") or p.get("length")
-        if m:
-            try: current_minute = max(current_minute, int(m))
-            except (TypeError, ValueError): pass
-    if current_minute == 0 and fixture.get("events"):
-        emins = [int(e.get("minute", 0)) for e in fixture["events"] if e.get("minute")]
-        if emins: current_minute = max(emins)
-    if current_minute == 0:
-        current_minute = safe_get(fixture, "time", "minute", default=0)
-    if current_minute == 0 and isinstance(fixture.get("state"), dict):
-        current_minute = safe_get(fixture, "state", "minute", default=0)
-    if current_minute == 0 and fixture.get("starting_at_timestamp"):
-        now_ts  = int(datetime.now(timezone.utc).timestamp())
-        elapsed = (now_ts - int(fixture["starting_at_timestamp"])) // 60
-        if 0 < elapsed <= 50:    current_minute = elapsed
-        elif 60 < elapsed <= 110: current_minute = elapsed - 15
-        elif elapsed > 110:       current_minute = 90
+    # The match minute is resolved in ONE place so the engine and the board can
+    # never disagree about what minute a match is on.
+    current_minute = _resolve_match_minute(fixture)
 
     if f_id not in MATCH_CONTEXT_CACHE:
         h_sq = get_squad_data_standardized(h_id)
