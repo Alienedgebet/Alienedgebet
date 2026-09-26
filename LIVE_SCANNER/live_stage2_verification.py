@@ -1179,6 +1179,22 @@ VERDICT_LIKELY        = "LIKELY"
 VERDICT_UNLIKELY      = "UNLIKELY"
 VERDICT_VOID          = "VOID"
 
+# THE 30' OBSERVATION. Code 2's first checkpoint is an observation, not a
+# judgement: the judges have looked, and this is what they saw. It is recorded
+# separately from the verdict vocabulary precisely so it can never be read as
+# an approval — the old PRE_APPROVED / PRE_REJECTED words did exactly that,
+# and "UNDER_2.5 APPROVED" appeared on a match at 16'.
+OBSERVATION_SUPPORTING = "SUPPORTING"
+OBSERVATION_AGAINST    = "AGAINST"
+
+# THE 30' OBSERVATION. Code 2's first checkpoint is an observation, not a
+# judgement: the judges have looked, and this is what they saw. It is recorded
+# separately from the verdict vocabulary precisely so it can never be read as
+# an approval — the old PRE_APPROVED / PRE_REJECTED words did exactly that,
+# and "UNDER_2.5 APPROVED" appeared on a match at 16'.
+OBSERVATION_SUPPORTING = "SUPPORTING"
+OBSERVATION_AGAINST    = "AGAINST"
+
 # FINAL_APPROVED and FINAL_REJECTED are retained as readable aliases so the
 # existing ledger vocabulary stays meaningful to the audit trail, but the
 # LOCKED 45' path emits LIKELY / UNLIKELY / VOID / UNCLEAR from now on.
@@ -1281,11 +1297,22 @@ TRIGGER_ONLY_AFTER_MINUTE = 60
 
 
 def verdict_from_gate(gate_state):
-    """Map a gate state onto the ledger vocabulary for a NON-locked market."""
+    """
+    Map a gate state onto the ledger vocabulary for a NON-locked market.
+
+    The old mapping returned APPROVED_WATCH / PRE_REJECTED, which is where the
+    board's "APPROVED" chip came from for every non-Under market: OVER 2.5,
+    GG and TO_SCORE all flowed through here at 45'. Those are the old
+    pre-verdict words, and "approved" is not a word this engine is entitled to
+    use — a 45' reading is a probability.
+
+    The honest vocabulary is the same one the 45' UNDER lock and the 60' final
+    validation already use: LIKELY / UNLIKELY / UNCLEAR.
+    """
     if gate_state == V_SUPPORTED:
-        return VERDICT_APPROVED_WATCH
+        return VERDICT_LIKELY
     if gate_state == V_CONTRADICTED:
-        return VERDICT_PRE_REJECTED
+        return VERDICT_UNLIKELY
     return VERDICT_UNCERTAIN
 
 
@@ -1301,10 +1328,10 @@ def _verdict_family(verdict):
     """
     if verdict in (VERDICT_PRE_APPROVED, VERDICT_APPROVED_WATCH,
                    VERDICT_FINAL_APPROVED, VERDICT_TRIGGERED,
-                   VERDICT_LIKELY):
+                   VERDICT_LIKELY, OBSERVATION_SUPPORTING):
         return "APPROVE"
     if verdict in (VERDICT_PRE_REJECTED, VERDICT_FINAL_REJECTED,
-                   VERDICT_UNLIKELY, VERDICT_VOID):
+                   VERDICT_UNLIKELY, VERDICT_VOID, OBSERVATION_AGAINST):
         return "REJECT"
     if verdict in (VERDICT_UNCERTAIN, VERDICT_LOST, VERDICT_WON):
         return "UNCERTAIN"
@@ -2030,10 +2057,19 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
         alerted = bool(entry.get("alerted"))
 
         # ── CHECKPOINT 1 — 30' PRE-VERDICT (never final) ──────────────────
+        # ── CHECKPOINT 1 — 30' OBSERVATION (never a verdict) ───────────────
+        # The user described this as Code 2's "first observation with its 4 or
+        # 3 judges". It was recorded as PRE_APPROVED / PRE_REJECTED, which are
+        # the old pre-verdict words and read on the board as an approval. At 30'
+        # the engine has observed, it has not judged — so it now says what the
+        # observation was: SUPPORTING, AGAINST or UNCLEAR.
         if minute >= CHECKPOINT_PRE_MINUTE and pre_verdict is None:
-            pre_verdict = VERDICT_PRE_APPROVED if gate_open else VERDICT_PRE_REJECTED
             if combined_state in (V_INSUFFICIENT, V_NEUTRAL):
                 pre_verdict = VERDICT_UNCERTAIN
+            elif gate_open:
+                pre_verdict = OBSERVATION_SUPPORTING
+            else:
+                pre_verdict = OBSERVATION_AGAINST
             entry["verdict_30"] = pre_verdict
             entry["verdict_30_minute"] = minute
             # Capture the live picture at 30' so the 45' checkpoint can compare
