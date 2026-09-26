@@ -14,6 +14,7 @@ import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_O15_PSYCH, MOCK_O15_S3 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
 const psychologyColumns: PredictionColumn<Over15PsychologyPick>[] = [
   {
@@ -116,6 +117,7 @@ export default function Over15Page() {
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No psychology audits for this date."
           fallbackData={MOCK_O15_PSYCH}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -130,6 +132,7 @@ export default function Over15Page() {
           rowKey={(r, i) => `${r.Match}-${i}`}
           emptyMessage="No stage 3 picks for this date."
           fallbackData={MOCK_O15_S3}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
     </div>

@@ -17,6 +17,7 @@ import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SH_8GOAL, MOCK_SH_GG, MOCK_SH_MASTER, MOCK_SHVI } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
 const shviColumns: PredictionColumn<SHVIPick>[] = [
   {
@@ -201,6 +202,7 @@ export default function SHVIPage() {
           rowKey={(r, i) => `${r.fixture}-${i}`}
           emptyMessage="No SHVI picks for this date."
           fallbackData={MOCK_SHVI}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -215,6 +217,7 @@ export default function SHVIPage() {
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No SH-GG winner picks for this date."
           fallbackData={MOCK_SH_GG}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -229,6 +232,7 @@ export default function SHVIPage() {
           rowKey={(r, i) => `${r.fixture}-${i}`}
           emptyMessage="No SH Master picks for this date."
           fallbackData={MOCK_SH_MASTER}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -243,6 +247,7 @@ export default function SHVIPage() {
           rowKey={(r, i) => `${r.Fixture_ID}-${i}`}
           emptyMessage="No SH 8-goal picks for this date."
           fallbackData={MOCK_SH_8GOAL}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
     </div>

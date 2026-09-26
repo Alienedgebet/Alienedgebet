@@ -19,6 +19,7 @@ import {
   MOCK_CORNER_S2,
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
 const aggregatorColumns: PredictionColumn<CornerAggregatorPick>[] = [
   {
@@ -195,7 +196,7 @@ export default function CornersPage() {
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No aggregator picks for this date."
           fallbackData={MOCK_CORNER_AGG}
-          refreshMs={60_000}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -210,7 +211,7 @@ export default function CornersPage() {
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No stage 2 picks for this date."
           fallbackData={MOCK_CORNER_S2}
-          refreshMs={60_000}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 

@@ -14,6 +14,7 @@ import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UD_AUDIT, MOCK_UD_BASE } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
 const auditColumns: PredictionColumn<UnderdogMasterPick>[] = [
   {
@@ -143,6 +144,7 @@ export default function UnderdogPage() {
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No audit picks for this date."
           fallbackData={MOCK_UD_AUDIT}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -157,6 +159,7 @@ export default function UnderdogPage() {
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No base picks for this date."
           fallbackData={MOCK_UD_BASE}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
     </div>

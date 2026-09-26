@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { TrendingDown } from "lucide-react";
 import { specialsApi, type UndersPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
-import { useApi } from "@/lib/use-api";
+import { useApi, VERIFY_REFRESH_MS } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
@@ -113,6 +113,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
   const result = useApi(() => specialsApi.getUnders(date), [date], {
     fallback: MOCK_UNDERS,
     cacheKey: `unders:${date}`,
+    refreshMs: VERIFY_REFRESH_MS,
   });
 
   // Under 2.5 (Verify -> DNA -> Rest)

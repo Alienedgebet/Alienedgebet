@@ -29,6 +29,7 @@ import {
   MOCK_WIN_U2S,
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
 // ============================================================
 // Columns = exact backend return / printout keys
@@ -415,6 +416,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
         emptyMessage="No apex picks for this date."
         fallbackData={MOCK_WIN_APEX}
+        refreshMs={VERIFY_REFRESH_MS}
       />
 
       {/* Stage 2: DNA & Goal Intent Board */}
@@ -427,6 +429,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         rowKey={(r, i) => `${r.team_id}-${i}`}
         emptyMessage="No DNA profiles for this date."
         fallbackData={MOCK_DNA}
+        refreshMs={VERIFY_REFRESH_MS}
       />
 
       {/* Stage 4: Underdog-to-Score Signal (U2S) */}
@@ -439,6 +442,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         rowKey={(r, i) => `${r.Fixture}-${i}`}
         emptyMessage="No U2S signals for this date."
         fallbackData={MOCK_WIN_U2S}
+        refreshMs={VERIFY_REFRESH_MS}
       />
 
       {/* Stage 5: Win Forecast */}
@@ -451,6 +455,7 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         rowKey={(r, i) => `${r.fixture_id}-${r.side}-${i}`}
         emptyMessage="No forecast data for this date."
         fallbackData={MOCK_WIN_FORECAST}
+        refreshMs={VERIFY_REFRESH_MS}
       />
 
     </div>
