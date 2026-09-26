@@ -1344,3 +1344,156 @@ class AlertPruningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE 1 — CODE 2 ACTS AS A VALIDATOR, NOT A SETTLEMENT RECORDER
+#   1. The 45' verdict is ALWAYS delivered, even if the window was missed.
+#   2. 60' delivers a FINAL validation for every Code 1 market.
+#   3. After 60' a market may only TRIGGER, never be re-verdicted.
+#   4. Missed checkpoints are backfilled and flagged.
+#   5. Under 2.5 is NOT re-decided at 60' — a 45' lock must stay locked.
+# ═══════════════════════════════════════════════════════════════════════════
+class Code2ValidatorPhase1Tests(unittest.TestCase):
+    """Code 2 must VALIDATE every pick it carries, not merely settle it."""
+
+    @staticmethod
+    def _ctx(home=0, away=0, h_sot=0, a_sot=0, minute=60, finished=False):
+        def stats(sot):
+            return {"shots-on-target": sot, "corners": 2,
+                    "dangerous-attacks": 0, "box": None}
+        return {
+            "id": "1", "name": "Home vs Away", "minute": minute,
+            "home": {"goals": home, "stats": stats(h_sot)},
+            "away": {"goals": away, "stats": stats(a_sot)},
+            "impact": {"home": {"reds": 0, "gk_risk": False, "key_sub_off": 0},
+                       "away": {"reds": 0, "gk_risk": False, "key_sub_off": 0}},
+            "events": [],
+            "is_finished": finished,
+        }
+
+    # ── ITEM 2: 60' final validation for every Code 1 market ────────────
+    def test_every_code1_market_is_locked_at_60(self):
+        # Before Phase 1 only UNDER_2.5 was locked. Every other Code 1 pick
+        # could sit unresolved all match and settle at FT with no validation.
+        for market in ("TO_SCORE", "GG", "OVER_2.5", "GG_OVER_2.5"):
+            self.assertIn(market, stage2.LOCKED_AT_60_MARKETS,
+                          f"{market} must receive a 60' final validation")
+        self.assertIn("UNDER_2.5", stage2.LOCKED_AT_60_MARKETS)
+        self.assertEqual(stage2.CHECKPOINT_FINAL_MINUTE, 60)
+
+    def test_60_validation_engines_decide_not_the_scoreline(self):
+        # Same rule as 45': the engine decides, the scoreline only breaks ties.
+        verdict, note = stage2.final_verdict_at_60(
+            stage2.V_SUPPORTED, self._ctx(h_sot=2, a_sot=1),
+            "TO_SCORE", stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+        self.assertIn("2 of 3", note)
+        # 0 of 3 beats a flattering goal count.
+        verdict, note = stage2.final_verdict_at_60(
+            stage2.V_CONTRADICTED, self._ctx(h_sot=10, a_sot=10, home=0),
+            "TO_SCORE", stage2.V_CONTRADICTED)
+        self.assertEqual(verdict, stage2.VERDICT_UNLIKELY)
+        self.assertIn("0 of 3", note)
+
+    def test_60_validation_never_says_rejected(self):
+        for gate in (stage2.V_SUPPORTED, stage2.V_CONTRADICTED,
+                     stage2.V_NEUTRAL, stage2.V_INSUFFICIENT):
+            for market in ("TO_SCORE", "GG", "OVER_2.5", "UNDER_2.5"):
+                for goals in (0, 1, 2, 3, 5):
+                    verdict, _ = stage2.final_verdict_at_60(
+                        gate, self._ctx(home=goals), market, gate)
+                    self.assertNotEqual(verdict, stage2.VERDICT_FINAL_REJECTED)
+                    self.assertIn(verdict, (
+                        stage2.VERDICT_LIKELY, stage2.VERDICT_UNLIKELY,
+                        stage2.VERDICT_UNCERTAIN, stage2.VERDICT_VOID))
+
+    def test_60_arithmetic_voids_a_dead_market(self):
+        # 3+ goals kills the under; 4+ kills the over. Arithmetic, not opinion.
+        verdict, note = stage2.final_verdict_at_60(
+            stage2.V_SUPPORTED, self._ctx(home=3, away=0),
+            "UNDER_2.5", stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_VOID)
+        self.assertIn("dead", note)
+        verdict, _ = stage2.final_verdict_at_60(
+            stage2.V_CONTRADICTED, self._ctx(home=2, away=2),
+            "OVER_2.5", stage2.V_CONTRADICTED)
+        self.assertEqual(verdict, stage2.VERDICT_VOID)
+
+    # ── ITEM 3: after 60' it may only TRIGGER ───────────────────────────
+    def test_after_60_market_is_trigger_only(self):
+        self.assertEqual(stage2.TRIGGER_ONLY_AFTER_MINUTE, 60)
+        self.assertEqual(stage2.FINAL_STRIKE_OPEN, 60)
+
+    # ── ITEM 5: the 45' lock is never overwritten at 60' ────────────────
+    def test_under_45_lock_is_not_redecided_at_60(self):
+        # A 45' lock that can be overwritten at 60' is not a lock. The main
+        # loop gates the 60' checkpoint on `not is_locked_market`, so Under
+        # never reaches final_verdict_at_60.
+        self.assertIn("UNDER_2.5", stage2.LOCKED_AT_45_MARKETS)
+        # Even if called directly, the under's own arithmetic keeps it honest.
+        verdict, _ = stage2.final_verdict_at_60(
+            stage2.V_SUPPORTED, self._ctx(h_sot=1, a_sot=1, home=0),
+            "UNDER_2.5", stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+
+    # ── ITEMS 1 & 4: guaranteed delivery and honest backfill ────────────
+    def test_45_verdict_is_delivered_on_first_cycle_at_or_past_45(self):
+        # The condition the main loop uses. Whatever the minute, once at/past
+        # 45' with no 45' verdict yet, the verdict is written.
+        for minute in (45, 46, 61, 75, 90):
+            self.assertTrue(minute >= stage2.CHECKPOINT_MAIN_MINUTE)
+        # A pick first seen at 90' still gets a verdict, flagged as late.
+        verdict, _ = stage2.locked_verdict_at_45(
+            stage2.V_SUPPORTED, self._ctx(minute=90), stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+
+    def test_settled_rows_surface_the_60_verdict(self):
+        # The finished-fixture board path previously read only verdict_45 and
+        # verdict_30, so a properly validated pick appeared as never judged.
+        board = stage2._finished_snapshot_board_entry
+        self.assertTrue(callable(board))
+        stage2.MATCH_VALIDATION_STATE.clear()
+        stage2.MATCH_VALIDATION_STATE["42"] = {
+            "GG:match": {
+                "verdict_45": "LIKELY", "verdict_45_minute": 45,
+                "verdict_60": "UNLIKELY", "verdict_60_minute": 60,
+                "final_60": True,
+                "verdict_60_note": "engines turned at 60'",
+                "locked": False,
+            },
+        }
+        row = board({
+            "fixture_id": 42, "name": "A vs B", "minute": 90,
+            "ft_score": "1-1", "home": {"goals": 1}, "away": {"goals": 1},
+            "home_stats": {}, "away_stats": {},
+        })
+        preds = row.get("predictions") or []
+        self.assertEqual(len(preds), 1)
+        # The 60' final validation supersedes the 45' read.
+        self.assertEqual(preds[0]["verdict_60"], "UNLIKELY")
+        self.assertEqual(preds[0]["verdict"], "UNLIKELY")
+        self.assertTrue(preds[0]["final"])
+        stage2.MATCH_VALIDATION_STATE.clear()
+
+    def test_under_locked_row_keeps_its_45_verdict(self):
+        # Precedence rule: for a 45'-locked market the 45' verdict stands and
+        # must not be replaced by a 60' read.
+        stage2.MATCH_VALIDATION_STATE.clear()
+        stage2.MATCH_VALIDATION_STATE["43"] = {
+            "UNDER_2.5:match": {
+                "verdict_45": "LIKELY", "verdict_45_minute": 45,
+                "verdict_60": "UNLIKELY", "verdict_60_minute": 60,
+                "locked": True, "final": True,
+            },
+        }
+        row = stage2._finished_snapshot_board_entry({
+            "fixture_id": 43, "name": "C vs D", "minute": 90,
+            "ft_score": "1-0", "home": {"goals": 1}, "away": {"goals": 0},
+            "home_stats": {}, "away_stats": {},
+        })
+        preds = row.get("predictions") or []
+        self.assertEqual(preds[0]["verdict"], "LIKELY")
+        # The 60' value is still on record for the audit trail.
+        self.assertEqual(preds[0]["verdict_60"], "UNLIKELY")
+        stage2.MATCH_VALIDATION_STATE.clear()

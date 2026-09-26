@@ -1106,6 +1106,30 @@ TO_SCORE_CLOSE_MINUTE = 90
 FINAL_STRIKE_OPEN  = 60
 FINAL_STRIKE_CLOSE = 70
 
+# ── PHASE 1: THE 60' FINAL VALIDATION ───────────────────────────────────────
+# The user's rule, in their words:
+#   "at 45 its should give final judgement to under if code 1 make the
+#    prediction, then at 60th its shold also give its final validation for
+#    all prediction from code 1, then after 60th its can only trigger if
+#    its see any opportunity"
+#
+# So there are three distinct phases and each ends at a fixed point:
+#   up to 45'  — the 45' verdict (Under is locked here; others provisional)
+#   45'-60'    — monitoring, alerts may still fire
+#   AT 60'     — final validation for EVERY Code 1 market, once, then locked
+#   after 60'  — TRIGGER-ONLY. No further verdicts are ever written, because
+#                past 60' a verdict is no longer a judgement about the match,
+#                it is a prediction about the remaining minutes. Only genuine
+#                opportunities may still fire.
+CHECKPOINT_FINAL_MINUTE = 60
+# Every Code 1 market receives a final validation at 60'. Under 2.5 already
+# locks at 45' and is NOT re-decided at 60' — a 45' lock that could be
+# overwritten at 60' would not be a lock.
+LOCKED_AT_60_MARKETS = frozenset({"UNDER_2.5", "OVER_2.5", "GG",
+                                  "GG_OVER_2.5", "TO_SCORE"})
+# After this minute a market may only TRIGGER, never be re-verdicted.
+TRIGGER_ONLY_AFTER_MINUTE = 60
+
 
 def verdict_from_gate(gate_state):
     """Map a gate state onto the ledger vocabulary for a NON-locked market."""
@@ -1282,6 +1306,104 @@ def locked_verdict_at_45(gate_state, data, stats_state=None):
     return VERDICT_UNCERTAIN, (
         f"UNCLEAR at 45': evidence incomplete (combined SOT {sot}, "
         f"{total_goals} goals) — no verdict in either direction"
+    )
+
+
+# ==============================================================================
+# PHASE 1 — THE 60' FINAL VALIDATION (every Code 1 market)
+# ==============================================================================
+def final_verdict_at_60(gate_state, data, ptype, stats_state=None, target=None):
+    """
+    THE 60' RULE — every Code 1 prediction gets a FINAL validation at 60'.
+
+    Until now only UNDER 2.5 was locked, and only at 45'. Every other Code 1
+    pick (TO_SCORE, GG, OVER 2.5) could sit unresolved all match and simply
+    settle at full time with no validation ever recorded — which is exactly
+    the "it acts as if it was meant to give predictions instead of validation"
+    complaint. A validation board that never validates is not a validator.
+
+    UNDER 2.5 is deliberately NOT re-decided here. It locked at 45'; a lock
+    that can be overwritten at 60' is not a lock, and the 45' verdict stays
+    the authoritative one for that market.
+
+    The same vocabulary is used — LIKELY / UNLIKELY / UNCLEAR — and "REJECTED"
+    stays retired. After 60' this function is never called again; the market
+    may only TRIGGER on a genuine opportunity.
+    """
+    total_goals = 0
+    sot = 0
+    for side in ("home", "away"):
+        try:
+            total_goals += int(data[side]["goals"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        try:
+            sot += int(data[side]["stats"].get("shots-on-target", 0) or 0)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+
+    token = str(ptype or "").upper()
+    direction = market_direction(token)
+    is_under = direction == DIRECTION_UNDER or "UNDER" in token or "U2.5" in token
+    is_over = direction == DIRECTION_OVER or "OVER" in token or "O2.5" in token
+
+    # Arithmetic still outranks everything, at any minute.
+    if is_under and total_goals >= 3:
+        return VERDICT_VOID, (
+            f"VOID at 60': {total_goals} goals already scored — the under is "
+            f"arithmetically dead"
+        )
+    if is_over and total_goals >= 4:
+        return VERDICT_VOID, (
+            f"VOID at 60': {total_goals} goals already scored — the over is "
+            f"arithmetically dead"
+        )
+
+    # The engines decide, exactly as at 45'. The scoreline only breaks a tie.
+    if stats_state == V_SUPPORTED or gate_state == V_SUPPORTED:
+        return VERDICT_LIKELY, (
+            f"LIKELY at 60': the engines agree, 2 of 3 — {total_goals} goal(s) "
+            f"scored, combined SOT {sot}"
+        )
+    if stats_state == V_CONTRADICTED or gate_state == V_CONTRADICTED:
+        return VERDICT_UNLIKELY, (
+            f"UNLIKELY at 60': the engines read against this pick, 0 of 3 — "
+            f"{total_goals} goal(s) scored, combined SOT {sot}. It can still come in"
+        )
+
+    # Split engines: the scoreline breaks the tie.
+    if is_under and total_goals >= 3:
+        return VERDICT_VOID, f"VOID at 60': {total_goals} goals already scored"
+    if is_under and total_goals == 2:
+        return VERDICT_UNCERTAIN, (
+            f"UNCLEAR at 60': engines split 1 of 3 and 2 goals already — no "
+            f"further goal allowed (SOT {sot})"
+        )
+    if is_under and total_goals <= 1:
+        return VERDICT_LIKELY, (
+            f"LIKELY at 60': engines split 1 of 3, but only {total_goals} goal(s) "
+            f"scored (SOT {sot})"
+        )
+    if is_over and total_goals >= 3:
+        return VERDICT_LIKELY, (
+            f"LIKELY at 60': engines split 1 of 3, but {total_goals} goals "
+            f"already scored and 1 more is still possible (SOT {sot})"
+        )
+    if is_over and total_goals <= 1:
+        return VERDICT_UNLIKELY, (
+            f"UNLIKELY at 60': engines split 1 of 3 and only {total_goals} "
+            f"goal(s) scored in 60 minutes (SOT {sot})"
+        )
+
+    # TO_SCORE / GG and anything else: report the engine read honestly.
+    if total_goals == 0 and sot == 0:
+        return VERDICT_UNCERTAIN, (
+            "UNCLEAR at 60': no goals and no shots on target recorded — the "
+            "available evidence supports neither direction"
+        )
+    return VERDICT_UNCERTAIN, (
+        f"UNCLEAR at 60': engines split 1 of 3 — {total_goals} goal(s) scored, "
+        f"combined SOT {sot}"
     )
 
 # ==============================================================================
@@ -1568,6 +1690,7 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
         is_locked_market = ptype in LOCKED_AT_45_MARKETS
         pre_verdict = entry.get("verdict_30")
         main_verdict = entry.get("verdict_45")
+        final60_verdict = entry.get("verdict_60")
         alerted = bool(entry.get("alerted"))
 
         # ── CHECKPOINT 1 — 30' PRE-VERDICT (never final) ──────────────────
@@ -1592,11 +1715,18 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             print(f"   Forensic    : {n_note}")
             print(f"   Stats       : {o_note}")
 
-        # ── CHECKPOINT 2 — 45' MAIN VERDICT ──────────────────────────────
+        # ── CHECKPOINT 2 — 45' MAIN VERDICT (ALWAYS DELIVERED) ────────────
         # THE USER'S MAIN RULE: 45' is the main verdict. For UNDER 2.5 it is
-        # LOCKED and final — approved, rejected, or unclear, and it never
-        # extends beyond this minute whatever happens later.
+        # LOCKED and final.
+        #
+        # PHASE 1 FIX: the verdict is delivered on the FIRST cycle at or past
+        # 45', whatever that minute is. A pick whose first sighting lands at
+        # 61' or later still receives its 45' verdict here rather than falling
+        # through to monitoring and settling at full time with no validation on
+        # record. `late_45` states honestly that the 45' window itself was
+        # missed; it never suppresses the verdict.
         if minute >= CHECKPOINT_MAIN_MINUTE and main_verdict is None:
+            late_45 = bool(minute > CHECKPOINT_MAIN_MINUTE)
             if is_locked_market:
                 main_verdict, verdict_note = locked_verdict_at_45(
                     combined_state, ctx, stats_state)
@@ -1610,6 +1740,7 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             main_verdict = reconciled
             entry["verdict_45"] = main_verdict
             entry["verdict_45_minute"] = minute
+            entry["late_45"] = late_45
             entry["overruled"] = overruled
             entry["final"] = bool(is_locked_market)
             entry["verdict_note"] = verdict_note
@@ -1619,12 +1750,77 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             match_summary_lines.append(
                 f"   🎯 [{label}] 45' MAIN VERDICT: {main_verdict}"
                 f"{' [LOCKED]' if is_locked_market else ''}"
+                + (" (late — window missed)" if late_45 else "")
             )
             if overruled:
                 match_summary_lines.append(f"      ↳ {tally_note}")
             print(f"\n🎯 45' MAIN VERDICT | {name} | Min {minute}' | {label}")
-            print(f"   Verdict  : {main_verdict} — {verdict_note}")
+            print(f"   Verdict  : {main_verdict} — {verdict_note}"
+                  + (" (LATE — 45' window was missed)" if late_45 else ""))
             print(f"   Tally    : {tally_note}")
+
+        # ── CHECKPOINT 3 — 60' FINAL VALIDATION (every Code 1 market) ──────
+        # PHASE 1: previously ONLY Under 2.5 was locked, and only at 45'. Every
+        # other Code 1 market (TO_SCORE, GG, OVER 2.5) could sit unresolved
+        # for the whole match and settle at FT with no validation ever
+        # recorded. Code 2 is a VALIDATOR, so every pick it carries must get a
+        # final, honest judgement.
+        #
+        # Two rules are enforced here:
+        #   * Under 2.5 is NOT re-decided. It locked at 45'; a lock that can be
+        #     overwritten at 60' would not be a lock.
+        #   * After 60' this never runs again — the market is trigger-only.
+        if (minute >= CHECKPOINT_FINAL_MINUTE
+                and final60_verdict is None
+                and ptype in LOCKED_AT_60_MARKETS
+                and not is_locked_market):
+            late_60 = bool(minute > CHECKPOINT_FINAL_MINUTE)
+            final60_verdict, verdict60_note = final_verdict_at_60(
+                combined_state, ctx, ptype, stats_state, target)
+            entry["verdict_60"] = final60_verdict
+            entry["verdict_60_minute"] = minute
+            entry["late_60"] = late_60
+            entry["backfilled"] = bool(late_60)
+            entry["final_60"] = True
+            entry["verdict_60_note"] = verdict60_note
+            _record_checkpoint(
+                minute, combined_state,
+                f"60' FINAL VALIDATION: {final60_verdict} ({verdict60_note})")
+            match_summary_lines.append(
+                f"   🔒 [{label}] 60' FINAL VALIDATION: {final60_verdict}"
+                + (" (late — window missed)" if late_60 else "")
+            )
+            print(f"\n🔒 60' FINAL VALIDATION | {name} | Min {minute}' | {label}")
+            print(f"   Verdict  : {final60_verdict} — {verdict60_note}"
+                  + (" (LATE — 60' window was missed)" if late_60 else ""))
+            print(f"   Engines  : {o_note}")
+
+        # ── BACKFILL: first seen after 60' with no 60' verdict ─────────────
+        # PHASE 1 item 4. A fixture first spotted at 75' can never have had a
+        # live 60' checkpoint. Rather than leave it permanently unvalidated,
+        # record an explicit backfilled read so the board is never silently
+        # empty. It is always flagged, never disguised as a live 60' read.
+        if (minute > TRIGGER_ONLY_AFTER_MINUTE
+                and final60_verdict is None
+                and ptype in LOCKED_AT_60_MARKETS
+                and main_verdict is not None):
+            final60_verdict, verdict60_note = final_verdict_at_60(
+                combined_state, ctx, ptype, stats_state, target)
+            entry["verdict_60"] = final60_verdict
+            entry["verdict_60_minute"] = minute
+            entry["late_60"] = True
+            entry["backfilled"] = True
+            entry["verdict_60_note"] = (
+                f"Backfilled after the 60' window: {verdict60_note}")
+            _record_checkpoint(
+                minute, combined_state,
+                f"60' validation BACKFILLED: {final60_verdict}")
+            match_summary_lines.append(
+                f"   🔒 [{label}] 60' VALIDATION BACKFILLED (seen at {minute}'): "
+                f"{final60_verdict}"
+            )
+            print(f"\n🔒 60' BACKFILL | {name} | Min {minute}' | {label}")
+            print(f"   Verdict  : {final60_verdict} (backfilled, not a live 60' read)")
 
         # ── ALERT FIRING (decoupled from the 30' handshake) ─────────────
         # Previously `elif minute >= 45 and ...get("pass_30")` meant a pick that
@@ -1794,12 +1990,27 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 row["verdict"] = VERDICT_APPROVED_WATCH
             else:
                 row["verdict"] = VERDICT_UNCERTAIN
+            # PHASE 1: the 60' final validation supersedes the 45' verdict for
+            # every market that is not locked at 45'. Without this the board
+            # kept showing the 45' read forever and the 60' judgement was
+            # invisible, which is what made Code 2 look like it only settles.
+            if final60_verdict and not entry.get("locked"):
+                row["verdict"] = final60_verdict
+                row["verdict_note"] = entry.get("verdict_60_note")
             row["verdict_30"] = pre_verdict
             row["verdict_45"] = main_verdict
-            row["verdict_minute"] = (entry.get("verdict_45_minute")
+            row["verdict_60"] = final60_verdict
+            row["late_45"] = bool(entry.get("late_45"))
+            row["late_60"] = bool(entry.get("late_60"))
+            row["backfilled"] = bool(entry.get("backfilled"))
+            row["trigger_only"] = bool(
+                minute > TRIGGER_ONLY_AFTER_MINUTE
+                and (final60_verdict or entry.get("locked")))
+            row["verdict_minute"] = (entry.get("verdict_60_minute")
+                                     or entry.get("verdict_45_minute")
                                      or entry.get("verdict_30_minute"))
-            row["verdict_note"] = entry.get("verdict_note")
-            row["final"] = bool(entry.get("final"))
+            row["verdict_note"] = row.get("verdict_note") or entry.get("verdict_note")
+            row["final"] = bool(entry.get("final") or entry.get("final_60"))
             row["locked"] = bool(entry.get("locked"))
             row["overruled"] = bool(entry.get("overruled"))
             row["late_30"] = bool(entry.get("late_30"))
@@ -2052,20 +2263,38 @@ def _finished_snapshot_board_entry(std):
         for p_key, entry in state_entry.items():
             if not isinstance(entry, dict):
                 continue
+            # PHASE 1: a finished fixture must show its FULL audit trail. The
+            # 60' final validation supersedes the 45' verdict for every market
+            # that is not locked at 45', so this is the same precedence the
+            # live rows use. Previously only verdict_45/verdict_30 were
+            # surfaced here, so a pick that was properly validated at 60'
+            # appeared on the completed row as if it had never been judged.
+            is_locked = bool(entry.get("locked"))
+            v60 = entry.get("verdict_60")
+            v45 = entry.get("verdict_45")
+            v30 = entry.get("verdict_30")
+            authoritative = (v60 if (v60 and not is_locked) else None) \
+                or v45 or v30
             settled_rows.append({
                 "key":           p_key,
                 "label":         p_key,
-                "status":        entry.get("verdict_45") or entry.get("verdict_30"),
-                "verdict":       entry.get("verdict_45") or entry.get("verdict_30"),
-                "verdict_30":    entry.get("verdict_30"),
-                "verdict_45":    entry.get("verdict_45"),
-                "verdict_minute": (entry.get("verdict_45_minute")
+                "status":        authoritative,
+                "verdict":       authoritative,
+                "verdict_30":    v30,
+                "verdict_45":    v45,
+                "verdict_60":    v60,
+                "verdict_minute": (entry.get("verdict_60_minute")
+                                   or entry.get("verdict_45_minute")
                                    or entry.get("verdict_30_minute")),
-                "verdict_note":  entry.get("verdict_note"),
-                "final":         bool(entry.get("final")),
-                "locked":        bool(entry.get("locked")),
+                "verdict_note":  (entry.get("verdict_60_note")
+                                  or entry.get("verdict_note")),
+                "final":         bool(entry.get("final") or entry.get("final_60")),
+                "locked":        is_locked,
                 "overruled":     bool(entry.get("overruled")),
                 "late_30":       bool(entry.get("late_30")),
+                "late_45":       bool(entry.get("late_45")),
+                "late_60":       bool(entry.get("late_60")),
+                "backfilled":    bool(entry.get("backfilled")),
                 "checkpoints":   list(entry.get("checkpoints") or []),
                 "triggered":     bool(entry.get("alerted")),
                 "settlement":    None,

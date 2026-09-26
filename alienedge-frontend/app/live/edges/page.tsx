@@ -613,9 +613,36 @@ function PredictionLifecycleCard({
           {displayMarketLabel(prediction.label)}
         </span>
         <div className="flex flex-wrap items-center gap-1.5">
-          {/* The 45' locked verdict is the headline answer: LIKELY,
-              UNLIKELY, VOID or UNCLEAR. */}
+          {/* The authoritative verdict: the 60' final validation where one
+              exists, otherwise the 45' verdict. LIKELY / UNLIKELY / VOID /
+              UNCLEAR. */}
           <LedgerVerdictChip verdict={prediction.verdict} />
+          {/* Honesty flags. A verdict recorded after its window closed is
+              labelled as such rather than presented as a live reading. */}
+          {prediction.backfilled && (
+            <span
+              className="rounded-md border border-slate-500/40 bg-slate-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-300"
+              title="Recorded after the checkpoint window closed"
+            >
+              BACKFILLED
+            </span>
+          )}
+          {(prediction.late_45 || prediction.late_60) && !prediction.backfilled && (
+            <span
+              className="rounded-md border border-white/15 bg-white/5 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-300"
+              title="The checkpoint window was missed; the verdict was recorded late"
+            >
+              LATE
+            </span>
+          )}
+          {prediction.trigger_only && (
+            <span
+              className="rounded-md border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-indigo-300"
+              title="Past 60' with a final validation — this market may only trigger now"
+            >
+              TRIGGER-ONLY
+            </span>
+          )}
           {/* Lifecycle stage is the primary read: it says where this
               prediction is in its live validation, one at a time. */}
           {prediction.stage && (
@@ -999,15 +1026,24 @@ export default function LivePage() {
     [activeValidation]
   );
 
-  // Counts for the Code 2 headline. A pick counts as decided only once it
-  // carries a locked 45' verdict; everything else is still awaiting one, which
-  // is what makes the board's emptiness legible instead of mysterious.
+  // Counts for the Code 2 headline.
+  //
+  // PHASE 1 FIX: settled picks were previously counted in the `default`
+  // branch and reported as "Awaiting 45'", so a match whose predictions had
+  // all finished at full time displayed LIKELY 0 / UNLIKELY 0 / VOID 0 /
+  // AWAITING 4 — the exact screen that made Code 2 look broken. A settled pick
+  // is DECIDED, not awaiting anything, and is now counted on its own.
   const predictionTally = useMemo(() => {
     let likely = 0;
     let unlikely = 0;
     let voided = 0;
+    let settled = 0;
     let awaiting = 0;
     for (const p of activePredictions) {
+      if (p.status === "SETTLED") {
+        settled++;
+        continue;
+      }
       switch (p.verdict) {
         case "LIKELY":
         case "FINAL_APPROVED":
@@ -1021,7 +1057,7 @@ export default function LivePage() {
           voided++;
           break;
         default:
-          // UNCLEAR, a 30' pre-verdict, or nothing at all yet.
+          // UNCLEAR, a 30' pre-verdict, or no verdict yet.
           awaiting++;
       }
     }
@@ -1030,6 +1066,7 @@ export default function LivePage() {
       likely,
       unlikely,
       void: voided,
+      settled,
       awaiting,
     };
   }, [activePredictions]);
@@ -1180,14 +1217,15 @@ export default function LivePage() {
                     locked at 45&apos; · cycle #{board.cycle || "—"}
                   </span>
                 </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
                   {(
                     [
                       ["Tracked", predictionTally.total, "text-white"],
                       ["Likely", predictionTally.likely, "text-emerald-300"],
                       ["Unlikely", predictionTally.unlikely, "text-amber-300"],
                       ["Void", predictionTally.void, "text-slate-300"],
-                      ["Awaiting 45'", predictionTally.awaiting, "text-cyan-300"],
+                      ["Settled", predictionTally.settled, "text-cyan-300"],
+                      ["Awaiting", predictionTally.awaiting, "text-slate-400"],
                     ] as const
                   ).map(([label, value, cls]) => (
                     <div
