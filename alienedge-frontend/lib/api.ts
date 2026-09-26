@@ -1128,6 +1128,9 @@ export interface LiveValidationPrediction {
   verdict_60?: LivePredictionVerdict;
   verdict_30?: LivePredictionVerdict;
   verdict_45?: LivePredictionVerdict;
+  /** The 30' -> 45' comparison: how the match moved between checkpoints. */
+  comparison_30_45?: "STRENGTHENED" | "HELD" | "WEAKENED" | "COLLAPSED" | "NO_BASELINE";
+  comparison_note?: string;
   /** The 45'/60' window was missed and the verdict was recorded late. */
   late_45?: boolean;
   late_60?: boolean;

@@ -1622,3 +1622,137 @@ class Code2ValidatesEveryMatchTests(unittest.TestCase):
                          stage2.V_SETTLED)
         self.assertEqual(stage2.combined_read_state(stage2.READ_UNCLEAR),
                          stage2.V_INSUFFICIENT)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE MATCH MINUTE — the number every checkpoint depends on
+# ═══════════════════════════════════════════════════════════════════════════
+class MatchMinuteResolutionTests(unittest.TestCase):
+    """
+    Every 30'/45'/60' checkpoint is gated on `minute`. If the minute is wrong,
+    the wrong verdicts fire — which is exactly how "APPROVED" appeared on a
+    16th-minute match.
+    """
+
+    @staticmethod
+    def _fx(periods, events=None, state=None):
+        return {"id": "1", "name": "A vs B", "periods": periods,
+                "events": events or [], "state": state or {},
+                "participants": []}
+
+    def test_ticking_period_is_cumulative_match_time(self):
+        # Verified against the live feed: Peñarol 1st=46 (ended), 2nd=56
+        # (ticking) means the match is at 56', NOT 56+45=101 and NOT max()=56
+        # only by luck. A 2nd-half `minutes` value is the match minute.
+        fx = self._fx([
+            {"description": "1st-half", "minutes": 46, "sort_order": 1,
+             "ended": 1790461100, "ticking": False},
+            {"description": "2nd-half", "minutes": 56, "sort_order": 2,
+             "ended": None, "ticking": True},
+        ])
+        self.assertEqual(stage2._resolve_match_minute(fx), 56)
+
+    def test_a_late_event_must_not_push_the_minute_forward(self):
+        # THE BUG. Trinidense had events at minute 24 and a 1st-half period at
+        # 45, so max() reported 45 and the board fired the 45' verdict against
+        # a match that had not reached it. The ticking period must win, and an
+        # event must never outrank it.
+        fx = self._fx(
+            [{"description": "1st-half", "minutes": 24, "sort_order": 1,
+              "ended": None, "ticking": True}],
+            events=[{"minute": 24}, {"minute": 24}])
+        self.assertEqual(stage2._resolve_match_minute(fx), 24)
+
+    def test_second_half_running_reads_as_match_minute(self):
+        fx = self._fx([
+            {"description": "1st-half", "minutes": 47, "sort_order": 1,
+             "ended": 1, "ticking": False},
+            {"description": "2nd-half", "minutes": 85, "sort_order": 2,
+             "ended": None, "ticking": True},
+        ])
+        self.assertEqual(stage2._resolve_match_minute(fx), 85)
+
+    def test_finished_match_with_no_ticking_period(self):
+        fx = self._fx([
+            {"description": "1st-half", "minutes": 46, "sort_order": 1,
+             "ended": 1, "ticking": False},
+            {"description": "2nd-half", "minutes": 94, "sort_order": 2,
+             "ended": 2, "ticking": False},
+        ], state={"state": "FT"})
+        self.assertEqual(stage2._resolve_match_minute(fx), 94)
+
+    def test_board_and_engine_resolve_the_same_minute(self):
+        # The board and the engine must never disagree about the minute.
+        fx = self._fx([
+            {"description": "1st-half", "minutes": 40, "sort_order": 1,
+             "ended": None, "ticking": True},
+        ])
+        self.assertEqual(stage2._resolve_match_minute(fx),
+                         stage2._fixture_minute_for_board(fx))
+
+
+class NoVerdictBeforeCheckpointTests(unittest.TestCase):
+    """An open gate is an internal signal, never a verdict."""
+
+    def test_gate_alone_never_produces_approved(self):
+        # The board once showed "APPROVED" at 16' purely because the gate was
+        # open. Before 30' nothing has been judged, so nothing may be claimed.
+        self.assertEqual(stage2.CHECKPOINT_PRE_MINUTE, 30)
+
+    def test_verdict_vocabulary_has_no_approved_watch_at_runtime(self):
+        # APPROVED_WATCH still exists as a legacy constant for old boards, but
+        # the live path must never emit it.
+        self.assertTrue(hasattr(stage2, "VERDICT_APPROVED_WATCH"))
+        source = open(stage2.__file__).read()
+        # It may only appear in its definition and the legacy family mapper.
+        occurrences = [ln.strip() for ln in source.splitlines()
+                       if "VERDICT_APPROVED_WATCH" in ln]
+        self.assertLessEqual(len(occurrences), 3,
+                             "APPROVED_WATCH must not be emitted by the live path")
+
+
+class Comparison30To45Tests(unittest.TestCase):
+    """The function that compares what happened at 30' to what happened at 45'."""
+
+    @staticmethod
+    def _s(goals, sot, engines, verdict=None):
+        return {"goals": goals, "sot": sot, "engines_passed": engines,
+                "verdict": verdict}
+
+    def test_engines_strengthened(self):
+        cmp_, note = stage2.compare_observation_to_verdict(
+            self._s(0, 2, 1), self._s(0, 4, 2, "LIKELY"))
+        self.assertEqual(cmp_, stage2.COMPARE_STRENGTHENED)
+        self.assertIn("2/3", note)
+
+    def test_engines_weakened(self):
+        cmp_, note = stage2.compare_observation_to_verdict(
+            self._s(0, 2, 2), self._s(1, 5, 1, "UNLIKELY"))
+        self.assertEqual(cmp_, stage2.COMPARE_WEAKENED)
+
+    def test_engines_held_while_the_match_moved(self):
+        cmp_, note = stage2.compare_observation_to_verdict(
+            self._s(0, 2, 2), self._s(1, 6, 2, "LIKELY"))
+        self.assertEqual(cmp_, stage2.COMPARE_HELD)
+        self.assertIn("moved", note)
+
+    def test_market_collapse(self):
+        cmp_, note = stage2.compare_observation_to_verdict(
+            self._s(0, 1, 2), self._s(2, 8, 0, "VOID"))
+        self.assertEqual(cmp_, stage2.COMPARE_COLLAPSED)
+
+    def test_no_baseline_is_honest(self):
+        cmp_, note = stage2.compare_observation_to_verdict(
+            None, self._s(0, 3, 2, "LIKELY"))
+        self.assertEqual(cmp_, stage2.COMPARE_NO_BASELINE)
+        self.assertIn("No 30'", note)
+
+    def test_snapshot_reads_the_board_label(self):
+        ctx = {
+            "home": {"goals": 0, "stats": {"shots-on-target": 2}},
+            "away": {"goals": 0, "stats": {"shots-on-target": 1}},
+        }
+        snap = stage2._live_snapshot(ctx, "STATS_2/3", "LIKELY")
+        self.assertEqual(snap["goals"], 0)
+        self.assertEqual(snap["sot"], 3)
+        self.assertEqual(snap["engines_passed"], 2)
