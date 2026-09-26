@@ -10,6 +10,7 @@ import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_FHVI } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
 const columns: PredictionColumn<FHVIPick>[] = [
   {
@@ -94,6 +95,7 @@ export default function FHVIPage() {
           rowKey={(r, i) => `${r.fixture}-${i}`}
           emptyMessage="No FHVI picks for this date."
           fallbackData={MOCK_FHVI}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
     </div>

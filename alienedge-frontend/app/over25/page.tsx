@@ -24,6 +24,7 @@ import {
   MOCK_FHVI,
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
 const apexColumns: PredictionColumn<Over25ApexPick>[] = [
   {
@@ -225,6 +226,7 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No apex picks for this date."
           fallbackData={MOCK_O25_APEX}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -239,6 +241,7 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No gold picks for this date."
           fallbackData={MOCK_O25_GOLD}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -253,6 +256,7 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
           rowKey={(r, i) => `${r.id}-${i}`}
           emptyMessage="No stage 2 picks for this date."
           fallbackData={MOCK_O25_S2}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
       {/* ── 5. FHVI DUPLICATE DISPLAY: Over 2.5 Intelligence 2 ──────── */}
@@ -266,6 +270,7 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
           rowKey={(r, i) => `${r.fixture}-${i}`}
           emptyMessage="No FHVI picks for this date."
           fallbackData={MOCK_FHVI}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
     </div>

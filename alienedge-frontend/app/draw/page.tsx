@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { Scale } from "lucide-react";
 import { specialsApi, type DrawPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
-import { useApi } from "@/lib/use-api";
+import { useApi, VERIFY_REFRESH_MS } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
@@ -60,6 +60,7 @@ export default function DrawPage() {
   const result = useApi(() => specialsApi.getDraw(date), [date], {
     fallback: MOCK_DRAW,
     cacheKey: `draw:${date}`,
+    refreshMs: VERIFY_REFRESH_MS,
   });
 
   // Verify -> DNA -> Rest (Used across all 3 draw branches)

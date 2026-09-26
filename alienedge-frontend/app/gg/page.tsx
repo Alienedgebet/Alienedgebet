@@ -10,7 +10,7 @@ import {
   type GGSupremePick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
-import { useApi } from "@/lib/use-api";
+import { useApi, VERIFY_REFRESH_MS } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
@@ -208,6 +208,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const precision = useApi(() => ggApi.getPrecision(date), [date], {
     fallback: MOCK_GG_PRECISION,
     cacheKey: `gg-precision:${date}`,
+    refreshMs: VERIFY_REFRESH_MS,
   });
 
   // 1. GG Supreme (Verify -> DNA -> Intelligent Pass Count -> Rest)
@@ -301,6 +302,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No supreme picks for this date."
           fallbackData={MOCK_GG_SUPREME}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 
@@ -315,6 +317,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No forensic picks for this date."
           fallbackData={MOCK_GG_FORENSICS}
+          refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
 

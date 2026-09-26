@@ -31,6 +31,18 @@ import { clearRawCache } from "@/lib/api";
 
 const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
 
+/**
+ * How often a Verify feed re-checks the backend.
+ *
+ * 45s sits inside the 30-45s target and comfortably under the ~4 minute live
+ * scanner cycle, so an unsettled match's verdict (PENDING -> IN_PLAY ->
+ * WON/LOST) is picked up promptly without hammering the API. Pages pass this
+ * straight to `useApi`/`ChainStage`, which reuses the existing polling
+ * mechanism — a tick bypasses the cache and hits the network, then the newer
+ * backend payload replaces the cached one.
+ */
+export const VERIFY_REFRESH_MS = 45_000;
+
 /** Explicit global demo-mode switch for the whole deployment. */
 export const DEMO_MODE_ENABLED =
   process.env.NEXT_PUBLIC_DEMO_MODE === "1" ||
@@ -43,19 +55,100 @@ interface CacheEntry<T> {
 
 const apiCache = new Map<string, CacheEntry<unknown>>();
 const PERSISTENT_CACHE_PREFIX = "alienedge:api-cache:";
+// The persistent tier keeps a page instant on re-entry. It NO LONGER decides
+// whether data is deleted — only whether it must be re-checked against the
+// backend. Expiry marks a payload as needing revalidation; it never discards a
+// settled (finished) Verify record, which must survive as history.
 const PERSISTENT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-function getPersistentCached<T>(key: string): T | null {
+// ── Verify / verification awareness ───────────────────────────────────
+// A Verify verdict reaches a terminal state once the match is decided. Only
+// these verdicts are "settled" and therefore permanent; everything else
+// (PENDING, IN_PLAY) is provisional and must be re-checked.
+const TERMINAL_VERDICTS = new Set(["WON", "LOST", "VOID", "SETTLED", "CANCELLED"]);
+
+function readVerificationVerdict(node: unknown): string | null {
+  // A verification payload lives on a row as `row.verification`. Read it
+  // defensively: feeds are heterogeneous and a malformed row must never throw
+  // inside a cache read.
+  if (!node || typeof node !== "object") return null;
+  const verification = (node as Record<string, unknown>).verification;
+  if (!verification || typeof verification !== "object") return null;
+  const verdict = (verification as Record<string, unknown>).verdict;
+  return typeof verdict === "string" ? verdict : null;
+}
+
+/** True when this row carries a terminal (settled) Verify verdict. */
+function isSettledRow(node: unknown): boolean {
+  const verdict = readVerificationVerdict(node);
+  return verdict !== null && TERMINAL_VERDICTS.has(verdict);
+}
+
+function collectNodes(payload: unknown, out: unknown[], depth = 0): void {
+  // Walks a response payload to find candidate row objects. Payloads are
+  // either a flat array of rows or a composite object of such arrays
+  // (e.g. { u25: [...], u35: [...] }), so both shapes are handled.
+  if (depth > 3 || payload == null) return;
+  if (Array.isArray(payload)) {
+    for (const item of payload) collectNodes(item, out, depth + 1);
+    return;
+  }
+  if (typeof payload !== "object") return;
+  const record = payload as Record<string, unknown>;
+  if ("verification" in record) {
+    out.push(record);
+    return;
+  }
+  for (const value of Object.values(record)) {
+    if (Array.isArray(value) || (value && typeof value === "object")) {
+      collectNodes(value, out, depth + 1);
+    }
+  }
+}
+
+/**
+ * True when this payload contains Verify data.
+ *
+ * Only payloads that actually carry verification objects opt into the
+ * settled-preservation and revalidation behaviour below. Every other
+ * `useApi` consumer (live feeds, weekly strips, dashboard) keeps exactly the
+ * caching semantics it has today, so this change cannot leak into them.
+ */
+export function payloadHasVerification(payload: unknown): boolean {
+  const nodes: unknown[] = [];
+  collectNodes(payload, nodes);
+  return nodes.some((node) => readVerificationVerdict(node) !== null);
+}
+
+/** True when at least one row in this payload has settled. */
+function payloadIsSettled(payload: unknown): boolean {
+  const nodes: unknown[] = [];
+  collectNodes(payload, nodes);
+  return nodes.some((node) => isSettledRow(node));
+}
+
+function getPersistentEntry<T>(key: string): CacheEntry<T> | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = window.localStorage.getItem(`${PERSISTENT_CACHE_PREFIX}${key}`);
     if (!raw) return null;
     const entry = JSON.parse(raw) as CacheEntry<T>;
-    if (!entry || Date.now() - Number(entry.ts) > PERSISTENT_CACHE_TTL_MS) {
+    if (!entry) {
       window.localStorage.removeItem(`${PERSISTENT_CACHE_PREFIX}${key}`);
       return null;
     }
-    return entry.data;
+    if (Date.now() - Number(entry.ts) > PERSISTENT_CACHE_TTL_MS) {
+      // Expired. A SETTLED payload is permanent history: keep serving it and
+      // let the refresh mechanism re-check the backend. An unsettled payload
+      // is discarded so the next read reflects reality rather than replaying a
+      // stale "Pending" for another day.
+      if (payloadIsSettled(entry.data)) {
+        return entry;
+      }
+      window.localStorage.removeItem(`${PERSISTENT_CACHE_PREFIX}${key}`);
+      return null;
+    }
+    return entry;
   } catch {
     return null;
   }
@@ -64,17 +157,24 @@ function getPersistentCached<T>(key: string): T | null {
 function getCached<T>(key: string): T | null {
   const entry = apiCache.get(key) as CacheEntry<T> | undefined;
   if (entry) {
-    if (Date.now() - entry.ts > CACHE_TTL_MS) {
+    // The memory tier expires quickly. As with the persistent tier, a settled
+    // payload is retained past its TTL so a finished match never disappears
+    // from the board; only unsettled data is dropped for re-fetching.
+    if (Date.now() - entry.ts > CACHE_TTL_MS && !payloadIsSettled(entry.data)) {
       apiCache.delete(key);
     } else {
       return entry.data;
     }
   }
-  const persistent = getPersistentCached<T>(key);
+  const persistent = getPersistentEntry<T>(key);
   if (persistent !== null) {
-    apiCache.set(key, { data: persistent as unknown, ts: Date.now() });
+    // Carry the ORIGINAL timestamp across from the persistent tier. Re-stamping
+    // with Date.now() would make a payload read back from localStorage look
+    // brand new, so it would never age out and never trigger revalidation —
+    // which is exactly the stale-"Pending" bug this change exists to fix.
+    apiCache.set(key, { data: persistent.data as unknown, ts: persistent.ts });
   }
-  return persistent;
+  return persistent !== null ? persistent.data : null;
 }
 
 function setCached<T>(key: string, data: T): void {
@@ -364,18 +464,40 @@ export function useApi<T>(
     if (cacheKey && !explicitRefresh) {
       const hit = getCached<T>(cacheKey);
       if (hit !== null) {
-        setData(hit);
-        dataRef.current = hit;
-        requestKeyRef.current = cacheKey ?? JSON.stringify(deps);
-        setIsMock(false);
-        setStale(false);
-        setLoading(false);
-        setIsRefetching(false);
-        setError(null);
-        hasLoadedOnce.current = true;
-        return () => {
-          cancelled = true;
-        };
+        // A Verify payload whose rows have NOT settled can still change at any
+        // moment (a match kicks off, goes in-play, then settles). Serving it
+        // from cache and returning early would pin a stale "Pending" on screen
+        // until the next hard reload, because the 24h persistent tier would
+        // keep answering this branch on every later mount.
+        //
+        // So: paint the cached rows immediately (page stays fast and history
+        // stays visible), then CONTINUE to the fetch so the backend can replace
+        // them. `keepVisible` below keeps the table on screen during the
+        // background request rather than dropping to a skeleton.
+        if (payloadHasVerification(hit) && !payloadIsSettled(hit)) {
+          setData(hit);
+          dataRef.current = hit;
+          requestKeyRef.current = cacheKey ?? JSON.stringify(deps);
+          setIsMock(false);
+          setLoading(false);
+          setIsRefetching(true);
+          setError(null);
+          hasLoadedOnce.current = true;
+          // Deliberately no `return` here — fall through to the network fetch.
+        } else {
+          setData(hit);
+          dataRef.current = hit;
+          requestKeyRef.current = cacheKey ?? JSON.stringify(deps);
+          setIsMock(false);
+          setStale(false);
+          setLoading(false);
+          setIsRefetching(false);
+          setError(null);
+          hasLoadedOnce.current = true;
+          return () => {
+            cancelled = true;
+          };
+        }
       }
     }
 
