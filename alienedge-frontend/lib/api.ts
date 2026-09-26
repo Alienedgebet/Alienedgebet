@@ -1124,6 +1124,17 @@ export interface LiveValidationPrediction {
   /** The locked 45' verdict: LIKELY / UNLIKELY / VOID / UNCLEAR. */
   verdict?: LivePredictionVerdict;
   verdict_note?: string;
+  /** The 60' FINAL validation. Supersedes verdict for non-45'-locked markets. */
+  verdict_60?: LivePredictionVerdict;
+  verdict_30?: LivePredictionVerdict;
+  verdict_45?: LivePredictionVerdict;
+  /** The 45'/60' window was missed and the verdict was recorded late. */
+  late_45?: boolean;
+  late_60?: boolean;
+  /** Recorded after the window closed — flagged, never a live read. */
+  backfilled?: boolean;
+  /** Past 60' with a final validation: this market may only TRIGGER now. */
+  trigger_only?: boolean;
   signal?: LiveValidationState;
   forensic?: LiveValidationState;
   statistics?: LiveValidationState;
