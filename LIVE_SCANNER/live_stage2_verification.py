@@ -113,17 +113,50 @@ MIN_MOMENTUM_FACTOR = 1.10   # was 1.30
 MIN_CORNER_DIFF     = 2
 
 # Engine 1 — combined shots on target required; passes when total > this value,
-# i.e. 4 or more.
+# i.e. 4 or more. THIS IS AN OVER THRESHOLD. It means "4+ is a lot of pressure".
 ENGINE1_MIN_COMBINED_SOT = 3
 # Engine 3 — recent key events inside the lookback window.
 MIN_RECENT_KEY_EVENTS = 4
 
+# ── UNDER-DIRECTION THRESHOLDS (derived, not invented) ────────────────────────
+# The UNDER gate used to borrow the OVER constants and one hardcoded value:
+#   Engine 1  total <= 1                       (unreachable in practice)
+#   Engine 2  tot_sot <= ENGINE1_MIN_COMBINED_SOT  and  tot_box <= the same
+# Neither was ever derived for the UNDER direction. The `1` fails almost every
+# ordinary first half, and comparing BOX ENTRIES against a SHOTS-ON-TARGET
+# threshold is a unit error.
+#
+# These values come from 752 finished matches already in
+# data/danger_history_cache.json (measured, not guessed):
+#
+#   combined shots on target, full match : p10=3  p25=6  med=8  p75=10 p90=13
+#   combined box entries,  full match     : p10=0  p25=4  med=12 p75=16 p90=21
+#   combined goals,       full match      : p10=1  p25=1  med=2  p75=3  p90=4
+#
+# Roughly 45% of a match's shots land in the first half, so a 45' reading with
+# a combined SOT of 3-4 is a completely NORMAL first half. "SOT <= 1" therefore
+# rejected the majority of healthy 0-0 half-times, which is how a goalless match
+# at 84' ended up locked as FINAL_REJECTED.
+#
+# UNDER_SOT_MAX_MEDIAN  — at or below the 45' median, the under is ON TRACK.
+# UNDER_SOT_MAX_STRONG — at or below the 45' p25, it is STRONGLY on track.
+UNDER_SOT_MAX_MEDIAN = 4
+UNDER_SOT_MAX_STRONG = 2
+# Box entries are judged on the box distribution, not the SOT one. The 45'
+# p25 for combined box entries is ~2 and the median ~6.
+UNDER_BOX_MAX_SUPPORT = 4
+
 # The provider does not emit "touches-in-opposition-box" or "attacks-in-box",
 # so the previous box source was permanently 0 and the box signal could never
-# contribute to Engine 2. "shots-insidebox" is a real, available stat; the
-# fallback keeps the engine useful if a future feed omits it too.
+# contribute to Engine 2. "shots-insidebox" is a real, available stat.
 BOX_STAT_CODES = ("shots-insidebox", "attacks-in-box", "touches-in-opposition-box")
-BOX_STAT_FALLBACK = "shots-total"
+# NO FALLBACK. The old fallback mapped "shots-total" into the box slot, then
+# compared it against a box threshold — two different units. Combined shots-total
+# has a median of ~8 per match against a box threshold of 3, so the fallback
+# could never pass and silently dragged Engine 2 down with it. A genuinely
+# absent box is reported as unavailable and judged on SOT alone, which
+# _opt_box() and Engine 2 already support.
+BOX_STAT_FALLBACK = None
 
 # ── MARKET DIRECTION ───────────────────────────────────────────────────────
 # Engines 2 and 3 and the forensic engine previously read the SAME evidence
@@ -673,8 +706,19 @@ def engine_1_rule_validator(data, pick):
 
     if "UNDER" in ptype:
         total = get_s(h_s, 'shots-on-target') + get_s(a_s, 'shots-on-target')
-        result = total <= 1
-        return result, f"SOT combined {total} ≤ 1: {'✅' if result else '❌'}"
+        # WAS `total <= 1` — a hardcoded value never derived from anything.
+        # Measured against 752 finished matches, a NORMAL first half carries a
+        # combined 3-4 shots on target, so `<= 1` failed almost every healthy
+        # half. That is how a goalless 84' match was locked as rejected.
+        # The bar is now the derived 45' median (see UNDER_SOT_MAX_*).
+        result = total <= UNDER_SOT_MAX_MEDIAN
+        if total <= UNDER_SOT_MAX_STRONG:
+            detail = "strongly on track"
+        elif result:
+            detail = "on track"
+        else:
+            detail = "above the 45' median"
+        return result, f"SOT combined {total} ≤ {UNDER_SOT_MAX_MEDIAN}: {'✅' if result else '❌'} ({detail})"
 
     if "WIN" in ptype or "SCORE" in ptype:
         sot_ok = get_s(exp, 'shots-on-target') >= 1
@@ -713,12 +757,15 @@ def engine_2_structural_stacker(data, target_loc, direction=DIRECTION_NEUTRAL):
             tot_box = int(box_vals[0]) + int(box_vals[1])
             if direction == DIRECTION_UNDER:
                 # UNDER: high SOT / high box entries are evidence AGAINST it.
-                sot_ok  = tot_sot <= ENGINE1_MIN_COMBINED_SOT
-                box_ok  = tot_box <= ENGINE1_MIN_COMBINED_SOT
+                # Each signal is judged against ITS OWN derived distribution.
+                # The old code compared BOTH against ENGINE1_MIN_COMBINED_SOT,
+                # a shots-on-target constant — a unit error for box entries.
+                sot_ok  = tot_sot <= UNDER_SOT_MAX_MEDIAN
+                box_ok  = tot_box <= UNDER_BOX_MAX_SUPPORT
                 return (sot_ok or box_ok), (
-                    f"[UNDER] Combined SOT {tot_sot} ≤ {ENGINE1_MIN_COMBINED_SOT}: "
+                    f"[UNDER] Combined SOT {tot_sot} ≤ {UNDER_SOT_MAX_MEDIAN}: "
                     f"{'✅' if sot_ok else '❌'} | "
-                    f"Combined box entries {tot_box} ≤ {ENGINE1_MIN_COMBINED_SOT}: "
+                    f"Combined box entries {tot_box} ≤ {UNDER_BOX_MAX_SUPPORT}: "
                     f"{'✅' if box_ok else '❌'}"
                 )
             sot_ok  = tot_sot > ENGINE1_MIN_COMBINED_SOT
@@ -730,9 +777,9 @@ def engine_2_structural_stacker(data, target_loc, direction=DIRECTION_NEUTRAL):
         # Box entries genuinely unavailable — judge on SOT alone and say so
         # rather than silently treating missing data as zero pressure.
         if direction == DIRECTION_UNDER:
-            sot_ok = tot_sot <= ENGINE1_MIN_COMBINED_SOT
+            sot_ok = tot_sot <= UNDER_SOT_MAX_MEDIAN
             return sot_ok, (
-                f"[UNDER] Combined SOT {tot_sot} ≤ {ENGINE1_MIN_COMBINED_SOT}: "
+                f"[UNDER] Combined SOT {tot_sot} ≤ {UNDER_SOT_MAX_MEDIAN}: "
                 f"{'✅' if sot_ok else '❌'} | box entries unavailable"
             )
         sot_ok = tot_sot > ENGINE1_MIN_COMBINED_SOT
@@ -790,30 +837,49 @@ def engine_3_momentum_escalator(data, target_id, direction=DIRECTION_NEUTRAL):
     shots on target, goals) is evidence AGAINST the under, not for it. The old
     version counted "lots of attacking activity" as support regardless of which
     side of 2.5 the market sat on.
+
+    MATCH-LEVEL FIX. The old guard was:
+        if not target_id or now < 15:
+            return False, f"Minute {now} < 15 — too early"
+    `target_id` is None for every match-level market (UNDER 2.5 / OVER 2.5),
+    so the engine returned False unconditionally and could NEVER pass. The
+    message it printed was also a lie: it claimed a minute problem while the
+    match could be at 72'. That is why the board was permanently stuck at
+    1-2 of 3 engines. For a match-level market the correct scope is BOTH
+    teams' key events, which is what is counted when target_id is absent.
     """
     now = data['minute']
-    if not target_id or now < 15:
+    if now < 15:
         return False, f"Minute {now} < 15 — too early"
+
+    # No target_id means a match-level market: both teams' momentum counts,
+    # because the market is about the match total, not one side.
+    scope = None if not target_id else str(target_id)
+    if scope is None:
+        label = "[match-level] "
+    else:
+        label = ""
 
     recent = 0
     for e in data.get('events', []):
-        if str(e.get("participant_id")) == str(target_id):
-            if (e.get("minute") or 0) > (now - 12):
-                if safe_get(e, "type", "code") in ["corner", "shot-on-target", "goal"]:
-                    recent += 1
+        if scope is not None and str(e.get("participant_id")) != scope:
+            continue
+        if (e.get("minute") or 0) > (now - 12):
+            if safe_get(e, "type", "code") in ["corner", "shot-on-target", "goal"]:
+                recent += 1
 
     if direction == DIRECTION_UNDER:
         # Escalating attacking pressure is evidence the under is in trouble.
         passed = recent < MIN_RECENT_KEY_EVENTS
         return passed, (
-            f"[UNDER] Recent key events in last 12 min: {recent} < "
+            f"{label}[UNDER] Recent key events in last 12 min: {recent} < "
             f"{MIN_RECENT_KEY_EVENTS}: {'✅' if passed else '❌'}"
         )
 
     passed = recent >= MIN_RECENT_KEY_EVENTS
     return passed, (
-        f"Recent key events in last 12 min: {recent} ≥ {MIN_RECENT_KEY_EVENTS}: "
-        f"{'✅' if passed else '❌'}"
+        f"{label}Recent key events in last 12 min: {recent} ≥ "
+        f"{MIN_RECENT_KEY_EVENTS}: {'✅' if passed else '❌'}"
     )
 
 # ==============================================================================
@@ -909,19 +975,40 @@ def prediction_lifecycle_step(pick, status, combined_state, minute, settled):
     if combined_state == V_SUPPORTED:
         return "SUPPORTED", "Both validators agree — awaiting confirmation"
     if combined_state == V_CONTRADICTED:
-        return "REJECTED", "Live evidence contradicts this prediction"
+        return "UNLIKELY", "Live evidence weighs against this prediction"
     if combined_state == V_INSUFFICIENT:
         return "MONITORING", "Partial evidence — still accumulating"
     return "MONITORING", "No exploitable condition yet"
 
 
-def combine_validation_states(forensic_state, stats_state):
+def combine_validation_states(forensic_state, stats_state, direction=DIRECTION_NEUTRAL):
     """
     Combine the forensic and statistical verdicts into one gate state.
 
     An alert is only SUPPORTED when BOTH dimensions agree. Anything short of
     that is reported honestly as monitoring rather than as a pass.
+
+    MATCH-LEVEL FIX — WHY CODE 2 COULD NEVER APPROVE ANYTHING.
+    The forensic engine asks "is a team structurally weakened?" — a red card,
+    a shaky keeper, a key substitution. On a healthy match it returns NEUTRAL
+    ("no fracture — not evidence"), and NEUTRAL can never satisfy
+    `forensic == SUPPORTED`. So for a match-level market such as UNDER 2.5 the
+    gate demanded a red card before it could ever open, even though the market
+    is about the MATCH TOTAL and has no target team at all.
+
+    The recorded production board proved it: forensic returned SUPPORTED once
+    in 47 predictions and the combined gate was never SUPPORTED even once.
+    Code 2 had literally never approved a prediction.
+
+    Fix: for a directional match-level market (UNDER / OVER) the forensic
+    dimension is not applicable, so the statistical engines decide alone. The
+    forensic requirement is RETAINED for team-side markets (TO_SCORE, WIN,
+    GG) where a weakened side is genuinely the mechanism being traded.
     """
+    # A directional match-level market has no target side, so "is a team
+    # weakened" is not a question about this market. Judge on the engines.
+    if direction in (DIRECTION_UNDER, DIRECTION_OVER):
+        return stats_state
     if forensic_state == V_SUPPORTED and stats_state == V_SUPPORTED:
         return V_SUPPORTED
     if forensic_state == V_CONTRADICTED or stats_state == V_CONTRADICTED:
@@ -976,8 +1063,32 @@ VERDICT_UNCERTAIN      = "UNCERTAIN"        # neither: not enough evidence
 VERDICT_WON            = "WON"
 VERDICT_LOST           = "LOST"
 
+# ── HONEST 45' VOCABULARY (replaces REJECTED) ────────────────────────────────
+# The user's objection was specifically the WORD "rejected". Football is
+# probabilistic: a 45' reading is a probability, not a refutation, and calling
+# it "REJECTED" asserted a certainty the engine does not have. Worse, the old
+# chain reached FINAL_REJECTED from a *weak engine reading* — "the engines
+# cannot confirm it" is not "the market is wrong".
+#
+# The new words separate JUDGEMENT from ARITHMETIC:
+#   LIKELY    — the evidence supports the pick; it is on track
+#   UNLIKELY  — the evidence works against it, but it can STILL come in
+#   VOID      — dead. Arithmetic, not opinion: 3 goals already scored
+#   UNCLEAR   — genuinely insufficient evidence; no verdict claimed
+VERDICT_LIKELY        = "LIKELY"
+VERDICT_UNLIKELY      = "UNLIKELY"
+VERDICT_VOID          = "VOID"
+
+# FINAL_APPROVED and FINAL_REJECTED are retained as readable aliases so the
+# existing ledger vocabulary stays meaningful to the audit trail, but the
+# LOCKED 45' path emits LIKELY / UNLIKELY / VOID / UNCLEAR from now on.
+VERDICT_45_LIKELY   = VERDICT_FINAL_APPROVED   # same decision, honest word
+VERDICT_45_UNLIKELY = VERDICT_UNLIKELY
+VERDICT_45_VOID     = VERDICT_VOID
+
 TERMINAL_VERDICTS = frozenset({
     VERDICT_FINAL_APPROVED, VERDICT_FINAL_REJECTED, VERDICT_UNCERTAIN,
+    VERDICT_LIKELY, VERDICT_UNLIKELY, VERDICT_VOID,
 })
 
 # The gate minutes. 30' is a PRE-verdict only; 45' is the main verdict.
@@ -1016,9 +1127,11 @@ def _verdict_family(verdict):
     PRE_REJECTED / FINAL_REJECTED and to UNCERTAIN at either checkpoint.
     """
     if verdict in (VERDICT_PRE_APPROVED, VERDICT_APPROVED_WATCH,
-                   VERDICT_FINAL_APPROVED, VERDICT_TRIGGERED):
+                   VERDICT_FINAL_APPROVED, VERDICT_TRIGGERED,
+                   VERDICT_LIKELY):
         return "APPROVE"
-    if verdict in (VERDICT_PRE_REJECTED, VERDICT_FINAL_REJECTED):
+    if verdict in (VERDICT_PRE_REJECTED, VERDICT_FINAL_REJECTED,
+                   VERDICT_UNLIKELY, VERDICT_VOID):
         return "REJECT"
     if verdict in (VERDICT_UNCERTAIN, VERDICT_LOST, VERDICT_WON):
         return "UNCERTAIN"
@@ -1048,27 +1161,32 @@ def reconcile_pre_and_main(pre_verdict, main_verdict):
     )
 
 
-def locked_verdict_at_45(gate_state, data):
+def locked_verdict_at_45(gate_state, data, stats_state=None):
     """
     THE UNDER 2.5 RULE — a decision is produced at 45' every single time.
 
-    Three possible outcomes and no fourth, whatever the data looks like:
-      * FINAL_APPROVED — the UNDER read is positively supported
-      * FINAL_REJECTED — the evidence positively contradicts it
-      * UNCLEAR        — the data available at 45' genuinely cannot say
+    THE USER'S RULE: at 45' the pick is LIKELY when the CONDITION holds OR when
+    2 of the 3 engines agree. Four possible outcomes, no fifth:
 
-    UNCLEAR is a real answer here, not a failure: at 45' a match with no shots
-    on target and no box data has produced no evidence in either direction, and
-    reporting that honestly is exactly what replaces the old behaviour of
-    leaving the pick on "Monitoring" for the rest of the match.
+      VOID      — 3+ goals already scored. ARITHMETIC, not opinion.
+      LIKELY    — the condition holds, or the engines reached 2 of 3.
+      UNCLEAR   — 2 goals already (on the line, zero more allowed), or the
+                  evidence genuinely cannot say.
+      UNLIKELY  — the evidence works against it, but it can STILL come in.
+
+    WHY "REJECTED" IS GONE. The old chain returned FINAL_REJECTED whenever the
+    engines did not confirm the pick. That is a category error twice over:
+    "the engines cannot confirm it" is not "the market is wrong", and 0 goals at
+    45' is POSITIVE evidence for an under, not an absence of it. The old code
+    also treated a moderate combined SOT as refutation, so an ordinary 0-0
+    first half was locked as rejected and stayed wrong for the rest of the
+    match. A 45' reading is a probability; the honest words are LIKELY,
+    UNLIKELY, VOID and UNCLEAR.
+
+    `stats_state` is the statistical judge's own state, passed in so the
+    "2 of 3 engines" condition can be honoured directly. It is optional so
+    existing callers and tests that pass only the gate state keep working.
     """
-    if gate_state == V_SUPPORTED:
-        return VERDICT_FINAL_APPROVED, "UNDER 2.5 supported at 45' — locked"
-    if gate_state == V_CONTRADICTED:
-        return VERDICT_FINAL_REJECTED, "UNDER 2.5 contradicted at 45' — locked"
-
-    # NEUTRAL and INSUFFICIENT_DATA both collapse to UNCLEAR, but the recorded
-    # note keeps the distinction so the audit trail stays honest.
     total_goals = 0
     sot = 0
     for side in ("home", "away"):
@@ -1081,11 +1199,79 @@ def locked_verdict_at_45(gate_state, data):
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
 
-    # 3 goals already means the market is dead. That is a FACT, not evidence.
+    # ── ARITHMETIC FIRST ──────────────────────────────────────────────────
+    # 3 goals already means the market is dead. That is a FACT, not evidence,
+    # and it is the ONLY case allowed to end the pick without a judgement.
     if total_goals >= 3:
-        return VERDICT_FINAL_REJECTED, (
-            f"UNDER 2.5 already lost at 45' ({total_goals} goals) — locked"
+        return VERDICT_VOID, (
+            f"VOID at 45': UNDER 2.5 already lost ({total_goals} goals scored) "
+            f"— arithmetic, not a prediction"
         )
+
+    # ── CONDITION: the 2-of-3 engine agreement ────────────────────────────
+    # Passing this overrides an otherwise UNCLEAR goal count: the engines
+    # agree the under is on track, so the board must say so.
+    if stats_state == V_SUPPORTED or gate_state == V_SUPPORTED:
+        if total_goals == 0:
+            return VERDICT_LIKELY, (
+                f"LIKELY at 45': 0 goals and the engines agree "
+                f"(2 of 3) — up to 2 more still allowed"
+            )
+        if total_goals == 1:
+            return VERDICT_LIKELY, (
+                f"LIKELY at 45': 1 goal and the engines agree "
+                f"(2 of 3) — up to 1 more still allowed"
+            )
+        return VERDICT_LIKELY, (
+            f"LIKELY at 45': 2 goals with the engines agreeing "
+            f"(2 of 3) — no further goal allowed"
+        )
+
+    # ── CONDITION: the scoreline on its own ───────────────────────────────
+    # 0 or 1 goal at 45' is positive evidence for the under and does not need
+    # engine agreement. This is what a goalless first half now reads as.
+    if total_goals == 0:
+        if sot <= UNDER_SOT_MAX_STRONG:
+            return VERDICT_LIKELY, (
+                f"LIKELY at 45': 0 goals, combined SOT {sot} "
+                f"(≤ {UNDER_SOT_MAX_STRONG}) — strongly on track"
+            )
+        return VERDICT_LIKELY, (
+            f"LIKELY at 45': 0 goals, combined SOT {sot} — "
+            f"up to 2 more still allowed"
+        )
+    if total_goals == 1:
+        return VERDICT_LIKELY, (
+            f"LIKELY at 45': 1 goal, combined SOT {sot} — "
+            f"up to 1 more still allowed"
+        )
+
+    # 2 goals at 45' is ON THE LINE: the under survives only if no more goal is
+    # scored. On its own that is a genuine coin-toss, so it is reported as
+    # UNCLEAR. But if the engines have ALSO read sustained pressure against the
+    # under, that is real evidence and the honest word is UNLIKELY — still not
+    # "rejected", because the pick can still come in.
+    if total_goals == 2:
+        if gate_state == V_CONTRADICTED:
+            return VERDICT_UNLIKELY, (
+                f"UNLIKELY at 45': 2 goals already and the engines read pressure "
+                f"against the under (combined SOT {sot}) — it can still come in"
+            )
+        return VERDICT_UNCERTAIN, (
+            f"UNCLEAR at 45': 2 goals already — the under survives only if no "
+            f"further goal is scored (combined SOT {sot})"
+        )
+
+    # ── CONTRADICTED BY THE ENGINES ───────────────────────────────────────
+    # Defensive: with 0-1 goals the scoreline condition above already decided
+    # LIKELY, and 3+ goals is VOID, so reaching here means the engine state is
+    # contradictory in a way the scoreline cannot resolve.
+    if gate_state == V_CONTRADICTED:
+        return VERDICT_UNLIKELY, (
+            f"UNLIKELY at 45': the engines read pressure against the under "
+            f"(combined SOT {sot}) — it can still come in"
+        )
+
     if sot == 0:
         return VERDICT_UNCERTAIN, (
             "UNCLEAR at 45': no shots on target recorded and no box data — "
@@ -1324,10 +1510,16 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             continue
 
         # ── RUN BOTH ENGINES ────────────────────────────────────────────────
+        pick_direction = market_direction(ptype)
         forensic_state, n_note   = new_engine_forensic_investigation(ctx, pick)
         stats_state, o_note, engine_detail = old_engine_statistical_judge(ctx, pick)
-        combined_state = combine_validation_states(forensic_state, stats_state)
-        # The gate opens only when BOTH dimensions independently say SUPPORTED.
+        # `direction` is passed so a match-level UNDER/OVER market is judged by
+        # the statistical engines alone. Without it the forensic requirement
+        # made every Under 2.5 verdict unreachable (see
+        # combine_validation_states).
+        combined_state = combine_validation_states(
+            forensic_state, stats_state, pick_direction)
+        # The gate opens only when the applicable dimensions say SUPPORTED.
         # A single weak signal (the old STATS_1/3 case) can no longer pass.
         gate_open = combined_state == V_SUPPORTED
         new_ok = forensic_state == V_SUPPORTED
@@ -1405,7 +1597,7 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
         if minute >= CHECKPOINT_MAIN_MINUTE and main_verdict is None:
             if is_locked_market:
                 main_verdict, verdict_note = locked_verdict_at_45(
-                    combined_state, ctx)
+                    combined_state, ctx, stats_state)
                 entry["locked"] = True
             else:
                 main_verdict = verdict_from_gate(combined_state)
@@ -1699,11 +1891,12 @@ def extract_live_context(fixture):
         if not side or not code: continue
         stats[side][code] = val
 
-    # Box entries: the provider never emits "touches-in-opposition-box" or
-    # "attacks-in-box", which left this permanently 0 and made the Engine 2 box
-    # signal impossible to satisfy. Prefer a code the feed actually carries and
-    # record which source was used. `None` means genuinely unavailable, which is
-    # NOT the same as a real 0 — the engine must not read it as zero pressure.
+    # Box entries: prefer a code the feed actually carries and record which
+    # source was used. `None` means genuinely unavailable, which is NOT the
+    # same as a real 0 — the engine must not read it as zero pressure.
+    # There is deliberately NO shots-total fallback: shots-total is a different
+    # unit, and judging it against a box threshold made Engine 2 fail on every
+    # match whose feed omitted shots-insidebox.
     for side in ("home", "away"):
         for candidate in BOX_STAT_CODES:
             if candidate in stats[side]:
@@ -1711,7 +1904,7 @@ def extract_live_context(fixture):
                 stats[side]["box_source"] = candidate
                 break
         else:
-            if BOX_STAT_FALLBACK in stats[side]:
+            if BOX_STAT_FALLBACK and BOX_STAT_FALLBACK in stats[side]:
                 stats[side]["box"] = float(stats[side][BOX_STAT_FALLBACK])
                 stats[side]["box_source"] = BOX_STAT_FALLBACK
 

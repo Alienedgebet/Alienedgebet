@@ -10,7 +10,6 @@ import {
   ChevronRight,
   Activity,
   AlertTriangle,
-  Target,
 } from "lucide-react";
 import {
   liveApi,
@@ -480,10 +479,76 @@ type VerdictTone = "good" | "bad" | "wait" | "flat";
 const STAGE_STYLE: Record<string, string> = {
   MONITORING: "border-white/15 bg-white/5 text-slate-300",
   SUPPORTED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
-  REJECTED: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+  UNLIKELY: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+  VOID: "border-slate-500/40 bg-slate-500/10 text-slate-300",
   TRIGGERED: "border-amber-500/50 bg-amber-500/10 text-amber-300",
   SETTLED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
 };
+
+// The 45' locked verdict vocabulary. "REJECTED" is deliberately absent: it
+// asserted a certainty the engine does not have, and on live football it was
+// being produced from a weak engine reading. VOID is the arithmetic case
+// (3+ goals already scored) and is styled neutral because it is a fact about
+// the scoreline, not a judgement about the prediction.
+const LEDGER_VERDICT_STYLE: Record<string, { label: string; tone: VerdictTone }> = {
+  LIKELY: { label: "LIKELY", tone: "good" },
+  UNLIKELY: { label: "UNLIKELY", tone: "wait" },
+  VOID: { label: "VOID", tone: "flat" },
+  UNCLEAR: { label: "UNCLEAR", tone: "flat" },
+  FINAL_APPROVED: { label: "LIKELY", tone: "good" },
+  PRE_APPROVED: { label: "PRE-APPROVED", tone: "good" },
+  APPROVED_WATCH: { label: "APPROVED", tone: "good" },
+  TRIGGERED: { label: "TRIGGERED", tone: "wait" },
+  PRE_REJECTED: { label: "PRE-UNLIKELY", tone: "wait" },
+  FINAL_REJECTED: { label: "UNLIKELY", tone: "wait" },
+  WON: { label: "WON", tone: "good" },
+  LOST: { label: "LOST", tone: "bad" },
+};
+
+function LedgerVerdictChip({ verdict }: { verdict?: string | null }) {
+  if (!verdict) return null;
+  const style = LEDGER_VERDICT_STYLE[verdict] ?? {
+    label: verdict,
+    tone: "flat" as VerdictTone,
+  };
+  return (
+    <span
+      className={cn(
+        "rounded-md border px-2 py-0.5 font-mono text-[10px] font-black",
+        VERDICT_TONE_CLASS[style.tone]
+      )}
+      title={`45' locked verdict: ${verdict}`}
+    >
+      {style.label}
+    </span>
+  );
+}
+
+// DISPLAY-ONLY SAFETY LABEL. Prematch Under 2.5 is shown to users as
+// "Under 3.5" so they are not handed the tightest line. This is a LABEL ONLY:
+// the engine still tracks and settles the real 2.5, so a match finishing 2-1
+// is still recorded as a loss for the true line. Nothing here changes the
+// engine, the pick type, or the settlement maths.
+const DISPLAY_LABEL: Record<string, string> = {
+  "UNDER_2.5": "UNDER 3.5",
+  "U2_5": "UNDER 3.5",
+  "U2.5": "UNDER 3.5",
+};
+
+// `UNDER 2.5` and `under 2.5` both normalise to UNDER_2.5 above, and the
+// backend label may carry a target suffix such as "UNDER_2.5 (match)".
+function displayMarketLabel(label: string): string {
+  if (!label) return label;
+  const key = label.toUpperCase().replace(/\s+/g, "_");
+  if (DISPLAY_LABEL[key]) return DISPLAY_LABEL[key];
+  // Preserve any "(home)"/"(away)" target suffix on team-side markets.
+  const targetMatch = key.match(/^([A-Z0-9_.]+)\s*\((.+)\)$/);
+  if (targetMatch) {
+    const base = DISPLAY_LABEL[targetMatch[1]];
+    if (base) return `${base} (${targetMatch[2]})`;
+  }
+  return label;
+}
 
 const VERDICT_STYLE: Record<string, { label: string; tone: VerdictTone }> = {
   SUPPORTED: { label: "SUPPORTED", tone: "good" },
@@ -545,9 +610,12 @@ function PredictionLifecycleCard({
     >
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <span className="font-mono text-xs font-black text-white">
-          {prediction.label}
+          {displayMarketLabel(prediction.label)}
         </span>
         <div className="flex flex-wrap items-center gap-1.5">
+          {/* The 45' locked verdict is the headline answer: LIKELY,
+              UNLIKELY, VOID or UNCLEAR. */}
+          <LedgerVerdictChip verdict={prediction.verdict} />
           {/* Lifecycle stage is the primary read: it says where this
               prediction is in its live validation, one at a time. */}
           {prediction.stage && (
@@ -923,8 +991,48 @@ export default function LivePage() {
   // The structured prediction list is Code 2's primary output. Older boards
   // written before the contract change carry no `predictions` array, so fall
   // back to an empty list rather than rendering a misleading empty state.
-  const activePredictions: LiveValidationPrediction[] =
-    activeValidation?.predictions ?? [];
+  // Memoised on its own so the tally below has a stable dependency: `?? []`
+  // creates a NEW array every render otherwise, which would recompute the
+  // headline counts on every paint.
+  const activePredictions: LiveValidationPrediction[] = useMemo(
+    () => activeValidation?.predictions ?? [],
+    [activeValidation]
+  );
+
+  // Counts for the Code 2 headline. A pick counts as decided only once it
+  // carries a locked 45' verdict; everything else is still awaiting one, which
+  // is what makes the board's emptiness legible instead of mysterious.
+  const predictionTally = useMemo(() => {
+    let likely = 0;
+    let unlikely = 0;
+    let voided = 0;
+    let awaiting = 0;
+    for (const p of activePredictions) {
+      switch (p.verdict) {
+        case "LIKELY":
+        case "FINAL_APPROVED":
+          likely++;
+          break;
+        case "UNLIKELY":
+        case "FINAL_REJECTED":
+          unlikely++;
+          break;
+        case "VOID":
+          voided++;
+          break;
+        default:
+          // UNCLEAR, a 30' pre-verdict, or nothing at all yet.
+          awaiting++;
+      }
+    }
+    return {
+      total: activePredictions.length,
+      likely,
+      unlikely,
+      void: voided,
+      awaiting,
+    };
+  }, [activePredictions]);
 
   return (
     <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
@@ -1057,7 +1165,53 @@ export default function LivePage() {
             </div>
 
             <div className="space-y-6">
-              
+
+              {/* ── CODE 2 TOP SECTION: what is being validated ──────────── */}
+              {/* The user asked for a headline that states plainly which
+                  prematch predictions are awaiting validation or already
+                  voided, so the board never reads as empty or ambiguous. */}
+              <section className="flex flex-col gap-2.5 rounded-2xl border border-emerald-500/20 bg-emerald-950/10 p-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-wider text-emerald-300">
+                    <ShieldCheck className="h-4 w-4" />
+                    Prematch probabilistic predictions — validation status
+                  </h3>
+                  <span className="font-mono text-[10px] text-slate-400">
+                    locked at 45&apos; · cycle #{board.cycle || "—"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+                  {(
+                    [
+                      ["Tracked", predictionTally.total, "text-white"],
+                      ["Likely", predictionTally.likely, "text-emerald-300"],
+                      ["Unlikely", predictionTally.unlikely, "text-amber-300"],
+                      ["Void", predictionTally.void, "text-slate-300"],
+                      ["Awaiting 45'", predictionTally.awaiting, "text-cyan-300"],
+                    ] as const
+                  ).map(([label, value, cls]) => (
+                    <div
+                      key={label}
+                      className="rounded-lg border border-white/10 bg-black/30 px-2.5 py-2"
+                    >
+                      <p className="font-mono text-[9px] uppercase tracking-wide text-slate-400">
+                        {label}
+                      </p>
+                      <p className={cn("font-mono text-lg font-black", cls)}>
+                        {value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                {predictionTally.total === 0 && (
+                  <p className="font-mono text-[11px] italic text-slate-400">
+                    No prematch predictions reached this fixture yet. Code 1
+                    emits a pick only when a structural condition fires, so a
+                    clean match sheet produces nothing to validate.
+                  </p>
+                )}
+              </section>
+
               {/* ── CODE 2: PREDICTION LIFECYCLE (main objective) ─────── */}
               <section className="flex flex-col gap-3">
                 <div className="flex items-center justify-between border-b border-white/5 pb-2">
@@ -1267,87 +1421,15 @@ export default function LivePage() {
                 })()}
               </section>
 
-              {/* ── CODE 3B: PER-PREDICTION ENGINE VERDICTS ────────────── */}
-              <section className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/40 p-4">
-                <div className="flex items-center justify-between border-b border-white/10 pb-2">
-                  <div className="flex items-center gap-2">
-                    <Target className="h-4 w-4 text-cyan-400" />
-                    <h3 className="text-xs font-black uppercase tracking-wider text-white">
-                      Code 3B — Engine Verdicts Per Prediction
-                    </h3>
-                  </div>
-                  <span className="font-mono text-[10px] text-slate-400">
-                    per prediction · not a match-wide verdict
-                  </span>
-                </div>
-
-                {/* The previous Code 3B panel was static JSX that always
-                    rendered "3/3 ENGINES PASSED" with three hardcoded ✅
-                    cards, directly contradicting the real per-prediction
-                    counters above. The engines are market-specific, so the
-                    only honest presentation is one row per prediction. */}
-                {activePredictions.length === 0 ? (
-                  <p className="rounded-lg border border-white/5 bg-white/5 p-3 text-center font-mono text-[11px] text-slate-400">
-                    No predictions to score yet.
-                  </p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[520px] text-left font-mono text-[11px]">
-                      <thead className="text-[10px] uppercase text-slate-500">
-                        <tr>
-                          <th className="py-1.5 pr-2 font-medium">Prediction</th>
-                          <th className="py-1.5 pr-2 font-medium">Stage</th>
-                          <th className="py-1.5 pr-2 font-medium">Engines</th>
-                          <th className="py-1.5 pr-2 font-medium">Forensic</th>
-                          <th className="py-1.5 font-medium">Statistics</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {activePredictions.map((p) => (
-                          <tr
-                            key={p.key}
-                            className="border-t border-white/5 align-top"
-                          >
-                            <td className="py-1.5 pr-2 font-bold text-white">
-                              {p.label}
-                            </td>
-                            <td className="py-1.5 pr-2">
-                              {p.stage ? (
-                                <span
-                                  className={cn(
-                                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                                    STAGE_STYLE[p.stage] ??
-                                      STAGE_STYLE.MONITORING
-                                  )}
-                                >
-                                  {p.stage}
-                                </span>
-                              ) : (
-                                <span className="text-slate-500">—</span>
-                              )}
-                            </td>
-                            <td className="py-1.5 pr-2 text-slate-300">
-                              {p.stats_label ?? "—"}
-                            </td>
-                            <td className="py-1.5 pr-2 text-slate-300">
-                              {p.forensic ?? "—"}
-                            </td>
-                            <td className="py-1.5 text-slate-300">
-                              {p.statistics ?? "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                      A prediction passes only when its forensic and
-                      statistics dimensions both read SUPPORTED. Counters are
-                      market-specific, so different rows may legitimately show
-                      different engine counts.
-                    </p>
-                  </div>
-                )}
-              </section>
+              {/* CODE 3B REMOVED.
+                  The user asked for this table to go. It duplicated the
+                  per-prediction Forensic / Statistics / Engines rows already
+                  rendered inside each prediction card above, and its footnote
+                  ("passes only when forensic AND statistics both read
+                  SUPPORTED") described the OLD gate — which was precisely the
+                  rule that made a match-level Under 2.5 impossible to approve.
+                  The 45' verdict chip on each card is now the single source of
+                  truth, so a second summary table can only contradict it. */}
 
               {/* ── CODE 3C: SUPREME CONFIRMATIONS TABLE ─────────────── */}
               <section className="flex flex-col gap-2.5">

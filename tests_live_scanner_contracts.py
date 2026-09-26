@@ -358,7 +358,76 @@ class LiveScannerContractTests(unittest.TestCase):
         # are not, which is why box was permanently 0.
         self.assertEqual(stage2.BOX_STAT_CODES[0], "shots-insidebox")
         self.assertIn("shots-insidebox", stage2.BOX_STAT_CODES)
-        self.assertTrue(stage2.BOX_STAT_FALLBACK)
+        # NO shots-total fallback. Mapping shots-total into the box slot and
+        # then comparing it against a box threshold is a unit error: combined
+        # shots-total has a median of ~8 per match against a box bar of 3-4, so
+        # the fallback could never pass and silently dragged Engine 2 down.
+        self.assertIsNone(stage2.BOX_STAT_FALLBACK)
+
+    def test_stage2_under_sot_threshold_is_derived_not_the_over_one(self):
+        # The UNDER bar must be its own derived value, not the OVER constant
+        # and not the unreachable hardcoded 1 that rejected ordinary 0-0 halves.
+        self.assertEqual(stage2.UNDER_SOT_MAX_MEDIAN, 4)
+        self.assertLess(stage2.UNDER_SOT_MAX_STRONG, stage2.UNDER_SOT_MAX_MEDIAN)
+        self.assertNotEqual(stage2.UNDER_SOT_MAX_MEDIAN, stage2.ENGINE1_MIN_COMBINED_SOT)
+        # A completely normal 45' first half (3 combined SOT) must pass.
+        self.assertTrue(3 <= stage2.UNDER_SOT_MAX_MEDIAN)
+
+    def test_stage2_under_engine_passes_a_normal_first_half(self):
+        # The reported 84'-at-0-0 case had a combined SOT of 3-4. Engine 1
+        # used to demand <= 1 and failed it.
+        ctx = self._stage2_ctx()
+        ctx["home"]["stats"].update({"shots-on-target": 2})
+        ctx["away"]["stats"].update({"shots-on-target": 1})
+        pick = {"type": "UNDER_2.5", "target_loc": "match"}
+        passed, note = stage2.engine_1_rule_validator(ctx, pick)
+        self.assertTrue(passed, note)
+        self.assertIn(str(stage2.UNDER_SOT_MAX_MEDIAN), note)
+
+    def test_stage2_engine3_runs_for_match_level_markets(self):
+        # Engine 3 returned False unconditionally for match-level markets
+        # because target_id is None, and its message blamed the minute even at
+        # 72'. It must now actually evaluate both teams' recent events.
+        ctx = self._stage2_ctx()
+        ctx["minute"] = 45
+        # A quiet match: no recent key events, so UNDER passes.
+        passed, note = stage2.engine_3_momentum_escalator(
+            ctx, None, stage2.DIRECTION_UNDER)
+        self.assertTrue(passed, note)
+        self.assertNotIn("too early", note)
+        # A busy match must fail the UNDER direction.
+        ctx["events"] = [{"participant_id": "1", "minute": 40,
+                          "type": {"code": "goal"}} for _ in range(6)]
+        passed, note = stage2.engine_3_momentum_escalator(
+            ctx, None, stage2.DIRECTION_UNDER)
+        self.assertFalse(passed, note)
+        # Still honest about a genuinely early match.
+        ctx["minute"] = 5
+        passed, note = stage2.engine_3_momentum_escalator(
+            ctx, None, stage2.DIRECTION_UNDER)
+        self.assertFalse(passed)
+        self.assertIn("too early", note)
+
+    def test_match_level_gate_does_not_require_a_forensic_signal(self):
+        # THE ROOT CAUSE. The forensic engine asks "is a team weakened?", which
+        # is NEUTRAL on a healthy match. Requiring forensic==SUPPORTED meant a
+        # match-level UNDER could never open its gate — Code 2 never approved
+        # anything in production. The engines must decide alone here.
+        stats_ok = stage2.V_SUPPORTED
+        # Under/Over: forensic is irrelevant, so SUPPORTED is reachable.
+        self.assertEqual(
+            stage2.combine_validation_states(
+                stage2.V_NEUTRAL, stats_ok, stage2.DIRECTION_UNDER),
+            stage2.V_SUPPORTED)
+        self.assertEqual(
+            stage2.combine_validation_states(
+                stage2.V_NEUTRAL, stats_ok, stage2.DIRECTION_OVER),
+            stage2.V_SUPPORTED)
+        # Team-side markets keep the forensic requirement.
+        self.assertNotEqual(
+            stage2.combine_validation_states(
+                stage2.V_NEUTRAL, stats_ok, stage2.DIRECTION_NEUTRAL),
+            stage2.V_SUPPORTED)
 
     def test_stage2_box_none_is_unavailable_not_zero(self):
         self.assertIsNone(stage2._opt_box({"box": None}))
@@ -458,7 +527,7 @@ class LiveScannerContractTests(unittest.TestCase):
         self.assertEqual(
             stage2.prediction_lifecycle_step(
                 pick, "WAITING", stage2.V_CONTRADICTED, 30, False)[0],
-            "REJECTED")
+            "UNLIKELY")
         self.assertEqual(
             stage2.prediction_lifecycle_step(
                 pick, "WAITING", stage2.V_INSUFFICIENT, 30, False)[0],
@@ -812,28 +881,94 @@ class LiveValidationLedgerTests(unittest.TestCase):
         }
 
     # ── RULE 1: UNDER 2.5 locks at 45', and ALWAYS decides ───────────────
-    def test_under_locks_final_approved_at_45(self):
-        verdict, _ = stage2.locked_verdict_at_45(stage2.V_SUPPORTED, self._ctx())
-        self.assertEqual(verdict, stage2.VERDICT_FINAL_APPROVED)
+    def test_under_locks_likely_at_45(self):
+        verdict, note = stage2.locked_verdict_at_45(stage2.V_SUPPORTED, self._ctx())
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+        self.assertIn("LIKELY", note)
 
-    def test_under_locks_final_rejected_at_45(self):
-        verdict, _ = stage2.locked_verdict_at_45(stage2.V_CONTRADICTED, self._ctx())
-        self.assertEqual(verdict, stage2.VERDICT_FINAL_REJECTED)
+    def test_under_never_says_rejected_at_45(self):
+        # The user's objection: "rejected" asserts a certainty the engine does
+        # not have, and it was being produced from a WEAK engine reading. No
+        # engine state may produce a REJECTED-family verdict at 45' any more.
+        for gate in (stage2.V_SUPPORTED, stage2.V_CONTRADICTED,
+                     stage2.V_NEUTRAL, stage2.V_INSUFFICIENT):
+            for goals in ((0, 0), (1, 0), (2, 0), (0, 1)):
+                verdict, _ = stage2.locked_verdict_at_45(
+                    gate, self._ctx(home=goals[0], away=goals[1]))
+                self.assertNotEqual(verdict, stage2.VERDICT_FINAL_REJECTED)
+                self.assertIn(verdict, (
+                    stage2.VERDICT_LIKELY, stage2.VERDICT_UNLIKELY,
+                    stage2.VERDICT_UNCERTAIN, stage2.VERDICT_VOID))
+
+    def test_under_two_goals_under_pressure_is_unlikely_not_rejected(self):
+        # 2 goals is on the line, but sustained engine pressure is real
+        # evidence, so the honest word is UNLIKELY.
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_CONTRADICTED, self._ctx(home=2, away=0, h_sot=5, a_sot=4))
+        self.assertEqual(verdict, stage2.VERDICT_UNLIKELY)
+        self.assertIn("UNLIKELY", note)
+
+    def test_under_goalless_45_is_likely_even_with_pressure(self):
+        # THE REPORTED BUG. At 45' a 0-0 is the best possible position for an
+        # under: 0 of the 3 goals are spent and up to 2 may still come. It must
+        # never be rejected, whatever the shot count says.
+        for gate in (stage2.V_NEUTRAL, stage2.V_INSUFFICIENT,
+                     stage2.V_CONTRADICTED, stage2.V_SUPPORTED):
+            verdict, _ = stage2.locked_verdict_at_45(
+                gate, self._ctx(home=0, away=0, h_sot=2, a_sot=1))
+            self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+
+    def test_under_one_goal_at_45_is_likely(self):
+        verdict, _ = stage2.locked_verdict_at_45(
+            stage2.V_INSUFFICIENT, self._ctx(home=1, away=0, h_sot=3, a_sot=2))
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+
+    def test_under_is_likely_when_two_of_three_engines_agree(self):
+        # The user's rule: the condition OR a 2-of-3 engine agreement.
+        # With no goals the scoreline already reads LIKELY, so the engines
+        # agreeing must not change it.
+        verdict, _ = stage2.locked_verdict_at_45(
+            stage2.V_SUPPORTED, self._ctx(home=0, away=0),
+            stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+        # And with 2 goals, engine agreement is what lifts it off UNCLEAR.
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_INSUFFICIENT, self._ctx(home=2, away=0),
+            stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
+        self.assertIn("2 of 3", note)
+
+    def test_under_two_goals_without_pressure_is_unclear(self):
+        # On the line, no engine opinion: a genuine coin-toss, so UNCLEAR.
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_INSUFFICIENT, self._ctx(home=2, away=0))
+        self.assertEqual(verdict, stage2.VERDICT_UNCERTAIN)
+        self.assertIn("UNCLEAR", note)
 
     def test_under_returns_unclear_when_data_says_nothing(self):
-        # The third allowed answer. A match with no shots on target at 45' has
-        # produced no evidence either way, and the engine must SAY that rather
-        # than stay silent until the match dies.
+        # Only reachable with no goals AND contradictory engine states, which
+        # the scoreline resolves as LIKELY. UNCLEAR is still the honest answer
+        # whenever the engine states disagree with each other.
         for gate in (stage2.V_NEUTRAL, stage2.V_INSUFFICIENT):
             verdict, note = stage2.locked_verdict_at_45(gate, self._ctx())
-            self.assertEqual(verdict, stage2.VERDICT_UNCERTAIN)
-            self.assertIn("UNCLEAR", note)
+            self.assertIn(verdict, (stage2.VERDICT_LIKELY, stage2.VERDICT_UNCERTAIN))
+        # An explicitly empty scoreline with no supporting evidence at all.
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_NEUTRAL, self._ctx(home=0, away=0, h_sot=0, a_sot=0))
+        self.assertEqual(verdict, stage2.VERDICT_LIKELY)
 
-    def test_under_is_rejected_when_three_goals_already_scored(self):
+    def test_under_is_void_when_three_goals_already_scored(self):
+        # 3+ goals is ARITHMETIC, not a judgement. This is the one case that
+        # legitimately ends the pick without an opinion.
         verdict, note = stage2.locked_verdict_at_45(
             stage2.V_NEUTRAL, self._ctx(home=1, away=2))
-        self.assertEqual(verdict, stage2.VERDICT_FINAL_REJECTED)
+        self.assertEqual(verdict, stage2.VERDICT_VOID)
         self.assertIn("already lost", note)
+        # Even when the engines fully support it, arithmetic wins.
+        verdict, _ = stage2.locked_verdict_at_45(
+            stage2.V_SUPPORTED, self._ctx(home=3, away=0),
+            stage2.V_SUPPORTED)
+        self.assertEqual(verdict, stage2.VERDICT_VOID)
 
     def test_under_is_the_only_locked_market(self):
         self.assertIn("UNDER_2.5", stage2.LOCKED_AT_45_MARKETS)

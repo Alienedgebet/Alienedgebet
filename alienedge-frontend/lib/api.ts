@@ -1081,9 +1081,30 @@ export type LiveValidationState =
 export type LivePredictionStage =
   | "MONITORING"
   | "SUPPORTED"
-  | "REJECTED"
+  | "UNLIKELY"
+  | "VOID"
   | "TRIGGERED"
   | "SETTLED";
+
+/**
+ * The 45' locked verdict written by Code 2. "REJECTED" is intentionally absent:
+ * a 45' reading is a probability, not a refutation. VOID is the arithmetic case
+ * (3+ goals already scored) and is separate from UNLIKELY, which still allows
+ * the pick to come in.
+ */
+export type LivePredictionVerdict =
+  | "LIKELY"
+  | "UNLIKELY"
+  | "VOID"
+  | "UNCLEAR"
+  | "FINAL_APPROVED"
+  | "FINAL_REJECTED"
+  | "PRE_APPROVED"
+  | "PRE_REJECTED"
+  | "APPROVED_WATCH"
+  | "TRIGGERED"
+  | "WON"
+  | "LOST";
 
 /** One canonical prediction tracked through its live lifecycle by Code 2. */
 export interface LiveValidationPrediction {
@@ -1100,6 +1121,9 @@ export interface LiveValidationPrediction {
     | "SETTLED";
   stage?: LivePredictionStage;
   stage_note?: string;
+  /** The locked 45' verdict: LIKELY / UNLIKELY / VOID / UNCLEAR. */
+  verdict?: LivePredictionVerdict;
+  verdict_note?: string;
   signal?: LiveValidationState;
   forensic?: LiveValidationState;
   statistics?: LiveValidationState;
