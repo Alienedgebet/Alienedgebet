@@ -505,6 +505,15 @@ const LEDGER_VERDICT_STYLE: Record<string, { label: string; tone: VerdictTone }>
   LOST: { label: "LOST", tone: "bad" },
 };
 
+// PHASE 2 — a live-only read's own styling. Deliberately muted and distinct
+// from the verdict colours: a read is an observation, not a judgement.
+const READ_STATE_STYLE: Record<string, string> = {
+  ON_TRACK: "border-sky-500/30 bg-sky-500/10 text-sky-300",
+  AT_RISK: "border-orange-500/30 bg-orange-500/10 text-orange-300",
+  DEAD: "border-slate-500/40 bg-slate-500/10 text-slate-400",
+  UNCLEAR: "border-white/15 bg-white/5 text-slate-300",
+};
+
 function LedgerVerdictChip({ verdict }: { verdict?: string | null }) {
   if (!verdict) return null;
   const style = LEDGER_VERDICT_STYLE[verdict] ?? {
@@ -1015,6 +1024,11 @@ export default function LivePage() {
   // instead of borrowing another match's score/minute/statistics.
   const activeValidation = matchedValidationMatches[0] ?? null;
 
+  // PHASE 2: the live-only read for a fixture Code 1 did not pick. Sourced from
+  // the SAME matched row as the predictions, so it can never be borrowed from
+  // another fixture — the cross-fixture leakage bug this board already had.
+  const activeLiveRead = activeValidation?.live_read ?? null;
+
   // The structured prediction list is Code 2's primary output. Older boards
   // written before the contract change carry no `predictions` array, so fall
   // back to an empty list rather than rendering a misleading empty state.
@@ -1071,6 +1085,62 @@ export default function LivePage() {
     };
   }, [activePredictions]);
 
+  // PHASE 2 item 7 — the NUMBERED BOARD LIST.
+  //
+  // The user asked: "i demand all the list of prediction should be listed out
+  // at the top as a list only with number".
+  //
+  // So this is a flat, numbered index of EVERY prediction Code 2 is carrying
+  // across ALL live matches, not just the selected one. Live-only reads are
+  // included but tagged, so a read can never be mistaken for a Code 1 pick.
+  const boardList = useMemo(() => {
+    type BoardRow = {
+      n: number;
+      fixtureId: string;
+      match: string;
+      market: string;
+      state: string;
+      kind: "pick" | "read";
+      minute: number | null;
+    };
+    const rows: Omit<BoardRow, "n">[] = [];
+
+    for (const m of board.matches) {
+      // A settled or finished fixture has no live decision left to show.
+      if (m.is_finished) continue;
+      for (const p of m.predictions ?? []) {
+        // Settled picks are filtered out above, so this cannot be SETTLED.
+        if (p.status === "SETTLED") continue;
+        rows.push({
+          fixtureId: String(m.id),
+          match: m.name,
+          market: p.label,
+          state: p.verdict ?? p.status ?? "MONITORING",
+          kind: "pick",
+          minute: p.minute ?? m.minute ?? null,
+        });
+      }
+      if (m.live_read) {
+        rows.push({
+          fixtureId: String(m.id),
+          match: m.name,
+          market: "UNDER 2.5 (live read)",
+          state: m.live_read.read,
+          kind: "read",
+          minute: m.live_read.minute ?? m.minute ?? null,
+        });
+      }
+    }
+
+    // A stable, scannable order: live reads first are NOT prioritised —
+    // ordering is by fixture then market so the list does not reshuffle
+    // unpredictably between cycles.
+    rows.sort((a, b) =>
+      a.match.localeCompare(b.match) || a.market.localeCompare(b.market)
+    );
+    return rows.map((r, i) => ({ ...r, n: i + 1 }));
+  }, [board.matches]);
+
   return (
     <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
       
@@ -1096,7 +1166,101 @@ export default function LivePage() {
         </div>
       </div>
 
-      {/* ── 2. CODE 1: PREMATCH STRATEGIC AUDIT CARDS ────────────────── */}
+      {/* ── 1b. THE NUMBERED BOARD — every prediction Code 2 carries ──── */}
+      {/* The user asked for "all the list of prediction ... listed out at the
+          top as a list only with number". This is that list: a flat, numbered
+          index across ALL live matches, not just the one selected. Live-only
+          reads (a match Code 1 did not pick) are included but tagged READ, so
+          an observation can never be mistaken for a validated prediction. */}
+      <section className="flex flex-col gap-2.5 rounded-2xl border border-white/10 bg-black/40 p-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-wider text-white">
+            <ShieldCheck className="h-4 w-4 text-emerald-400" />
+            The board — every prediction, numbered
+          </h2>
+          <div className="flex items-center gap-2 font-mono text-[10px] text-slate-400">
+            <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">
+              {boardList.filter((r) => r.kind === "pick").length} PICKS
+            </span>
+            <span className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-slate-300">
+              {boardList.filter((r) => r.kind === "read").length} READS
+            </span>
+            <span>cycle #{board.cycle || "—"}</span>
+          </div>
+        </div>
+
+        {boardList.length === 0 ? (
+          <p className="rounded-lg border border-white/5 bg-white/5 p-3 text-center font-mono text-[11px] italic text-slate-400">
+            Nothing on the board yet. Picks appear when Code 1 flags a
+            fixture; live reads appear once a match passes 30&apos;.
+          </p>
+        ) : (
+          <div className="max-h-80 overflow-y-auto">
+            <table className="w-full min-w-[540px] text-left font-mono text-[11px]">
+              <thead className="sticky top-0 bg-black/95 text-[9px] uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="w-8 py-1.5 pr-2 font-medium">#</th>
+                  <th className="py-1.5 pr-2 font-medium">Match</th>
+                  <th className="py-1.5 pr-2 font-medium">Market</th>
+                  <th className="py-1.5 pr-2 font-medium">State</th>
+                  <th className="py-1.5 font-medium">Min</th>
+                </tr>
+              </thead>
+              <tbody>
+                {boardList.map((r) => (
+                  <tr
+                    key={`${r.fixtureId}-${r.market}-${r.n}`}
+                    className="border-t border-white/5 align-top hover:bg-white/[0.03]"
+                  >
+                    <td className="py-1.5 pr-2 font-bold text-slate-500">
+                      {r.n}
+                    </td>
+                    <td className="py-1.5 pr-2 text-white">{r.match}</td>
+                    <td className="py-1.5 pr-2">
+                      <span
+                        className={cn(
+                          "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                          r.kind === "pick"
+                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                            : "border-white/15 bg-white/5 text-slate-300"
+                        )}
+                        title={
+                          r.kind === "pick"
+                            ? "Validated Code 1 prediction"
+                            : "Live-only read — no prematch pick from Code 1"
+                        }
+                      >
+                        {r.market}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <span
+                        className={cn(
+                          "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                          r.kind === "read"
+                            ? READ_STATE_STYLE[r.state] ??
+                              "border-white/15 bg-white/5 text-slate-300"
+                            : LEDGER_VERDICT_STYLE[r.state]
+                              ? "border-white/20 bg-white/5 text-slate-200"
+                              : "border-white/15 bg-white/5 text-slate-300"
+                        )}
+                      >
+                        {r.kind === "read"
+                          ? r.state.replace("_", " ")
+                          : (LEDGER_VERDICT_STYLE[r.state]?.label ?? r.state)}
+                      </span>
+                    </td>
+                    <td className="py-1.5 text-slate-400">
+                      {r.minute != null ? `${r.minute}'` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       <section className="flex flex-col gap-3">
         <div className="flex items-center justify-between border-b border-white/5 pb-2 px-1">
           <div className="flex items-center gap-2">
@@ -1268,8 +1432,9 @@ export default function LivePage() {
 
                 {activePredictions.length === 0 ? (
                   <p className="rounded-xl border border-white/5 bg-bg-elevated/30 p-4 text-center font-mono text-xs italic text-text-dim">
-                    No predictions are attached to this fixture yet. Code 2
-                    validates whatever Code 1 hands it once picks exist.
+                    {activeLiveRead
+                      ? "Code 1 attached no prediction to this fixture, so there is nothing to validate. Code 2 is still reading the match live — see below."
+                      : "No predictions are attached to this fixture yet. Code 2 validates whatever Code 1 hands it once picks exist."}
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 gap-2.5">
@@ -1279,6 +1444,37 @@ export default function LivePage() {
                         prediction={prediction}
                       />
                     ))}
+                  </div>
+                )}
+
+                {/* PHASE 2 — the live-only read, shown in its OWN block so it
+                    can never be mistaken for a validated Code 1 prediction. It
+                    is an observation from the live statistics, not a bet. */}
+                {activeLiveRead && (
+                  <div className="mt-3 rounded-xl border border-sky-500/25 bg-sky-950/20 p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-black text-sky-200">
+                        Live read — no Code 1 pick
+                      </span>
+                      <span
+                        className={cn(
+                          "rounded-md border px-2 py-0.5 font-mono text-[10px] font-black",
+                          READ_STATE_STYLE[activeLiveRead.read] ??
+                            "border-white/15 bg-white/5 text-slate-300"
+                        )}
+                      >
+                        {activeLiveRead.read.replace("_", " ")}
+                      </span>
+                    </div>
+                    <p className="font-mono text-[11px] text-slate-300">
+                      {activeLiveRead.stage_note}
+                    </p>
+                    <p className="mt-2 font-mono text-[10px] italic leading-relaxed text-slate-500">
+                      This is an observation from the live statistics only.
+                      Code 1 attached no prematch prediction to this fixture, so
+                      there is nothing to validate. It is not a bet and carries
+                      no verdict.
+                    </p>
                   </div>
                 )}
               </section>
