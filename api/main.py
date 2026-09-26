@@ -1423,6 +1423,77 @@ def get_live_prematch():
     return list(raw.values()) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
 
 
+VALIDATED_ALERTS_MAX_AGE_HOURS = 24
+VALIDATED_ALERTS_MAX_ROWS = 200
+
+
+def _parse_alert_time(value):
+    """Best-effort parse of an alert timestamp. Returns None when unusable."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _prune_validated_alerts(alert_list):
+    """
+    Drop stale and legacy rows before they are presented as CURRENT
+    confirmations.
+
+    `validated_picks.json` is append-only, so it accumulated 270 alerts going
+    back 13 days. The three rows the user quoted as "misaligned Supreme
+    Confirmations" were legacy artifacts written by the OLD gate (STATS_1/3, a
+    single engine — which the current code forbids at
+    STATS_MIN_ENGINES_FOR_PASS = 2), yet they were being displayed as live
+    results.
+
+    Pruning is deliberately at the API/read boundary rather than by rewriting
+    the file, so no historical record is destroyed. Two rules:
+      * keep only alerts newer than 24h (a match that finished yesterday is not a
+        live confirmation), capped at 200 newest-first,
+      * drop rows lacking a current-schema `combined_state`, which is exactly the
+        legacy STATS_1/3 shape.
+
+    `team`, `verdict` and `final_result` are added for display only, derived
+    from fields the row already carries. An alert never confirms anything
+    until it has an explicit verdict.
+    """
+    if not isinstance(alert_list, list):
+        return []
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=VALIDATED_ALERTS_MAX_AGE_HOURS)
+    kept = []
+    for row in alert_list:
+        if not isinstance(row, dict):
+            continue
+        # Legacy rows: no combined_state means the old single-engine gate.
+        if not row.get("combined_state"):
+            continue
+        stamp = _parse_alert_time(row.get("timestamp"))
+        if stamp is not None and stamp < cutoff:
+            continue
+        enriched = dict(row)
+        enriched.setdefault(
+            "team",
+            f"{(row.get('home_team') or '')} / {(row.get('away_team') or '')}".strip(" /")
+            or row.get("target") or "—",
+        )
+        enriched.setdefault("verdict", row.get("verdict") or row.get("combined_state"))
+        enriched.setdefault("final_result", "PENDING")
+        kept.append((stamp or datetime.min.replace(tzinfo=timezone.utc), enriched))
+
+    # Newest first, then cap. The min-timestamp fallback keeps a row with an
+    # unparseable timestamp visible rather than silently dropping it.
+    kept.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for _, row in kept[:VALIDATED_ALERTS_MAX_ROWS]]
+
+
 @app.get("/api/live/validation", tags=["Live"])
 def get_live_validation():
     alerts = _read_json(os.path.join(DATA_DIR, "validated_picks.json"), {})
@@ -1431,6 +1502,7 @@ def get_live_validation():
     alert_list = list(alerts.values()) if isinstance(alerts, dict) else alerts
     if not isinstance(alert_list, list):
         alert_list = []
+    alert_list = _prune_validated_alerts(alert_list)
     # The frontend LiveValidationBoard expects `total_live`, `cycle` and a real
     # `matches` list. Those previously defaulted to hardcoded empties because
     # the stage-2 console board was printed but never persisted; it is now

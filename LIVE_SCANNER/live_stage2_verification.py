@@ -7,6 +7,21 @@ import requests
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
+# SHARED FIXTURE-STATE CLASSIFIER — the single definition of finished / live
+# used by Stage 1, Stage 2 and the API, so no two components can disagree about
+# whether a match is finished.
+try:
+    from LIVE_SCANNER.live_state_classifier import (
+        classify_fixture, admit_to_prematch_board, parse_kickoff_utc,
+    )
+except ImportError:  # executed as a plain script from the backend root
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "LIVE_SCANNER"))
+    from live_state_classifier import (
+        classify_fixture, admit_to_prematch_board, parse_kickoff_utc,
+    )
+
 # ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
 # Mirrors live_stage1_prematch: the archiver/stages broadcast cooldown windows
 # into data/api_429_cooldown.lock; GET() paces itself through them so the
@@ -109,6 +124,19 @@ MIN_RECENT_KEY_EVENTS = 4
 # fallback keeps the engine useful if a future feed omits it too.
 BOX_STAT_CODES = ("shots-insidebox", "attacks-in-box", "touches-in-opposition-box")
 BOX_STAT_FALLBACK = "shots-total"
+
+# ── MARKET DIRECTION ───────────────────────────────────────────────────────
+# Engines 2 and 3 and the forensic engine previously read the SAME evidence
+# (shots on target, box entries, recent key events) without ever being told
+# which direction the market runs in. That is precisely how one fixture could
+# open the gate for UNDER 2.5 and OVER 2.5 at the same time. Every engine now
+# receives the direction and scores in it: an UNDER gate can no longer be
+# opened by "lots of shots on target", and GG stays direction-neutral.
+# These live up here (not beside their helper) because they are used as default
+# argument values in the engine signatures below.
+DIRECTION_OVER    = "OVER"
+DIRECTION_UNDER   = "UNDER"
+DIRECTION_NEUTRAL = "NEUTRAL"
 
 # ── VALIDATION GATE POLICY ───────────────────────────────────────────────────
 # Validators no longer return a loose boolean. Each one reports one of four
@@ -302,9 +330,22 @@ def _fixture_state_code(fixture):
 
 
 def _fixture_is_finished(fixture):
+    """
+    Delegates to the SHARED classifier so Stage 1, Stage 2 and the API cannot
+    disagree. The old local list knew only short codes (FT/AET/AP/PEN/...) and
+    missed the longer in-play strings the provider actually emits, so a match
+    finished as MATCH_ENDED or after a shootout was not recognised as finished
+    here. The local token check is kept as a fallback for the abbreviated
+    `state.state` shape.
+    """
     token = _fixture_state_code(fixture)
-    return token in {"FT", "AET", "AP", "FT_PEN", "PEN", "FINISHED", "ENDED",
-                     "FULL-TIME", "FULL TIME", "FULL_TIME"} or token.startswith("FT_")
+    if token in {"FT", "AET", "AP", "FT_PEN", "PEN", "FINISHED", "ENDED",
+                 "FULL-TIME", "FULL TIME", "FULL_TIME"} or token.startswith("FT_"):
+        return True
+    try:
+        return classify_fixture(fixture).get("is_finished", False)
+    except Exception:
+        return False
 
 
 def _fixture_is_scheduled(fixture):
@@ -367,6 +408,41 @@ def _empty_statistics():
     return {"home": side(), "away": side()}
 
 
+def _statistics_from_snapshot(std):
+    """
+    Real final box statistics for a FINISHED fixture, from the standardized FT
+    snapshot.
+
+    This is the fix for the "No live statistics for this fixture yet — pressure
+    cannot be assessed" message on completed matches. Both board entry points
+    hard-coded `_empty_statistics()` and `"predictions": []` for a finished
+    match, even though the snapshot carries real shots-on-target and corners, so
+    the completed match displayed as if it had never been played. Settlement
+    bookkeeping for finished rows stays internal to the board — only what is
+    DISPLAYED changes.
+    """
+    def num(value):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def side(prefix):
+        return {
+            # Possession and dangerous attacks are not in the FT snapshot. They
+            # stay 0 rather than being invented, and `box_available` stays
+            # False because box entries genuinely are not recorded at FT.
+            "possession":        0,
+            "shots_on_target":   num(std.get(f"{prefix}_sot")),
+            "dangerous_attacks": 0,
+            "corners":           num(std.get(f"{prefix}_corners")),
+            "box_entries":       None,
+            "box_available":     False,
+        }
+
+    return {"home": side("h"), "away": side("a")}
+
+
 def _period_label(minute):
     if minute >= 90: return "FULL TIME"
     if minute > 45:  return "SECOND HALF"
@@ -383,11 +459,19 @@ def _score_parts(display):
 
 
 def _summary_board_entry(fixture, retained_finished=False):
-    """Create a visible board row without requiring an attached prediction."""
+    """
+    Create a visible board row without requiring an attached prediction.
+
+    A FINISHED fixture that is still present in the live feed keeps its real
+    statistics here too (the same fix as _finished_snapshot_board_entry), so a
+    match never displays "no live statistics" merely because it is over. The
+    provider does send final statistics on the finished fixture, so reading them
+    is strictly better than blanking them.
+    """
     finished = _fixture_is_finished(fixture)
     scheduled = _fixture_is_scheduled(fixture)
     if finished:
-        lines = ["🏁 FINISHED RESULT RETAINED — settlement snapshot is available."]
+        lines = ["🏁 FINISHED RESULT RETAINED — final statistics and verdicts shown."]
     elif scheduled:
         lines = ["⏳ SCHEDULED — retained in the live verification universe; awaiting kickoff."]
     else:
@@ -395,6 +479,12 @@ def _summary_board_entry(fixture, retained_finished=False):
     f_id = str(fixture.get("id", ""))
     minute = _fixture_minute_for_board(fixture)
     score = _score_for_board(fixture)
+
+    if finished:
+        stats_block = _statistics_from_fixture(fixture)
+    else:
+        stats_block = _empty_statistics()
+
     return {
         "name": fixture.get("name") or str(fixture.get("id", "Unknown")),
         "id": f_id,
@@ -408,9 +498,62 @@ def _summary_board_entry(fixture, retained_finished=False):
         "is_finished": finished,
         "retained_finished": retained_finished,
         "updated_at": datetime.now().isoformat(),
-        "statistics": _empty_statistics(),
+        "statistics": stats_block,
         "predictions": [],
     }
+
+
+def _statistics_from_fixture(fixture):
+    """
+    Real statistics read straight off a fixture the provider still lists.
+
+    Used for FINISHED rows. The provider does return final statistics for a
+    completed match; the previous code ignored them and rendered zeros, which
+    is what produced the misleading "no live statistics" text.
+    """
+    # participant_id is a NUMERIC team id, never the literal "home"/"away", so
+    # the side has to be resolved through the participants meta.location. The
+    # first version of this function compared the id to "home" and therefore
+    # always produced zeros — exactly the bug it was written to fix.
+    side_of = {}
+    for participant in fixture.get("participants", []) or []:
+        if not isinstance(participant, dict):
+            continue
+        loc = safe_get(participant, "meta", "location", default="")
+        if loc in ("home", "away"):
+            side_of[str(participant.get("id"))] = loc
+
+    def num(value):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    totals = {"home": {"shots-on-target": 0, "corners": 0},
+              "away": {"shots-on-target": 0, "corners": 0}}
+    for entry in fixture.get("statistics", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        loc = side_of.get(str(entry.get("participant_id")))
+        if loc is None:
+            continue
+        code = str(safe_get(entry, "type", "code", default="") or "").lower()
+        data = entry.get("data")
+        raw = data.get("value") if isinstance(data, dict) else entry.get("value")
+        if code in ("shots-on-target", "corners"):
+            totals[loc][code] = num(raw)
+
+    def side(loc):
+        return {
+            "possession":        0,
+            "shots_on_target":   totals[loc]["shots-on-target"],
+            "dangerous_attacks": 0,
+            "corners":           totals[loc]["corners"],
+            "box_entries":       None,
+            "box_available":     False,
+        }
+
+    return {"home": side("home"), "away": side("away")}
 
 
 def GET(url, params=None):
@@ -547,7 +690,15 @@ def engine_1_rule_validator(data, pick):
 # ==============================================================================
 # ENGINE 2 — STRUCTURAL STACKER (thresholds at 50%)
 # ==============================================================================
-def engine_2_structural_stacker(data, target_loc):
+def engine_2_structural_stacker(data, target_loc, direction=DIRECTION_NEUTRAL):
+    """
+    Direction-aware. The old version judged only "lots of SOT / box entries",
+    which is OVER evidence and therefore opened the gate for UNDER too.
+
+    For a match-level UNDER market the polarity of every signal is inverted
+    before it is scored, so the same table can only ever be evidence in the
+    direction the market actually runs.
+    """
     def get_s(d, k): return int(d.get(k, 0))
 
     # Match-level markets (O2.5 / U2.5 / GG) have no single target side.
@@ -560,6 +711,16 @@ def engine_2_structural_stacker(data, target_loc):
         box_vals = [_opt_box(h), _opt_box(a)]
         if all(v is not None for v in box_vals):
             tot_box = int(box_vals[0]) + int(box_vals[1])
+            if direction == DIRECTION_UNDER:
+                # UNDER: high SOT / high box entries are evidence AGAINST it.
+                sot_ok  = tot_sot <= ENGINE1_MIN_COMBINED_SOT
+                box_ok  = tot_box <= ENGINE1_MIN_COMBINED_SOT
+                return (sot_ok or box_ok), (
+                    f"[UNDER] Combined SOT {tot_sot} ≤ {ENGINE1_MIN_COMBINED_SOT}: "
+                    f"{'✅' if sot_ok else '❌'} | "
+                    f"Combined box entries {tot_box} ≤ {ENGINE1_MIN_COMBINED_SOT}: "
+                    f"{'✅' if box_ok else '❌'}"
+                )
             sot_ok  = tot_sot > ENGINE1_MIN_COMBINED_SOT
             box_ok  = tot_box > ENGINE1_MIN_COMBINED_SOT
             return (sot_ok or box_ok), (
@@ -568,6 +729,12 @@ def engine_2_structural_stacker(data, target_loc):
             )
         # Box entries genuinely unavailable — judge on SOT alone and say so
         # rather than silently treating missing data as zero pressure.
+        if direction == DIRECTION_UNDER:
+            sot_ok = tot_sot <= ENGINE1_MIN_COMBINED_SOT
+            return sot_ok, (
+                f"[UNDER] Combined SOT {tot_sot} ≤ {ENGINE1_MIN_COMBINED_SOT}: "
+                f"{'✅' if sot_ok else '❌'} | box entries unavailable"
+            )
         sot_ok = tot_sot > ENGINE1_MIN_COMBINED_SOT
         return sot_ok, (
             f"Combined SOT {tot_sot} > {ENGINE1_MIN_COMBINED_SOT}: "
@@ -617,7 +784,13 @@ def engine_2_structural_stacker(data, target_loc):
 # ==============================================================================
 # ENGINE 3 — MOMENTUM ESCALATOR
 # ==============================================================================
-def engine_3_momentum_escalator(data, target_id):
+def engine_3_momentum_escalator(data, target_id, direction=DIRECTION_NEUTRAL):
+    """
+    Direction-aware. For an UNDER market, a burst of recent key events (corners,
+    shots on target, goals) is evidence AGAINST the under, not for it. The old
+    version counted "lots of attacking activity" as support regardless of which
+    side of 2.5 the market sat on.
+    """
     now = data['minute']
     if not target_id or now < 15:
         return False, f"Minute {now} < 15 — too early"
@@ -628,6 +801,14 @@ def engine_3_momentum_escalator(data, target_id):
             if (e.get("minute") or 0) > (now - 12):
                 if safe_get(e, "type", "code") in ["corner", "shot-on-target", "goal"]:
                     recent += 1
+
+    if direction == DIRECTION_UNDER:
+        # Escalating attacking pressure is evidence the under is in trouble.
+        passed = recent < MIN_RECENT_KEY_EVENTS
+        return passed, (
+            f"[UNDER] Recent key events in last 12 min: {recent} < "
+            f"{MIN_RECENT_KEY_EVENTS}: {'✅' if passed else '❌'}"
+        )
 
     passed = recent >= MIN_RECENT_KEY_EVENTS
     return passed, (
@@ -688,8 +869,11 @@ def old_engine_statistical_judge(ctx, pick):
     exactly one engine is reported as INSUFFICIENT_DATA rather than a pass.
     """
     e1_pass, e1_note = engine_1_rule_validator(ctx, pick)
-    e2_pass, e2_note = engine_2_structural_stacker(ctx, pick.get('target_loc'))
-    e3_pass, e3_note = engine_3_momentum_escalator(ctx, pick.get('target_id'))
+    direction = market_direction(pick.get("market") or pick.get("type"))
+    e2_pass, e2_note = engine_2_structural_stacker(
+        ctx, pick.get('target_loc'), direction)
+    e3_pass, e3_note = engine_3_momentum_escalator(
+        ctx, pick.get('target_id'), direction)
 
     passed_count = sum([bool(e1_pass), bool(e2_pass), bool(e3_pass)])
 
@@ -758,32 +942,242 @@ STATE_GLYPH = {
 }
 
 # ==============================================================================
+# MARKET DIRECTION
+# ==============================================================================
+# The constants live beside the other module configuration (see the top of this
+# file) because they are default argument values in the engine signatures.
+
+def market_direction(market):
+    """Which way does this market run? NEVER None — unknown is NEUTRAL."""
+    token = str(market or "").strip().upper()
+    if "UNDER" in token or token in {"U2.5", "U25"}:
+        return DIRECTION_UNDER
+    if "OVER" in token or token in {"O2.5", "O25"}:
+        return DIRECTION_OVER
+    # GG / GG_OVER_2.5 / TO_SCORE carry no single goal-volume direction.
+    return DIRECTION_NEUTRAL
+
+
+# ==============================================================================
+# PER-PREDICTION VERDICT LEDGER
+# ==============================================================================
+# The old board had only "status" strings (QUEUED / MONITORING / TRIGGERED /
+# STRIKE_WINDOW) and no notion of a final, honest answer. These are the
+# verdicts. UNCERTAIN is deliberately NOT a rejection: it means the evidence
+# available at the decision minute supported neither answer, and the board
+# says so rather than guessing.
+VERDICT_PRE_APPROVED  = "PRE_APPROVED"      # 30' pre-verdict, still reversible
+VERDICT_PRE_REJECTED   = "PRE_REJECTED"      # 30' pre-verdict said no
+VERDICT_APPROVED_WATCH = "APPROVED_WATCH"   # approved, may still be overruled
+VERDICT_TRIGGERED      = "TRIGGERED"        # the alert actually fired
+VERDICT_FINAL_APPROVED = "FINAL_APPROVED"   # locked final YES
+VERDICT_FINAL_REJECTED = "FINAL_REJECTED"   # locked final NO
+VERDICT_UNCERTAIN      = "UNCERTAIN"        # neither: not enough evidence
+VERDICT_WON            = "WON"
+VERDICT_LOST           = "LOST"
+
+TERMINAL_VERDICTS = frozenset({
+    VERDICT_FINAL_APPROVED, VERDICT_FINAL_REJECTED, VERDICT_UNCERTAIN,
+})
+
+# The gate minutes. 30' is a PRE-verdict only; 45' is the main verdict.
+CHECKPOINT_PRE_MINUTE = 30
+CHECKPOINT_MAIN_MINUTE = 45
+# UNDER 2.5 is locked at 45' and may NOT be extended past it — this is the
+# user's explicit rule: the 45th minute verdict is the main one, and UNDER must
+# get its final verdict at 45' whatever data is available then.
+LOCKED_AT_45_MARKETS = frozenset({"UNDER_2.5"})
+# TO_SCORE can be called any time from 30' to 90' because a team that can still
+# score can still be called. The old 60-70 cap made a 78' or 82' TO_SCORE
+# structurally incapable of triggering.
+TO_SCORE_OPEN_MINUTE  = 30
+TO_SCORE_CLOSE_MINUTE = 90
+FINAL_STRIKE_OPEN  = 60
+FINAL_STRIKE_CLOSE = 70
+
+
+def verdict_from_gate(gate_state):
+    """Map a gate state onto the ledger vocabulary for a NON-locked market."""
+    if gate_state == V_SUPPORTED:
+        return VERDICT_APPROVED_WATCH
+    if gate_state == V_CONTRADICTED:
+        return VERDICT_PRE_REJECTED
+    return VERDICT_UNCERTAIN
+
+
+def _verdict_family(verdict):
+    """
+    Collapse a verdict to the decision it actually represents.
+
+    PRE_APPROVED at 30' and FINAL_APPROVED at 45' are the SAME decision taken
+    at two different checkpoints, not two conflicting opinions. Comparing them
+    literally made every ordinary approval look like an overrule, which would
+    have made the `overruled` flag meaningless. The same applies to
+    PRE_REJECTED / FINAL_REJECTED and to UNCERTAIN at either checkpoint.
+    """
+    if verdict in (VERDICT_PRE_APPROVED, VERDICT_APPROVED_WATCH,
+                   VERDICT_FINAL_APPROVED, VERDICT_TRIGGERED):
+        return "APPROVE"
+    if verdict in (VERDICT_PRE_REJECTED, VERDICT_FINAL_REJECTED):
+        return "REJECT"
+    if verdict in (VERDICT_UNCERTAIN, VERDICT_LOST, VERDICT_WON):
+        return "UNCERTAIN"
+    return None
+
+
+def reconcile_pre_and_main(pre_verdict, main_verdict):
+    """
+    Tally the 30' pre-verdict against the 45' main verdict.
+
+    45' is the main verdict and always wins, but the comparison is recorded
+    rather than discarded: a pick that was APPROVED at 30' and REJECTED at 45'
+    is flagged `overruled` with both values kept, which is the audit trail the
+    user asked for. The comparison is made on decision families, so the same
+    decision reached at both checkpoints is not reported as a conflict.
+    Returns (authoritative_verdict, overruled_bool, note).
+    """
+    if pre_verdict is None:
+        return main_verdict, False, "No 30' pre-verdict was recorded"
+    pre_family = _verdict_family(pre_verdict)
+    main_family = _verdict_family(main_verdict)
+    if pre_family is not None and pre_family == main_family:
+        return main_verdict, False, f"30' and 45' agree ({main_family})"
+    return main_verdict, True, (
+        f"45' verdict ({main_verdict}) overrules the 30' pre-verdict "
+        f"({pre_verdict})"
+    )
+
+
+def locked_verdict_at_45(gate_state, data):
+    """
+    THE UNDER 2.5 RULE — a decision is produced at 45' every single time.
+
+    Three possible outcomes and no fourth, whatever the data looks like:
+      * FINAL_APPROVED — the UNDER read is positively supported
+      * FINAL_REJECTED — the evidence positively contradicts it
+      * UNCLEAR        — the data available at 45' genuinely cannot say
+
+    UNCLEAR is a real answer here, not a failure: at 45' a match with no shots
+    on target and no box data has produced no evidence in either direction, and
+    reporting that honestly is exactly what replaces the old behaviour of
+    leaving the pick on "Monitoring" for the rest of the match.
+    """
+    if gate_state == V_SUPPORTED:
+        return VERDICT_FINAL_APPROVED, "UNDER 2.5 supported at 45' — locked"
+    if gate_state == V_CONTRADICTED:
+        return VERDICT_FINAL_REJECTED, "UNDER 2.5 contradicted at 45' — locked"
+
+    # NEUTRAL and INSUFFICIENT_DATA both collapse to UNCLEAR, but the recorded
+    # note keeps the distinction so the audit trail stays honest.
+    total_goals = 0
+    sot = 0
+    for side in ("home", "away"):
+        try:
+            total_goals += int(data[side]["goals"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        try:
+            sot += int(data[side]["stats"].get("shots-on-target", 0) or 0)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+
+    # 3 goals already means the market is dead. That is a FACT, not evidence.
+    if total_goals >= 3:
+        return VERDICT_FINAL_REJECTED, (
+            f"UNDER 2.5 already lost at 45' ({total_goals} goals) — locked"
+        )
+    if sot == 0:
+        return VERDICT_UNCERTAIN, (
+            "UNCLEAR at 45': no shots on target recorded and no box data — "
+            "the available evidence supports neither direction"
+        )
+    return VERDICT_UNCERTAIN, (
+        f"UNCLEAR at 45': evidence incomplete (combined SOT {sot}, "
+        f"{total_goals} goals) — no verdict in either direction"
+    )
+
+# ==============================================================================
 # DONE CHECK
 # ==============================================================================
-def check_if_done(ctx, pick):
+def check_if_done(ctx, pick, is_finished=False):
+    """
+    Settlement. Returns (done, note, outcome) where outcome is one of
+    WON / LOST / "" (not yet settled).
+
+    The previous version returned (done, note) and had NO branch at all for a
+    losing UNDER, a failed GG, or a failed TO_SCORE. Those picks could never
+    settle — they simply vanished when the feed dropped them, which is exactly
+    the "neither approve nor reject" symptom. Every prematch pick now reaches a
+    terminal WON/LOST.
+    """
     h_g   = ctx["home"]["goals"]
     a_g   = ctx["away"]["goals"]
     h_c   = int(ctx["home"]["stats"].get("corners", 0))
     a_c   = int(ctx["away"]["stats"].get("corners", 0))
     ptype = str(pick.get('type', '')).upper()
     side  = pick.get('target_loc')
+    total = h_g + a_g
 
     # GG_OVER_2.5 is a compound market: 1-1 satisfies GG but does not settle
     # Over 2.5. Check the compound condition before the single-market branches.
     is_gg = "GG" in ptype
     is_over25 = "OVER_2.5" in ptype or "OVER2.5" in ptype
+    is_under25 = "UNDER_2.5" in ptype or "UNDER2.5" in ptype or "U2.5" in ptype
+
+    if is_under25:
+        # UNDER 2.5 — the market the user now locks at 45'. Settlement is
+        # independent of the validation verdict: the verdict is a judgement
+        # about the match, the settlement is the fact of the scoreline.
+        if total >= 3:
+            return True, f"UNDER 2.5 lost — {total} goals ❌", VERDICT_LOST
+        if is_finished:
+            return True, f"UNDER 2.5 won — {total} goals at FT ✅", VERDICT_WON
+        return False, "", ""
+
     if is_gg and is_over25:
-        if h_g > 0 and a_g > 0 and (h_g + a_g) >= 3:
-            return True, "GG + Over 2.5 settled ✅"
-        return False, ""
-    if is_gg and h_g > 0 and a_g > 0:
-        return True, "GG settled ✅"
+        if h_g > 0 and a_g > 0 and total >= 3:
+            return True, "GG + Over 2.5 settled ✅", VERDICT_WON
+        if is_finished:
+            return True, f"GG + Over 2.5 failed at FT ({h_g}-{a_g}) ❌", VERDICT_LOST
+        return False, "", ""
+
+    if is_gg:
+        if h_g > 0 and a_g > 0:
+            return True, "GG settled ✅", VERDICT_WON
+        # The missing GG LOSE branch. Once a side is 0-0 and the match is over,
+        # GG can never be satisfied and the pick must be marked lost.
+        if is_finished and (h_g == 0 or a_g == 0):
+            return True, f"GG failed at FT ({h_g}-{a_g}) ❌", VERDICT_LOST
+        return False, "", ""
+
     if "TO_SCORE" in ptype:
-        if side == "home" and h_g > 0:                           return True, "Home scored ✅"
-        if side == "away" and a_g > 0:                           return True, "Away scored ✅"
-    if is_over25 and (h_g + a_g) >= 3:                       return True, "Over 2.5 settled ✅"
-    if "OVER"     in ptype and "CORNER" in ptype and (h_c + a_c) >= 10: return True, "Corner over settled ✅"
-    return False, ""
+        scored = (side == "home" and h_g > 0) or (side == "away" and a_g > 0)
+        if scored:
+            return True, "Scored ✅", VERDICT_WON
+        # The missing TO_SCORE LOSE branch. At FT with the target side on 0
+        # goals the pick can never be met and must settle as lost.
+        if is_finished:
+            label = "Home" if side == "home" else "Away"
+            return True, f"{label} did not score — TO_SCORE lost ❌", VERDICT_LOST
+        return False, "", ""
+
+    if is_over25 and total >= 3:
+        return True, "Over 2.5 settled ✅", VERDICT_WON
+    if is_over25 and is_finished:
+        return True, f"Over 2.5 failed at FT ({h_g}-{a_g}) ❌", VERDICT_LOST
+
+    if "OVER" in ptype and "CORNER" in ptype:
+        if (h_c + a_c) >= 10:
+            return True, "Corner over settled ✅", VERDICT_WON
+        if is_finished:
+            return True, f"Corner over failed at FT ({h_c}+{a_c}) ❌", VERDICT_LOST
+
+    # Generic FT resolver: any market still open when the whistle goes is
+    # settled as lost rather than left hanging forever.
+    if is_finished:
+        return True, f"Resolved at FT ({h_g}-{a_g}) ❌", VERDICT_LOST
+
+    return False, "", ""
 
 # ==============================================================================
 # ════════════════════════════════════════════════════════════════════════════
@@ -870,11 +1264,17 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
         label  = f"{ptype} ({target})" if target != 'match' else ptype
         # Once a pick is settled its gate verdict is history — the settlement
         # is the answer, so the raw counters must not be shown as UNKNOWN.
+        # The canonical label is already the market name, so the U2.5/O2.5
+        # aliases are kept only for backward compatibility with old feeds.
         if ptype in ("U2.5", "O2.5", "UNDER_2.5", "OVER_2.5"):
             label = ptype
 
         # ── DONE CHECK ──────────────────────────────────────────────────────
-        done, done_reason = check_if_done(ctx, pick)
+        # ctx["is_finished"] is set once by extract_live_context from the shared
+        # state classifier, so settlement uses the SAME finished definition the
+        # board uses rather than a second, possibly disagreeing one.
+        done, done_reason, settlement_outcome = check_if_done(
+            ctx, pick, is_finished=bool(ctx.get("is_finished")))
         if done:
             if MATCH_VALIDATION_STATE[f_id].get(p_key) != "DONE":
                 MATCH_VALIDATION_STATE[f_id][p_key] = "DONE"
@@ -939,149 +1339,183 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 f"Stats {STATE_GLYPH[stats_state]}{stats_state}"
             )
 
-        # ── PHASE 1: 30-MINUTE HANDSHAKE ────────────────────────────────────
-        if 30 <= minute < 45 and p_key not in MATCH_VALIDATION_STATE[f_id]:
-            if gate_open:
-                MATCH_VALIDATION_STATE[f_id][p_key] = {"pass_30": True}
-                line = f"   🤝 [{label}] 30' HANDSHAKE PASSED — Saved to state"
-                match_summary_lines.append(line)
-                print(f"\n🤝 30-MINUTE HANDSHAKE | {name} | Min {minute}'")
-                print(f"   Pick       : {label}")
-                print(f"   Forensic   : {n_note}")
-                print(f"   Stats      : {o_note}{engine_detail}")
-                print(f"   Status     : ✅ Both engines passed — pick queued for 45' confirmation")
-            else:
-                line = f"   ⏳ [{label}] 30' check: {_state_text()}"
-                match_summary_lines.append(line)
+        # ══════════════════════════════════════════════════════════════════
+        # CHECKPOINT LEDGER — replaces the three ad-hoc phases
+        # ══════════════════════════════════════════════════════════════════
+        # WHY THIS REPLACEMENT EXISTS
+        # The old PHASE 1 wrote `pass_30` ONLY when 30 <= minute < 45, and
+        # PHASE 2 was gated on that key existing. A fixture whose first cycle
+        # sighting landed at 45' or later could therefore never enter PHASE 2,
+        # fell through to the `else` branch and printed "Monitoring" until the
+        # match died — the permanent stall. The ledger records the pre-verdict
+        # on the FIRST cycle at or past 30' wherever that happens, and flags it
+        # `late_30` when the 30-45 window was genuinely missed.
+        entry = MATCH_VALIDATION_STATE[f_id].get(p_key)
+        if not isinstance(entry, dict):
+            # A settled pick stores the string "DONE"; any other legacy shape is
+            # replaced rather than trusted, so state can never wedge a market.
+            entry = {}
+            MATCH_VALIDATION_STATE[f_id][p_key] = entry
 
-                stage, stage_note = prediction_lifecycle_step(
-                    pick, "QUEUED" if gate_open else "MONITORING",
-                    combined_state, minute, False)
-                prediction_rows.append({
-                    "key":           p_key,
-                    "label":         label,
-                    "type":          ptype,
-                    "target":        target,
-                    "status":        "QUEUED" if gate_open else "MONITORING",
-                    "stage":         stage,
-                    "stage_note":    stage_note,
-                    "signal":        combined_state,
+        def _record_checkpoint(minute_at, gate, note):
+            """Append one immutable checkpoint record (capped at 3)."""
+            cps = entry.setdefault("checkpoints", [])
+            cps.append({
+                "minute": minute_at,
+                "gate": gate,
+                "forensic": forensic_state,
+                "statistics": stats_state,
+                "combined": combined_state,
+                "note": note,
+            })
+            del cps[:-3]
+            return cps
+
+        is_locked_market = ptype in LOCKED_AT_45_MARKETS
+        pre_verdict = entry.get("verdict_30")
+        main_verdict = entry.get("verdict_45")
+        alerted = bool(entry.get("alerted"))
+
+        # ── CHECKPOINT 1 — 30' PRE-VERDICT (never final) ──────────────────
+        if minute >= CHECKPOINT_PRE_MINUTE and pre_verdict is None:
+            pre_verdict = VERDICT_PRE_APPROVED if gate_open else VERDICT_PRE_REJECTED
+            if combined_state in (V_INSUFFICIENT, V_NEUTRAL):
+                pre_verdict = VERDICT_UNCERTAIN
+            entry["verdict_30"] = pre_verdict
+            entry["verdict_30_minute"] = minute
+            # `late_30` is a permanent, honest record that the 30-45 window was
+            # missed. It is never used to skip the pre-verdict.
+            entry["late_30"] = bool(minute >= CHECKPOINT_MAIN_MINUTE)
+            _record_checkpoint(minute, combined_state,
+                               f"30' pre-verdict: {pre_verdict}")
+            match_summary_lines.append(
+                f"   🤝 [{label}] 30' PRE-VERDICT: {pre_verdict}"
+                + (" (late — window missed)" if entry["late_30"] else "")
+            )
+            print(f"\n🤝 30' PRE-VERDICT | {name} | Min {minute}' | {label}")
+            print(f"   Pre-verdict : {pre_verdict}"
+                  + (" (late)" if entry["late_30"] else ""))
+            print(f"   Forensic    : {n_note}")
+            print(f"   Stats       : {o_note}")
+
+        # ── CHECKPOINT 2 — 45' MAIN VERDICT ──────────────────────────────
+        # THE USER'S MAIN RULE: 45' is the main verdict. For UNDER 2.5 it is
+        # LOCKED and final — approved, rejected, or unclear, and it never
+        # extends beyond this minute whatever happens later.
+        if minute >= CHECKPOINT_MAIN_MINUTE and main_verdict is None:
+            if is_locked_market:
+                main_verdict, verdict_note = locked_verdict_at_45(
+                    combined_state, ctx)
+                entry["locked"] = True
+            else:
+                main_verdict = verdict_from_gate(combined_state)
+                verdict_note = f"45' main verdict: {main_verdict}"
+
+            reconciled, overruled, tally_note = reconcile_pre_and_main(
+                pre_verdict, main_verdict)
+            main_verdict = reconciled
+            entry["verdict_45"] = main_verdict
+            entry["verdict_45_minute"] = minute
+            entry["overruled"] = overruled
+            entry["final"] = bool(is_locked_market)
+            entry["verdict_note"] = verdict_note
+            _record_checkpoint(minute, combined_state,
+                               f"45' main verdict: {main_verdict} ({verdict_note})")
+
+            match_summary_lines.append(
+                f"   🎯 [{label}] 45' MAIN VERDICT: {main_verdict}"
+                f"{' [LOCKED]' if is_locked_market else ''}"
+            )
+            if overruled:
+                match_summary_lines.append(f"      ↳ {tally_note}")
+            print(f"\n🎯 45' MAIN VERDICT | {name} | Min {minute}' | {label}")
+            print(f"   Verdict  : {main_verdict} — {verdict_note}")
+            print(f"   Tally    : {tally_note}")
+
+        # ── ALERT FIRING (decoupled from the 30' handshake) ─────────────
+        # Previously `elif minute >= 45 and ...get("pass_30")` meant a pick that
+        # never passed the 30' gate could NEVER alert, even at 78'. The alert
+        # is now decided on the main verdict and the market's own open window.
+        market_open = (
+            CHECKPOINT_PRE_MINUTE <= minute <= TO_SCORE_CLOSE_MINUTE
+            if ptype == "TO_SCORE" or target != "match"
+            else minute >= CHECKPOINT_MAIN_MINUTE
+        )
+        alert_key = f"{f_id}_{p_key}_ALERT"
+        if (gate_open and market_open and minute >= CHECKPOINT_PRE_MINUTE
+                and not alerted and alert_key not in ALERT_HISTORY_CACHE
+                and ptype not in LOCKED_AT_45_MARKETS):
+            entry["alerted"] = True
+            alerted = True
+            # Capture the score at the instant the alert fires. Settlement
+            # compares against this, so it must be recorded at trigger time
+            # and never recomputed from a later cycle.
+            score_at_trigger = f"{ctx['home']['goals']}-{ctx['away']['goals']}"
+
+            # ════════════════════════════════════════════════════════════
+            # 🔥 SUPREME ALERT FIRED
+            # ════════════════════════════════════════════════════════════
+            print(f"\n{'🔥'*60}")
+            print(f"🔥 SUPREME ALERT @ {minute}' | {name}")
+            print(f"{'🔥'*60}")
+            print(f"   Pick       : {label}")
+            print(f"   Forensic   : ✅ {n_note}")
+            print(f"   Stats      : ✅ {o_note}")
+            print(f"   Engines    : {engine_detail}")
+            print(f"   Scores     : Home {ctx['home']['goals']} - {ctx['away']['goals']} Away")
+            print(f"   Time       : {datetime.now().strftime('%H:%M:%S')} UTC")
+            print(f"{'🔥'*60}\n")
+
+            ALERT_HISTORY_CACHE.add(alert_key)
+            VALIDATED_ALERTS[alert_key] = {
+                "fixture_id":        f_id,
+                "match_name":        name,
+                "prediction_type":   ptype,
+                "target":            target,
+                "forensic_note":     n_note,
+                "stats_note":        o_note,
+                "forensic_state":    forensic_state,
+                "statistics_state":  stats_state,
+                "combined_state":    combined_state,
+                "minute_triggered":  minute,
+                "scores":            score_at_trigger,
+                "score_at_trigger":  score_at_trigger,
+                "timestamp":         datetime.now().isoformat()
+            }
+
+            line = f"   🔥 [{label}] SUPREME ALERT FIRED @ {minute}' (score {score_at_trigger})"
+            match_summary_lines.append(line)
+            _notify_triggered(ctx, label, ptype, target,
+                              minute, score_at_trigger)
+
+            stage, stage_note = prediction_lifecycle_step(
+                pick, "TRIGGERED", combined_state, minute, False)
+            prediction_rows.append({
+                "key":           p_key,
+                "label":         label,
+                "type":          ptype,
+                "target":        target,
+                "status":        "TRIGGERED",
+                "stage":         stage,
+                "stage_note":    stage_note,
+                "signal":        combined_state,
                 "forensic":      forensic_state,
                 "statistics":    stats_state,
                 "stats_label":   o_note,
                 "forensic_note": n_note,
-                "triggered":     False,
+                "triggered":     True,
                 "minute":        minute,
-                "score_at_trigger": None,
+                "trigger_minute": minute,
+                "score_at_trigger": score_at_trigger,
                 "final_score":   None,
                 "settlement":    None,
             })
 
-        # ── PHASE 2: 45-MINUTE SUPREME ALERT ────────────────────────────────
-        elif minute >= 45 and MATCH_VALIDATION_STATE[f_id].get(p_key, {}).get("pass_30"):
-            alert_key = f"{f_id}_{p_key}_ALERT"
-            if gate_open and alert_key not in ALERT_HISTORY_CACHE:
-
-                # Capture the score at the instant the alert fires. Settlement
-                # compares against this, so it must be recorded at trigger time
-                # and never recomputed from a later cycle.
-                score_at_trigger = f"{ctx['home']['goals']}-{ctx['away']['goals']}"
-
-                # ════════════════════════════════════════════════════════════
-                # 🔥 SUPREME ALERT FIRED
-                # ════════════════════════════════════════════════════════════
-                print(f"\n{'🔥'*60}")
-                print(f"🔥 SUPREME ALERT @ {minute}' | {name}")
-                print(f"{'🔥'*60}")
-                print(f"   Pick       : {label}")
-                print(f"   Forensic   : ✅ {n_note}")
-                print(f"   Stats      : ✅ {o_note}")
-                print(f"   Engines    : {engine_detail}")
-                print(f"   Scores     : Home {ctx['home']['goals']} - {ctx['away']['goals']} Away")
-                print(f"   Time       : {datetime.now().strftime('%H:%M:%S')} UTC")
-                print(f"{'🔥'*60}\n")
-
-                ALERT_HISTORY_CACHE.add(alert_key)
-                VALIDATED_ALERTS[alert_key] = {
-                    "fixture_id":        f_id,
-                    "match_name":        name,
-                    "prediction_type":   ptype,
-                    "target":            target,
-                    "forensic_note":     n_note,
-                    "stats_note":        o_note,
-                    "forensic_state":    forensic_state,
-                    "statistics_state":  stats_state,
-                    "combined_state":    combined_state,
-                    "minute_triggered":  minute,
-                    "scores":            score_at_trigger,
-                    "score_at_trigger":  score_at_trigger,
-                    "timestamp":         datetime.now().isoformat()
-                }
-
-                line = f"   🔥 [{label}] SUPREME ALERT FIRED @ {minute}' (score {score_at_trigger})"
-                match_summary_lines.append(line)
-                _notify_triggered(ctx, label, ptype, target,
-                                  minute, score_at_trigger)
-
-                stage, stage_note = prediction_lifecycle_step(
-                    pick, "TRIGGERED", combined_state, minute, False)
-                prediction_rows.append({
-                    "key":           p_key,
-                    "label":         label,
-                    "type":          ptype,
-                    "target":        target,
-                    "status":        "TRIGGERED",
-                    "stage":         stage,
-                    "stage_note":    stage_note,
-                    "signal":        combined_state,
-                    "forensic":      forensic_state,
-                    "statistics":    stats_state,
-                    "stats_label":   o_note,
-                    "forensic_note": n_note,
-                    "triggered":     True,
-                    "minute":        minute,
-                    "trigger_minute": minute,
-                    "score_at_trigger": score_at_trigger,
-                    "final_score":   None,
-                    "settlement":    None,
-                })
-
-            elif alert_key in ALERT_HISTORY_CACHE:
-                match_summary_lines.append(f"   🔥 [{label}] Alert already fired — monitoring")
-            else:
-                line = f"   ⏳ [{label}] 45'+ waiting: {_state_text()}"
-                match_summary_lines.append(line)
-
-            # A pick that already fired keeps a row on the board with its
-            # trigger facts preserved, even on later cycles.
-            if not prediction_rows or prediction_rows[-1].get("key") != p_key:
-                prior = VALIDATED_ALERTS.get(alert_key, {})
-                prior_stage, prior_note = prediction_lifecycle_step(
-                    pick, "TRIGGERED" if prior else "MONITORING",
-                    combined_state, minute, False)
-                prediction_rows.append({
-                    "key":              p_key,
-                    "label":            label,
-                    "type":             ptype,
-                    "target":           target,
-                    "status":           "TRIGGERED" if prior else "MONITORING",
-                    "stage":            prior_stage,
-                    "stage_note":       prior_note,
-                    "signal":           combined_state,
-                    "forensic":         forensic_state,
-                    "statistics":       stats_state,
-                    "stats_label":      o_note,
-                    "forensic_note":    n_note,
-                    "triggered":        bool(prior),
-                    "minute":           minute,
-                    "trigger_minute":   prior.get("minute_triggered"),
-                    "score_at_trigger": prior.get("score_at_trigger") or prior.get("scores"),
-                    "final_score":      None,
-                    "settlement":       None,
-                })
-
-        # ── PHASE 3: 60-70 FINAL STRIKE WINDOW ──────────────────────────────
-        elif 60 <= minute <= 70 and pick['type'] in ["TO_SCORE", "OVER_2.5"]:
+        # ── CHECKPOINT 3 — 60-70 FINAL STRIKE WINDOW ──────────────────────
+        # UNDER 2.5 is deliberately EXCLUDED: it is LOCKED at 45' by the user's
+        # rule and must not be extended. Every other market keeps this window.
+        elif (FINAL_STRIKE_OPEN <= minute <= FINAL_STRIKE_CLOSE
+                and ptype in ("TO_SCORE", "OVER_2.5")):
             if new_ok:
                 line = f"   ⚡ [{label}] FINAL STRIKE WINDOW @ {minute}' — Gap still exploited"
                 match_summary_lines.append(line)
@@ -1111,13 +1545,21 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 "settlement":    None,
             })
 
-        # ── PRE-30 MONITORING ────────────────────────────────────────────────
+        # ── MONITORING (before 30', or no checkpoint applies) ───────────────
+        # This branch also renders the recorded verdict for markets that
+        # already HAVE one, so a locked UNDER 2.5 keeps showing its final
+        # verdict on every later cycle instead of reverting to "Monitoring".
         else:
-            state_label = "Queued for 45'" if MATCH_VALIDATION_STATE[f_id].get(p_key, {}).get("pass_30") else "Monitoring"
+            if main_verdict:
+                state_label = f"{main_verdict}"
+            elif pre_verdict:
+                state_label = f"{pre_verdict} (pre-verdict)"
+            else:
+                state_label = "Monitoring"
             line = f"   👁️  [{label}] {state_label} @ {minute}' | {_state_text()}"
             match_summary_lines.append(line)
 
-            open_status = "QUEUED" if state_label.startswith("Queued") else "WAITING"
+            open_status = "QUEUED" if gate_open else "WAITING"
             stage, stage_note = prediction_lifecycle_step(
                 pick, open_status, combined_state, minute, False)
             prediction_rows.append({
@@ -1139,6 +1581,48 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 "final_score":   None,
                 "settlement":    None,
             })
+
+        # ── LEDGER FIELDS ON EVERY ROW ───────────────────────────────────
+        # Applied to the row this cycle just appended, whatever branch built
+        # it, so verdict / verdict_minute / final / checkpoints are uniformly
+        # present for the UI and for Code 3C.
+        if prediction_rows and prediction_rows[-1].get("key") == p_key:
+            row = prediction_rows[-1]
+            # Parenthesised deliberately: mixing `or` and a conditional
+            # expression without brackets binds as
+            # `(main or pre) or (APPROVED_WATCH if gate else UNCERTAIN)`,
+            # which silently ignores the pre-verdict. This is explicit.
+            if main_verdict:
+                row["verdict"] = main_verdict
+            elif pre_verdict:
+                row["verdict"] = pre_verdict
+            elif gate_open:
+                row["verdict"] = VERDICT_APPROVED_WATCH
+            else:
+                row["verdict"] = VERDICT_UNCERTAIN
+            row["verdict_30"] = pre_verdict
+            row["verdict_45"] = main_verdict
+            row["verdict_minute"] = (entry.get("verdict_45_minute")
+                                     or entry.get("verdict_30_minute"))
+            row["verdict_note"] = entry.get("verdict_note")
+            row["final"] = bool(entry.get("final"))
+            row["locked"] = bool(entry.get("locked"))
+            row["overruled"] = bool(entry.get("overruled"))
+            row["late_30"] = bool(entry.get("late_30"))
+            row["checkpoints"] = list(entry.get("checkpoints") or [])
+            row["direction"] = market_direction(ptype)
+            if row.get("status") == "TRIGGERED" and not row.get("verdict"):
+                row["verdict"] = VERDICT_TRIGGERED
+            if entry.get("verdict_note") and not row.get("stage_note"):
+                row["stage_note"] = entry["verdict_note"]
+            # A locked market keeps its verdict on the board even when this
+            # cycle's branch wrote a generic status string.
+            if main_verdict and row.get("status") in ("QUEUED", "WAITING",
+                                                       "MONITORING"):
+                row["status"] = main_verdict
+            elif pre_verdict and row.get("status") in ("QUEUED", "WAITING",
+                                                       "MONITORING"):
+                row["status"] = pre_verdict
 
     # Collect this match's summary for the end-of-cycle board.
     # The entry is now a structured contract rather than a bag of text lines:
@@ -1300,7 +1784,14 @@ def extract_live_context(fixture):
         "home":   {"goals": scores["home"], "stats": stats["home"]},
         "away":   {"goals": scores["away"], "stats": stats["away"]},
         "impact": impact,
-        "events": fixture.get("events", [])
+        "events": fixture.get("events", []),
+        # Settlement and the board MUST agree on what "finished" means, and
+        # `_fixture_is_finished` is the single definition in this module. It is
+        # surfaced here because check_if_done() and the FT snapshot both need
+        # it; without it every LOST branch would have been unreachable.
+        "is_finished":   _fixture_is_finished(fixture),
+        "is_scheduled":  _fixture_is_scheduled(fixture),
+        "state_code":    _fixture_state_code(fixture),
     }
 
 # ==============================================================================
@@ -1343,12 +1834,50 @@ def print_cycle_board(cycle_log, total_live, total_tracked, cycle_number):
 # 📦 MAIN ENGINE EXECUTION
 # ==============================================================================
 def _finished_snapshot_board_entry(std):
-    """Render a retained standardized FT snapshot as a visible board row."""
+    """
+    Render a retained standardized FT snapshot as a visible board row.
+
+    The finished row KEEPS its real statistics and its terminal prediction
+    verdicts (confirmed with the user). A completed match now shows what
+    actually happened instead of "no live statistics ... pressure cannot be
+    assessed". The board still tracks finished rows for bookkeeping — only the
+    display changed.
+    """
     fid = str(std.get("fixture_id") or "")
     if not fid:
         return None
     minute = int(std.get("minute", 0) or 0) or 90
     score = std.get("ft_score") or "—"
+
+    # Terminal verdicts recorded for this fixture while it was live, so the
+    # completed row shows the audit trail rather than an empty list.
+    settled_rows = []
+    state_entry = MATCH_VALIDATION_STATE.get(fid, {})
+    if isinstance(state_entry, dict):
+        for p_key, entry in state_entry.items():
+            if not isinstance(entry, dict):
+                continue
+            settled_rows.append({
+                "key":           p_key,
+                "label":         p_key,
+                "status":        entry.get("verdict_45") or entry.get("verdict_30"),
+                "verdict":       entry.get("verdict_45") or entry.get("verdict_30"),
+                "verdict_30":    entry.get("verdict_30"),
+                "verdict_45":    entry.get("verdict_45"),
+                "verdict_minute": (entry.get("verdict_45_minute")
+                                   or entry.get("verdict_30_minute")),
+                "verdict_note":  entry.get("verdict_note"),
+                "final":         bool(entry.get("final")),
+                "locked":        bool(entry.get("locked")),
+                "overruled":     bool(entry.get("overruled")),
+                "late_30":       bool(entry.get("late_30")),
+                "checkpoints":   list(entry.get("checkpoints") or []),
+                "triggered":     bool(entry.get("alerted")),
+                "settlement":    None,
+                "minute":        minute,
+                "final_score":   score,
+            })
+
     return {
         "name": f"{std.get('home_team') or 'Home'} vs {std.get('away_team') or 'Away'}",
         "id": fid,
@@ -1356,14 +1885,16 @@ def _finished_snapshot_board_entry(std):
         "minute": minute,
         "score": score,
         "score_parts": _score_parts(score),
-        "lines": ["🏁 FINISHED RESULT RETAINED — settlement snapshot is available."],
+        "lines": ["🏁 FINISHED RESULT RETAINED — final statistics and verdicts shown."],
         "status": "FINISHED",
         "period": _period_label(minute),
         "is_finished": True,
         "retained_finished": True,
         "updated_at": datetime.now().isoformat(),
-        "statistics": _empty_statistics(),
-        "predictions": [],
+        # Real final box stats instead of _empty_statistics().
+        "statistics": _statistics_from_snapshot(std),
+        # The terminal verdicts instead of [].
+        "predictions": settled_rows,
     }
 
 

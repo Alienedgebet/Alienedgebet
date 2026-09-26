@@ -1027,6 +1027,22 @@ export interface LivePrematchAudit {
   picks: Array<string | { type: string; target_loc?: string }>;
   killer_rules: string[];
   combined_miss: number;
+  /**
+   * Explicit lifecycle flags written by Stage 1 via the shared state classifier
+   * (live_state_classifier.py). Present so the UI never has to re-derive a
+   * fixture's status from `status_text` — which is what previously let a
+   * finished match stay on the Code 1 board, because `isFinished` only tinted a
+   * badge while every row was still rendered.
+   */
+  state?: "LIVE" | "FINISHED" | "NOT_STARTED" | string;
+  is_live?: boolean;
+  is_finished?: boolean;
+  is_upcoming?: boolean;
+  has_lineup?: boolean;
+  has_formation?: boolean;
+  /** {team_id: formation} for both sides, present when has_formation is true. */
+  formations?: Record<string, string>;
+  admit_reason?: string;
 }
 
 /** @deprecated thin feed shape — prefer LivePrematchAudit */
