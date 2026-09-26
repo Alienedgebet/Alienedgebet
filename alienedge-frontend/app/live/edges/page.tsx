@@ -526,6 +526,95 @@ const COMPARISON_STYLE: Record<string, string> = {
   NO_BASELINE: "border-white/10 bg-white/[0.03] text-slate-500",
 };
 
+type MonitorRow = {
+  n: number;
+  market: string;
+  state: string;
+  kind: "pick" | "read";
+  comparison?: string;
+  comparisonNote?: string;
+};
+
+/**
+ * The per-match list of predictions Code 2 is monitoring and verifying.
+ * Numbered, with the 30'→45' comparison beside each state. A live-only read is
+ * tagged so it can never be mistaken for a Code 1 prematch prediction.
+ */
+function MonitorListTable({ rows }: { rows: MonitorRow[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[440px] text-left font-mono text-[11px]">
+        <thead className="text-[9px] uppercase tracking-wide text-slate-500">
+          <tr>
+            <th className="w-8 py-1 pr-2 font-medium">#</th>
+            <th className="py-1 pr-2 font-medium">Market</th>
+            <th className="py-1 pr-2 font-medium">State</th>
+            <th className="py-1 font-medium">30&apos;&rarr;45&apos;</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr
+              key={`${r.market}-${r.n}`}
+              className="border-t border-white/5 align-top"
+            >
+              <td className="py-1 pr-2 font-bold text-slate-500">{r.n}</td>
+              <td className="py-1 pr-2">
+                <span
+                  className={cn(
+                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                    r.kind === "pick"
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                      : "border-white/15 bg-white/5 text-slate-300"
+                  )}
+                  title={
+                    r.kind === "pick"
+                      ? "Code 1 prematch prediction, validated by Code 2"
+                      : "Live-only read — no prematch pick from Code 1"
+                  }
+                >
+                  {displayMarketLabel(r.market)}
+                </span>
+              </td>
+              <td className="py-1 pr-2">
+                <span
+                  className={cn(
+                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                    r.kind === "read"
+                      ? READ_STATE_STYLE[r.state] ??
+                        "border-white/15 bg-white/5 text-slate-300"
+                      : "border-white/20 bg-white/5 text-slate-200"
+                  )}
+                >
+                  {r.kind === "read"
+                    ? r.state.replace("_", " ")
+                    : (LEDGER_VERDICT_STYLE[r.state]?.label ?? r.state)}
+                </span>
+              </td>
+              <td className="py-1">
+                {r.comparison ? (
+                  <span
+                    className={cn(
+                      "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                      COMPARISON_STYLE[r.comparison] ??
+                        "border-white/15 bg-white/5 text-slate-400"
+                    )}
+                    title={r.comparisonNote}
+                  >
+                    {r.comparison.replace("_", " ")}
+                  </span>
+                ) : (
+                  <span className="text-slate-600">—</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function LedgerVerdictChip({ verdict }: { verdict?: string | null }) {
   if (!verdict) return null;
   const style = LEDGER_VERDICT_STYLE[verdict] ?? {
@@ -1097,64 +1186,43 @@ export default function LivePage() {
     };
   }, [activePredictions]);
 
-  // PHASE 2 item 7 — the NUMBERED BOARD LIST.
+  // THE PREDICTIONS CODE 2 IS MONITORING — scoped to the SELECTED match.
   //
-  // The user asked: "i demand all the list of prediction should be listed out
-  // at the top as a list only with number".
+  // This was previously a flat index across every live match, shown at the top
+  // of the page. The user rejected that: "code i dont need the board list even
+  // if its need it its should be on individusl team section or pages not in
+  // general its not convinet like that so the best mean is for code 2 to have
+  // the list of prematch prediction its want to monitor and verify at the top
+  // of its individual page".
   //
-  // So this is a flat, numbered index of EVERY prediction Code 2 is carrying
-  // across ALL live matches, not just the selected one. Live-only reads are
-  // included but tagged, so a read can never be mistaken for a Code 1 pick.
-  const boardList = useMemo(() => {
-    type BoardRow = {
-      n: number;
-      fixtureId: string;
-      match: string;
-      market: string;
-      state: string;
-      kind: "pick" | "read";
-      minute: number | null;
-      comparison?: string;
-      comparisonNote?: string;
-    };
-    const rows: Omit<BoardRow, "n">[] = [];
+  // So the list now lives on the individual match page and shows only that
+  // match's predictions. A live-only read is included but tagged, so a read
+  // can never be mistaken for a Code 1 pick.
+  const monitorList = useMemo(() => {
+    const rows: Omit<MonitorRow, "n">[] = [];
 
-    for (const m of board.matches) {
-      // A settled or finished fixture has no live decision left to show.
-      if (m.is_finished) continue;
-      for (const p of m.predictions ?? []) {
-        if (p.status === "SETTLED") continue;
-        rows.push({
-          fixtureId: String(m.id),
-          match: m.name,
-          market: p.label,
-          state: p.verdict ?? p.status ?? "MONITORING",
-          kind: "pick",
-          minute: p.minute ?? m.minute ?? null,
-          comparison: p.comparison_30_45,
-          comparisonNote: p.comparison_note,
-        });
-      }
-      if (m.live_read) {
-        rows.push({
-          fixtureId: String(m.id),
-          match: m.name,
-          market: "UNDER 2.5 (live read)",
-          state: m.live_read.read,
-          kind: "read",
-          minute: m.live_read.minute ?? m.minute ?? null,
-        });
-      }
+    for (const p of activePredictions) {
+      if (p.status === "SETTLED") continue;
+      rows.push({
+        market: p.label,
+        state: p.verdict ?? p.status ?? "MONITORING",
+        kind: "pick",
+        comparison: p.comparison_30_45,
+        comparisonNote: p.comparison_note,
+      });
     }
-
-    // A stable, scannable order: live reads first are NOT prioritised —
-    // ordering is by fixture then market so the list does not reshuffle
-    // unpredictably between cycles.
-    rows.sort((a, b) =>
-      a.match.localeCompare(b.match) || a.market.localeCompare(b.market)
-    );
+    if (activeLiveRead) {
+      rows.push({
+        market: "UNDER 2.5 (live read)",
+        state: activeLiveRead.read,
+        kind: "read",
+      });
+    }
     return rows.map((r, i) => ({ ...r, n: i + 1 }));
-  }, [board.matches]);
+  }, [activePredictions, activeLiveRead]);
+
+  const pickCount = monitorList.filter((r) => r.kind === "pick").length;
+  const readCount = monitorList.filter((r) => r.kind === "read").length;
 
   return (
     <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
@@ -1180,118 +1248,6 @@ export default function LivePage() {
           </div>
         </div>
       </div>
-
-      {/* ── 1b. THE NUMBERED BOARD — every prediction Code 2 carries ──── */}
-      {/* The user asked for "all the list of prediction ... listed out at the
-          top as a list only with number". This is that list: a flat, numbered
-          index across ALL live matches, not just the one selected. Live-only
-          reads (a match Code 1 did not pick) are included but tagged READ, so
-          an observation can never be mistaken for a validated prediction. */}
-      <section className="flex flex-col gap-2.5 rounded-2xl border border-white/10 bg-black/40 p-3.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-wider text-white">
-            <ShieldCheck className="h-4 w-4 text-emerald-400" />
-            The board — every prediction, numbered
-          </h2>
-          <div className="flex items-center gap-2 font-mono text-[10px] text-slate-400">
-            <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">
-              {boardList.filter((r) => r.kind === "pick").length} PICKS
-            </span>
-            <span className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-slate-300">
-              {boardList.filter((r) => r.kind === "read").length} READS
-            </span>
-            <span>cycle #{board.cycle || "—"}</span>
-          </div>
-        </div>
-
-        {boardList.length === 0 ? (
-          <p className="rounded-lg border border-white/5 bg-white/5 p-3 text-center font-mono text-[11px] italic text-slate-400">
-            Nothing on the board yet. Picks appear when Code 1 flags a
-            fixture; live reads appear once a match passes 30&apos;.
-          </p>
-        ) : (
-          <div className="max-h-80 overflow-y-auto">
-            <table className="w-full min-w-[640px] text-left font-mono text-[11px]">
-              <thead className="sticky top-0 bg-black/95 text-[9px] uppercase tracking-wide text-slate-500">
-                <tr>
-                  <th className="w-8 py-1.5 pr-2 font-medium">#</th>
-                  <th className="py-1.5 pr-2 font-medium">Match</th>
-                  <th className="py-1.5 pr-2 font-medium">Market</th>
-                  <th className="py-1.5 pr-2 font-medium">State</th>
-                  <th className="py-1.5 pr-2 font-medium">30&apos;&rarr;45&apos;</th>
-                  <th className="py-1.5 font-medium">Now</th>
-                </tr>
-              </thead>
-              <tbody>
-                {boardList.map((r) => (
-                  <tr
-                    key={`${r.fixtureId}-${r.market}-${r.n}`}
-                    className="border-t border-white/5 align-top hover:bg-white/[0.03]"
-                  >
-                    <td className="py-1.5 pr-2 font-bold text-slate-500">
-                      {r.n}
-                    </td>
-                    <td className="py-1.5 pr-2 text-white">{r.match}</td>
-                    <td className="py-1.5 pr-2">
-                      <span
-                        className={cn(
-                          "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                          r.kind === "pick"
-                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                            : "border-white/15 bg-white/5 text-slate-300"
-                        )}
-                        title={
-                          r.kind === "pick"
-                            ? "Validated Code 1 prediction"
-                            : "Live-only read — no prematch pick from Code 1"
-                        }
-                      >
-                        {r.market}
-                      </span>
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      <span
-                        className={cn(
-                          "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                          r.kind === "read"
-                            ? READ_STATE_STYLE[r.state] ??
-                              "border-white/15 bg-white/5 text-slate-300"
-                            : LEDGER_VERDICT_STYLE[r.state]
-                              ? "border-white/20 bg-white/5 text-slate-200"
-                              : "border-white/15 bg-white/5 text-slate-300"
-                        )}
-                      >
-                        {r.kind === "read"
-                          ? r.state.replace("_", " ")
-                          : (LEDGER_VERDICT_STYLE[r.state]?.label ?? r.state)}
-                      </span>
-                    </td>
-                    <td className="py-1.5 pr-2">
-                      {r.comparison ? (
-                        <span
-                          className={cn(
-                            "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                            COMPARISON_STYLE[r.comparison] ??
-                              "border-white/15 bg-white/5 text-slate-400"
-                          )}
-                          title={r.comparisonNote}
-                        >
-                          {r.comparison.replace("_", " ")}
-                        </span>
-                      ) : (
-                        <span className="text-slate-600">—</span>
-                      )}
-                    </td>
-                    <td className="py-1.5 text-slate-400">
-                      {r.minute != null ? `${r.minute}'` : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
 
       <section className="flex flex-col gap-3">
         <div className="flex items-center justify-between border-b border-white/5 pb-2 px-1">
@@ -1443,6 +1399,42 @@ export default function LivePage() {
                     emits a pick only when a structural condition fires, so a
                     clean match sheet produces nothing to validate.
                   </p>
+                )}
+              </section>
+
+              {/* ── THE PREDICTIONS CODE 2 IS MONITORING (this match) ────── */}
+              {/* Scoped to the individual match page, not the page as a whole.
+                  The user asked for "the list of prematch prediction its want
+                  to monitor and verify at the top of its individual page". */}
+              <section className="flex flex-col gap-2.5 rounded-2xl border border-emerald-500/20 bg-emerald-950/10 p-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-wider text-emerald-300">
+                    <ShieldCheck className="h-4 w-4" />
+                    Prematch predictions — monitored &amp; verified
+                  </h3>
+                  <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                    <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">
+                      {pickCount} PICK{pickCount === 1 ? "" : "S"}
+                    </span>
+                    {readCount > 0 && (
+                      <span className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-slate-300">
+                        {readCount} READ
+                      </span>
+                    )}
+                    <span className="text-slate-400">
+                      cycle #{board.cycle || "—"}
+                    </span>
+                  </div>
+                </div>
+
+                {monitorList.length === 0 ? (
+                  <p className="rounded-lg border border-white/5 bg-white/5 p-3 text-center font-mono text-[11px] italic text-slate-400">
+                    Code 1 attached no prediction to this fixture, and the match
+                    has not passed 30&apos; yet — so there is nothing for Code 2
+                    to monitor here.
+                  </p>
+                ) : (
+                  <MonitorListTable rows={monitorList} />
                 )}
               </section>
 
