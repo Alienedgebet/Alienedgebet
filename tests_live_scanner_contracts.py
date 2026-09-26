@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +37,7 @@ from LIVE_SCANNER import live_stage4_danger as stage4
 from LIVE_SCANNER import live_stage5_aggregator as stage5
 from LIVE_SCANNER import live_stage6_alerts as stage6
 from api import main as api_main
+from LIVE_SCANNER import live_state_classifier as classifier
 
 
 class LiveScannerContractTests(unittest.TestCase):
@@ -159,9 +161,13 @@ class LiveScannerContractTests(unittest.TestCase):
             "away": {"goals": 1, "stats": {"corners": 0}},
         }
         pick = {"type": "GG_OVER_2.5"}
-        self.assertEqual(stage2.check_if_done(base, pick), (False, ""))
+        # check_if_done now returns (done, note, outcome) so the caller can
+        # record WON / LOST as well as the human-readable settlement text.
+        self.assertEqual(stage2.check_if_done(base, pick), (False, "", ""))
         base["away"]["goals"] = 2
-        self.assertTrue(stage2.check_if_done(base, pick)[0])
+        done, note, outcome = stage2.check_if_done(base, pick)
+        self.assertTrue(done)
+        self.assertEqual(outcome, stage2.VERDICT_WON)
 
     # ── CODE 2 VALIDATION GATE ────────────────────────────────────────────
     # The forensic validator used to return True for "nothing bad happened"
@@ -606,7 +612,15 @@ class LiveScannerContractTests(unittest.TestCase):
             "LIVE_SCANNER/live_stage1_prematch.py").read_text(encoding="utf-8")
         rotation_block = source.split("match_picks =[]", 1)[1].split(
             "h_odd, o25, kp", 1)[0]
-        self.assertIn('match_picks.append({"type": "U2.5"})', rotation_block)
+        # The market is now emitted under its canonical label "UNDER 2.5" so
+        # Stage 2 can read the direction without substring guessing. The
+        # invariant this test actually protects is unchanged: the single
+        # high-rotation condition must still resolve to ONE direction.
+        self.assertTrue(
+            'match_picks.append({"type": "UNDER 2.5"' in rotation_block
+            or 'match_picks.append({"type": "U2.5"})' in rotation_block,
+            "high-rotation block must emit the UNDER market exactly once",
+        )
         # The old line emitted both directions from one condition.
         self.assertNotIn('{"type": "O2.5"}', rotation_block)
         self.assertNotIn(
@@ -765,7 +779,401 @@ class LiveScannerContractTests(unittest.TestCase):
         orchestrator.print_orchestrator_board = lambda *args: called.append("print")
         orchestrator.save_orchestrator_board = lambda *args: called.append("save")
         orchestrator.run_single_cycle()
+
+# ═══════════════════════════════════════════════════════════════════════════
+
         self.assertEqual(called, [])
+
+# VALIDATION LEDGER — the rules confirmed for this build
+#   1. UNDER 2.5 gets a FINAL verdict at 45' and is never extended.
+#   2. The 30' verdict is a PRE-verdict, tallied against the 45' main verdict.
+#   3. Code 1 keeps an un-kicked fixture while it has lineup+formation and
+#      never shows a finished one.
+#   4. Finished rows keep real statistics and terminal verdicts.
+#   5. Every pick settles WON or LOST — there is no third "vanishes" path.
+# ═══════════════════════════════════════════════════════════════════════════
+class LiveValidationLedgerTests(unittest.TestCase):
+    """Contracts for the 30'/45' ledger, the 45' UNDER lock and settlement."""
+
+    @staticmethod
+    def _ctx(home=0, away=0, h_sot=0, a_sot=0, h_corn=0, a_corn=0,
+             minute=45, finished=False):
+        def stats(sot, corn):
+            return {"shots-on-target": sot, "corners": corn,
+                    "dangerous-attacks": 0, "box": None}
+        return {
+            "id": "1", "name": "Home vs Away", "minute": minute,
+            "home": {"goals": home, "stats": stats(h_sot, h_corn)},
+            "away": {"goals": away, "stats": stats(a_sot, a_corn)},
+            "impact": {"home": {"reds": 0, "gk_risk": False, "key_sub_off": 0},
+                       "away": {"reds": 0, "gk_risk": False, "key_sub_off": 0}},
+            "events": [],
+            "is_finished": finished,
+        }
+
+    # ── RULE 1: UNDER 2.5 locks at 45', and ALWAYS decides ───────────────
+    def test_under_locks_final_approved_at_45(self):
+        verdict, _ = stage2.locked_verdict_at_45(stage2.V_SUPPORTED, self._ctx())
+        self.assertEqual(verdict, stage2.VERDICT_FINAL_APPROVED)
+
+    def test_under_locks_final_rejected_at_45(self):
+        verdict, _ = stage2.locked_verdict_at_45(stage2.V_CONTRADICTED, self._ctx())
+        self.assertEqual(verdict, stage2.VERDICT_FINAL_REJECTED)
+
+    def test_under_returns_unclear_when_data_says_nothing(self):
+        # The third allowed answer. A match with no shots on target at 45' has
+        # produced no evidence either way, and the engine must SAY that rather
+        # than stay silent until the match dies.
+        for gate in (stage2.V_NEUTRAL, stage2.V_INSUFFICIENT):
+            verdict, note = stage2.locked_verdict_at_45(gate, self._ctx())
+            self.assertEqual(verdict, stage2.VERDICT_UNCERTAIN)
+            self.assertIn("UNCLEAR", note)
+
+    def test_under_is_rejected_when_three_goals_already_scored(self):
+        verdict, note = stage2.locked_verdict_at_45(
+            stage2.V_NEUTRAL, self._ctx(home=1, away=2))
+        self.assertEqual(verdict, stage2.VERDICT_FINAL_REJECTED)
+        self.assertIn("already lost", note)
+
+    def test_under_is_the_only_locked_market(self):
+        self.assertIn("UNDER_2.5", stage2.LOCKED_AT_45_MARKETS)
+        for extendable in ("OVER_2.5", "GG", "GG_OVER_2.5", "TO_SCORE"):
+            self.assertNotIn(extendable, stage2.LOCKED_AT_45_MARKETS)
+
+    def test_locked_verdicts_are_terminal(self):
+        self.assertIn(stage2.VERDICT_FINAL_APPROVED, stage2.TERMINAL_VERDICTS)
+        self.assertIn(stage2.VERDICT_FINAL_REJECTED, stage2.TERMINAL_VERDICTS)
+        self.assertIn(stage2.VERDICT_UNCERTAIN, stage2.TERMINAL_VERDICTS)
+
+    def test_to_score_window_extends_to_ninety(self):
+        # The old 60-70 cap made a 78' or 82' TO_SCORE structurally incapable
+        # of triggering.
+        self.assertEqual(stage2.TO_SCORE_OPEN_MINUTE, 30)
+        self.assertEqual(stage2.TO_SCORE_CLOSE_MINUTE, 90)
+        self.assertGreater(stage2.TO_SCORE_CLOSE_MINUTE, 82)
+
+    # ── RULE 2: 30' pre-verdict tallied against the 45' main verdict ─────
+    def test_pre_and_main_agreeing_is_not_overruled(self):
+        verdict, overruled, note = stage2.reconcile_pre_and_main(
+            stage2.VERDICT_PRE_APPROVED, stage2.VERDICT_FINAL_APPROVED)
+        self.assertEqual(verdict, stage2.VERDICT_FINAL_APPROVED)
+        self.assertFalse(overruled)
+        self.assertIn("agree", note)
+
+    def test_45_overrules_a_different_30_pre_verdict(self):
+        verdict, overruled, note = stage2.reconcile_pre_and_main(
+            stage2.VERDICT_PRE_APPROVED, stage2.VERDICT_FINAL_REJECTED)
+        self.assertEqual(verdict, stage2.VERDICT_FINAL_REJECTED)
+        self.assertTrue(overruled)
+        self.assertIn("overrules", note)
+
+    def test_missing_pre_verdict_does_not_block_the_main_verdict(self):
+        # A fixture first seen at 45' or later must still receive its 45' verdict.
+        verdict, overruled, note = stage2.reconcile_pre_and_main(
+            None, stage2.VERDICT_FINAL_APPROVED)
+        self.assertEqual(verdict, stage2.VERDICT_FINAL_APPROVED)
+        self.assertFalse(overruled)
+        self.assertIn("No 30'", note)
+
+    # ── RULE 5: every pick settles, win AND loss ────────────────────────
+    def test_under_settles_lost_at_three_goals(self):
+        done, note, outcome = stage2.check_if_done(
+            self._ctx(home=1, away=2), {"type": "UNDER_2.5"})
+        self.assertTrue(done)
+        self.assertEqual(outcome, stage2.VERDICT_LOST)
+
+    def test_under_settles_won_at_full_time(self):
+        done, _, outcome = stage2.check_if_done(
+            self._ctx(home=1, away=1, finished=True), {"type": "UNDER_2.5"},
+            is_finished=True)
+        self.assertTrue(done)
+        self.assertEqual(outcome, stage2.VERDICT_WON)
+
+    def test_gg_settles_lost_when_a_side_never_scores(self):
+        done, _, outcome = stage2.check_if_done(
+            self._ctx(home=0, away=1, finished=True), {"type": "GG"},
+            is_finished=True)
+        self.assertTrue(done)
+        self.assertEqual(outcome, stage2.VERDICT_LOST)
+
+    def test_to_score_settles_lost_at_full_time(self):
+        done, _, outcome = stage2.check_if_done(
+            self._ctx(home=0, away=2, finished=True),
+            {"type": "TO_SCORE", "target_loc": "home"}, is_finished=True)
+        self.assertTrue(done)
+        self.assertEqual(outcome, stage2.VERDICT_LOST)
+
+    def test_over_settles_lost_at_full_time(self):
+        done, _, outcome = stage2.check_if_done(
+            self._ctx(home=1, away=1, finished=True), {"type": "OVER_2.5"},
+            is_finished=True)
+        self.assertTrue(done)
+        self.assertEqual(outcome, stage2.VERDICT_LOST)
+
+    def test_open_pick_does_not_settle_before_it_can(self):
+        done, _, outcome = stage2.check_if_done(
+            self._ctx(home=0, away=0), {"type": "UNDER_2.5"})
+        self.assertFalse(done)
+        self.assertEqual(outcome, "")
+
+    def test_legacy_u25_alias_still_settles(self):
+        done, _, outcome = stage2.check_if_done(
+            self._ctx(home=1, away=2), {"type": "U2.5"})
+        self.assertTrue(done)
+        self.assertEqual(outcome, stage2.VERDICT_LOST)
+
+    # ── Market direction: an UNDER gate cannot open on OVER evidence ─────
+    def test_market_direction_is_never_none(self):
+        self.assertEqual(stage2.market_direction("UNDER_2.5"), stage2.DIRECTION_UNDER)
+        self.assertEqual(stage2.market_direction("OVER_2.5"), stage2.DIRECTION_OVER)
+        self.assertEqual(stage2.market_direction("GG"), stage2.DIRECTION_NEUTRAL)
+        self.assertIsNotNone(stage2.market_direction("anything-else"))
+        self.assertIsNotNone(stage2.market_direction(None))
+
+    def test_engine2_inverts_its_polarity_for_under(self):
+        # Heavy pressure: OVER must pass, UNDER must fail. Before the fix the
+        # same evidence passed both directions, which is how one fixture was
+        # handed UNDER 2.5 and OVER 2.5 at once.
+        data = self._ctx(h_sot=6, a_sot=5)
+        over_pass, _ = stage2.engine_2_structural_stacker(
+            data, "match", stage2.DIRECTION_OVER)
+        under_pass, _ = stage2.engine_2_structural_stacker(
+            data, "match", stage2.DIRECTION_UNDER)
+        self.assertTrue(over_pass)
+        self.assertFalse(under_pass)
+
+    def test_engine3_inverts_its_polarity_for_under(self):
+        data = self._ctx(minute=60)
+        data["events"] = [
+            {"participant_id": 1, "minute": 55, "type": {"code": "shot-on-target"}},
+            {"participant_id": 1, "minute": 56, "type": {"code": "corner"}},
+            {"participant_id": 1, "minute": 57, "type": {"code": "goal"}},
+            {"participant_id": 1, "minute": 58, "type": {"code": "corner"}},
+            {"participant_id": 1, "minute": 59, "type": {"code": "goal"}},
+        ]
+        over_pass, _ = stage2.engine_3_momentum_escalator(
+            data, 1, stage2.DIRECTION_OVER)
+        under_pass, _ = stage2.engine_3_momentum_escalator(
+            data, 1, stage2.DIRECTION_UNDER)
+        self.assertTrue(over_pass)
+        self.assertFalse(under_pass)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CODE 1 ADMISSION + SHARED STATE CLASSIFIER
+# ═══════════════════════════════════════════════════════════════════════════
+class PrematchAdmissionTests(unittest.TestCase):
+    NOW = datetime(2026, 9, 26, 14, 0, tzinfo=timezone.utc)
+
+    @classmethod
+    def _fx(cls, state_id=1, starting_at="2026-09-26T15:00:00", lineups=True,
+            formations=True, state=None):
+        fx = {
+            "id": 9, "starting_at": starting_at, "state_id": state_id,
+            "name": "Alpha vs Beta",
+            "participants": [{"id": 10, "meta": {"location": "home"}},
+                             {"id": 20, "meta": {"location": "away"}}],
+            "lineups": ([{"type_id": 11, "player_id": 1, "team_id": 10}]
+                        if lineups else []),
+            "formations": ([{"participant_id": 10, "formation": "4-3-3"},
+                            {"participant_id": 20, "formation": "4-4-2"}]
+                           if formations else []),
+        }
+        if state:
+            fx["state"] = {"name": state}
+        return fx
+
+    def test_finished_states_are_never_live(self):
+        # 6 = after extra time, 7 = after penalties. Both used to sit INSIDE the
+        # "live" list, which kept a completed match on the board as LIVE.
+        for sid in (5, 6, 7, 19):
+            info = classifier.classify_fixture(self._fx(state_id=sid))
+            self.assertTrue(info["is_finished"], f"state_id {sid} should be finished")
+            self.assertFalse(info["is_live"], f"state_id {sid} must not be live")
+
+    def test_real_live_states_are_still_live(self):
+        for sid in (2, 3, 4, 12, 13, 21, 22):
+            self.assertTrue(classifier.classify_fixture(
+                self._fx(state_id=sid))["is_live"], f"state_id {sid}")
+
+    def test_inplay_state_string_wins_over_state_id(self):
+        self.assertTrue(classifier.classify_fixture(
+            self._fx(state_id=2, state="FT"))["is_finished"])
+        self.assertTrue(classifier.classify_fixture(
+            self._fx(state_id=2, state="INPLAY_2ND_HALF"))["is_live"])
+
+    def test_naive_kickoff_is_utc_not_machine_local(self):
+        # On this UTC+1 host the old .astimezone() call shifted every kickoff
+        # back an hour.
+        parsed = classifier.parse_kickoff_utc("2026-09-26T11:30:00")
+        self.assertEqual(parsed.hour, 11)
+        self.assertEqual(parsed.utcoffset().total_seconds(), 0)
+
+    def test_unstarted_fixture_admitted_with_lineup_and_formation(self):
+        info = classifier.admit_to_prematch_board(self._fx(state_id=1), now=self.NOW)
+        self.assertTrue(info["admitted"])
+        self.assertIn("lineups + formation confirmed", info["admit_reason"])
+
+    def test_unstarted_fixture_withheld_until_formation_arrives(self):
+        info = classifier.admit_to_prematch_board(
+            self._fx(state_id=1, formations=False), now=self.NOW)
+        self.assertFalse(info["admitted"])
+        self.assertIn("awaiting", info["admit_reason"])
+
+    def test_one_sided_formation_is_not_enough(self):
+        fx = self._fx(state_id=1)
+        fx["formations"] = [{"participant_id": 10, "formation": "4-3-3"}]
+        self.assertFalse(classifier.admit_to_prematch_board(fx, now=self.NOW)["admitted"])
+
+    def test_upcoming_fixture_has_no_time_cap(self):
+        # The user requires an un-kicked fixture to stay "for as long as it
+        # takes". The old 65-minute cap dropped it while still waiting.
+        far = self._fx(state_id=1, starting_at="2026-09-27T18:00:00")
+        info = classifier.admit_to_prematch_board(far, now=self.NOW)
+        self.assertTrue(info["is_upcoming"])
+        self.assertTrue(info["admitted"])
+
+    def test_finished_fixture_is_never_admitted(self):
+        for sid in (5, 6, 7):
+            self.assertFalse(classifier.admit_to_prematch_board(
+                self._fx(state_id=sid), now=self.NOW)["admitted"], f"state_id {sid}")
+
+    def test_abandoned_fixture_is_culled_by_the_clock(self):
+        fx = self._fx(state_id=1, starting_at="2020-01-01T10:00:00")
+        self.assertTrue(classifier.classify_fixture(fx, now=self.NOW)["is_stale"])
+        self.assertFalse(classifier.admit_to_prematch_board(fx, now=self.NOW)["admitted"])
+
+    def test_live_fixture_needs_official_lineup_only(self):
+        info = classifier.admit_to_prematch_board(
+            self._fx(state_id=2, formations=False), now=self.NOW)
+        self.assertTrue(info["admitted"])
+        self.assertIn("LIVE", info["admit_reason"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FINISHED ROWS KEEP THEIR REAL STATISTICS AND VERDICTS
+# ═══════════════════════════════════════════════════════════════════════════
+class FinishedRowRetentionTests(unittest.TestCase):
+    def test_finished_snapshot_carries_real_statistics(self):
+        std = {"fixture_id": "42", "home_team": "A", "away_team": "B",
+               "ft_score": "2-1", "h_sot": 4, "a_sot": 4,
+               "h_corners": 8, "a_corners": 1}
+        entry = stage2._finished_snapshot_board_entry(std)
+        # The old code returned _empty_statistics() here, which is what
+        # produced "No live statistics for this fixture yet".
+        self.assertEqual(entry["statistics"]["home"]["shots_on_target"], 4)
+        self.assertEqual(entry["statistics"]["away"]["shots_on_target"], 4)
+        self.assertEqual(entry["statistics"]["home"]["corners"], 8)
+        self.assertEqual(entry["statistics"]["away"]["corners"], 1)
+
+    def test_finished_snapshot_resolves_sides_by_participant_meta(self):
+        # participant_id is numeric; matching it against "home" always yielded 0.
+        fixture = {
+            "id": 7, "name": "X vs Y", "state": {"state": "FT"},
+            "participants": [{"id": 101, "meta": {"location": "home"}},
+                             {"id": 202, "meta": {"location": "away"}}],
+            "statistics": [
+                {"participant_id": 101, "type": {"code": "shots-on-target"},
+                 "data": {"value": 5}},
+                {"participant_id": 202, "type": {"code": "shots-on-target"},
+                 "data": {"value": 3}},
+                {"participant_id": 101, "type": {"code": "corners"},
+                 "data": {"value": 7}},
+            ],
+        }
+        entry = stage2._summary_board_entry(fixture)
+        self.assertTrue(entry["is_finished"])
+        self.assertEqual(entry["statistics"]["home"]["shots_on_target"], 5)
+        self.assertEqual(entry["statistics"]["away"]["shots_on_target"], 3)
+        self.assertEqual(entry["statistics"]["home"]["corners"], 7)
+
+    def test_finished_snapshot_keeps_terminal_verdicts(self):
+        fid = "777"
+        saved = dict(stage2.MATCH_VALIDATION_STATE)
+        try:
+            stage2.MATCH_VALIDATION_STATE[fid] = {
+                "UNDER_2.5:match": {
+                    "verdict_30": stage2.VERDICT_PRE_APPROVED,
+                    "verdict_45": stage2.VERDICT_FINAL_REJECTED,
+                    "verdict_45_minute": 45, "final": True, "locked": True,
+                    "overruled": True,
+                },
+            }
+            entry = stage2._finished_snapshot_board_entry(
+                {"fixture_id": fid, "ft_score": "1-2"})
+            self.assertEqual(len(entry["predictions"]), 1)
+            self.assertEqual(entry["predictions"][0]["verdict"],
+                             stage2.VERDICT_FINAL_REJECTED)
+            self.assertTrue(entry["predictions"][0]["final"])
+        finally:
+            stage2.MATCH_VALIDATION_STATE.clear()
+            stage2.MATCH_VALIDATION_STATE.update(saved)
+
+    def test_scheduled_rows_are_still_retained_for_bookkeeping(self):
+        # Pinned by the original suite: the board keeps SCHEDULED/FINISHED rows
+        # even after Code 1 stops showing them.
+        fixture = {"id": 8, "name": "P vs Q", "state": {"state": "NS"},
+                   "participants": [], "statistics": []}
+        entry = stage2._summary_board_entry(fixture)
+        self.assertEqual(entry["status"], "SCHEDULED")
+        self.assertIn("predictions", entry)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CODE 3C — ALERT PRUNING (stale + legacy rows must stop being shown)
+# ═══════════════════════════════════════════════════════════════════════════
+class AlertPruningTests(unittest.TestCase):
+    def _alert(self, fixture_id, when, **extra):
+        row = {"fixture_id": fixture_id, "match_name": f"M{fixture_id}",
+               "prediction_type": "GG", "target": "match",
+               "combined_state": "SUPPORTED", "timestamp": when}
+        row.update(extra)
+        return row
+
+    def test_recent_alert_survives_pruning(self):
+        now = datetime.now(timezone.utc).isoformat()
+        kept = api_main._prune_validated_alerts([self._alert("1", now)])
+        self.assertEqual(len(kept), 1)
+
+    def test_alert_older_than_24h_is_dropped(self):
+        old = (datetime.now(timezone.utc) - timedelta(hours=40)).isoformat()
+        kept = api_main._prune_validated_alerts([self._alert("2", old)])
+        self.assertEqual(kept, [])
+
+    def test_legacy_row_without_combined_state_is_dropped(self):
+        # The STATS_1/3 rows written by the old single-engine gate.
+        now = datetime.now(timezone.utc).isoformat()
+        legacy = {"fixture_id": "3", "match_name": "L", "stats_note": "STATS_1/3",
+                  "timestamp": now}
+        self.assertEqual(api_main._prune_validated_alerts([legacy]), [])
+
+    def test_alert_gains_team_verdict_and_final_result(self):
+        now = datetime.now(timezone.utc).isoformat()
+        kept = api_main._prune_validated_alerts(
+            [self._alert("4", now, home_team="Alpha", away_team="Beta")])
+        self.assertEqual(len(kept), 1)
+        self.assertIn("Alpha", kept[0]["team"])
+        self.assertTrue(kept[0]["verdict"])
+        self.assertEqual(kept[0]["final_result"], "PENDING")
+
+    def test_pruning_is_capped_and_newest_first(self):
+        now = datetime.now(timezone.utc)
+        rows = [
+            self._alert(str(i), (now - timedelta(minutes=i)).isoformat())
+            for i in range(250)
+        ]
+        kept = api_main._prune_validated_alerts(rows)
+        self.assertLessEqual(len(kept), 200)
+        stamps = [r["timestamp"] for r in kept]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+
+    def test_pruning_never_mutates_the_source_rows(self):
+        now = datetime.now(timezone.utc).isoformat()
+        original = self._alert("5", now)
+        snapshot = json.loads(json.dumps(original))
+        api_main._prune_validated_alerts([original])
+        self.assertEqual(original, snapshot)
+
+    def test_non_list_input_is_safe(self):
+        self.assertEqual(api_main._prune_validated_alerts(None), [])
 
 
 if __name__ == "__main__":

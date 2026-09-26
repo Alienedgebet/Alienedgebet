@@ -846,9 +846,14 @@ function PrematchAuditCard({
 export default function LivePage() {
   const [selectedAudit, setSelectedAudit] = useState<LivePrematchAudit | null>(null);
 
+  // Code 1 must keep refreshing. Without an interval the prematch panel is
+  // fetched exactly once on mount, so the board FREEZES on first paint — the
+  // other half of "it stops". A live match's audit can change every cycle
+  // (~2.5-3.5 min), so a 20s poll is well inside the useful window.
   const prematch = useApi(() => liveApi.getPrematch(), [], {
     fallback: MOCK_LIVE_PREMATCH_AUDIT,
     cacheKey: "live-edges-prematch",
+    refreshMs: 20_000,
   });
   // Code 2 must stay live while the cockpit is open. Without a refresh
   // interval the modal could show 0-0 at 24' long after the match moved on,
@@ -859,7 +864,21 @@ export default function LivePage() {
     refreshMs: selectedAudit ? 15_000 : 0,
   });
 
-  const auditRows = liveRows(asAuditList(prematch.data));
+  // Code 1 render filter — the FINAL guard against a finished match appearing.
+  //
+  // Stage 1 already refuses to admit a finished fixture, and the audit rows
+  // carry explicit `is_finished` / `state` flags, but the old card only used
+  // `isFinished` to tint a badge and rendered EVERY row regardless. Filtering
+  // here means a stale cached payload or a row written by an older build can
+  // never put a completed match back on the pre-match board.
+  const auditRows = liveRows(asAuditList(prematch.data)).filter((row) => {
+    if (row.is_finished) return false;
+    const state = (row.state ?? "").toString().toUpperCase();
+    if (state === "FINISHED") return false;
+    const status = (row.status_text ?? "").toUpperCase();
+    if (status.includes("FINISH") || /\bFT\b/.test(status)) return false;
+    return true;
+  });
   const board = boardFrom(validation.data);
   const validationRows = liveRows(board.alerts);
 
@@ -875,26 +894,31 @@ export default function LivePage() {
     };
   }, [auditRows, board.matches.length, board.total_tracked, validationRows.length]);
 
+  // Code 3C must match on fixture_id ALONE.
+  //
+  // The old filter matched on team-name SUBSTRINGS:
+  //     m.name.includes(home.team_name) || m.name.includes(away.team_name)
+  // "Sportivo Luqueño" plays in three different fixtures, so selecting
+  // "Sportivo Luqueño vs Guaraní" (19745716) also pulled in alerts belonging to
+  // "Olimpia vs Sportivo Luqueño" and "Sportivo Luqueño vs Deportivo Recoleta",
+  // and `activeValidation = matched[0]` could then bind the WRONG fixture's
+  // score, minute and statistics. Every alert carries a real fixture_id, so the
+  // substring path is removed entirely rather than merely deprioritised.
   const matchedValidationMatches = selectedAudit
     ? board.matches.filter(
-        (m) =>
-          String(m.id) === String(selectedAudit.fixture_id) ||
-          m.name.toLowerCase().includes(selectedAudit.home.team_name.toLowerCase()) ||
-          m.name.toLowerCase().includes(selectedAudit.away.team_name.toLowerCase())
+        (m) => String(m.id) === String(selectedAudit.fixture_id)
       )
     : board.matches;
 
   const matchedAlerts = selectedAudit
     ? validationRows.filter(
-        (a) =>
-          String(a.fixture_id) === String(selectedAudit.fixture_id) ||
-          a.match_name.toLowerCase().includes(selectedAudit.home.team_name.toLowerCase()) ||
-          a.match_name.toLowerCase().includes(selectedAudit.away.team_name.toLowerCase())
+        (a) => String(a.fixture_id) === String(selectedAudit.fixture_id)
       )
     : validationRows;
 
-  // Selected match live validation instance
-  const activeValidation = matchedValidationMatches[0];
+  // When no live row exists for the selected fixture we say so explicitly
+  // instead of borrowing another match's score/minute/statistics.
+  const activeValidation = matchedValidationMatches[0] ?? null;
 
   // The structured prediction list is Code 2's primary output. Older boards
   // written before the contract change carry no `predictions` array, so fall

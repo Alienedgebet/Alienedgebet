@@ -87,6 +87,21 @@ except ImportError:  # running this file directly rather than via the package
     sys.path.insert(0, BASE_DIR)
     from live_cache import note_acquisition, acquisition_failed, write_feed
 
+# SHARED FIXTURE-STATE CLASSIFIER — one canonical implementation of
+# live / finished / not-started plus the Code 1 admission rule, so Stage 1,
+# Stage 2 and the API can never disagree about a fixture's status again.
+try:
+    from LIVE_SCANNER.live_state_classifier import (
+        admit_to_prematch_board, classify_fixture, official_lineup_players,
+        parse_kickoff_utc, has_official_lineup, has_full_formation,
+    )
+except ImportError:  # executed as a plain script from the backend root
+    sys.path.insert(0, os.path.join(BASE_DIR, "LIVE_SCANNER"))
+    from live_state_classifier import (
+        admit_to_prematch_board, classify_fixture, official_lineup_players,
+        parse_kickoff_utc, has_official_lineup, has_full_formation,
+    )
+
 # ==============================================================================
 # CONFIGURATION & WORLD STANDARDS (100% UNTOUCHED)
 # ==============================================================================
@@ -514,7 +529,15 @@ def run_prematch_engine():
                 resp = GET(
                     f"/fixtures/date/{target_date}",
                     params={
-                        "include": "participants;lineups.details.type;"
+                        # `formations` and `state` are DEEPENINGS of this same
+                        # endpoint - no new SportMonks call, no extra request.
+                        # `state` supplies the authoritative in-play state
+                        # STRING (FT / AET / INPLAY_2ND_HALF ...) that the old
+                        # numeric-only check could not see, and `formations` is
+                        # what the board's "about to start" admission rule
+                        # requires alongside the official lineup.
+                        "include": "participants;state;formations;"
+                                   "lineups.details.type;"
                                    "lineups.player.position;"
                                    "lineups.player.detailedPosition",
                         "page": page,
@@ -582,22 +605,46 @@ def run_prematch_engine():
                 f_id = str(fx.get("id"))
                 if f_id in processed_fixtures: continue
                 
-                raw_start = fx['starting_at'].replace('Z', '+00:00')
-                start_dt = datetime.fromisoformat(raw_start).astimezone(timezone.utc)
-                time_diff_mins = (start_dt - now_aware).total_seconds() / 60
-                
-                state_id = fx.get('state_id')
-                is_live = state_id in[2, 3, 4, 6, 7, 12, 13, 21, 22]
-                is_upcoming = (0 <= time_diff_mins <= 65)
-
-                if not (is_live or is_upcoming): continue
-                
+                # ── SHARED STATE CLASSIFIER (single source of truth) ────────
+                # The old inline check was:
+                #     is_live = state_id in [2,3,4,6,7,12,13,21,22]
+                #     is_upcoming = (0 <= time_diff_mins <= 65)
+                #     if not (is_live or is_upcoming): continue
+                # Three defects lived in those three lines:
+                #   1. state_ids 6 (after extra time) and 7 (after penalties)
+                #      are FINISHED states and were inside the "live" list, so
+                #      a completed match stayed on the board labelled LIVE.
+                #   2. the 65-minute upcoming cap meant a fixture dropped off
+                #      the board while still waiting to kick off. Per the user
+                #      a fixture is retained for as long as it takes, so the cap
+                #      is gone - lineup+formation is the only gate now.
+                #   3. `starting_at` is naive, and .astimezone() on a naive
+                #      datetime silently reinterprets it as machine-local time.
+                #      On this UTC+1 host that shifted every kickoff back an
+                #      hour and skewed the "starts in Nm" countdown.
+                # The classifier fixes all three; nothing here re-implements
+                # the rule. The 429 feed-write guard downstream is untouched, so
+                # a rate-limit still can never wipe this feed.
+                admit = admit_to_prematch_board(fx, now=now_aware)
+                start_dt = admit.get("kickoff_utc") or now_aware
+                is_live = admit["is_live"]
                 lineups_raw = fx.get("lineups", [])
-                official_lineups =[l for l in lineups_raw if l.get('type_id') == 11]
-                if not official_lineups: continue 
+                official_lineups = official_lineup_players(fx)
+                formations = admit.get("formations") or {}
+
+                if not admit["admitted"]:
+                    if admit["is_finished"] or admit["is_stale"]:
+                        print(f"[CULL] {fx.get('name')}: {admit['admit_reason']}")
+                    else:
+                        print(f"[WAIT] {fx.get('name')}: {admit['admit_reason']}")
+                    continue
 
                 processed_fixtures.add(f_id)
-                status_text = "LIVE" if is_live else f"Starts in {int(time_diff_mins)}m"
+                if is_live:
+                    status_text = "LIVE"
+                else:
+                    mins_out = int((start_dt - now_aware).total_seconds() / 60)
+                    status_text = f"STARTS IN {mins_out}m · LINEUPS + FORMATION CONFIRMED"
                 print(f"\n{'='*120}\nMATCH: {fx['name']} | KICKOFF: {start_dt.strftime('%H:%M')} UTC ({status_text})\n{'='*120}")
                 
                 odds_data = get_fixture_odds_safe(f_id)
@@ -685,7 +732,11 @@ def run_prematch_engine():
                         # and O2.5 together made one of them unresolvable by
                         # construction.
                         print("- [PICK] UNDER 2.5: High structural rotation degrades attacking quality.")
-                        match_picks.append({"type": "U2.5"})
+                        # Canonical label. "U2.5" was the old abbreviation and
+                        # is what made UNDER unreadable downstream - Stage 2 had
+                        # to substring-match for "UNDER" and never matched, so
+                        # the market silently fell through every gate.
+                        match_picks.append({"type": "UNDER 2.5", "target_loc": "match"})
                     if h['gk_out']:
                         print(f"-[PICK] {a['name'].upper()} TO SCORE: {h['name']} Keeper Liability.")
                         match_picks.append({"type": "TO_SCORE", "target_loc": "away"})
@@ -732,6 +783,17 @@ def run_prematch_engine():
                         "fixture": fx.get('name'),
                         "kickoff_utc": start_dt.strftime('%H:%M'),
                         "status_text": status_text,
+                        # Explicit lifecycle flags so the frontend never has to
+                        # re-derive them (and never re-introduces the old
+                        # "isFinished only tints a badge, every row renders" bug).
+                        "state": admit.get("state"),
+                        "is_live": bool(is_live),
+                        "is_finished": bool(admit.get("is_finished")),
+                        "is_upcoming": bool(admit.get("is_upcoming")),
+                        "has_lineup": bool(admit.get("has_lineup")),
+                        "has_formation": bool(admit.get("has_formation")),
+                        "formations": {str(k): str(v) for k, v in (formations or {}).items()},
+                        "admit_reason": admit.get("admit_reason"),
                         "odds_home_win": odds_data['home_win'],
                         "odds_away_win": odds_data['away_win'],
                         "odds_o25": odds_data['o25'],
