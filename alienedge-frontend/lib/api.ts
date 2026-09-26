@@ -1097,6 +1097,9 @@ export type LivePredictionVerdict =
   | "UNLIKELY"
   | "VOID"
   | "UNCLEAR"
+  // The 30' checkpoint is an OBSERVATION, not a verdict.
+  | "SUPPORTING"
+  | "AGAINST"
   | "FINAL_APPROVED"
   | "FINAL_REJECTED"
   | "PRE_APPROVED"
