@@ -245,12 +245,37 @@ class LiveScannerContractTests(unittest.TestCase):
         pick = {"type": "TO_SCORE", "target_loc": "home", "target_id": "1"}
         self.assertTrue(stage2.engine_1_rule_validator(weak, pick)[0])
         self.assertFalse(stage2.engine_2_structural_stacker(weak, "home")[0])
-        self.assertFalse(stage2.engine_3_momentum_escalator(weak, "1")[0])
+        # `weak` carries no event feed, so Engine 3 abstains rather than
+        # recording a fail. Only two engines report, and one pass out of two is
+        # still inconclusive — a single engine must never carry the gate.
+        e3_pass, e3_note = stage2.engine_3_momentum_escalator(weak, "1")
+        self.assertIsNone(e3_pass)
+        self.assertIn("abstained", e3_note)
 
         state, label, _ = stage2.old_engine_statistical_judge(weak, pick)
-        self.assertEqual(label, "STATS_1/3")
+        self.assertIn("abstained", label)
         self.assertEqual(state, stage2.V_INSUFFICIENT)
         self.assertNotEqual(state, stage2.V_SUPPORTED)
+
+    def test_single_reporting_engine_never_passes_the_gate(self):
+        # Even with Engine 3 abstaining, the bar must never drop below 2 real
+        # engines. One engine voting yes is not agreement.
+        ctx = self._stage2_ctx(
+            minute=45,
+            home={"shots-on-target": 1, "dangerous-attacks": 12,
+                  "box": 0, "corners": 3},
+            away={"shots-on-target": 0, "dangerous-attacks": 2,
+                  "box": 0, "corners": 0},
+        )
+        ctx["events"] = []   # Engine 3 abstains
+        pick = {"type": "TO_SCORE", "target_loc": "home", "target_id": "1"}
+        e3_pass, _ = stage2.engine_3_momentum_escalator(ctx, "1")
+        self.assertIsNone(e3_pass)
+        state, label, detail = stage2.old_engine_statistical_judge(ctx, pick)
+        # Whichever way Engines 1 and 2 land, two reporting engines with a
+        # single pass must not reach SUPPORTED.
+        self.assertIn("abstained", label)
+        self.assertIn("need 2", detail)
 
     def test_stage2_strong_evidence_passes_the_gate(self):
         strong = self._stage2_ctx(
@@ -390,23 +415,47 @@ class LiveScannerContractTests(unittest.TestCase):
         # 72'. It must now actually evaluate both teams' recent events.
         ctx = self._stage2_ctx()
         ctx["minute"] = 45
-        # A quiet match: no recent key events, so UNDER passes.
+        # A quiet match: a real event feed with no recent key events, so the
+        # UNDER direction passes. The feed must contain at least one event —
+        # an EMPTY feed is missing data, not a quiet match (see below).
+        ctx["events"] = [{"participant_id": "1", "minute": 5,
+                          "type": {"code": "goal"}}]
         passed, note = stage2.engine_3_momentum_escalator(
             ctx, None, stage2.DIRECTION_UNDER)
         self.assertTrue(passed, note)
         self.assertNotIn("too early", note)
+        self.assertNotIn("abstained", note)
         # A busy match must fail the UNDER direction.
         ctx["events"] = [{"participant_id": "1", "minute": 40,
                           "type": {"code": "goal"}} for _ in range(6)]
         passed, note = stage2.engine_3_momentum_escalator(
             ctx, None, stage2.DIRECTION_UNDER)
         self.assertFalse(passed, note)
-        # Still honest about a genuinely early match.
+        # Still honest about a genuinely early match: it abstains rather than
+        # recording a fail, because "too early" is not a judgement.
         ctx["minute"] = 5
         passed, note = stage2.engine_3_momentum_escalator(
             ctx, None, stage2.DIRECTION_UNDER)
-        self.assertFalse(passed)
+        self.assertIsNone(passed)
         self.assertIn("too early", note)
+
+    def test_engine3_abstains_when_the_event_feed_is_empty(self):
+        # 2 of the 10 live fixtures carried NO events at all. Counting zero
+        # events on an empty feed scored a free PASS, which inflated the tally
+        # and could carry a verdict on no evidence. An absent feed must abstain.
+        ctx = self._stage2_ctx()
+        ctx["minute"] = 45
+        ctx["events"] = []
+        passed, note = stage2.engine_3_momentum_escalator(
+            ctx, None, stage2.DIRECTION_UNDER)
+        self.assertIsNone(passed)
+        self.assertIn("abstained", note)
+        # The judge must then express the tally against the engines that DID
+        # report, and must not treat the abstention as a fail.
+        pick = {"type": "UNDER 2.5", "market": "UNDER 2.5", "target_loc": "match"}
+        state, label, detail = stage2.old_engine_statistical_judge(ctx, pick)
+        self.assertIn("abstained", label)
+        self.assertIn("⏸️", detail)
 
     def test_match_level_gate_does_not_require_a_forensic_signal(self):
         # THE ROOT CAUSE. The forensic engine asks "is a team weakened?", which
@@ -1497,3 +1546,79 @@ class Code2ValidatorPhase1Tests(unittest.TestCase):
         # The 60' value is still on record for the audit trail.
         self.assertEqual(preds[0]["verdict_60"], "UNLIKELY")
         stage2.MATCH_VALIDATION_STATE.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE 2 — CODE 2 VALIDATES EVERY LIVE MATCH
+#   6. A match Code 1 did not pick is still read from its live statistics.
+#   7. The read is an OBSERVATION: own vocabulary, never a verdict, never a bet.
+# ═══════════════════════════════════════════════════════════════════════════
+class Code2ValidatesEveryMatchTests(unittest.TestCase):
+    """Code 2 must read every live match, not only the ones Code 1 picked."""
+
+    @staticmethod
+    def _ctx(home=0, away=0, h_sot=0, a_sot=0, minute=50, events=None):
+        def stats(sot):
+            return {"shots-on-target": sot, "corners": 2,
+                    "dangerous-attacks": 2, "box": None}
+        return {
+            "id": "1", "name": "A vs B", "minute": minute,
+            "home": {"goals": home, "stats": stats(h_sot)},
+            "away": {"goals": away, "stats": stats(a_sot)},
+            "impact": {"home": {"reds": 0, "gk_risk": False, "key_sub_off": 0},
+                       "away": {"reds": 0, "gk_risk": False, "key_sub_off": 0}},
+            "events": events or [],
+            "is_finished": False,
+        }
+
+    def test_read_is_skipped_before_30_minutes(self):
+        # Too little of the match to read anything.
+        self.assertIsNone(stage2.live_only_read(self._ctx(minute=10)))
+        self.assertIsNotNone(stage2.live_only_read(self._ctx(minute=31)))
+
+    def test_read_uses_only_its_own_vocabulary(self):
+        # A read must NEVER borrow the verdict words. Those belong to a
+        # validated Code 1 pick, and reusing them would make an observation
+        # indistinguishable from a real verdict.
+        for gate in (stage2.V_SUPPORTED, stage2.V_CONTRADICTED,
+                     stage2.V_NEUTRAL, stage2.V_INSUFFICIENT):
+            for goals in (0, 1, 2, 3, 6):
+                read = stage2.live_only_read(self._ctx(home=goals))
+                self.assertIsNotNone(read)
+                state, note = read
+                self.assertIn(state, (stage2.READ_ON_TRACK, stage2.READ_AT_RISK,
+                                      stage2.READ_DEAD, stage2.READ_UNCLEAR))
+                self.assertNotIn(state, (stage2.VERDICT_LIKELY,
+                                         stage2.VERDICT_UNLIKELY,
+                                         stage2.VERDICT_FINAL_REJECTED,
+                                         stage2.VERDICT_VOID))
+                self.assertIn("No prematch pick", note)
+
+    def test_three_goals_makes_the_read_dead(self):
+        state, note = stage2.live_only_read(self._ctx(home=3, away=0))
+        self.assertEqual(state, stage2.READ_DEAD)
+        self.assertIn("dead", note)
+
+    def test_read_never_writes_a_prediction(self):
+        # The read must not be capable of becoming a bet. There is no function
+        # that appends a live read to a prematch feed, and the read itself
+        # carries no verdict and no pick identity.
+        self.assertEqual(stage2.LIVE_ONLY_MARKET, "LIVE_READ")
+        self.assertEqual(stage2.LIVE_ONLY_MARKETS, ("UNDER_2.5",))
+        source = open(stage2.__file__).read()
+        # _load_pick_feeds is the ONLY reader of the prematch feeds; a live read
+        # must never be written into either of them.
+        for feed_const in ("PREDICTIONS_FILE", "INCOMING_PREDICTIONS_FILE"):
+            for line in source.splitlines():
+                if feed_const in line and "json.dump" in line:
+                    self.fail(f"live read must not be written to {feed_const}")
+
+    def test_read_maps_to_a_gate_colour_but_not_a_verdict(self):
+        self.assertEqual(stage2.combined_read_state(stage2.READ_ON_TRACK),
+                         stage2.V_SUPPORTED)
+        self.assertEqual(stage2.combined_read_state(stage2.READ_AT_RISK),
+                         stage2.V_CONTRADICTED)
+        self.assertEqual(stage2.combined_read_state(stage2.READ_DEAD),
+                         stage2.V_SETTLED)
+        self.assertEqual(stage2.combined_read_state(stage2.READ_UNCLEAR),
+                         stage2.V_INSUFFICIENT)

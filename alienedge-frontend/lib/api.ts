@@ -1176,6 +1176,36 @@ export interface LiveValidationMatch {
   updated_at?: string;
   statistics?: { home: LiveValidationSideStats; away: LiveValidationSideStats };
   predictions?: LiveValidationPrediction[];
+  /**
+   * PHASE 2 — a live-only read for a match Code 1 did NOT pick. It is an
+   * OBSERVATION from the live statistics, never a bet, and it never carries a
+   * verdict. Deliberately a separate field so it can never be rendered as if
+   * it were a validated Code 1 prediction.
+   */
+  live_read?: LiveOnlyRead;
+}
+
+/** The live-only read's own vocabulary. Never LIKELY/UNLIKELY. */
+export type LiveReadState = "ON_TRACK" | "AT_RISK" | "DEAD" | "UNCLEAR";
+
+export interface LiveOnlyRead {
+  key: string;
+  label: string;
+  type: string;
+  target: string;
+  status: "READ";
+  stage: "READ";
+  stage_note: string;
+  read: LiveReadState;
+  read_label: string;
+  /** Always false — this is what separates a read from a Code 1 pick. */
+  prematch_pick: false;
+  signal?: LiveValidationState;
+  /** Always null — a read never produces a verdict. */
+  verdict?: null;
+  stats_label?: string;
+  minute?: number;
+  triggered?: boolean;
 }
 
 /** Stage 2 full board: tracks stage 1 picks through triple-phase audit. */

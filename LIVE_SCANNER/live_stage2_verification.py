@@ -850,7 +850,10 @@ def engine_3_momentum_escalator(data, target_id, direction=DIRECTION_NEUTRAL):
     """
     now = data['minute']
     if now < 15:
-        return False, f"Minute {now} < 15 — too early"
+        # Too early to have momentum at all. This is genuine "not yet", not a
+        # judgement about the match, so the engine abstains rather than
+        # recording a FAIL that would drag the tally down.
+        return None, f"Minute {now} < 15 — too early to read momentum"
 
     # No target_id means a match-level market: both teams' momentum counts,
     # because the market is about the match total, not one side.
@@ -861,12 +864,27 @@ def engine_3_momentum_escalator(data, target_id, direction=DIRECTION_NEUTRAL):
         label = ""
 
     recent = 0
+    saw_events = False
     for e in data.get('events', []):
         if scope is not None and str(e.get("participant_id")) != scope:
             continue
+        saw_events = True
         if (e.get("minute") or 0) > (now - 12):
             if safe_get(e, "type", "code") in ["corner", "shot-on-target", "goal"]:
                 recent += 1
+
+    # HONESTY FIX. Several fixtures arrive with NO event feed at all (2 of the
+    # 10 currently live carried zero events). Counting zero events on an empty
+    # feed scored a free PASS, which inflated the engine tally and could carry
+    # a verdict on no evidence whatsoever. An absent feed is not a quiet match;
+    # it is missing data, so the engine abstains and says so. The other two
+    # engines still judge, and a genuinely quiet match — a real feed with no
+    # recent key events — still passes exactly as before.
+    if not saw_events:
+        return None, (
+            f"{label}no event feed available — Engine 3 abstained "
+            f"(missing data, not a quiet match)"
+        )
 
     if direction == DIRECTION_UNDER:
         # Escalating attacking pressure is evidence the under is in trouble.
@@ -941,23 +959,44 @@ def old_engine_statistical_judge(ctx, pick):
     e3_pass, e3_note = engine_3_momentum_escalator(
         ctx, pick.get('target_id'), direction)
 
-    passed_count = sum([bool(e1_pass), bool(e2_pass), bool(e3_pass)])
+    # Engine 3 may ABSTAIN (return None) when the fixture carries no event
+    # feed at all. An abstention is missing data, not a fail and not a pass, so
+    # it must not be counted as either. The bar is expressed against the
+    # engines that actually reported: 2 of 2 reporting engines is still a
+    # genuine majority, and 1 of 2 is genuinely inconclusive.
+    e3_abstained = e3_pass is None
+    votes = [bool(e1_pass), bool(e2_pass)]
+    if not e3_abstained:
+        votes.append(bool(e3_pass))
+    passed_count = sum(votes)
+    reported = len(votes)
 
-    if passed_count >= STATS_MIN_ENGINES_FOR_PASS:
+    # Required passes scale with how many engines actually reported, but never
+    # fall below 2 — a single engine must never carry a verdict.
+    required = min(STATS_MIN_ENGINES_FOR_PASS, reported)
+    if reported < 2:
+        state = V_INSUFFICIENT
+    elif passed_count >= required:
         state = V_SUPPORTED
     elif passed_count == STATS_PARTIAL_ENGINES:
         state = V_INSUFFICIENT
     else:
         state = V_CONTRADICTED
 
+    def _mark(passed, note):
+        if passed is None:
+            return f"⏸️ N/A  → {note}"
+        return f"{'✅ PASS' if passed else '❌ FAIL'} → {note}"
+
+    denom = f"{reported}/3" + (" (Engine 3 abstained)" if e3_abstained else "")
     detail = (
-        f"\n         Engine 1 (Rule)       : {'✅ PASS' if e1_pass else '❌ FAIL'} → {e1_note}"
-        f"\n         Engine 2 (Structure)  : {'✅ PASS' if e2_pass else '❌ FAIL'} → {e2_note}"
-        f"\n         Engine 3 (Momentum)   : {'✅ PASS' if e3_pass else '❌ FAIL'} → {e3_note}"
-        f"\n         Combined              : {passed_count}/3 engines passed"
-        f" (need {STATS_MIN_ENGINES_FOR_PASS}/3 for a standard pass)"
+        f"\n         Engine 1 (Rule)       : {_mark(e1_pass, e1_note)}"
+        f"\n         Engine 2 (Structure)  : {_mark(e2_pass, e2_note)}"
+        f"\n         Engine 3 (Momentum)   : {_mark(e3_pass, e3_note)}"
+        f"\n         Combined              : {passed_count}/{denom} engines passed"
+        f" (need {required} for a standard pass)"
     )
-    return state, f"STATS_{passed_count}/3", detail
+    return state, f"STATS_{passed_count}/{denom}", detail
 
 
 def prediction_lifecycle_step(pick, status, combined_state, minute, settled):
@@ -1098,6 +1137,55 @@ CHECKPOINT_MAIN_MINUTE = 45
 # user's explicit rule: the 45th minute verdict is the main one, and UNDER must
 # get its final verdict at 45' whatever data is available then.
 LOCKED_AT_45_MARKETS = frozenset({"UNDER_2.5"})
+
+# ── PHASE 2: CODE 2 VALIDATES EVERY LIVE MATCH ──────────────────────────────
+# The user's instruction:
+#   "i think its should give its validation to all live match the diffrence
+#    will just be one is the one code 1 give prediction and all orther matches
+#    that fail code 1 threshold should also be validated they will just be
+#    without prematch prediction from code 1 there validation will be purely
+#    from their live statistic"
+#
+# Code 2 previously only ran when Code 1 had sent at least one pick:
+#     if picks and not _fixture_is_scheduled(fx):
+# A match that failed Code 1's threshold was therefore never validated at all
+# and showed an empty board — which is why "a lot of team[s] do the same".
+#
+# A LIVE-ONLY READ is what Code 2 produces for those matches. It is:
+#   * the SAME three engines, evaluated against the same live statistics —
+#     no new mathematics, no new SportMonks calls, no new prediction engine
+#   * an OBSERVATION, never a bet. It never becomes a prematch prediction
+#   * labelled READ, never LIKELY, so it can never be mistaken for a verdict
+#     on a Code 1 pick
+LIVE_ONLY_MARKET = "LIVE_READ"
+# Only from this minute does a live-only read carry any weight; before it
+# there is not enough of the match to read.
+LIVE_ONLY_MIN_MINUTE = 30
+# The only market a live-only read ever considers. Under 2.5 is the market
+# Code 1's rotation rule produces, so a live-only read is the same question
+# asked without the prematch condition. No other market is inferred.
+LIVE_ONLY_MARKETS = ("UNDER_2.5",)
+# The read's own vocabulary. Deliberately NOT LIKELY/UNLIKELY: those words
+# belong to a validated Code 1 pick. A read states what the live picture is.
+READ_ON_TRACK = "ON_TRACK"
+READ_AT_RISK  = "AT_RISK"
+READ_DEAD     = "DEAD"
+READ_UNCLEAR  = "UNCLEAR"
+
+
+def combined_read_state(read_state):
+    """
+    Map a live-read outcome onto the board's existing state vocabulary so the
+    UI colours it consistently. A live read is NOT a validation, so it never
+    produces a verdict word — only the gate colour.
+    """
+    if read_state == READ_ON_TRACK:
+        return V_SUPPORTED
+    if read_state == READ_AT_RISK:
+        return V_CONTRADICTED
+    if read_state == READ_DEAD:
+        return V_SETTLED
+    return V_INSUFFICIENT
 # TO_SCORE can be called any time from 30' to 90' because a team that can still
 # score can still be called. The old 60-70 cap made a 78' or 82' TO_SCORE
 # structurally incapable of triggering.
@@ -1404,6 +1492,89 @@ def final_verdict_at_60(gate_state, data, ptype, stats_state=None, target=None):
     return VERDICT_UNCERTAIN, (
         f"UNCLEAR at 60': engines split 1 of 3 — {total_goals} goal(s) scored, "
         f"combined SOT {sot}"
+    )
+
+
+# ==============================================================================
+# PHASE 2 — THE LIVE-ONLY READ (Code 2 validates every live match)
+# ==============================================================================
+def live_only_read(ctx):
+    """
+    The user's requirement, in their words:
+
+      "i think its should give its validation to all live match the diffrence
+       will just be one is the one code 1 give prediction and all orther
+       matches that fail code 1 threshold should also be validated they will
+       just be without prematch prediction from code 1 there validation will
+       be purely from their live statistic"
+
+    So for a match Code 1 did NOT pick, Code 2 still reads the match from its
+    live statistics. Previously these fixtures were skipped entirely and the
+    board was empty, which is why whole fixtures looked "lost".
+
+    DELIBERATE RESTRICTIONS, because this is the riskiest part of the rebuild:
+      * It uses the SAME three engines on the SAME live statistics. No new
+        mathematics, no new SportMonks calls, no new prediction engine.
+      * It is an OBSERVATION, never a bet. It is never written to a prematch
+        feed and never becomes a prediction.
+      * It is reported with its own vocabulary — ON_TRACK / AT_RISK / DEAD /
+        UNCLEAR — and NEVER as LIKELY/UNLIKELY. Those words belong to a
+        validated Code 1 pick, and reusing them here would make a live read
+        indistinguishable from a real verdict.
+
+    Returns None when the match is too early to read, or (read, note).
+    """
+    minute = int(ctx.get("minute") or 0)
+    if minute < LIVE_ONLY_MIN_MINUTE:
+        return None
+
+    total_goals = 0
+    sot = 0
+    for side in ("home", "away"):
+        try:
+            total_goals += int(ctx[side]["goals"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        try:
+            sot += int(ctx[side]["stats"].get("shots-on-target", 0) or 0)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+
+    # The same engines, run exactly as they run for a Code 1 Under 2.5 pick.
+    synthetic_pick = {"type": "UNDER 2.5", "market": "UNDER 2.5",
+                      "target_loc": "match", "target_id": None}
+    f_state, f_note = new_engine_forensic_investigation(ctx, synthetic_pick)
+    s_state, s_label, _ = old_engine_statistical_judge(ctx, synthetic_pick)
+    direction = market_direction("UNDER_2.5")
+    combined = combine_validation_states(f_state, s_state, direction)
+
+    # Arithmetic: 3+ goals and the under is dead, whatever the engines say.
+    if total_goals >= 3:
+        return READ_DEAD, (
+            f"Live read: {total_goals} goals already — the under is "
+            f"arithmetically dead. {s_label}. No prematch pick."
+        )
+    # The engines decide, as everywhere else.
+    if s_state == V_SUPPORTED or combined == V_SUPPORTED:
+        return READ_ON_TRACK, (
+            f"Live read: engines agree {s_label} — the under is on track "
+            f"({total_goals} goal(s), combined SOT {sot}). No prematch pick."
+        )
+    if s_state == V_CONTRADICTED or combined == V_CONTRADICTED:
+        return READ_AT_RISK, (
+            f"Live read: engines read against the under {s_label} — pressure "
+            f"is building ({total_goals} goal(s), combined SOT {sot}). "
+            f"No prematch pick."
+        )
+    # Split engines: the scoreline is the tiebreak, as at 45' and 60'.
+    if total_goals <= 1:
+        return READ_ON_TRACK, (
+            f"Live read: engines split {s_label}, but only {total_goals} "
+            f"goal(s) scored (combined SOT {sot}). No prematch pick."
+        )
+    return READ_UNCLEAR, (
+        f"Live read: engines split {s_label} and 2 goals already — no further "
+        f"goal allowed (combined SOT {sot}). No prematch pick."
     )
 
 # ==============================================================================
@@ -2369,9 +2540,46 @@ def run_live_validator_once(cycle_number=1):
         picks = FEED_A.get(f_id, [])
         before = len(cycle_log)
         try:
-            if picks and not _fixture_is_scheduled(fx):
+            if not _fixture_is_scheduled(fx):
                 ctx = extract_live_context(fx)
-                process_triple_phase_audit(ctx, picks, cycle_log)
+                if picks:
+                    process_triple_phase_audit(ctx, picks, cycle_log)
+                else:
+                    # ── PHASE 2: no Code 1 pick, but Code 2 still reads it ──
+                    # Previously `if picks and ...` meant a fixture that failed
+                    # Code 1's threshold was never validated at all and showed an
+                    # empty board. The user asked for every live match to be
+                    # validated from its live statistics. The read is an
+                    # OBSERVATION, clearly labelled, never a bet.
+                    entry = _summary_board_entry(fx)
+                    try:
+                        read = live_only_read(ctx)
+                    except Exception as read_err:
+                        read = None
+                        entry["lines"].append(
+                            f"⚠️ live read unavailable: {read_err}")
+                    if read:
+                        read_state, read_note = read
+                        entry["live_read"] = {
+                            "key":          LIVE_ONLY_MARKET,
+                            "label":        "UNDER 2.5 (live read)",
+                            "type":         LIVE_ONLY_MARKET,
+                            "target":       "match",
+                            "status":       "READ",
+                            "stage":        "READ",
+                            "stage_note":   read_note,
+                            "read":         read_state,
+                            "read_label":   read_state.replace("_", " "),
+                            "prematch_pick": False,
+                            "signal":       combined_read_state(read_state),
+                            "verdict":      None,
+                            "stats_label":  read_note,
+                            "minute":       int(ctx.get("minute") or 0),
+                            "triggered":    False,
+                        }
+                        entry["lines"].append(
+                            f"📖 LIVE READ (no Code 1 pick): {read_state}")
+                    cycle_log.append(entry)
             else:
                 entry = _summary_board_entry(fx)
                 if picks:
