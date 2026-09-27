@@ -1418,6 +1418,25 @@ export interface LiveAlertPick {
   user_id?: string | null;
   rule_id?: string | null;
   rule_label?: string | null;
+  /** Which storm gate fired: developing (30-45') | sustained (45-60') | peaking (60-75'). */
+  storm_stage?: "developing" | "sustained" | "peaking" | null;
+  /** Scoreline at the exact instant the alert fired. null = not captured. */
+  score_at_trigger?: string | null;
+  score_home_trigger?: number | null;
+  score_away_trigger?: number | null;
+  /** Full-time scoreline, written once the fixture reaches FT. */
+  final_score?: string | null;
+  /** Goals scored AFTER the trigger minute. null when unverifiable. */
+  goals_after?: number | null;
+  /**
+   * Descriptive outcome, never an accuracy claim:
+   *   pending        — match still running
+   *   goal_followed  — at least one goal was scored after the alert
+   *   no_further_goal— none followed
+   *   unverifiable   — no trigger scoreline was captured for this record
+   */
+  outcome?: "pending" | "goal_followed" | "no_further_goal" | "unverifiable" | null;
+  resolved_at?: string | null;
 }
 
 /** Stage 6 cycle_matches orchestrator board row. */
@@ -2002,8 +2021,8 @@ export const liveApi = {
     api.get("/api/live/orchestrator"),
 
   /** Stage 6 — VIP + free LIVE alerts (ready_to_push / session logs). */
-  getAlerts: (): Promise<AxiosResponse<LiveAlertPick[]>> =>
-    api.get("/api/live/alerts"),
+  getAlerts: (date?: string): Promise<AxiosResponse<LiveAlertPick[]>> =>
+    api.get("/api/live/alerts", date ? { params: { date } } : undefined),
 
   getDashboard: (): Promise<AxiosResponse<LiveDashboardResult[]>> =>
     api.get("/api/live/dashboard"),

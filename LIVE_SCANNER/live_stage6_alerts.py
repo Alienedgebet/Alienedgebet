@@ -128,6 +128,47 @@ CONFIDENCE_STANDARD_THRESHOLD = 30
 PRESSURE_SHARE_THRESHOLD      = 55
 MIN_CHAOS_FOR_FUSED            = 5.0
 
+# ==============================================================================
+# THE STORM TRACK — three escalating gates instead of one
+# ==============================================================================
+# WHY THIS EXISTS
+# Code 6 alerted on only 9 fixtures over 11 days. The cause is NOT the polling
+# cadence: the scanner already cycles every ~3 minutes (115-161s of work plus a
+# 45s sleep). It is three separate constraints, and only one of them is about
+# time:
+#
+#   1. The structural test is STATIC. `h_triple` is the home squad's average
+#      pre-match "doom" rating being 2x the away squad's. It is computed from
+#      the squad cache and does not change at 60'. A team structurally broken
+#      at 40' is still broken at 75'.
+#   2. The handshake was only ever evaluated inside `30 <= minute < 45` — a
+#      15-minute window. Sixty of the match's seventy-five eligible minutes
+#      were simply never tested, even though the underlying condition holds
+#      for the whole match.
+#   3. The alert key was "{f_id}_SUPREME_45" and is in ALERT_HISTORY forever,
+#      so a fixture could fire exactly once, ever.
+#
+# The fix multiplies the SURFACE AREA, never loosens the bar. The 2x doom
+# ratio and the 50% opposing-pressure test are identical in all three gates.
+# We simply ask the same strict question at three points in the match instead
+# of one, and each gate keeps its own one-shot key so nothing can repeat.
+#
+# The late gate demands a HIGHER confidence bar, so precision rises as the
+# window widens rather than falling.
+#
+# GATE 1 IS BYTE-FOR-BYTE THE ORIGINAL CONDITION. It is not modified, relaxed
+# or reordered — a contract test pins this.
+STORM_GATES = (
+    # (key suffix, window start, window end, min confidence, stage label)
+    ("SUPREME_45", 30, 45, CONFIDENCE_STANDARD_THRESHOLD, "developing"),
+    ("SUPREME_60", 45, 60, CONFIDENCE_STANDARD_THRESHOLD, "sustained"),
+    ("SUPREME_75", 60, 75, CONFIDENCE_PREMIUM_THRESHOLD,  "peaking"),
+)
+
+# Per-fixture storm progression, updated every cycle but NEVER alertable.
+# It exists so the UI can show a storm building before any alert has fired.
+STORM_STATE = {}
+
 # GLOBAL STATE
 SQUAD_VAULT        = {}
 LIVE_METRICS_VAULT = {}
@@ -645,6 +686,9 @@ class SupremeOrchestrator:
             return None
 
         self.update_market_settlement(f_id, fx)
+        # The scoreline at this instant, captured once and handed to
+        # fire_alert() so every alert this cycle is anchored to real state.
+        current_score = self.score_from_fixture(fx)
         h_s, a_s = self.extract_stats(fx)
         intel = self.Brain.analyze_match_state(
             f_id, h_s, a_s, minute, fx.get("events", [])
@@ -683,17 +727,31 @@ class SupremeOrchestrator:
                     user_id=ua.get("user_id"),
                     rule_id=ua.get("rule_id"),
                     rule_label=ua.get("rule_label"),
+                    score=current_score,
                 )
                 ALERT_HISTORY.add(alert_id)
                 fired_this.append(ua)
             elif tier == "📊 MONITOR":
                 fired_this.append(ua)
 
-        self.process_ai_gates(f_id, fixture_name, minute, intel, structural, pre)
+        self.update_storm_state(f_id, minute, intel, structural)
+        self.process_ai_gates(f_id, fixture_name, minute, intel, structural,
+                              pre, score=current_score)
+        # Storm progression is surfaced on the board so the UI can show a
+        # storm building BEFORE any alert has fired. Read-only: the tracker
+        # can never raise an alert.
+        storm = STORM_STATE.get(f_id)
         return {
             "name": fixture_name,
             "id": f_id,
             "minute": minute,
+            "storm": ({
+                "stage": storm.get("stage"),
+                "first_seen": storm.get("first_seen"),
+                "last_seen": storm.get("last_seen"),
+                "confidence": storm.get("confidence"),
+                "chaos": storm.get("chaos"),
+            } if storm else None),
             "conf": intel["match"]["confidence_score"],
             "h_pressure": intel["match"]["h_pressure_share"],
             "a_pressure": intel["match"]["a_pressure_share"],
@@ -725,8 +783,29 @@ class SupremeOrchestrator:
             if not live_data:
                 logging.warning("Stage 6 live feed returned no fixtures; preserving previous board")
                 return
+            # Request squads for the LIVE fixtures too. Without this, a match
+            # absent from the prematch report could never be structurally
+            # evaluated, and the storm gates could never fire on it.
+            # Isolated for the same reason the result resolver is: a squad
+            # cache problem must never cost us the cycle board.
+            try:
+                self.maintenance_thread({}, live_data)
+            except Exception as squad_err:
+                logging.warning(
+                    "Live squad backfill skipped: %s", squad_err)
             live_ids = {str(fx.get("id")) for fx in live_data if isinstance(fx, dict)}
             self.cleanup_stale_memory(live_ids)
+            # Settle any alert whose fixture has now finished, so the page can
+            # show the final score against the score at the moment it fired.
+            # Runs BEFORE the per-fixture pass and is fully isolated: a failure
+            # here must never stop live analysis.
+            try:
+                self.resolve_alert_results(
+                    {str(fx.get("id")): fx for fx in live_data
+                     if isinstance(fx, dict)}
+                )
+            except Exception as exc:
+                logging.warning("Alert result resolution skipped: %s", exc)
             for fx in live_data:
                 if not isinstance(fx, dict):
                     continue
@@ -900,9 +979,25 @@ class SupremeOrchestrator:
 
     # ── AI GATES ─────────────────────────────────────────────────────────
     def process_ai_gates(self, f_id, fixture_name,
-                          minute, intel, struct, pre):
+                          minute, intel, struct, pre, score=None):
+        """
+        The storm track: one handshake observation plus three escalating gates.
+
+        GATE 1 IS THE ORIGINAL LOGIC, UNCHANGED. The `30 <= minute < 45`
+        handshake and the `minute >= 45` firing condition below are exactly
+        what shipped before the storm track existed. Gates 2 and 3 are purely
+        additive siblings: same 2x doom test, same 50% opposing-pressure test,
+        a different time window, a stricter confidence bar, and their own
+        one-shot alert key.
+
+        Gates 2 and 3 deliberately do NOT require VALID_30. A storm can start
+        after 45' — that is the whole point of widening the window — so
+        requiring the original handshake would make the new gates
+        unreachable in exactly the cases they exist to catch.
+        """
         conf = intel['match']['confidence_score']
 
+        # ── THE ORIGINAL HANDSHAKE, UNTOUCHED ──────────────────────────
         if 30 <= minute < 45 and f_id not in VALIDATION_STATE:
             if ((struct.get('h_triple') and
                  intel['match']['a_pressure_share'] > 50) or
@@ -914,6 +1009,7 @@ class SupremeOrchestrator:
                     f"Synchronized (Conf:{conf}%)"
                 )
 
+        # ── THE ORIGINAL FIRING CONDITION, UNTOUCHED ───────────────────
         if (minute >= 45 and
                 VALIDATION_STATE.get(f_id) == "VALID_30"):
             a_key = f"{f_id}_SUPREME_45"
@@ -929,14 +1025,197 @@ class SupremeOrchestrator:
                     f"A-xG:{intel['away']['live_xg']}"
                 )
                 self.fire_alert(
-                    f_id, fixture_name, tier, msg, conf, minute
+                    f_id, fixture_name, tier, msg, conf, minute,
+                    storm_stage="developing", score=score,
                 )
                 ALERT_HISTORY.add(a_key)
+
+        # ── GATES 2 & 3: the storm persists, so re-ask the same question ──
+        # Identical structural test to the handshake. Only the window and the
+        # confidence bar change, and the bar rises with the window so a late
+        # call has to be a stronger one.
+        structural_break = (
+            (struct.get('h_triple') and
+             intel['match']['a_pressure_share'] > 50) or
+            (struct.get('a_triple') and
+             intel['match']['h_pressure_share'] > 50)
+        )
+        for key_suffix, win_start, win_end, min_conf, stage in STORM_GATES:
+            if key_suffix == "SUPREME_45":
+                continue                      # gate 1 is handled above
+            if not (win_start <= minute <= win_end):
+                continue
+            if not structural_break:
+                continue
+            a_key = f"{f_id}_{key_suffix}"
+            if a_key in ALERT_HISTORY or conf < min_conf:
+                continue
+            tier = ("🔥 PREMIUM"
+                    if conf >= CONFIDENCE_PREMIUM_THRESHOLD
+                    else "✅ STANDARD")
+            label = f"{win_start}'-{win_end}'"
+            msg = (
+                f"{fixture_name} — Storm {stage}. "
+                f"Chaos:{intel['match']['chaos_index']:.1f} | "
+                f"H-xG:{intel['home']['live_xg']} "
+                f"A-xG:{intel['away']['live_xg']} | "
+                f"{label} window"
+            )
+            self.fire_alert(
+                f_id, fixture_name, tier, msg, conf, minute,
+                storm_stage=stage, score=score,
+            )
+            ALERT_HISTORY.add(a_key)
+            logging.info(
+                f"[Storm {stage}] {fixture_name} @ {minute}' "
+                f"(Conf:{conf}%) key={a_key}"
+            )
+
+    def update_storm_state(self, f_id, minute, intel, struct):
+        """
+        Track how far a storm has progressed. NEVER alertable.
+
+        This exists purely so the UI can show a storm building before any
+        alert has fired. It deliberately cannot raise an alert: adding a
+        notification path here would let the page emit signals that never
+        passed the gate confidence bars.
+        """
+        structural_break = bool(
+            (struct.get('h_triple') and
+             intel['match']['a_pressure_share'] > 50) or
+            (struct.get('a_triple') and
+             intel['match']['h_pressure_share'] > 50)
+        )
+        if not structural_break:
+            return
+        entry = STORM_STATE.setdefault(
+            f_id, {"first_seen": minute, "stage": "developing"}
+        )
+        if minute < entry.get("first_seen", minute):
+            entry["first_seen"] = minute
+        if minute >= 60:
+            entry["stage"] = "peaking"
+        elif minute >= 45:
+            entry["stage"] = "sustained"
+        else:
+            entry["stage"] = "developing"
+        entry["last_seen"] = minute
+        entry["confidence"] = intel["match"]["confidence_score"]
+        entry["chaos"] = intel["match"]["chaos_index"]
+
+    # ── ALERT RESULT RESOLVER ─────────────────────────────────────────────
+    @staticmethod
+    def fixture_is_finished(fx):
+        """
+        Is this provider fixture finished?
+
+        Delegates to the SHARED classifier (live_state_classifier) rather than
+        keeping a private state list, so an alert cannot be marked settled
+        under a different definition of "finished" from the one Stage 1,
+        Stage 2 and the API use. A disagreement here would settle alerts at
+        the wrong moment.
+        """
+        try:
+            from LIVE_SCANNER.live_state_classifier import classify_fixture
+            return bool(classify_fixture(fx).get("is_finished", False))
+        except Exception:
+            return False
+
+    def resolve_alert_results(self, live_by_id):
+        """
+        Backfill `final_score` and the outcome tag once a fixture is finished.
+
+        An alert is a claim about a moment. Without the final scoreline there
+        is no way to check it afterwards, which is why the page previously
+        showed alerts as an unfalsifiable list. This runs each cycle over any
+        alert still marked `pending` and settles it when the fixture is done.
+
+        `goals_after` is the number of goals scored AFTER the trigger minute —
+        that is the question the page actually answers. It is deliberately
+        descriptive: `goal_followed` / `no_further_goal` state a fact about
+        the scoreline and make no claim about the engine's accuracy.
+
+        The alert log is append-only JSONL, so resolution is achieved by
+        rewriting the file with settled fields merged in. That is safe because
+        the merge only ever fills fields that are still null/pending, so an
+        already-settled alert is never rewritten.
+        """
+        if not os.path.exists(OUTPUT_ALERTS_FILE):
+            return 0
+        with alert_lock:
+            try:
+                with open(OUTPUT_ALERTS_FILE, "r", encoding="utf-8") as f:
+                    records = []
+                    for line in f:
+                        line = line.strip()
+                        if not line or line == "[]":
+                            continue
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            continue
+            except Exception as e:
+                logging.error(f"Alert Resolve Read Failed: {e}")
+                return 0
+
+            settled = 0
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("outcome") not in (None, "pending"):
+                    continue
+                fx = live_by_id.get(str(rec.get("f_id")))
+                if not fx or not self.fixture_is_finished(fx):
+                    continue
+                h_ft, a_ft = self.score_from_fixture(fx)
+                h_trig = rec.get("score_home_trigger")
+                a_trig = rec.get("score_away_trigger")
+                rec["final_score"] = f"{h_ft}-{a_ft}"
+                if h_trig is None or a_trig is None:
+                    # No trigger scoreline was captured (a record written
+                    # before this change, or the caller had no fixture
+                    # data). Say so rather than inventing a 0-0 anchor.
+                    rec["goals_after"] = None
+                    rec["outcome"] = "unverifiable"
+                else:
+                    after = (h_ft - int(h_trig)) + (a_ft - int(a_trig))
+                    rec["goals_after"] = max(0, after)
+                    rec["outcome"] = ("goal_followed" if after > 0
+                                      else "no_further_goal")
+                rec["resolved_at"] = datetime.now().isoformat()
+                settled += 1
+
+            if settled:
+                try:
+                    tmp = OUTPUT_ALERTS_FILE + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        for rec in records:
+                            if isinstance(rec, dict):
+                                f.write(json.dumps(rec) + "\n")
+                    os.replace(tmp, OUTPUT_ALERTS_FILE)
+                    logging.info(
+                        f"Alert results resolved: {settled} alert(s) settled"
+                    )
+                except Exception as e:
+                    logging.error(f"Alert Resolve Write Failed: {e}")
+                    return 0
+        return settled
 
     # ── FIRE ALERT ────────────────────────────────────────────────────────
     def fire_alert(self, f_id, fixture_name,
                    level, msg, confidence, minute,
-                   user_id=None, rule_id=None, rule_label=None):
+                   user_id=None, rule_id=None, rule_label=None,
+                   storm_stage=None, score=None):
+        """
+        Write one alert record.
+
+        `score` is the scoreline at the instant of firing, supplied by the
+        caller (it has the provider fixture in hand). It is optional so every
+        existing call site keeps working, and it is stored as
+        `score_at_trigger` — the anchor the whole verification panel hangs
+        from. Without it an alert is an opinion about a moment with no
+        recorded state.
+        """
         now    = datetime.now()
         banner = ("🔥" if "PREMIUM" in level
                   else ("✅" if "STANDARD" in level else "📊"))
@@ -945,6 +1224,8 @@ class SupremeOrchestrator:
         print(f"  {banner} {level} ALERT | {now.strftime('%H:%M:%S')} UTC")
         print(f"  Match    : {fixture_name}")
         print(f"  Minute   : {minute}'")
+        if score is not None:
+            print(f"  Score    : {score[0]}-{score[1]}")
         print(f"  Message  : {msg}")
         print(f"  Conf     : {confidence}%")
         if user_id:
@@ -970,6 +1251,24 @@ class SupremeOrchestrator:
             "user_id":    user_id,
             "rule_id":    rule_id,
             "rule_label": rule_label,
+            # ── VERIFICATION FIELDS ────────────────────────────────────
+            # storm_stage: which gate fired (developing / sustained /
+            # peaking) so the UI can render one card per fixture as an
+            # escalation track instead of three near-identical alerts.
+            "storm_stage":       storm_stage,
+            # score_at_trigger: scoreline at the instant of firing. `None`
+            # means the caller had no fixture data — recorded honestly
+            # rather than defaulted to "0-0", which would be a fabricated
+            # scoreline.
+            "score_at_trigger":  (f"{score[0]}-{score[1]}"
+                                 if score is not None else None),
+            "score_home_trigger": (score[0] if score is not None else None),
+            "score_away_trigger": (score[1] if score is not None else None),
+            # Filled in later by resolve_alert_results() once the fixture
+            # reaches full time. `pending` means the match is still running.
+            "final_score":       None,
+            "goals_after":       None,
+            "outcome":           "pending",
         }
         SESSION_ALERTS.append(record)
 
@@ -1109,34 +1408,96 @@ class SupremeOrchestrator:
             with FETCHING_LOCK:
                 FETCHING_TEAMS.discard(tid)
 
-    def maintenance_thread(self, db):
-        for f_id, data in db.items():
-            for tid in [data.get('h_id'), data.get('a_id')]:
-                if tid:
-                    # FIX 6 (squad coverage): an empty {"players": {}} vault
-                    # entry is the residue of a failed/empty fetch, not valid
-                    # squad data. The old `str(tid) in SQUAD_VAULT` check
-                    # treated it as cached forever, so a poisoned team was
-                    # never re-fetched and investigate() returned
-                    # INSUFFICIENT_SQUAD_DATA permanently. Only entries with
-                    # actual players count as cached.
-                    vault_entry = SQUAD_VAULT.get(str(tid))
-                    has_data = bool(
-                        vault_entry.get("players")
-                        if isinstance(vault_entry, dict)
-                        and "players" in vault_entry
-                        else vault_entry
-                    )
+    def maintenance_thread(self, db, live_fixtures=None):
+        """
+        Keep the squad vault populated for every team the storm gates need.
+
+        WHY live_fixtures IS NOW PASSED IN
+        This used to iterate the PREMATCH database only. A fixture that is live
+        but was not in the prematch report — which is most youth, women's and
+        lower-league matches, exactly the kind that produce alerts — never had
+        its squads requested. investigate() then returned
+        INSUFFICIENT_SQUAD_DATA for the whole match, `h_triple`/`a_triple` were
+        never computed, and the storm gates could not fire on it no matter what
+        the pressure or confidence were.
+
+        That, not the 15-minute window, was the dominant reason only 9 alerts
+        fired in 11 days: the structural bar could not even be evaluated on
+        most live matches. Widening the time window does nothing for a match
+        whose squad data was never fetched, so live participants are now
+        requested alongside the prematch ones.
+        """
+        team_ids = []
+        for _f_id, data in (db or {}).items():
+            team_ids.extend([data.get('h_id'), data.get('a_id')])
+        for fx in (live_fixtures or []):
+            if not isinstance(fx, dict):
+                continue
+            for p in (fx.get("participants") or []):
+                if isinstance(p, dict) and p.get("id") is not None:
+                    team_ids.append(p.get("id"))
+        for tid in team_ids:
+            if tid:
+                # FIX 6 (squad coverage): an empty {"players": {}} vault
+                # entry is the residue of a failed/empty fetch, not valid
+                # squad data. The old `str(tid) in SQUAD_VAULT` check
+                # treated it as cached forever, so a poisoned team was
+                # never re-fetched and investigate() returned
+                # INSUFFICIENT_SQUAD_DATA permanently. Only entries with
+                # actual players count as cached.
+                vault_entry = SQUAD_VAULT.get(str(tid))
+                has_data = bool(
+                    vault_entry.get("players")
+                    if isinstance(vault_entry, dict)
+                    and "players" in vault_entry
+                    else vault_entry
+                )
+                with FETCHING_LOCK:
+                    already = (tid in FETCHING_TEAMS or has_data)
+                if not already:
                     with FETCHING_LOCK:
-                        already = (tid in FETCHING_TEAMS or has_data)
-                    if not already:
-                        with FETCHING_LOCK:
-                            FETCHING_TEAMS.add(tid)
-                        self.executor.submit(
-                            self._fetch_and_store_squad, tid
-                        )
+                        FETCHING_TEAMS.add(tid)
+                    self.executor.submit(
+                        self._fetch_and_store_squad, tid
+                    )
 
     # ── MARKET SETTLEMENT ─────────────────────────────────────────────────
+    @staticmethod
+    def score_from_fixture(fx):
+        """
+        Read the CURRENT scoreline out of a provider fixture.
+
+        Same parse as update_market_settlement() below, lifted out so the
+        scoreline can be captured at the exact instant an alert fires. That
+        value is the whole point of the verification panel: without it an
+        alert is a claim about a moment with no recorded state, and there is
+        no way to check afterwards whether anything actually followed.
+
+        Returns (home_goals, away_goals) as ints. Missing data yields 0s,
+        matching the rest of this module's handling.
+        """
+        h_g = a_g = 0
+        for entry in (fx or {}).get("scores", []):
+            if not isinstance(entry, dict):
+                continue
+            s_obj = entry.get("score") or entry
+            desc = str(s_obj.get("description", "")).upper()
+            if "CURRENT" not in desc:
+                continue
+            side = str(s_obj.get("participant", "")).lower()
+            goals = s_obj.get("goals")
+            if goals is None:
+                continue
+            try:
+                val = int(goals)
+            except (TypeError, ValueError):
+                continue
+            if side == "home":
+                h_g = val
+            elif side == "away":
+                a_g = val
+        return h_g, a_g
+
     def update_market_settlement(self, f_id, fx):
         h_g = a_g = 0
         for entry in fx.get("scores", []):

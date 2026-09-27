@@ -1705,7 +1705,21 @@ def get_live_orchestrator():
 
 
 @app.get("/api/live/alerts", tags=["Live"])
-def get_live_alerts(request: Request):
+def get_live_alerts(request: Request, date: str | None = None):
+    """
+    Live alert stream, optionally scoped to one calendar day.
+
+    `date=YYYY-MM-DD` is what finally makes the page's Today / Yesterday / 2 Days
+    Ago strip work. The strip has always rendered and always set a date context,
+    but this endpoint took no date argument and returned the whole log, so
+    every tab showed identical data — and the LIVE/AUDIT badges on them were
+    decorative rather than factual.
+
+    An alert's `time` is an ISO timestamp, so the day is its first 10 chars. An
+    unknown or malformed `date` returns an empty list rather than silently
+    falling back to everything, so a bad tab can never masquerade as "all
+    alerts".
+    """
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required.")
@@ -1722,6 +1736,8 @@ def get_live_alerts(request: Request):
                 try:
                     row = json.loads(line)
                     if row.get("user_id") not in (None, user["user_id"]):
+                        continue
+                    if date and str(row.get("time", ""))[:10] != date:
                         continue
                     rows.append(row)
                 except json.JSONDecodeError:
