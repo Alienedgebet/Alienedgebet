@@ -123,6 +123,10 @@ CONFIDENCE_PREMIUM_THRESHOLD  = 50
 CONFIDENCE_STANDARD_THRESHOLD = 30
 PRESSURE_SHARE_THRESHOLD      = 55
 MIN_CHAOS_FOR_FUSED            = 5.0
+# How long an alert may stay "pending" before it is declared unverifiable.
+# The FT snapshot only retains a day or two, so beyond this the score is
+# simply gone and the honest answer is "cannot verify", not "in progress".
+STALE_PENDING_AFTER_S = 48 * 3600
 
 # ==============================================================================
 # THE STORM TRACK — three escalating gates instead of one
@@ -1321,9 +1325,22 @@ class SupremeOrchestrator:
                     continue
                 if rec.get("outcome") not in (None, "pending"):
                     continue
-                fx = live_by_id.get(str(rec.get("f_id")))
-                if not fx or not self.fixture_is_finished(fx):
-                    continue
+                f_id = str(rec.get("f_id"))
+                fx = live_by_id.get(f_id)
+                # A finished fixture LEAVES the in-play feed, usually within the
+                # same cycle. The old guard required the fixture to still be in
+                # the live feed AND marked finished, so any match that dropped
+                # out was never resolved and its card sat on "Match in progress"
+                # for good — the verification was silently losing finished
+                # matches. The FT snapshot persists finished results
+                # independently of the live feed, so try that first and only
+                # fall back to the live fixture.
+                from_snapshot = self._ft_snapshot_scores(f_id)
+                if from_snapshot is None:
+                    if not fx or not self.fixture_is_finished(fx):
+                        # Nothing readable yet. Age the record out below rather
+                        # than letting it claim the match is still running.
+                        continue
                 # The authoritative FT score, or None. NEVER a defaulted 0-0:
                 # a 0-0 we did not actually read yields a confident
                 # "no further goal" verdict on a match that had goals, which is
@@ -1352,6 +1369,35 @@ class SupremeOrchestrator:
                                           else "no_further_goal")
                 rec["resolved_at"] = datetime.now().isoformat()
                 settled += 1
+
+            # AGE-OUT: a pending record whose match finished days ago and whose
+            # score is in no longer-retained source must not keep claiming
+            # "Match in progress" forever. The FT snapshot only retains a day
+            # or two, so older alerts can never be resolved from it. Saying
+            # "we looked and could not find the score" is honest; claiming the
+            # match is live is not.
+            now = datetime.now()
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("outcome") not in (None, "pending"):
+                    continue
+                stamp = str(rec.get("time") or "")
+                try:
+                    fired = datetime.fromisoformat(stamp)
+                except ValueError:
+                    continue
+                if (now - fired).total_seconds() > STALE_PENDING_AFTER_S:
+                    rec["final_score"] = None
+                    rec["goals_after"] = None
+                    rec["outcome"] = "unverifiable"
+                    rec["resolved_at"] = now.isoformat()
+                    rec["unverifiable_reason"] = (
+                        "The match finished, but its final score is no longer "
+                        "retained by any source this scanner reads, so nothing "
+                        "can be verified. The FT snapshot keeps roughly a day."
+                    )
+                    settled += 1
 
             if settled:
                 try:
