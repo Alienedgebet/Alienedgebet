@@ -348,6 +348,81 @@ def delete_rule(rule_id: str, user_id: str) -> bool:
 
 
 # ==============================================================================
+# SEEDED DEFAULT RULES
+# ==============================================================================
+# "Can either team still score?" between 45' and 60'.
+#
+# WHY THIS IS A RULE AND NOT A NEW ENGINE
+# Code 2's judges 1 and 2 cannot answer this. They read CUMULATIVE, full-match
+# totals (shots on target, dangerous attacks, box entries, corners) with no
+# time window, so at 78' they still report whatever the match looked like
+# earlier. They answer "were they dominant?", which is a different question
+# from "can they still score?". Only Code 2's third judge is time-aware.
+#
+# Code 6's primitives answer it exactly, with no new mathematics:
+#   * minute_window {start:45, end:60}  -> the window the user asked about
+#   * live.type "xg", side "any"        -> `max(home, away) >= min_value`
+# `side: "any"` is already a max() over both teams, which is literally "can
+# EITHER side still score". The live_xg figure is the weighted live score
+# pressure from shots on target, box entries, dangerous attacks, corners and
+# possession (live_stage6_alerts.compute_team_metrics).
+#
+# The xG threshold below is the Code 6 "STANDARD" confidence bar, so the rule
+# fires at the same pressure level the rest of Code 6 treats as a real signal.
+# It is a normal, fully editable rule — a user can retune or delete it.
+SEED_OWNER = "system"
+SEEDED_RULE_LABELS = {
+    "Still scoring after 45'": {
+        "minute_window": {"start": 45, "end": 60},
+        "live": {"type": "xg", "side": "any", "min_value": 3.0},
+    },
+    "Still scoring after 60'": {
+        "minute_window": {"start": 60, "end": 75},
+        "live": {"type": "xg", "side": "any", "min_value": 3.0},
+    },
+}
+
+
+def ensure_seeded_rules() -> list:
+    """
+    Install the default "can either team still score" rules if they are absent.
+
+    Idempotent and non-destructive: keyed on the label, so re-running never
+    duplicates a rule and never touches a rule the user has edited, disabled
+    or deleted deliberately. A user who removes a seeded rule and restarts will
+    get it back — that is intentional, since these are the documented defaults,
+    and the rule can be set inactive instead of deleted.
+    """
+    created = []
+    with _lock:
+        rules = _read_all()
+        existing = {r.get("label") for r in rules}
+        for label, spec in SEEDED_RULE_LABELS.items():
+            if label in existing:
+                continue
+            try:
+                rule = validate_rule_payload({
+                    "user_id": SEED_OWNER,
+                    "label": label,
+                    "prematch": {"type": "none"},
+                    "live": spec["live"],
+                    "minute_window": spec["minute_window"],
+                    "active": True,
+                })
+            except RuleValidationError:
+                # A malformed seed must never stop the scanner booting.
+                continue
+            rule["rule_id"] = f"r_seed_{uuid.uuid4().hex[:10]}"
+            rule["created_at"] = _now_iso()
+            rule["seeded"] = True
+            rules.append(rule)
+            created.append(rule)
+        if created:
+            _write_all(rules)
+    return created
+
+
+# ==============================================================================
 # EVALUATION — called by LIVE_SCANNER/live_stage6_alerts.py every cycle.
 # ==============================================================================
 

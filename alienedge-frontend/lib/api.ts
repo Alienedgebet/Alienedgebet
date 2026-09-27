@@ -1138,6 +1138,9 @@ export interface LiveValidationPrediction {
   verdict_60?: LivePredictionVerdict;
   verdict_30?: LivePredictionVerdict;
   verdict_45?: LivePredictionVerdict;
+  /** The minute the authoritative verdict was actually recorded (60' if the
+   *  final validation exists, otherwise 45', otherwise 30'). */
+  verdict_minute?: number;
   /** The 30' -> 45' comparison: how the match moved between checkpoints. */
   comparison_30_45?: "STRENGTHENED" | "HELD" | "WEAKENED" | "COLLAPSED" | "NO_BASELINE";
   comparison_note?: string;
@@ -1152,7 +1155,18 @@ export interface LiveValidationPrediction {
   forensic?: LiveValidationState;
   statistics?: LiveValidationState;
   stats_label?: string;
+  /** The three judges' individual readings and reasoning, verbatim from the
+   *  statistical judge. Present so the UI can show WHICH judge dissented and
+   *  why instead of an opaque "STATS_1/3" tally. */
+  engine_detail?: string;
+  /** Forensic dimension: "MAINTAINED (No structural fracture — not evidence)". */
   forensic_note?: string;
+  /** Suppressed: a contradictory market on an UNDER fixture, or an orphan kept
+   *  alive after its feed row vanished. Visible with a reason, never alertable. */
+  suppressed?: boolean;
+  suppressed_reason?: string | null;
+  /** Its feed row disappeared; carried forward so it can still settle. */
+  orphaned?: boolean;
   triggered?: boolean;
   minute?: number;
   trigger_minute?: number | null;

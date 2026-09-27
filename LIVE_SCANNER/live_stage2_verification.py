@@ -327,7 +327,133 @@ def _load_pick_feeds():
                     continue
                 existing.append(normalized)
                 seen.add(key)
+    for fid, picks in merged.items():
+        suppress_contradictory_markets(picks)
     return merged
+
+
+# ── ONE DIRECTION PER FIXTURE ────────────────────────────────────────────────
+# WHY THIS EXISTS
+# A fixture was being validated and alerted on UNDER_2.5 and OVER_2.5 at the
+# same time. Code 1 handed the validator an under; the incoming feed also
+# carried two over markets for the same fixture, and both fired Supreme Alerts
+# at 45'. They cannot both be honest readings of one scoreline, and the board
+# ended up contradicting itself: the per-match list said UNLIKELY while Code 3C
+# displayed two fired over alerts.
+#
+# A suppressed pick is KEPT and stays visible with its reason attached, so the
+# audit trail survives, but it is never alertable and never receives a new
+# verdict. The UNDER side is always the one that survives, because it is the
+# market Code 1 committed to in the prematch feed.
+SUPPRESSED_REASON = "Suppressed — contradictory market (fixture is tracked on an UNDER market)"
+
+
+def suppress_contradictory_markets(picks):
+    """
+    Mark every OVER-market pick on a fixture that is also tracked UNDER.
+
+    Returns the same list for convenience. Mutates in place: the caller merges
+    these dicts straight into the board, so the suppression flag has to travel
+    with the pick rather than be reported separately.
+    """
+    if not picks:
+        return picks
+    try:
+        directions = {
+            market_direction(p.get("market") or p.get("type"))
+            for p in picks if isinstance(p, dict)
+        }
+    except Exception:
+        return picks
+    if DIRECTION_UNDER not in directions or DIRECTION_OVER not in directions:
+        return picks
+    for p in picks:
+        if not isinstance(p, dict):
+            continue
+        if market_direction(p.get("market") or p.get("type")) == DIRECTION_OVER:
+            p["suppressed"] = True
+            p["suppressed_reason"] = SUPPRESSED_REASON
+    return picks
+
+
+def _pick_from_canonical_key(canonical_key):
+    """
+    Rebuild a minimal pick from a state key so an orphaned prediction can stay
+    on the board. Only the market and target are recoverable — the original
+    justification text is gone with the feed — so the pick is marked orphaned
+    and never re-judged.
+    """
+    text = str(canonical_key or "")
+    if ":" not in text:
+        return None
+    market, target = text.split(":", 1)
+    if not market or not target:
+        return None
+    return {
+        "type": market,
+        "market": market,
+        "target_loc": target,
+        "canonical_key": text,
+        "orphaned": True,
+        "orphaned_reason": (
+            "No longer in the Code 1 / incoming feed — kept so a prediction "
+            "that already alerted can still be settled rather than vanishing"
+        ),
+    }
+
+
+def carry_forward_orphans(feed):
+    """
+    Keep a prediction that alerted or reached a verdict after its feed row
+    disappears.
+
+    THE BUG THIS FIXES
+    `live_predictions.json` and the incoming feed are rewritten every cycle from
+    whatever Code 1 and Stage 3 currently hold. A market that is present in
+    cycle N and absent in cycle N+1 simply disappeared from the tracked set —
+    even though it had already fired a Supreme Alert and was sitting in the
+    Code 3C confirmations table. It could never be validated again and never
+    settled, so it was stranded in 3C indefinitely showing the verdict it had
+    at the moment it fired.
+
+    A state entry qualifies as an orphan when it carries real history (a
+    verdict at any checkpoint, or an alert) and has no corresponding feed row.
+    It is marked `orphaned`, is never re-judged, and is settled normally, so it
+    reaches a terminal WON/LOST instead of hanging.
+    """
+    for fid, entries in list(MATCH_VALIDATION_STATE.items()):
+        if not isinstance(entries, dict):
+            continue
+        # setdefault, not `feed.get(fid) or []`: a fixture that has dropped out
+        # of the feed entirely is absent from the mapping, and `or []` produced a
+        # throwaway list that was never written back — so the carried pick was
+        # appended to nothing and the orphan was still silently dropped.
+        present = feed.setdefault(fid, [])
+        live_keys = {
+            p.get("canonical_key") for p in present if isinstance(p, dict)
+        }
+        for state_key, state in entries.items():
+            if not isinstance(state, dict):
+                continue                      # "DONE" or legacy scalar
+            if state_key in live_keys:
+                continue
+            has_history = bool(
+                state.get("verdict_30")
+                or state.get("verdict_45")
+                or state.get("verdict_60")
+                or state.get("alerted")
+            )
+            if not has_history:
+                continue                      # never judged — nothing to keep
+            carried = _pick_from_canonical_key(state_key)
+            if carried is None:
+                continue
+            carried["suppressed"] = True
+            carried["suppressed_reason"] = carried["orphaned_reason"]
+            present.append(carried)
+            state["orphaned"] = True
+            state["orphaned_at"] = datetime.now().isoformat()
+    return feed
 
 
 def _stat_int(stats, key):
@@ -1049,15 +1175,20 @@ def old_engine_statistical_judge(ctx, pick):
             return f"⏸️ N/A  → {note}"
         return f"{'✅ PASS' if passed else '❌ FAIL'} → {note}"
 
-    denom = f"{reported}/3" + (" (Engine 3 abstained)" if e3_abstained else "")
+    # The label is `STATS_<passed>/<reported>` — two numbers only. The fixed
+    # judge count used to be emitted as a THIRD number ("STATS_1/3/3"), which
+    # read as three separate quantities on the board and could not be parsed
+    # by anyone who had not seen the source. The total judge count is already
+    # implied by the denominator; it is stated in prose below instead.
+    suffix = " (Engine 3 abstained)" if e3_abstained else ""
     detail = (
         f"\n         Engine 1 (Rule)       : {_mark(e1_pass, e1_note)}"
         f"\n         Engine 2 (Structure)  : {_mark(e2_pass, e2_note)}"
         f"\n         Engine 3 (Momentum)   : {_mark(e3_pass, e3_note)}"
-        f"\n         Combined              : {passed_count}/{denom} engines passed"
-        f" (need {required} for a standard pass)"
+        f"\n         Combined              : {passed_count} of {reported} judges "
+        f"passed (need {required} for a standard pass)"
     )
-    return state, f"STATS_{passed_count}/{denom}", detail
+    return state, f"STATS_{passed_count}/{reported}{suffix}", detail
 
 
 def prediction_lifecycle_step(pick, status, combined_state, minute, settled):
@@ -2258,9 +2389,21 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             else minute >= CHECKPOINT_MAIN_MINUTE
         )
         alert_key = f"{f_id}_{p_key}_ALERT"
+        # A suppressed pick — a contradictory market on an UNDER fixture, or an
+        # orphan carried forward after its feed row vanished — is never
+        # alertable. It stays on the board with its reason so the audit trail
+        # survives, but it can never fire a fresh Supreme Alert and contradict
+        # the market the fixture is actually tracked on.
+        if pick.get("suppressed"):
+            if not entry.get("suppression_logged"):
+                entry["suppression_logged"] = True
+                match_summary_lines.append(
+                    f"   ⛔ [{label}] {pick.get('suppressed_reason') or SUPPRESSED_REASON}"
+                )
         if (gate_open and market_open and minute >= CHECKPOINT_PRE_MINUTE
                 and not alerted and alert_key not in ALERT_HISTORY_CACHE
-                and ptype not in LOCKED_AT_45_MARKETS):
+                and ptype not in LOCKED_AT_45_MARKETS
+                and not pick.get("suppressed")):
             entry["alerted"] = True
             alerted = True
             # Capture the score at the instant the alert fires. Settlement
@@ -2443,6 +2586,18 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             row["verdict_30"] = pre_verdict
             row["verdict_45"] = main_verdict
             row["verdict_60"] = final60_verdict
+            # A suppressed pick stays visible on the board with its reason, so
+            # the market that was dropped is never silently hidden.
+            row["suppressed"] = bool(pick.get("suppressed"))
+            row["suppressed_reason"] = pick.get("suppressed_reason")
+            row["orphaned"] = bool(pick.get("orphaned"))
+            # The per-judge reasoning is already computed by
+            # `old_engine_statistical_judge`. It was printed to the console and
+            # then discarded, which is why the board could only ever show an
+            # opaque "STATS_1/3" with no way to tell a user WHICH judge
+            # dissented or why. Carried on the row so the UI can show the three
+            # judges and their actual readings.
+            row["engine_detail"] = engine_detail
             row["late_45"] = bool(entry.get("late_45"))
             row["late_60"] = bool(entry.get("late_60"))
             row["backfilled"] = bool(entry.get("backfilled"))
@@ -2775,6 +2930,10 @@ def run_live_validator_once(cycle_number=1):
     load_memory()
 
     FEED_A = _load_pick_feeds()
+    # A prediction that already alerted or reached a verdict must not vanish
+    # when its feed row disappears — that is how two Over alerts ended up
+    # stranded in Code 3C with no way to be validated or settled.
+    carry_forward_orphans(FEED_A)
 
     cycle_log = []
 
