@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, type ReactNode } from "react";
 import {
   Radio,
   Shield,
@@ -121,50 +121,52 @@ function oddsCell(value: number | null | undefined): string {
     : String(value);
 }
 
+// The 3C table lives inside a modal already scoped to ONE fixture, so the
+// `match_name` column repeated the fixture header in every row. The machine
+// field names (match_name / prediction_type / target / minute_triggered / …)
+// were also read as raw API keys rather than labels.
 const validationAlertColumns: PredictionColumn<LiveValidationPick>[] = [
   {
-    key: "match_name",
-    header: "match_name",
-    render: (r) => <span className="font-medium text-text-primary">{r.match_name}</span>,
-  },
-  {
     key: "prediction_type",
-    header: "prediction_type",
+    header: "Market",
     render: (r) => (
       <span className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1.5 py-0.5 font-mono text-2xs font-semibold text-accent-amber">
         {r.prediction_type}
       </span>
     ),
   },
-  { key: "target", header: "target", render: (r) => r.target },
   {
     key: "minute_triggered",
-    header: "minute_triggered",
+    header: "Fired",
     align: "right",
-    render: (r) => <span className="font-mono">{r.minute_triggered}&apos;</span>,
+    render: (r) => (
+      <span className="font-mono font-bold text-amber-300">
+        {r.minute_triggered}&apos;
+      </span>
+    ),
   },
   {
     key: "scores",
-    header: "scores",
+    header: "Score then",
     align: "right",
     render: (r) => <span className="font-mono font-semibold">{r.scores}</span>,
   },
   {
     key: "forensic_note",
-    header: "forensic_note",
-    className: "max-w-[260px]",
+    header: "Forensic",
+    className: "max-w-[220px]",
     render: (r) => (
       <span className="line-clamp-2 text-2xs text-text-secondary">{r.forensic_note}</span>
     ),
   },
   {
     key: "stats_note",
-    header: "stats_note",
+    header: "Judges",
     render: (r) => <span className="font-mono text-2xs">{r.stats_note}</span>,
   },
   {
     key: "timestamp",
-    header: "timestamp",
+    header: "At",
     render: (r) => (
       <span className="font-mono text-2xs text-text-dim">
         {r.timestamp.replace("T", " ").slice(0, 19)}
@@ -476,15 +478,6 @@ function OddsComparisonBlock({ row }: { row: LivePrematchAudit }) {
 
 type VerdictTone = "good" | "bad" | "wait" | "flat";
 
-const STAGE_STYLE: Record<string, string> = {
-  MONITORING: "border-white/15 bg-white/5 text-slate-300",
-  SUPPORTED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
-  UNLIKELY: "border-amber-500/40 bg-amber-500/10 text-amber-300",
-  VOID: "border-slate-500/40 bg-slate-500/10 text-slate-300",
-  TRIGGERED: "border-amber-500/50 bg-amber-500/10 text-amber-300",
-  SETTLED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
-};
-
 // The 45' locked verdict vocabulary. "REJECTED" is deliberately absent: it
 // asserted a certainty the engine does not have, and on live football it was
 // being produced from a weak engine reading. VOID is the arithmetic case
@@ -516,153 +509,6 @@ const READ_STATE_STYLE: Record<string, string> = {
   DEAD: "border-slate-500/40 bg-slate-500/10 text-slate-400",
   UNCLEAR: "border-white/15 bg-white/5 text-slate-300",
 };
-
-// The 30' -> 45' comparison: how the match MOVED between the two checkpoints.
-const COMPARISON_STYLE: Record<string, string> = {
-  STRENGTHENED: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-  HELD: "border-white/15 bg-white/5 text-slate-300",
-  WEAKENED: "border-amber-500/30 bg-amber-500/10 text-amber-300",
-  COLLAPSED: "border-rose-500/30 bg-rose-500/10 text-rose-300",
-  NO_BASELINE: "border-white/10 bg-white/[0.03] text-slate-500",
-};
-
-type MonitorRow = {
-  n: number;
-  market: string;
-  state: string;
-  kind: "pick" | "read";
-  /** A settled prediction still carries the 30'/45'/60' record. */
-  settled?: boolean;
-  /** The three checkpoints, shown for a settled pick. */
-  at30?: string;
-  at45?: string;
-  at60?: string;
-  comparison?: string;
-  comparisonNote?: string;
-};
-
-/**
- * The per-match list of predictions Code 2 is monitoring and verifying.
- * Numbered, with the 30'→45' comparison beside each state. A live-only read is
- * tagged so it can never be mistaken for a Code 1 prematch prediction.
- */
-function MonitorListTable({ rows }: { rows: MonitorRow[] }) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[620px] text-left font-mono text-[11px]">
-        <thead className="text-[9px] uppercase tracking-wide text-slate-500">
-          <tr>
-            <th className="w-8 py-1 pr-2 font-medium">#</th>
-            <th className="py-1 pr-2 font-medium">Market</th>
-            <th className="py-1 pr-2 font-medium">30&apos;</th>
-            <th className="py-1 pr-2 font-medium">45&apos;</th>
-            <th className="py-1 pr-2 font-medium">60&apos;</th>
-            <th className="py-1 pr-2 font-medium">30&apos;&rarr;45&apos;</th>
-            <th className="py-1 font-medium">State</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr
-              key={`${r.market}-${r.n}`}
-              className="border-t border-white/5 align-top"
-            >
-              <td className="py-1 pr-2 font-bold text-slate-500">{r.n}</td>
-              <td className="py-1 pr-2">
-                <span
-                  className={cn(
-                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                    r.kind === "pick"
-                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                      : "border-white/15 bg-white/5 text-slate-300"
-                  )}
-                  title={
-                    r.kind === "pick"
-                      ? "Code 1 prematch prediction, validated by Code 2"
-                      : "Live-only read — no prematch pick from Code 1"
-                  }
-                >
-                  {displayMarketLabel(r.market)}
-                </span>
-              </td>
-              {/* The three checkpoints. A dash means that checkpoint has not
-                  been reached or was never recorded — never a guess. */}
-              {([30, 45, 60] as const).map((cp) => {
-                const val = cp === 30 ? r.at30 : cp === 45 ? r.at45 : r.at60;
-                return (
-                  <td key={cp} className="py-1 pr-2">
-                    {val ? (
-                      <span
-                        className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-[10px] font-bold text-slate-300"
-                        title={`${cp}' checkpoint`}
-                      >
-                        {LEDGER_VERDICT_STYLE[val]?.label ?? val}
-                      </span>
-                    ) : (
-                      <span className="text-slate-600">—</span>
-                    )}
-                  </td>
-                );
-              })}
-              <td className="py-1 pr-2">
-                {r.comparison ? (
-                  <span
-                    className={cn(
-                      "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                      COMPARISON_STYLE[r.comparison] ??
-                        "border-white/15 bg-white/5 text-slate-400"
-                    )}
-                    title={r.comparisonNote}
-                  >
-                    {r.comparison.replace("_", " ")}
-                  </span>
-                ) : (
-                  <span className="text-slate-600">—</span>
-                )}
-              </td>
-              <td className="py-1">
-                <span
-                  className={cn(
-                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                    r.kind === "read"
-                      ? READ_STATE_STYLE[r.state] ??
-                        "border-white/15 bg-white/5 text-slate-300"
-                      : r.settled
-                        ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
-                        : "border-white/20 bg-white/5 text-slate-200"
-                  )}
-                >
-                  {r.kind === "read"
-                    ? r.state.replace("_", " ")
-                    : (LEDGER_VERDICT_STYLE[r.state]?.label ?? r.state)}
-                </span>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function LedgerVerdictChip({ verdict }: { verdict?: string | null }) {
-  if (!verdict) return null;
-  const style = LEDGER_VERDICT_STYLE[verdict] ?? {
-    label: verdict,
-    tone: "flat" as VerdictTone,
-  };
-  return (
-    <span
-      className={cn(
-        "rounded-md border px-2 py-0.5 font-mono text-[10px] font-black",
-        VERDICT_TONE_CLASS[style.tone]
-      )}
-      title={`45' locked verdict: ${verdict}`}
-    >
-      {style.label}
-    </span>
-  );
-}
 
 // DISPLAY-ONLY SAFETY LABEL. Prematch Under 2.5 is shown to users as
 // "Under 3.5" so they are not handed the tightest line. This is a LABEL ONLY:
@@ -705,15 +551,6 @@ const VERDICT_TONE_CLASS: Record<VerdictTone, string> = {
   flat: "border-white/15 bg-white/5 text-slate-300",
 };
 
-const PREDICTION_STATUS_STYLE: Record<string, string> = {
-  SETTLED: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
-  TRIGGERED: "border-amber-500/50 bg-amber-500/10 text-amber-300",
-  STRIKE_WINDOW: "border-indigo-500/40 bg-indigo-500/10 text-indigo-300",
-  QUEUED: "border-cyan-500/40 bg-cyan-500/10 text-cyan-300",
-  MONITORING: "border-white/15 bg-white/5 text-slate-300",
-  WAITING: "border-white/15 bg-white/5 text-slate-300",
-};
-
 function VerdictChip({ state }: { state?: string }) {
   const style = VERDICT_STYLE[state ?? ""] ?? {
     label: "UNKNOWN",
@@ -731,135 +568,478 @@ function VerdictChip({ state }: { state?: string }) {
   );
 }
 
+// ── PLAIN-LANGUAGE VERDICTS ─────────────────────────────────────────────────
+// The LIKELY / UNLIKELY / VOID / UNCLEAR vocabulary is deliberate and
+// defensible — see the engine's own notes — but it was never explained on
+// screen, which is why "UNCLEAR" and "UNLIKELY" read as interchangeable. Each
+// word now carries one sentence of plain English so a verdict can be acted on
+// without reading the source.
+const VERDICT_PLAIN: Record<string, { title: string; plain: string }> = {
+  LIKELY: {
+    title: "Evidence supports this",
+    plain: "The judges agree this is on track. It has not settled yet.",
+  },
+  UNLIKELY: {
+    title: "Evidence works against this",
+    plain: "The judges are reading against it — but it can still come in.",
+  },
+  VOID: {
+    title: "Dead on the arithmetic",
+    plain: "The scoreline has already made this impossible. Not a judgement.",
+  },
+  UNCLEAR: {
+    title: "Not enough evidence yet",
+    plain: "The judges are split. No verdict is claimed either way.",
+  },
+  TRIGGERED: {
+    title: "Alert fired",
+    plain: "The validator called this one and sent the alert.",
+  },
+  WON: { title: "Won", plain: "Settled as a win on the final score." },
+  LOST: { title: "Lost", plain: "Settled as a loss on the final score." },
+};
+
+const VERDICT_HERO_CLASS: Record<string, string> = {
+  LIKELY: "text-emerald-300",
+  FINAL_APPROVED: "text-emerald-300",
+  UNLIKELY: "text-amber-300",
+  FINAL_REJECTED: "text-amber-300",
+  VOID: "text-slate-400",
+  TRIGGERED: "text-amber-300",
+  WON: "text-emerald-300",
+  LOST: "text-rose-300",
+  SETTLED: "text-emerald-300",
+};
+
+// ── THE CHECKPOINT RAIL ─────────────────────────────────────────────────────
+// The old presentation was a seven-column table where 30', 45' and 60' each
+// held a word and a fifth column held a delta — all in 10px monospace. The
+// reader had to assemble the trajectory themselves. The rail makes the
+// trajectory the graphic: three fixed nodes, the delta stated under the
+// connector, and checkpoints not yet reached rendered hollow so "absence" is
+// visible rather than an unexplained dash.
+type RailNode = { minute: number; verdict?: string | null; pending: boolean };
+
+const RAIL_ARROW_CLASS: Record<string, string> = {
+  STRENGTHENED: "text-emerald-300",
+  HELD: "text-slate-400",
+  WEAKENED: "text-amber-300",
+  COLLAPSED: "text-rose-300",
+  NO_BASELINE: "text-slate-500",
+};
+
+function CheckpointRail({
+  at30,
+  at45,
+  at60,
+  comparison,
+  comparisonNote,
+  now,
+}: {
+  at30?: string | null;
+  at45?: string | null;
+  at60?: string | null;
+  comparison?: string | null;
+  comparisonNote?: string | null;
+  now?: number;
+}) {
+  const nodes: RailNode[] = [
+    { minute: 30, verdict: at30, pending: !at30 },
+    { minute: 45, verdict: at45, pending: !at45 },
+    { minute: 60, verdict: at60, pending: !at60 },
+  ];
+  return (
+    <div className="rounded-xl border border-white/10 bg-black/30 px-3 py-2.5">
+      <div className="flex items-start">
+        {nodes.map((n, i) => {
+          const reached = !n.pending;
+          const isCurrent =
+            now != null && n.minute <= now && (i === 2 || n.minute + 15 > now);
+          const text = reached
+            ? (LEDGER_VERDICT_STYLE[n.verdict ?? ""]?.label ?? n.verdict)
+            : "not reached";
+          return (
+            <div key={n.minute} className="flex flex-1 items-start last:flex-none">
+              <div className="flex flex-col items-center gap-1.5">
+                <span
+                  className={cn(
+                    "h-2.5 w-2.5 rounded-full border-2",
+                    !reached
+                      ? "border-white/25 bg-transparent"
+                      : isCurrent
+                        ? "border-cyan-400 bg-cyan-400"
+                        : "border-white/40 bg-white/30"
+                  )}
+                  aria-hidden
+                />
+                <span className="font-mono text-[10px] font-bold text-slate-300">
+                  {n.minute}&apos;
+                </span>
+                <span
+                  className={cn(
+                    "w-[72px] text-center text-[10px] font-semibold leading-tight",
+                    reached ? "text-slate-200" : "text-slate-600"
+                  )}
+                >
+                  {text}
+                </span>
+              </div>
+              {i < nodes.length - 1 && (
+                <div className="mt-[5px] h-px flex-1 bg-white/15" aria-hidden />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {comparison && (
+        <p
+          className={cn(
+            "mt-2.5 border-t border-white/10 pt-2 text-[11px] font-bold",
+            RAIL_ARROW_CLASS[comparison] ?? "text-slate-400"
+          )}
+          title={comparisonNote ?? undefined}
+        >
+          {comparison === "STRENGTHENED"
+            ? "▲"
+            : comparison === "WEAKENED"
+              ? "▼"
+              : comparison === "COLLAPSED"
+                ? "✕"
+                : "■"}{" "}
+          30&apos;&rarr;45&apos; {comparison.replace("_", " ").toLowerCase()}
+          {comparisonNote && (
+            <span className="ml-1.5 font-normal normal-case text-slate-400">
+              — {comparisonNote}
+            </span>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── THE JUDGES ──────────────────────────────────────────────────────────────
+// `engine_detail` is the per-judge breakdown the statistical judge already
+// builds. It was printed to the console and thrown away, so the board could
+// only ever show "STATS_1/3" — a tally with no indication of WHICH judge
+// dissented or why. Showing the three readings makes the tally self-evident:
+// one support out of three judges is not a verdict, it is "not enough yet".
+type JudgeReading = {
+  name: string;
+  mark: "pass" | "fail" | "abstain";
+  reason: string;
+};
+
+function parseJudgeDetail(detail?: string): JudgeReading[] {
+  if (!detail) return [];
+  const out: JudgeReading[] = [];
+  for (const raw of detail.split("\n")) {
+    const m = raw.trim().match(
+      /^Engine\s+\d\s*\(([^)]+)\)\s*:\s*(✅ PASS|❌ FAIL|⏸️\s*N\/A)\s*(?:→|-)\s*(.*)$/
+    );
+    if (!m) continue;
+    out.push({
+      name: m[1].trim(),
+      mark: m[2].startsWith("✅")
+        ? "pass"
+        : m[2].startsWith("❌")
+          ? "fail"
+          : "abstain",
+      reason: (m[3] || "").trim(),
+    });
+  }
+  return out;
+}
+
+function JudgePanel({
+  statsLabel,
+  engineDetail,
+  statistics,
+}: {
+  statsLabel?: string;
+  engineDetail?: string;
+  statistics?: string;
+}) {
+  const judges = parseJudgeDetail(engineDetail);
+  const passed = judges.filter((j) => j.mark === "pass").length;
+
+  if (judges.length === 0) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2.5">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+          Judges
+        </span>
+        <span className="font-mono text-[11px] text-slate-300">
+          {statsLabel || "—"}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <details className="group rounded-xl border border-white/10 bg-black/30">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+          Judges
+        </span>
+        <span className="flex items-center gap-2">
+          <span
+            className={cn(
+              "font-mono text-xs font-black",
+              passed >= 2
+                ? "text-emerald-300"
+                : passed === 1
+                  ? "text-amber-300"
+                  : "text-rose-300"
+            )}
+          >
+            {passed} of {judges.length} support
+          </span>
+          <ChevronRight className="h-3.5 w-3.5 text-slate-500 transition-transform group-open:rotate-90" />
+        </span>
+      </summary>
+      <ul className="space-y-2 border-t border-white/10 px-3 py-2.5">
+        {judges.map((j) => (
+          <li key={j.name} className="flex items-start gap-2">
+            <span
+              className={cn(
+                "mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-black",
+                j.mark === "pass"
+                  ? "bg-emerald-500/20 text-emerald-300"
+                  : j.mark === "fail"
+                    ? "bg-rose-500/20 text-rose-300"
+                    : "bg-white/10 text-slate-400"
+              )}
+            >
+              {j.mark === "pass" ? "✓" : j.mark === "fail" ? "✗" : "–"}
+            </span>
+            <span className="min-w-0">
+              <span className="text-[11px] font-bold text-slate-200">
+                {j.name}
+              </span>
+              <span className="block text-[10.5px] leading-relaxed text-slate-400">
+                {j.reason}
+              </span>
+            </span>
+          </li>
+        ))}
+        <li className="pt-0.5 text-[10px] leading-relaxed text-slate-500">
+          A standard pass needs 2 of 3. One judge alone never carries a verdict,
+          and one dissenter is not a rejection — it is &ldquo;not enough
+          evidence yet&rdquo;{statistics === "INSUFFICIENT_DATA" ? ". Currently split." : "."}
+        </li>
+      </ul>
+    </details>
+  );
+}
+
 function PredictionLifecycleCard({
   prediction,
 }: {
   prediction: LiveValidationPrediction;
 }) {
   const settled = prediction.status === "SETTLED";
+  // The authoritative word: the 60' final validation where one exists,
+  // otherwise the 45' verdict.
+  const word =
+    prediction.status === "SETTLED"
+      ? prediction.verdict === "LOST"
+        ? "LOST"
+        : "SETTLED"
+      : (prediction.verdict ?? undefined);
+  const plain = word ? VERDICT_PLAIN[word] : undefined;
+  const decidedAt = prediction.verdict_minute;
+  // Trigger / score fields are only meaningful once a trigger or a settlement
+  // exists. They used to render as three permanently empty "—" cells.
+  const hasTrigger = prediction.trigger_minute != null;
+  const hasSettlement = Boolean(prediction.settlement);
+
   return (
     <div
       className={cn(
-        "rounded-xl border bg-black/40 p-3",
-        settled
-          ? "border-emerald-500/30"
-          : prediction.status === "TRIGGERED"
-            ? "border-amber-500/40"
-            : "border-white/10"
+        "rounded-2xl border bg-black/40 p-4",
+        prediction.suppressed
+          ? "border-slate-600/40 opacity-80"
+          : settled
+            ? "border-emerald-500/30"
+            : prediction.status === "TRIGGERED"
+              ? "border-amber-500/40"
+              : "border-white/10"
       )}
     >
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <span className="font-mono text-xs font-black text-white">
-          {displayMarketLabel(prediction.label)}
-        </span>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {/* The authoritative verdict: the 60' final validation where one
-              exists, otherwise the 45' verdict. LIKELY / UNLIKELY / VOID /
-              UNCLEAR. */}
-          <LedgerVerdictChip verdict={prediction.verdict} />
-          {/* Honesty flags. A verdict recorded after its window closed is
-              labelled as such rather than presented as a live reading. */}
-          {prediction.backfilled && (
-            <span
-              className="rounded-md border border-slate-500/40 bg-slate-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-300"
-              title="Recorded after the checkpoint window closed"
-            >
-              BACKFILLED
-            </span>
-          )}
-          {(prediction.late_45 || prediction.late_60) && !prediction.backfilled && (
-            <span
-              className="rounded-md border border-white/15 bg-white/5 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-300"
-              title="The checkpoint window was missed; the verdict was recorded late"
-            >
-              LATE
-            </span>
-          )}
-          {prediction.trigger_only && (
-            <span
-              className="rounded-md border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-indigo-300"
-              title="Past 60' with a final validation — this market may only trigger now"
-            >
-              TRIGGER-ONLY
-            </span>
-          )}
-          {/* Lifecycle stage is the primary read: it says where this
-              prediction is in its live validation, one at a time. */}
-          {prediction.stage && (
-            <span
+      {/* ── HERO: the answer, at the size it deserves ─────────────────── */}
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <p className="text-sm font-black text-white">
+            {displayMarketLabel(prediction.label)}
+          </p>
+          <p className="mt-0.5 text-[11px] text-slate-500">
+            Code 1 prematch pick
+            {prediction.target !== "match" && ` · ${prediction.target} side`}
+          </p>
+        </div>
+        <div className="text-right">
+          {word && (
+            <p
               className={cn(
-                "rounded-md border px-2 py-0.5 font-mono text-[10px] font-black",
-                STAGE_STYLE[prediction.stage] ?? STAGE_STYLE.MONITORING
+                "text-2xl font-black leading-none",
+                VERDICT_HERO_CLASS[word] ?? "text-slate-300"
               )}
-              title={prediction.stage_note}
             >
-              {prediction.stage}
-            </span>
+              {LEDGER_VERDICT_STYLE[word]?.label ?? word}
+            </p>
           )}
-          {!settled && <VerdictChip state={prediction.signal} />}
-          <span
-            className={cn(
-              "rounded-md border px-2 py-0.5 font-mono text-[10px] font-bold",
-              PREDICTION_STATUS_STYLE[prediction.status] ??
-                PREDICTION_STATUS_STYLE.MONITORING
-            )}
-          >
-            {prediction.status.replace("_", " ")}
-          </span>
+          {decidedAt != null && (
+            <p className="mt-1 font-mono text-[10px] text-slate-500">
+              decided at {decidedAt}&apos;
+            </p>
+          )}
         </div>
       </div>
 
-      {prediction.stage_note && (
-        <p className="mb-2 font-mono text-[11px] text-slate-400">
-          {prediction.stage_note}
+      {plain && (
+        <div className="mt-3 border-l-2 border-white/15 pl-3">
+          <p className="text-[12px] font-semibold text-slate-200">{plain.title}</p>
+          <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
+            {plain.plain}
+          </p>
+        </div>
+      )}
+
+      {/* ── HONESTY / ELIGIBILITY FLAGS ─────────────────────────────── */}
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        {prediction.backfilled && (
+          <Flag tone="slate" title="Recorded after the checkpoint window closed">
+            Backfilled
+          </Flag>
+        )}
+        {(prediction.late_45 || prediction.late_60) && !prediction.backfilled && (
+          <Flag tone="slate" title="The checkpoint window was missed; recorded late">
+            Late
+          </Flag>
+        )}
+        {prediction.trigger_only && (
+          <Flag
+            tone="indigo"
+            title="Past 60' with a final validation — this market may still alert on a genuine opportunity. This is permission to trigger, not a trigger."
+          >
+            Trigger-only
+          </Flag>
+        )}
+        {prediction.suppressed && (
+          <Flag tone="rose" title={prediction.suppressed_reason ?? "Suppressed"}>
+            Suppressed
+          </Flag>
+        )}
+        {prediction.status !== "SETTLED" && (
+          <Flag tone="slate" title={prediction.stage_note ?? undefined}>
+            {prediction.status.replace("_", " ")}
+          </Flag>
+        )}
+      </div>
+
+      {prediction.suppressed && prediction.suppressed_reason && (
+        <p className="mt-2 rounded-lg border border-slate-600/40 bg-slate-900/40 px-3 py-2 text-[11px] leading-relaxed text-slate-400">
+          {prediction.suppressed_reason}
         </p>
       )}
 
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px] sm:grid-cols-3">
+      {/* ── THE TRAJECTORY ──────────────────────────────────────────── */}
+      <div className="mt-3 space-y-2.5">
+        <CheckpointRail
+          at30={prediction.verdict_30}
+          at45={prediction.verdict_45}
+          at60={prediction.verdict_60}
+          comparison={prediction.comparison_30_45}
+          comparisonNote={prediction.comparison_note}
+          now={prediction.minute}
+        />
         {!settled && (
-          <>
-            <div className="flex items-center justify-between gap-2">
-              <dt className="text-slate-500">Forensic</dt>
-              <dd>
-                <VerdictChip state={prediction.forensic} />
-              </dd>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <dt className="text-slate-500">Statistics</dt>
-              <dd>
-                <VerdictChip state={prediction.statistics} />
-              </dd>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <dt className="text-slate-500">Engines</dt>
-              <dd className="text-slate-300">{prediction.stats_label ?? "—"}</dd>
-            </div>
-          </>
+          <JudgePanel
+            statsLabel={prediction.stats_label}
+            engineDetail={prediction.engine_detail}
+            statistics={prediction.statistics}
+          />
         )}
-        <div className="flex items-center justify-between gap-2">
-          <dt className="text-slate-500">Trigger</dt>
-          <dd className="text-slate-300">
-            {prediction.trigger_minute != null
-              ? `${prediction.trigger_minute}'`
-              : "—"}
-          </dd>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <dt className="text-slate-500">Score at trigger</dt>
-          <dd className="text-slate-300">{prediction.score_at_trigger ?? "—"}</dd>
-        </div>
-        <div className="flex items-center justify-between gap-2">
-          <dt className="text-slate-500">Final score</dt>
-          <dd className="text-slate-300">{prediction.final_score ?? "—"}</dd>
-        </div>
-      </dl>
+      </div>
 
-      {prediction.settlement && (
-        <p className="mt-2 border-t border-white/10 pt-2 font-mono text-[11px] font-bold text-emerald-300">
-          Settlement: {prediction.settlement}
-        </p>
+      {/* ── FORENSIC ────────────────────────────────────────────────── */}
+      {!settled && (
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/30 px-3 py-2.5">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">
+            Forensic
+          </span>
+          <span className="flex items-center gap-2">
+            <VerdictChip state={prediction.forensic} />
+            <span className="text-[10.5px] text-slate-500">
+              {prediction.forensic_note ?? ""}
+            </span>
+          </span>
+        </div>
+      )}
+
+      {/* ── OUTCOME — rendered only once something has actually happened ─ */}
+      {(hasTrigger || hasSettlement || prediction.final_score) && (
+        <dl className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-white/10 pt-2.5 text-[11px]">
+          {hasTrigger && (
+            <div className="flex items-center gap-1.5">
+              <dt className="text-slate-500">Alert fired</dt>
+              <dd className="font-mono font-bold text-slate-200">
+                {prediction.trigger_minute}&apos;
+                {prediction.score_at_trigger
+                  ? ` · ${prediction.score_at_trigger}`
+                  : ""}
+              </dd>
+            </div>
+          )}
+          {hasSettlement && (
+            <div className="flex items-center gap-1.5">
+              <dt className="text-slate-500">Settled</dt>
+              <dd className="font-mono font-bold text-emerald-300">
+                {prediction.settlement}
+              </dd>
+            </div>
+          )}
+          {prediction.final_score && (
+            <div className="flex items-center gap-1.5">
+              <dt className="text-slate-500">Final</dt>
+              <dd className="font-mono font-bold text-slate-200">
+                {prediction.final_score}
+              </dd>
+            </div>
+          )}
+        </dl>
       )}
     </div>
+  );
+}
+
+/** A small honesty/eligibility flag. Never interactive, always tooltipped. */
+function Flag({
+  children,
+  tone,
+  title,
+}: {
+  children: ReactNode;
+  tone: "slate" | "indigo" | "rose";
+  title?: string;
+}) {
+  const toneClass =
+    tone === "indigo"
+      ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
+      : tone === "rose"
+        ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
+        : "border-white/15 bg-white/5 text-slate-400";
+  return (
+    <span
+      title={title}
+      className={cn(
+        "rounded-md border px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide",
+        toneClass
+      )}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -1171,100 +1351,15 @@ export default function LivePage() {
     [activeValidation]
   );
 
-  // Counts for the Code 2 headline.
+  // THE PREDICTIONS CODE 2 IS VALIDATING — scoped to the SELECTED match.
   //
-  // PHASE 1 FIX: settled picks were previously counted in the `default`
-  // branch and reported as "Awaiting 45'", so a match whose predictions had
-  // all finished at full time displayed LIKELY 0 / UNLIKELY 0 / VOID 0 /
-  // AWAITING 4 — the exact screen that made Code 2 look broken. A settled pick
-  // is DECIDED, not awaiting anything, and is now counted on its own.
-  const predictionTally = useMemo(() => {
-    let likely = 0;
-    let unlikely = 0;
-    let voided = 0;
-    let settled = 0;
-    let awaiting = 0;
-    for (const p of activePredictions) {
-      if (p.status === "SETTLED") {
-        settled++;
-        continue;
-      }
-      switch (p.verdict) {
-        case "LIKELY":
-        case "FINAL_APPROVED":
-          likely++;
-          break;
-        case "UNLIKELY":
-        case "FINAL_REJECTED":
-          unlikely++;
-          break;
-        case "VOID":
-          voided++;
-          break;
-        default:
-          // UNCLEAR, a 30' pre-verdict, or no verdict yet.
-          awaiting++;
-      }
-    }
-    return {
-      total: activePredictions.length,
-      likely,
-      unlikely,
-      void: voided,
-      settled,
-      awaiting,
-    };
-  }, [activePredictions]);
-
-  // THE PREDICTIONS CODE 2 IS MONITORING — scoped to the SELECTED match.
-  //
-  // This was previously a flat index across every live match, shown at the top
-  // of the page. The user rejected that: "code i dont need the board list even
-  // if its need it its should be on individusl team section or pages not in
-  // general its not convinet like that so the best mean is for code 2 to have
-  // the list of prematch prediction its want to monitor and verify at the top
-  // of its individual page".
-  //
-  // So the list now lives on the individual match page and shows only that
-  // match's predictions. A live-only read is included but tagged, so a read
-  // can never be mistaken for a Code 1 pick.
-  const monitorList = useMemo(() => {
-    const rows: Omit<MonitorRow, "n">[] = [];
-
-    for (const p of activePredictions) {
-      // BUG FIXED: settled picks were filtered out of this list, so a match
-      // whose predictions had all settled rendered as "0 PICKS" and claimed
-      // Code 1 had attached no prediction — while the cards directly below
-      // showed two SETTLED predictions. A settled pick is still a prediction
-      // Code 2 monitored and verified, and it is the one carrying the 30'/45'/60'
-      // record, so it must be listed.
-      rows.push({
-        market: p.label,
-        state: p.verdict ?? p.status ?? "MONITORING",
-        kind: "pick",
-        settled: p.status === "SETTLED",
-        // A settled pick has no live verdict, so the three checkpoints are
-        // what the row must show instead — otherwise it reads as a bare
-        // "SETTLED" with no evidence of any validation.
-        at30: p.verdict_30 ?? undefined,
-        at45: p.verdict_45 ?? undefined,
-        at60: p.verdict_60 ?? undefined,
-        comparison: p.comparison_30_45,
-        comparisonNote: p.comparison_note,
-      });
-    }
-    if (activeLiveRead) {
-      rows.push({
-        market: "UNDER 2.5 (live read)",
-        state: activeLiveRead.read,
-        kind: "read",
-      });
-    }
-    return rows.map((r, i) => ({ ...r, n: i + 1 }));
-  }, [activePredictions, activeLiveRead]);
-
-  const pickCount = monitorList.filter((r) => r.kind === "pick").length;
-  const readCount = monitorList.filter((r) => r.kind === "read").length;
+  // This used to build a full row list for the old 7-column table, including a
+  // row for the live-only read. The table is gone: its 30'/45'/60' cells and its
+  // State column duplicated what each prediction card already shows, now in a
+  // clearer form (the rail plus the hero verdict). Only the two counts the
+  // header still needs are derived here.
+  const pickCount = activePredictions.length;
+  const readCount = activeLiveRead ? 1 : 0;
 
   return (
     <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
@@ -1397,87 +1492,46 @@ export default function LivePage() {
 
             <div className="space-y-6">
 
-              {/* ── CODE 2 TOP SECTION: what is being validated ──────────── */}
-              {/* The user asked for a headline that states plainly which
-                  prematch predictions are awaiting validation or already
-                  voided, so the board never reads as empty or ambiguous. */}
-              <section className="flex flex-col gap-2.5 rounded-2xl border border-emerald-500/20 bg-emerald-950/10 p-3.5">
+              {/* ── CODE 2 HEADLINE ────────────────────────────────────── */}
+              {/* TWO SECTIONS WERE DELETED HERE.
+                  1. A six-counter block (Tracked / Likely / Unlikely / Void /
+                     Settled / Awaiting). Every one of those numbers was
+                     derivable from the cards directly beneath it, and the block
+                     actively LIED: on fixture 19872289 it read "Likely 0" while
+                     Code 3C below displayed two alerts that had fired on a
+                     SUPPORTED reading. Six tiles to express one idea, and the
+                     one idea was wrong.
+                  2. The 7-column "monitored & verified" table. Its 30'/45'/60'
+                     cells and its State column were the same facts the
+                     prediction cards already carried, in 10px monospace. The
+                     rail inside each card now carries the trajectory, so the
+                     table was a second, worse rendering of the same data. */}
+              <section className="rounded-2xl border border-emerald-500/20 bg-emerald-950/10 p-3.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-wider text-emerald-300">
                     <ShieldCheck className="h-4 w-4" />
-                    Prematch probabilistic predictions — validation status
+                    Code 2 — live validation
                   </h3>
-                  <span className="font-mono text-[10px] text-slate-400">
-                    locked at 45&apos; · cycle #{board.cycle || "—"}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-                  {(
-                    [
-                      ["Tracked", predictionTally.total, "text-white"],
-                      ["Likely", predictionTally.likely, "text-emerald-300"],
-                      ["Unlikely", predictionTally.unlikely, "text-amber-300"],
-                      ["Void", predictionTally.void, "text-slate-300"],
-                      ["Settled", predictionTally.settled, "text-cyan-300"],
-                      ["Awaiting", predictionTally.awaiting, "text-slate-400"],
-                    ] as const
-                  ).map(([label, value, cls]) => (
-                    <div
-                      key={label}
-                      className="rounded-lg border border-white/10 bg-black/30 px-2.5 py-2"
-                    >
-                      <p className="font-mono text-[9px] uppercase tracking-wide text-slate-400">
-                        {label}
-                      </p>
-                      <p className={cn("font-mono text-lg font-black", cls)}>
-                        {value}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-                {predictionTally.total === 0 && (
-                  <p className="font-mono text-[11px] italic text-slate-400">
-                    No prematch predictions reached this fixture yet. Code 1
-                    emits a pick only when a structural condition fires, so a
-                    clean match sheet produces nothing to validate.
-                  </p>
-                )}
-              </section>
-
-              {/* ── THE PREDICTIONS CODE 2 IS MONITORING (this match) ────── */}
-              {/* Scoped to the individual match page, not the page as a whole.
-                  The user asked for "the list of prematch prediction its want
-                  to monitor and verify at the top of its individual page". */}
-              <section className="flex flex-col gap-2.5 rounded-2xl border border-emerald-500/20 bg-emerald-950/10 p-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-wider text-emerald-300">
-                    <ShieldCheck className="h-4 w-4" />
-                    Prematch predictions — monitored &amp; verified
-                  </h3>
-                  <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                    <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">
+                  <div className="flex items-center gap-1.5 text-[10px]">
+                    <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-emerald-300">
                       {pickCount} PICK{pickCount === 1 ? "" : "S"}
                     </span>
                     {readCount > 0 && (
-                      <span className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-slate-300">
+                      <span className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 font-mono text-slate-300">
                         {readCount} READ
                       </span>
                     )}
-                    <span className="text-slate-400">
+                    <span className="font-mono text-slate-400">
                       cycle #{board.cycle || "—"}
                     </span>
                   </div>
                 </div>
-
-                {monitorList.length === 0 ? (
-                  <p className="rounded-lg border border-white/5 bg-white/5 p-3 text-center font-mono text-[11px] italic text-slate-400">
-                    Code 1 attached no prediction to this fixture, and the match
-                    has not passed 30&apos; yet — so there is nothing for Code 2
-                    to monitor here.
-                  </p>
-                ) : (
-                  <MonitorListTable rows={monitorList} />
-                )}
+                <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">
+                  Each Code 1 pick is judged at 30&apos;, 45&apos; and 60&apos;.
+                  The 45&apos; verdict is authoritative (Under locks there); 60&apos;
+                  is the final validation. After 60&apos; a pick may only alert on
+                  a genuine opportunity — it is never re-judged.
+                </p>
               </section>
 
               {/* ── CODE 2: PREDICTION LIFECYCLE (main objective) ─────── */}
@@ -1556,20 +1610,31 @@ export default function LivePage() {
                 </section>
               )}
 
-              {/* ── CODE 2: VALIDATION DETAIL (raw board log) ───────────── */}
+              {/* ── CODE 2: RAW ENGINE LOG (diagnostics) ─────────────────── */}
+              {/* This is server console output. It was rendered inline as a
+                  wall of monospace text in the middle of the cockpit, which is
+                  the single biggest reason the screen read as a terminal dump.
+                  It is kept — it is genuinely useful when a verdict looks
+                  wrong — but collapsed behind a disclosure. */}
               {activeValidation?.lines?.length ? (
-                <section className="flex flex-col gap-2">
-                  <h3 className="text-2xs font-bold uppercase tracking-wider text-slate-400">
-                    Cycle detail
-                  </h3>
-                  <div className="rounded-xl border border-white/5 bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-slate-400">
+                <details className="group rounded-xl border border-white/5 bg-black/20">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3.5 py-2.5">
+                    <span className="text-2xs font-bold uppercase tracking-wider text-slate-500">
+                      Engine log
+                    </span>
+                    <span className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                      diagnostics
+                      <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
+                    </span>
+                  </summary>
+                  <div className="border-t border-white/5 px-3.5 py-2.5 font-mono text-[10.5px] leading-relaxed text-slate-500">
                     {activeValidation.lines.map((line, idx) => (
                       <p key={idx} className="whitespace-pre-wrap">
                         {line.trim()}
                       </p>
                     ))}
                   </div>
-                </section>
+                </details>
               ) : null}
 
               {/* ── MATCH ALERTS (opt-in push) ─────────────────────────── */}

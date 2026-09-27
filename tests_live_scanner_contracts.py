@@ -1391,10 +1391,6 @@ class AlertPruningTests(unittest.TestCase):
         self.assertEqual(api_main._prune_validated_alerts(None), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 1 — CODE 2 ACTS AS A VALIDATOR, NOT A SETTLEMENT RECORDER
 #   1. The 45' verdict is ALWAYS delivered, even if the window was missed.
@@ -1807,3 +1803,232 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         self.assertEqual(p["comparison_30_45"], "HELD")
         self.assertTrue(p["late_45"])
         stage2.MATCH_VALIDATION_STATE.clear()
+
+    # ── ONE DIRECTION PER FIXTURE ────────────────────────────────────────
+    def test_under_fixture_suppresses_over_markets(self):
+        """Code 1 said UNDER_2.5 while the incoming feed also carried two OVER
+        markets for the same fixture. Both fired Supreme Alerts at 45', so the
+        board contradicted itself. The OVER side must be suppressed and must
+        never be alertable; it stays visible with a reason."""
+        picks = [
+            stage2.normalize_pick({"type": "UNDER 2.5", "target_loc": "match"})[1],
+            stage2.normalize_pick({"type": "OVER 2.5", "target_loc": "match"})[1],
+            stage2.normalize_pick({"type": "GG_OVER_2.5", "target_loc": "match"})[1],
+        ]
+        stage2.suppress_contradictory_markets(picks)
+        by_key = {p["canonical_key"]: p for p in picks}
+        self.assertFalse(by_key["UNDER_2.5:match"].get("suppressed"))
+        self.assertTrue(by_key["OVER_2.5:match"].get("suppressed"))
+        self.assertTrue(by_key["GG_OVER_2.5:match"].get("suppressed"))
+        self.assertIn(
+            "contradictory market",
+            by_key["OVER_2.5:match"]["suppressed_reason"],
+        )
+
+    def test_direction_suppression_leaves_coherent_fixtures_alone(self):
+        """Suppression must only fire when BOTH directions are present."""
+        under_only = [
+            stage2.normalize_pick({"type": "UNDER 2.5", "target_loc": "match"})[1],
+            stage2.normalize_pick({"type": "TO_SCORE", "target_loc": "home"})[1],
+        ]
+        stage2.suppress_contradictory_markets(under_only)
+        self.assertFalse(any(p.get("suppressed") for p in under_only))
+
+        neutral = [
+            stage2.normalize_pick({"type": "GG", "target_loc": "match"})[1],
+            stage2.normalize_pick({"type": "TO_SCORE", "target_loc": "away"})[1],
+        ]
+        stage2.suppress_contradictory_markets(neutral)
+        self.assertFalse(any(p.get("suppressed") for p in neutral))
+
+        # GG is direction-neutral, so a GG + OVER pair on its own is NOT a
+        # contradiction — there is no UNDER to contradict. Suppression is
+        # specifically "an OVER market on a fixture already tracked UNDER".
+        gg_and_over = [
+            stage2.normalize_pick({"type": "GG", "target_loc": "match"})[1],
+            stage2.normalize_pick({"type": "OVER 2.5", "target_loc": "match"})[1],
+        ]
+        stage2.suppress_contradictory_markets(gg_and_over)
+        self.assertFalse(any(p.get("suppressed") for p in gg_and_over))
+
+        # Add the UNDER back and the OVER side must be suppressed.
+        gg_under_over = gg_and_over + [
+            stage2.normalize_pick({"type": "UNDER 2.5", "target_loc": "match"})[1]
+        ]
+        stage2.suppress_contradictory_markets(gg_under_over)
+        by_key = {p["canonical_key"]: p for p in gg_under_over}
+        self.assertFalse(by_key["GG:match"].get("suppressed"))
+        self.assertFalse(by_key["UNDER_2.5:match"].get("suppressed"))
+        self.assertTrue(by_key["OVER_2.5:match"].get("suppressed"))
+
+    def test_suppressed_pick_never_fires_an_alert(self):
+        """The point of suppression is that the dropped market can never alert
+        again. This drives a full cycle with an open gate and asserts no alert
+        is recorded."""
+        stage2.MATCH_VALIDATION_STATE.clear()
+        stage2.ALERT_HISTORY_CACHE = set()
+        stage2.VALIDATED_ALERTS = {}
+        ctx = {
+            "id": 9001, "name": "X vs Y", "minute": 50, "is_finished": False,
+            "home": {"goals": 1, "stats": {"shots-on-target": 5,
+                                           "dangerous-attacks": 30,
+                                           "corners": 6, "box": 5}},
+            "away": {"goals": 1, "stats": {"shots-on-target": 2,
+                                           "dangerous-attacks": 12,
+                                           "corners": 2, "box": 1}},
+            "impact": {
+                "home": {"reds": 0, "gk_risk": False, "key_sub_off": 0},
+                "away": {"reds": 0, "gk_risk": False, "key_sub_off": 0},
+            },
+            "events": [{"minute": m, "type": t, "participant_id": 1}
+                       for m, t in [(48, "corner"), (49, "shot-on-target"),
+                                    (49, "goal"), (50, "corner")]],
+        }
+        pick = stage2.normalize_pick({"type": "OVER 2.5", "target_loc": "match"})[1]
+        pick["suppressed"] = True
+        pick["suppressed_reason"] = stage2.SUPPRESSED_REASON
+        cycle_log = []
+        stage2.process_triple_phase_audit(ctx, [pick], cycle_log)
+        self.assertEqual(stage2.VALIDATED_ALERTS, {})
+        row = (cycle_log[0].get("predictions") or [{}])[0]
+        self.assertTrue(row.get("suppressed"))
+        self.assertIn("contradictory market", row.get("suppressed_reason") or "")
+        self.assertTrue(
+            any("contradictory market" in ln for ln in cycle_log[0]["lines"])
+        )
+        stage2.MATCH_VALIDATION_STATE.clear()
+
+    # ── ORPHAN CARRY-FORWARD ─────────────────────────────────────────────
+    def test_alerted_pick_is_carried_forward_when_its_feed_row_disappears(self):
+        """A market that alerted and then dropped out of the pick feed used to
+        vanish from the tracked set while remaining stranded in Code 3C with no
+        way to be validated or settled. It must be carried forward instead."""
+        stage2.MATCH_VALIDATION_STATE.clear()
+        stage2.MATCH_VALIDATION_STATE["555"] = {
+            "UNDER_2.5:match": {"verdict_45": "LIKELY", "verdict_45_minute": 45},
+            "OVER_2.5:match": {"verdict_45": "LIKELY", "verdict_45_minute": 45,
+                               "alerted": True},
+        }
+        feed = {}
+        stage2.carry_forward_orphans(feed)
+        carried = {p["canonical_key"]: p for p in feed.get("555", [])}
+        # The alerted OVER is recovered even though no feed row remains for it.
+        self.assertIn("OVER_2.5:match", carried)
+        self.assertTrue(carried["OVER_2.5:match"]["orphaned"])
+        self.assertTrue(carried["OVER_2.5:match"]["suppressed"])
+        self.assertIn("OVER_2.5:match", stage2.MATCH_VALIDATION_STATE["555"])
+        stage2.MATCH_VALIDATION_STATE.clear()
+
+    def test_carry_forward_keeps_a_pick_the_feed_still_carries(self):
+        """A pick still present in the live feed must not be duplicated, and a
+        state entry that was never judged must not be resurrected."""
+        stage2.MATCH_VALIDATION_STATE.clear()
+        stage2.MATCH_VALIDATION_STATE["556"] = {
+            "UNDER_2.5:match": {"verdict_45": "LIKELY"},
+            "TO_SCORE:home": {},
+        }
+        live = [stage2.normalize_pick({"type": "UNDER 2.5",
+                                      "target_loc": "match"})[1]]
+        feed = {"556": live}
+        stage2.carry_forward_orphans(feed)
+        self.assertEqual(len(feed["556"]), 1)
+        self.assertEqual(feed["556"][0]["canonical_key"], "UNDER_2.5:match")
+        stage2.MATCH_VALIDATION_STATE.clear()
+
+    def test_canonical_key_round_trips_into_a_pick(self):
+        pick = stage2._pick_from_canonical_key("GG_OVER_2.5:match")
+        self.assertIsNotNone(pick)
+        self.assertEqual(pick["market"], "GG_OVER_2.5")
+        self.assertEqual(pick["target_loc"], "match")
+        self.assertIsNone(stage2._pick_from_canonical_key("no-separator"))
+
+    # ── ENGINE LABEL ─────────────────────────────────────────────────────
+    def test_engine_label_has_two_numbers_not_three(self):
+        """The label used to be STATS_1/3/3, which read as three separate
+        quantities and was the single most confusing thing on the board."""
+        ctx = {
+            "minute": 40, "home": {"stats": {"shots-on-target": 3}},
+            "away": {"stats": {"shots-on-target": 1}},
+        }
+        pick = {"type": "UNDER 2.5", "market": "UNDER 2.5",
+                "target_loc": "match", "target_id": None}
+        _state, label, detail = stage2.old_engine_statistical_judge(ctx, pick)
+        self.assertRegex(label, r"^STATS_\d+/(2|3)")
+        self.assertNotIn("/3/", label)
+        # The judge reasoning must be carried so the UI can show it.
+        self.assertIn("Engine 1 (Rule)", detail)
+        self.assertIn("Engine 2 (Structure)", detail)
+        self.assertIn("Engine 3 (Momentum)", detail)
+
+    def test_engine_abstention_reports_two_of_three(self):
+        """Engine 3 abstains with no event feed. The label must then read
+        STATS_x/2 and say so, not STATS_x/3/3."""
+        ctx = {
+            "minute": 40, "home": {"stats": {"shots-on-target": 3}},
+            "away": {"stats": {"shots-on-target": 1}}, "events": [],
+        }
+        pick = {"type": "UNDER 2.5", "market": "UNDER_2.5",
+                "target_loc": "match", "target_id": None}
+        _state, label, _detail = stage2.old_engine_statistical_judge(ctx, pick)
+        self.assertIn("STATS_", label)
+        self.assertIn("/2", label)
+        self.assertIn("abstained", label)
+
+    # ── SEEDED "CAN STILL SCORE" RULES ──────────────────────────────────
+    def test_seeded_rules_answer_can_either_team_still_score(self):
+        """Code 2's judges 1 and 2 read CUMULATIVE full-match totals with no
+        time window, so they cannot answer "can they still score at 45'/60'".
+        Code 6's minute_window + xg(side:"any") can, with no new engine."""
+        from LIVE_SCANNER import user_rules_store as urs
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_file = os.path.join(tmp, "user_rules.json")
+            with patch.object(urs, "USER_RULES_FILE", rules_file):
+                created = urs.ensure_seeded_rules()
+                self.assertEqual(len(created), 2)
+                by_label = {r["label"]: r for r in created}
+                r45 = by_label["Still scoring after 45'"]
+                self.assertEqual(r45["minute_window"], {"start": 45, "end": 60})
+                r60 = by_label["Still scoring after 60'"]
+                self.assertEqual(r60["minute_window"], {"start": 60, "end": 75})
+                for rule in (r45, r60):
+                    self.assertEqual(rule["live"]["type"], "xg")
+                    # "any" is evaluated as max(home, away) = either team.
+                    self.assertEqual(rule["live"]["side"], "any")
+                # Idempotent: a second call must not duplicate.
+                self.assertEqual(urs.ensure_seeded_rules(), [])
+                self.assertEqual(len(urs._read_all()), 2)
+
+    def test_seeded_rule_side_any_is_either_team(self):
+        """Prove `side: any` really is a max over both teams, so the seeded
+        rule means "can EITHER side still score" and not "both"."""
+        from LIVE_SCANNER import user_rules_store as urs
+        rule = {"rule_id": "r_test_1", "user_id": "test", "label": "T",
+                "active": True,
+                "prematch": {"type": "none"},
+                "live": {"type": "xg", "side": "any", "min_value": 3.0},
+                "minute_window": {"start": 45, "end": 60}}
+        key_loss = {"h_lost": 0, "a_lost": 0}
+        # Only the away side is above the bar -> must still fire.
+        hit = urs.evaluate_rule_for_match(
+            rule, {"match": {"confidence_score": 40}, "home": {"live_xg": 1.0},
+                   "away": {"live_xg": 4.0}}, {}, 50, key_loss)
+        self.assertIsNotNone(hit)
+        # Neither side is above the bar -> must not fire.
+        quiet = {"match": {"confidence_score": 40}, "home": {"live_xg": 1.0},
+                 "away": {"live_xg": 1.5}}
+        self.assertIsNone(urs.evaluate_rule_for_match(
+            rule, quiet, {}, 50, key_loss))
+        # Outside the window -> must not fire.
+        self.assertIsNone(urs.evaluate_rule_for_match(
+            rule, {"match": {"confidence_score": 40}, "home": {"live_xg": 1.0},
+                   "away": {"live_xg": 9.0}}, {}, 30, key_loss))
+
+
+
+
+# The runner block must be LAST in this file. It used to sit at line 1394,
+# mid-module, where unittest.main() called sys.exit() at import time and every
+# test class declared after it was silently never defined or run. The suite
+# reported "OK" while roughly half the contracts were dead code.
+if __name__ == "__main__":
+    unittest.main()

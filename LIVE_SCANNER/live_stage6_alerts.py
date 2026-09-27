@@ -66,7 +66,11 @@ def _api_gate_clear(tag=""):
         pass
 
 
-from LIVE_SCANNER.user_rules_store import list_rules, evaluate_rule_for_match
+from LIVE_SCANNER.user_rules_store import (
+    list_rules,
+    evaluate_rule_for_match,
+    ensure_seeded_rules,
+)
 
 # --- 1. HOSTING & ENVIRONMENT SETUP ---
 load_dotenv()
@@ -649,6 +653,19 @@ class SupremeOrchestrator:
         structural = self.Detective.investigate(ctx, pre)
         key_loss = self._track_key_player_loss(f_id, ctx, fx)
         fixture_name = fx.get("name", f_id)
+
+        # Install the default "can either team still score at 45'/60'" rules
+        # if they are not present yet. Idempotent, and wrapped so a rules-file
+        # problem can never abort a live cycle.
+        try:
+            _seeded = ensure_seeded_rules()
+            if _seeded:
+                logging.info(
+                    "Seeded %d default live rule(s): %s",
+                    len(_seeded), ", ".join(r["label"] for r in _seeded),
+                )
+        except Exception as seed_err:
+            logging.warning("Seeded rule install skipped: %s", seed_err)
 
         user_alerts = self.UserLogic.evaluate(
             f_id, intel, structural, pre, minute, key_loss,
