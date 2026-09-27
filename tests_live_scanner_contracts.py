@@ -2363,6 +2363,52 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         self.assertTrue(cov["reason"])
 
 
+    def test_coverage_is_marked_provisional_while_squads_load(self):
+        """
+        A cold vault must not be published as a real 0%. Observed live: 0/13 on
+        the first cycle after a restart, then 8/13 two cycles later with no
+        other change. Reporting the first figure as fact reads as "the engine
+        is blind" when the truth is "it has not finished looking".
+        """
+        import tempfile as _t
+        with _t.TemporaryDirectory() as tmp:
+            board_file = os.path.join(tmp, "ob.json")
+            orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+            orch.cycle = 1
+            old_fetching = set(stage6.FETCHING_TEAMS)
+            stage6.FETCHING_TEAMS.clear()
+            try:
+                # Cold: fetches still in flight, nothing evaluable yet.
+                stage6.FETCHING_TEAMS.update({11, 22})
+                with patch.object(stage6, "ORCHESTRATOR_BOARD_FILE", board_file):
+                    orch.save_orchestrator_board(
+                        [{"id": "1", "structural": "INSUFFICIENT_SQUAD_DATA"},
+                         {"id": "2", "structural": "INSUFFICIENT_SQUAD_DATA"}],
+                        2, 0)
+                    cold = json.load(open(board_file))["coverage"]
+                self.assertTrue(cold["warming_up"])
+                self.assertTrue(cold["provisional"])
+                self.assertEqual(cold["pending_fetches"], 2)
+                self.assertEqual(cold["evaluated"], 0)
+
+                # Warm: queue drained, the same 0% is now a real statement.
+                stage6.FETCHING_TEAMS.clear()
+                with patch.object(stage6, "ORCHESTRATOR_BOARD_FILE", board_file):
+                    orch.save_orchestrator_board(
+                        [{"id": "1", "structural": "OK"},
+                         {"id": "2", "structural": "OK"}], 2, 0)
+                    warm = json.load(open(board_file))["coverage"]
+                self.assertFalse(warm["warming_up"])
+                self.assertFalse(warm["provisional"])
+                self.assertEqual(warm["evaluated"], 2)
+            finally:
+                stage6.FETCHING_TEAMS.clear()
+                stage6.FETCHING_TEAMS.update(old_fetching)
+
+
+
+
+
 
 
 

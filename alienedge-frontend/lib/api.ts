@@ -1488,6 +1488,15 @@ export interface LiveCoverage {
   unevaluated: number;
   total: number;
   pct: number;
+  /**
+   * True while squad fetches are still in flight. The counts are then
+   * PROVISIONAL: the vault is cold (e.g. straight after a restart) and the
+   * figure is not the real coverage yet. A 0% shown during warm-up would read
+   * as "the engine is blind" when it is really "it has not finished looking".
+   */
+  warming_up?: boolean;
+  pending_fetches?: number;
+  provisional?: boolean;
   reason: string;
 }
 
