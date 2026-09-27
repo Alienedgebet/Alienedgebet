@@ -1,11 +1,14 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import type { AxiosResponse } from "axios";
 import { Crosshair } from "lucide-react";
 import { specialsApi, type SOTPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortSOT } from "@/lib/signal-ranking";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SOT } from "@/lib/mock-chains";
@@ -33,6 +36,25 @@ const columns: PredictionColumn<SOTPick>[] = [
 
 export default function SOTPage() {
   const { date } = useSelectedDate();
+  // Default ON: this is the one ordering the backtest actually supports
+  // (Consistency >= 48 AND Proj_SOT >= 9.3 -> 96.1% over 51 settled rows,
+  // p = 0.00136, surviving a Bonferroni correction). See
+  // lib/signal-ranking.ts for the full numbers and how to re-check them.
+  const [smartRank, setSmartRank] = useState(true);
+
+  const fetchSOT = useMemo(
+    () => async (): Promise<AxiosResponse<SOTPick[]>> => {
+      const response = await specialsApi.getSOT(date);
+      if (smartRank && Array.isArray(response.data)) {
+        // Rebind .data rather than spreading the response: spreading widens
+        // the type to a fresh object literal and breaks the ChainStage
+        // fetcher contract.
+        response.data = sortSOT(response.data);
+      }
+      return response;
+    },
+    [date, smartRank]
+  );
 
   // Verify -> Intelligent Pass Count -> Fixture -> Rest
   const columnsWithVerify = useMemo(
@@ -65,6 +87,13 @@ export default function SOTPage() {
             </p>
           </div>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          help="Picks the backtested combination to the top: Consistency >= 48 AND Proj_SOT >= 9.3 (49/51 = 96.1% vs 81.5% baseline, p = 0.00136). Re-check with: python3 signal_backtest.py --market sot"
+        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
@@ -75,8 +104,8 @@ export default function SOTPage() {
         <ChainStage
           title="Short On Target Over 6.5+"
           description="Foundation base"
-          fetcher={() => specialsApi.getSOT(date)}
-          deps={[date]}
+          fetcher={fetchSOT}
+          deps={[date, smartRank]}
           columns={columnsWithVerify}
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No S.O.T. picks for this date."

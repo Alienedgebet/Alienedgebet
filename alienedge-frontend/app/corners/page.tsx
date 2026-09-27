@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import type { AxiosResponse } from "axios";
 import { CornerUpRight } from "lucide-react";
 import {
   cornersApi,
@@ -12,6 +13,8 @@ import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortCorners } from "@/lib/signal-ranking";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import {
@@ -134,6 +137,24 @@ const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
 export default function CornersPage() {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
+  // Default ON: U2.5% <= 48.8 AND at most one side wounded is the ordering the
+  // full-history backtest supports (92.7% vs 81.5% for the rest, p = 0.000037,
+  // 10 of 11 leave-one-day-out days). See lib/signal-ranking.ts.
+  const [smartRank, setSmartRank] = useState(true);
+
+  const fetchAggregator = useMemo(
+    () => async (): Promise<AxiosResponse<CornerAggregatorPick[]>> => {
+      const response = await cornersApi.getAggregator(date);
+      if (smartRank && Array.isArray(response.data)) {
+        // Rebind .data rather than spreading the response: spreading widens
+        // the type to a fresh object literal and breaks the ChainStage
+        // fetcher contract.
+        response.data = sortCorners(response.data);
+      }
+      return response;
+    },
+    [date, smartRank]
+  );
 
   // 1. Master Aggregator (Verify -> DNA -> Rest)
   const aggregatorColumnsWithVerifyAndDna = useMemo(
@@ -180,6 +201,13 @@ export default function CornersPage() {
             </p>
           </div>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          help="Picks the backtested combination to the top: U2.5% <= 48.8 AND at most one side wounded (247 rows, 92.7% vs 81.5% for the rest, p = 0.000037, better on 10 of 11 leave-one-day-out days). Re-check with: python3 signal_backtest.py --market corners"
+        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
@@ -190,8 +218,8 @@ export default function CornersPage() {
         <ChainStage
           title="Corner Intelligence"
           description="Elite output"
-          fetcher={() => cornersApi.getAggregator(date)}
-          deps={[date]}
+          fetcher={fetchAggregator}
+          deps={[date, smartRank]}
           columns={aggregatorColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.Fixture}-${i}`}
           emptyMessage="No aggregator picks for this date."
