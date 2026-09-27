@@ -1756,3 +1756,54 @@ class Comparison30To45Tests(unittest.TestCase):
         self.assertEqual(snap["goals"], 0)
         self.assertEqual(snap["sot"], 3)
         self.assertEqual(snap["engines_passed"], 2)
+
+
+class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
+    """
+    A settled prediction must still show the work Code 2 did.
+
+    The settlement branch used to append a bare dict and `continue`, which
+    discarded the whole validation history. The 30' observation, 45' verdict,
+    60' final validation and 30'->45' comparison lived only in the ledger, so a
+    settled prediction reached the board as a bare "SETTLED" with no evidence
+    of any validation — and the per-match monitor list looked empty.
+    """
+
+    def test_settled_row_is_built_from_the_ledger_entry(self):
+        source = open(stage2.__file__).read()
+        # Both settlement branches must read the ledger entry.
+        self.assertIn('settled_entry = MATCH_VALIDATION_STATE[f_id].get(p_key)',
+                      source)
+        self.assertIn('done_entry = MATCH_VALIDATION_STATE[f_id].get(p_key)',
+                      source)
+        # And each must carry the three checkpoints onto the row.
+        self.assertGreaterEqual(source.count('"verdict_30":  settled_entry'), 1)
+        self.assertGreaterEqual(source.count('"verdict_45":  settled_entry'), 1)
+        self.assertGreaterEqual(source.count('"verdict_60":  settled_entry'), 1)
+        self.assertGreaterEqual(source.count('"comparison_30_45": settled_entry'), 1)
+        # The previously-settled branch must do the same.
+        self.assertGreaterEqual(source.count('"verdict_45":  done_entry'), 1)
+
+    def test_finished_snapshot_row_keeps_the_trail(self):
+        stage2.MATCH_VALIDATION_STATE.clear()
+        stage2.MATCH_VALIDATION_STATE["77"] = {
+            "GG:match": {
+                "verdict_30": "SUPPORTING", "verdict_30_minute": 32,
+                "verdict_45": "LIKELY", "verdict_45_minute": 49,
+                "verdict_60": "UNLIKELY", "verdict_60_minute": 60,
+                "comparison_30_45": "HELD",
+                "late_45": True,
+            },
+        }
+        row = stage2._finished_snapshot_board_entry({
+            "fixture_id": 77, "name": "X vs Y", "minute": 90,
+            "ft_score": "2-2", "home": {"goals": 2}, "away": {"goals": 2},
+            "home_stats": {}, "away_stats": {},
+        })
+        p = (row.get("predictions") or [])[0]
+        self.assertEqual(p["verdict_30"], "SUPPORTING")
+        self.assertEqual(p["verdict_45"], "LIKELY")
+        self.assertEqual(p["verdict_60"], "UNLIKELY")
+        self.assertEqual(p["comparison_30_45"], "HELD")
+        self.assertTrue(p["late_45"])
+        stage2.MATCH_VALIDATION_STATE.clear()
