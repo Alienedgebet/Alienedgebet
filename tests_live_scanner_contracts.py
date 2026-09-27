@@ -1974,56 +1974,12 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         self.assertIn("/2", label)
         self.assertIn("abstained", label)
 
-    # ── SEEDED "CAN STILL SCORE" RULES ──────────────────────────────────
-    def test_seeded_rules_answer_can_either_team_still_score(self):
-        """Code 2's judges 1 and 2 read CUMULATIVE full-match totals with no
-        time window, so they cannot answer "can they still score at 45'/60'".
-        Code 6's minute_window + xg(side:"any") can, with no new engine."""
-        from LIVE_SCANNER import user_rules_store as urs
-        with tempfile.TemporaryDirectory() as tmp:
-            rules_file = os.path.join(tmp, "user_rules.json")
-            with patch.object(urs, "USER_RULES_FILE", rules_file):
-                created = urs.ensure_seeded_rules()
-                self.assertEqual(len(created), 2)
-                by_label = {r["label"]: r for r in created}
-                r45 = by_label["Still scoring after 45'"]
-                self.assertEqual(r45["minute_window"], {"start": 45, "end": 60})
-                r60 = by_label["Still scoring after 60'"]
-                self.assertEqual(r60["minute_window"], {"start": 60, "end": 75})
-                for rule in (r45, r60):
-                    self.assertEqual(rule["live"]["type"], "xg")
-                    # "any" is evaluated as max(home, away) = either team.
-                    self.assertEqual(rule["live"]["side"], "any")
-                # Idempotent: a second call must not duplicate.
-                self.assertEqual(urs.ensure_seeded_rules(), [])
-                self.assertEqual(len(urs._read_all()), 2)
+    # (seeded "can still score" rules were removed: live_xg is cumulative,
+    # so a fixed bar fired on every candidate past 45'. See the xg condition
+    # in user_rules_store for the full reasoning.)
+    # ──────────────────────────────────
 
-    def test_seeded_rule_side_any_is_either_team(self):
-        """Prove `side: any` really is a max over both teams, so the seeded
-        rule means "can EITHER side still score" and not "both"."""
-        from LIVE_SCANNER import user_rules_store as urs
-        rule = {"rule_id": "r_test_1", "user_id": "test", "label": "T",
-                "active": True,
-                "prematch": {"type": "none"},
-                "live": {"type": "xg", "side": "any", "min_value": 3.0},
-                "minute_window": {"start": 45, "end": 60}}
-        key_loss = {"h_lost": 0, "a_lost": 0}
-        # Only the away side is above the bar -> must still fire.
-        hit = urs.evaluate_rule_for_match(
-            rule, {"match": {"confidence_score": 40}, "home": {"live_xg": 1.0},
-                   "away": {"live_xg": 4.0}}, {}, 50, key_loss)
-        self.assertIsNotNone(hit)
-        # Neither side is above the bar -> must not fire.
-        quiet = {"match": {"confidence_score": 40}, "home": {"live_xg": 1.0},
-                 "away": {"live_xg": 1.5}}
-        self.assertIsNone(urs.evaluate_rule_for_match(
-            rule, quiet, {}, 50, key_loss))
-        # Outside the window -> must not fire.
-        self.assertIsNone(urs.evaluate_rule_for_match(
-            rule, {"match": {"confidence_score": 40}, "home": {"live_xg": 1.0},
-                   "away": {"live_xg": 9.0}}, {}, 30, key_loss))
 
-    # ── STORM TRACK: THE THREE ESCALATING GATES ─────────────────────────
     def _storm_ctx(self, a_press=60.0, h_press=40.0):
         # h_triple means the HOME squad is the structurally broken one, so it
         # is the AWAY side that dominates: a_pressure_share must exceed 50 for
