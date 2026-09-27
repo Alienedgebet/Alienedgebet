@@ -2368,6 +2368,48 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
             stage6.FETCHING_TEAMS.update(old_fetching)
 
 
+    def test_coverage_reports_what_could_not_be_evaluated(self):
+        """
+        Option A: the strict 2x bar is kept and the unevaluable remainder is
+        REPORTED. Silence must not be ambiguous — a match with no squad is
+        BLIND, not QUIET, and the board has to say which.
+        """
+        import tempfile as _t
+        with _t.TemporaryDirectory() as tmp:
+            board_file = os.path.join(tmp, "ob.json")
+            orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+            orch.cycle = 7
+            with patch.object(stage6, "ORCHESTRATOR_BOARD_FILE", board_file):
+                matches = [
+                    {"id": "1", "structural": "OK"},
+                    {"id": "2", "structural": "INSUFFICIENT_SQUAD_DATA"},
+                    {"id": "3", "structural": "INSUFFICIENT_SQUAD_DATA"},
+                    {"id": "4", "structural": "STALE_CACHE_FORMAT"},
+                ]
+                orch.save_orchestrator_board(matches, 4, 0)
+                board = json.load(open(board_file))
+        cov = board["coverage"]
+        self.assertEqual(cov["total"], 4)
+        # Only the single "OK" row is evaluable. INSUFFICIENT_SQUAD_DATA and
+        # STALE_CACHE_FORMAT both mean the 2x bar was never tested.
+        self.assertEqual(cov["evaluated"], 1)
+        self.assertEqual(cov["unevaluated"], 3)
+        self.assertEqual(cov["pct"], 25)
+        # A row the structural detector could not read must be labelled, with a
+        # reason a user could read.
+        self.assertEqual(matches[0]["evaluation"], "evaluated")
+        self.assertIsNone(matches[0]["evaluation_note"])
+        self.assertEqual(matches[1]["evaluation"], "not_evaluated")
+        self.assertIn("squad", matches[1]["evaluation_note"].lower())
+        # A stale-cache row is equally unusable, so it must not be counted as
+        # evaluable just because its status is not the exact insufficient code.
+        self.assertEqual(matches[3]["evaluation"], "not_evaluated")
+        self.assertTrue(cov["reason"])
+
+
+
+
+
 
 
 
