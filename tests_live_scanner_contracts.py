@@ -2529,6 +2529,84 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         stage6.VALIDATION_STATE.clear()
 
 
+    # ── FINISHED MATCHES MUST NOT BE LOST ───────────────────────────────
+    def test_a_fixture_that_left_the_live_feed_is_still_resolved(self):
+        """
+        A finished fixture LEAVES the in-play feed, usually in the same cycle.
+        The old guard required it to still be in the live feed AND marked
+        finished, so the verification silently lost those matches and their
+        cards sat on "Match in progress" forever. The FT snapshot persists
+        finished results independently, so it must be consulted even when the
+        live feed has no row at all.
+        """
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        rec = {"f_id": "555", "outcome": "pending", "time":
+               __import__("datetime").datetime.now().isoformat(),
+               "score_home_trigger": 0, "score_away_trigger": 0}
+        import tempfile as _t
+        with _t.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                with open(out, "w") as f:
+                    f.write(json.dumps(rec) + "\n")
+                # live_by_id is EMPTY: the fixture is gone from the feed.
+                with patch.object(
+                        stage6.SupremeOrchestrator, "_ft_snapshot_scores",
+                        staticmethod(lambda fid: (2, 1))):
+                    settled = orch.resolve_alert_results({})
+                self.assertEqual(settled, 1)
+                got = json.loads(open(out).read().strip())
+        self.assertEqual(got["final_score"], "2-1")
+        self.assertEqual(got["outcome"], "goal_followed")
+
+    def test_stale_pending_ages_out_instead_of_claiming_in_progress(self):
+        """A match finished days ago whose score is in no retained source must
+        read 'cannot verify', never 'match in progress'."""
+        import tempfile as _t
+        from datetime import datetime, timedelta
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        old = (datetime.now() - timedelta(hours=stage6.STALE_PENDING_AFTER_S
+                                         / 3600 + 6)).isoformat()
+        rec = {"f_id": "556", "outcome": "pending", "time": old,
+               "score_home_trigger": 0, "score_away_trigger": 0}
+        with _t.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                with open(out, "w") as f:
+                    f.write(json.dumps(rec) + "\n")
+                with patch.object(
+                        stage6.SupremeOrchestrator, "_ft_snapshot_scores",
+                        staticmethod(lambda fid: None)):
+                    orch.resolve_alert_results({})
+                got = json.loads(open(out).read().strip())
+        self.assertEqual(got["outcome"], "unverifiable")
+        self.assertIsNone(got["final_score"])
+        self.assertIn("no longer retained", got["unverifiable_reason"])
+
+    def test_a_recent_pending_alert_is_left_alone(self):
+        """The age-out must not touch a match that is simply still running."""
+        import tempfile as _t
+        from datetime import datetime
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        rec = {"f_id": "557", "outcome": "pending",
+               "time": datetime.now().isoformat(),
+               "score_home_trigger": 0, "score_away_trigger": 0}
+        with _t.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                with open(out, "w") as f:
+                    f.write(json.dumps(rec) + "\n")
+                with patch.object(
+                        stage6.SupremeOrchestrator, "_ft_snapshot_scores",
+                        staticmethod(lambda fid: None)):
+                    self.assertEqual(orch.resolve_alert_results({}), 0)
+                got = json.loads(open(out).read().strip())
+        self.assertEqual(got["outcome"], "pending")
+        self.assertNotIn("unverifiable_reason", got)
+
+
+
+
 
 
 

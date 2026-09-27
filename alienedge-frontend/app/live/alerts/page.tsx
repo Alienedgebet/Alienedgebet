@@ -149,6 +149,51 @@ function VerificationStrip({ group }: { group: StormGroup }) {
 }
 
 /** The storm timeline: one node per gate the fixture actually reached. */
+/**
+ * The storm track in one sentence.
+ *
+ * The timeline shows the nodes; this says what they MEAN. Previously the card
+ * only ever said "3 stages", which tells a reader nothing — one moment of
+ * evidence listed three times looks like three separate findings rather than
+ * one storm tracked forward. The narration is what makes the escalation
+ * legible: how long it ran, and whether it was caught early or late.
+ */
+function narrateStorm(nodes: Array<{ stage: string; alert: LiveAlertPick }>) {
+  if (nodes.length === 0) return null;
+  const first = nodes[0].alert;
+  const last = nodes[nodes.length - 1].alert;
+  const span = last.minute - first.minute;
+  const firstStage = nodes[0].stage;
+  const lastStage = nodes[nodes.length - 1].stage;
+
+  // User rules are not part of the storm track and have no stage at all.
+  if (!firstStage) return "Your rule matched this match.";
+
+  if (nodes.length === 1) {
+    if (firstStage === "developing") {
+      return `Storm caught early at ${first.minute}' and never re-triggered — it faded rather than building.`;
+    }
+    if (firstStage === "sustained") {
+      return `Caught late: no storm until ${first.minute}'. Nothing earlier in the match set it off.`;
+    }
+    return `Only caught at the very end, ${first.minute}' — too late to be an early read.`;
+  }
+
+  const started =
+    firstStage === "developing"
+      ? `Storm started at ${first.minute}'`
+      : firstStage === "sustained"
+        ? `Storm not visible until ${first.minute}'`
+        : `Storm first caught at ${first.minute}', already peaking`;
+  const ended =
+    lastStage === "peaking"
+      ? ` still peaking at ${last.minute}'`
+      : lastStage === "sustained"
+        ? ` still holding at ${last.minute}'`
+        : ` seen again at ${last.minute}'`;
+  return `${started},${ended} — ${span} minute${span === 1 ? "" : "s"} tracked.`;
+}
+
 function StormTimeline({ group }: { group: StormGroup }) {
   const nodes = useMemo(() => {
     const byStage = new Map<string, LiveAlertPick>();
@@ -167,7 +212,11 @@ function StormTimeline({ group }: { group: StormGroup }) {
   if (nodes.length === 0) return null;
 
   return (
-    <div className="flex items-center">
+    <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3">
+      <p className="text-[12px] leading-relaxed text-slate-200">
+        {narrateStorm(nodes)}
+      </p>
+      <div className="mt-3 flex items-center">
       {nodes.map((n, i) => (
         <div key={n.stage} className="flex flex-1 items-start last:flex-none">
           <div className="flex flex-col items-center gap-1">
@@ -193,7 +242,8 @@ function StormTimeline({ group }: { group: StormGroup }) {
             <div className="mt-1 h-px flex-1 bg-white/15" aria-hidden />
           )}
         </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
@@ -222,10 +272,12 @@ function AlertGroupCard({ group }: { group: StormGroup }) {
             {isUserRule
               ? `Your rule · ${peak.rule_label || "custom"}`
               : "Code 6 storm track"}
-            {" · "}
-            {group.alerts.length > 1
-              ? `${group.alerts.length} stages`
-              : "1 stage"}
+            {!isUserRule && group.alerts.length > 1 && (
+              <>
+                {" · "}
+                {group.alerts.length} checks, one storm
+              </>
+            )}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -271,11 +323,11 @@ function AlertGroupCard({ group }: { group: StormGroup }) {
       <div className="flex items-center justify-between border-t border-white/5 pt-2 text-[10px] text-slate-500">
         <span>
           {group.alerts.length > 1
-            ? `stages at ${group.alerts
+            ? `checked at ${group.alerts
                 .map((a) => `${a.minute}'`)
                 .reverse()
                 .join(", ")}`
-            : `alerted at ${peak.minute}'`}
+            : `triggered at ${peak.minute}'`}
         </span>
         <span className="font-mono">
           {new Date(peak.time).toLocaleString(undefined, {
