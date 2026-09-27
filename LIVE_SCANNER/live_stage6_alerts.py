@@ -688,6 +688,8 @@ class SupremeOrchestrator:
         self.update_market_settlement(f_id, fx)
         # The scoreline at this instant, captured once and handed to
         # fire_alert() so every alert this cycle is anchored to real state.
+        # None means "could not be read" — which is recorded honestly as an
+        # unverifiable alert rather than as a 0-0 we never actually saw.
         current_score = self.score_from_fixture(fx)
         h_s, a_s = self.extract_stats(fx)
         intel = self.Brain.analyze_match_state(
@@ -1192,10 +1194,8 @@ class SupremeOrchestrator:
         """
         Read a specific named score period, e.g. "FULLTIME", "CURRENT".
 
-        `score_from_fixture` only matches CURRENT, which is correct for a live
-        read but WRONG at full time: SportMonks drops the CURRENT entry once
-        the whistle goes and leaves 1ST_HALF / 2ND_HALF / FULLTIME. That is why
-        every finished match used to resolve to 0-0.
+        At full time the CURRENT period is gone, so the score is read from the
+        FT snapshot instead (see score_at_ft).
         Returns (home, away) or None when the period is absent.
         """
         h = a = None
@@ -1692,38 +1692,71 @@ class SupremeOrchestrator:
     @staticmethod
     def score_from_fixture(fx):
         """
-        Read the CURRENT scoreline out of a provider fixture.
+        The scoreline of a fixture RIGHT NOW, or None when it cannot be read.
 
-        Same parse as update_market_settlement() below, lifted out so the
-        scoreline can be captured at the exact instant an alert fires. That
-        value is the whole point of the verification panel: without it an
-        alert is a claim about a moment with no recorded state, and there is
-        no way to check afterwards whether anything actually followed.
+        THE BUG THIS FIXES
+        This used to read ONLY the `CURRENT` score period and default to 0.
+        The provider does not always publish a CURRENT period: a fixture live
+        at 43' was found carrying only 1ST_HALF and 2ND_HALF, so the read
+        returned 0-0 for a match that was actually 1-0. That silently wrote a
+        wrong score onto the alert — the one number the verification panel
+        exists to show. It is not a full-time-only problem; it happens live.
 
-        Returns (home_goals, away_goals) as ints. Missing data yields 0s,
-        matching the rest of this module's handling.
+        ORDER
+        1. extract_match_data() — the settlement service's own standardiser and
+           already this system's canonical, independently tested reader of the
+           same payload. Its h_ft/a_ft are the running total.
+        2. The CURRENT period, when the provider did publish one.
+        3. The most recent period present. Period entries are CUMULATIVE (a
+           2ND_HALF entry holds the total so far, not that period's own goals),
+           so the newest period IS the running score.
+
+        RETURNS None, NEVER (0, 0). A 0-0 that was not read is
+        indistinguishable from a real goalless draw, so callers must treat
+        None as unknown rather than as zero.
         """
-        h_g = a_g = 0
-        for entry in (fx or {}).get("scores", []):
+        try:
+            from settlement_service import extract_match_data
+            std = extract_match_data(fx) or {}
+            if std.get("score_available"):
+                h, a = std.get("h_ft"), std.get("a_ft")
+                if h is not None and a is not None:
+                    return (int(h), int(a))
+        except Exception:
+            pass
+
+        current = {}
+        latest = {}
+        latest_type = -1
+        for entry in (fx or {}).get("scores", []) or []:
             if not isinstance(entry, dict):
                 continue
             s_obj = entry.get("score") or entry
-            desc = str(s_obj.get("description", "")).upper()
-            if "CURRENT" not in desc:
-                continue
             side = str(s_obj.get("participant", "")).lower()
-            goals = s_obj.get("goals")
-            if goals is None:
+            if side not in ("home", "away"):
                 continue
             try:
-                val = int(goals)
+                val = int(s_obj.get("goals"))
             except (TypeError, ValueError):
                 continue
-            if side == "home":
-                h_g = val
-            elif side == "away":
-                a_g = val
-        return h_g, a_g
+            desc = str(s_obj.get("description", "")).upper()
+            if "CURRENT" in desc:
+                current[side] = val
+                continue
+            try:
+                tid = int(entry.get("type_id") or 0)
+            except (TypeError, ValueError):
+                tid = 0
+            if tid >= latest_type:
+                if tid > latest_type:
+                    latest_type = tid
+                    latest = {}
+                latest[side] = val
+
+        for src in (current, latest):
+            if src.get("home") is not None and src.get("away") is not None:
+                return (int(src["home"]), int(src["away"]))
+        return None
 
     def update_market_settlement(self, f_id, fx):
         h_g = a_g = 0
