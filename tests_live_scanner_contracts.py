@@ -2423,17 +2423,43 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
             ],
         }
 
-    def test_current_is_not_read_at_full_time(self):
-        """THE BUG. `score_from_fixture` only matches CURRENT, so resolving a
-        finished match through it yields (0,0) — a scoreline that was never
-        read, and indistinguishable from a real goalless draw."""
+    def test_score_is_read_correctly_without_a_current_period(self):
+        """
+        THE BUG, and it was NOT full-time only.
+
+        `score_from_fixture` read only the CURRENT period and defaulted to 0.
+        The provider frequently publishes no CURRENT period at all — a fixture
+        LIVE at 43' was found carrying only 1ST_HALF and 2ND_HALF — so the
+        read returned 0-0 for a match that was really 1-0, silently writing a
+        wrong score onto the alert.
+
+        The reader now falls back to the settlement standardiser and then to
+        the most recent (cumulative) period, and returns None rather than a
+        fabricated 0-0 when nothing can be read.
+        """
         fx = self._finished_fx(42, period="FULLTIME", h=1, a=2)
         orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
-        self.assertEqual(orch.score_from_fixture(fx), (0, 0))
-        # The correct period gives the truth.
-        self.assertEqual(orch.score_period(fx, "FULLTIME"), (1, 2))
-        # An absent period must be None, never (0, 0).
+        # No CURRENT entry anywhere, yet the score must still be right.
+        self.assertEqual(orch.score_from_fixture(fx), (1, 2))
         self.assertIsNone(orch.score_period(fx, "CURRENT"))
+        # An unreadable fixture yields None, never a fabricated 0-0.
+        self.assertIsNone(orch.score_from_fixture({"scores": []}))
+
+    def test_latest_cumulative_period_is_the_running_score(self):
+        """With no CURRENT period, the newest period IS the running total:
+        period entries are cumulative, not per-period goals."""
+        fx = {"id": 1, "scores": [
+            {"type_id": 1, "score": {"participant": "home", "goals": 1},
+             "description": "1ST_HALF"},
+            {"type_id": 1, "score": {"participant": "away", "goals": 0},
+             "description": "1ST_HALF"},
+            {"type_id": 2, "score": {"participant": "home", "goals": 1},
+             "description": "2ND_HALF"},
+            {"type_id": 2, "score": {"participant": "away", "goals": 0},
+             "description": "2ND_HALF"},
+        ]}
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        self.assertEqual(orch.score_from_fixture(fx), (1, 0))
 
     def test_final_score_falls_back_to_the_fulltime_period(self):
         """With no FT snapshot available the FULLTIME period is used."""
