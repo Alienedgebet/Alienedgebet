@@ -863,7 +863,7 @@ class LiveScannerContractTests(unittest.TestCase):
         orchestrator = object.__new__(stage6.SupremeOrchestrator)
         orchestrator.cycle = 0
         orchestrator.load_all_prematch_data = lambda: {}
-        orchestrator.maintenance_thread = lambda db: None
+        orchestrator.maintenance_thread = lambda db, live=None: None
         orchestrator.fetch_live_scores = lambda: [{"id": "bad"}, {"id": "good"}]
         orchestrator.cleanup_stale_memory = lambda live_ids: None
 
@@ -890,7 +890,7 @@ class LiveScannerContractTests(unittest.TestCase):
         orchestrator = object.__new__(stage6.SupremeOrchestrator)
         orchestrator.cycle = 0
         orchestrator.load_all_prematch_data = lambda: {}
-        orchestrator.maintenance_thread = lambda db: None
+        orchestrator.maintenance_thread = lambda db, live=None: None
         orchestrator.fetch_live_scores = lambda: []
         orchestrator.cleanup_stale_memory = lambda live_ids: None
         called = []
@@ -2022,6 +2022,355 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         self.assertIsNone(urs.evaluate_rule_for_match(
             rule, {"match": {"confidence_score": 40}, "home": {"live_xg": 1.0},
                    "away": {"live_xg": 9.0}}, {}, 30, key_loss))
+
+    # ── STORM TRACK: THE THREE ESCALATING GATES ─────────────────────────
+    def _storm_ctx(self, a_press=60.0, h_press=40.0):
+        # h_triple means the HOME squad is the structurally broken one, so it
+        # is the AWAY side that dominates: a_pressure_share must exceed 50 for
+        # the handshake condition to hold.
+        return {
+            "match": {"confidence_score": 70.0, "chaos_index": 12.0,
+                      "a_pressure_share": a_press,
+                      "h_pressure_share": h_press},
+            "home": {"live_xg": 5.0}, "away": {"live_xg": 3.0},
+        }
+
+    def test_storm_gate_windows_do_not_overlap_and_cover_the_match(self):
+        """The three gates must tile the second half exactly once each, so a
+        fixture can never sit in two windows at the same cycle."""
+        wins = sorted((g[1], g[2]) for g in stage6.STORM_GATES)
+        self.assertEqual(wins, [(30, 45), (45, 60), (60, 75)])
+        for (_, prev_end), (next_start, _) in zip(wins, wins[1:]):
+            self.assertEqual(prev_end, next_start)
+
+    def test_storm_bar_rises_with_the_window(self):
+        """A later call must be a stronger one. This is what stops the wider
+        window from diluting precision."""
+        by_key = {g[0]: g for g in stage6.STORM_GATES}
+        self.assertEqual(by_key["SUPREME_45"][3],
+                         stage6.CONFIDENCE_STANDARD_THRESHOLD)
+        self.assertEqual(by_key["SUPREME_75"][3],
+                         stage6.CONFIDENCE_PREMIUM_THRESHOLD)
+        self.assertGreater(by_key["SUPREME_75"][3], by_key["SUPREME_60"][3])
+
+    def test_storm_gates_capture_the_score_at_trigger(self):
+        """Each gate must anchor its alert to the scoreline at that instant."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append((a, k))
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        # No handshake at all, minute 50, strong structural break.
+        orch.process_ai_gates("F1", "A vs B", 50, self._storm_ctx(),
+                              {"h_triple": True, "a_triple": False},
+                              {}, score=(2, 1))
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0][1]["storm_stage"], "sustained")
+        self.assertEqual(fired[0][1]["score"], (2, 1))
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+    def test_each_storm_gate_fires_at_most_once(self):
+        """Repeated cycles inside the same window must not re-alert."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append(k)
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        struct = {"h_triple": True, "a_triple": False}
+        for minute in (46, 48, 50, 55, 59):
+            orch.process_ai_gates("F2", "A vs B", minute, self._storm_ctx(),
+                                  struct, {}, score=(0, 0))
+        self.assertEqual(len(fired), 1, "the 45-60 gate must fire once only")
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+    def test_original_45_gate_is_unchanged(self):
+        """Gate 1 must still require the 30-45 handshake. The storm track is
+        additive; it must not have quietly relaxed the original rule."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append(k)
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        struct = {"h_triple": True, "a_triple": False}
+        # Minute 50 with NO handshake: gate 1 must NOT fire on its own.
+        orch.process_ai_gates("F3", "A vs B", 50, self._storm_ctx(),
+                              struct, {}, score=(0, 0))
+        stages = {f.get("storm_stage") for f in fired}
+        self.assertNotIn("developing", stages)
+        # Now with the handshake set, gate 1 fires.
+        stage6.VALIDATION_STATE["F3"] = "VALID_30"
+        fired.clear()
+        orch.process_ai_gates("F3", "A vs B", 80, self._storm_ctx(),
+                              struct, {}, score=(0, 0))
+        self.assertIn("developing", {f.get("storm_stage") for f in fired})
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+    def test_storm_gates_do_not_fire_without_a_structural_break(self):
+        """The 2x doom test is the whole bar. No break, no alert — widening the
+        window must not weaken the condition."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append(k)
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        struct = {"h_triple": False, "a_triple": False}
+        for minute in (35, 50, 65):
+            orch.process_ai_gates("F4", "A vs B", minute, self._storm_ctx(),
+                                  struct, {}, score=(0, 0))
+        self.assertEqual(fired, [])
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+    def test_storm_tracker_never_alerts(self):
+        """The tracker exists so the UI can show a storm building. It must be
+        structurally incapable of raising an alert."""
+        stage6.STORM_STATE.clear()
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append(k)
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        struct = {"h_triple": True, "a_triple": False}
+        for minute in (33, 47, 63):
+            orch.update_storm_state("F5", minute, self._storm_ctx(), struct)
+        self.assertEqual(fired, [], "update_storm_state must never alert")
+        self.assertEqual(stage6.STORM_STATE["F5"]["stage"], "peaking")
+        stage6.STORM_STATE.clear()
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+    # ── SCORE AT TRIGGER + OUTCOME RESOLUTION ───────────────────────────
+    def test_score_is_captured_when_an_alert_fires(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "ready_to_push.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out), \
+                 patch.object(stage6, "SESSION_LOG_FILE",
+                              os.path.join(tmp, "s.json")):
+                orch = stage6.SupremeOrchestrator.__new__(
+                    stage6.SupremeOrchestrator)
+                stage6.SESSION_ALERTS.clear()
+                orch.fire_alert("F6", "A vs B", "🔥 PREMIUM", "m", 80.0, 47,
+                                storm_stage="sustained", score=(2, 1))
+                rec = stage6.SESSION_ALERTS[-1]
+                self.assertEqual(rec["score_at_trigger"], "2-1")
+                self.assertEqual(rec["score_home_trigger"], 2)
+                self.assertEqual(rec["score_away_trigger"], 1)
+                self.assertEqual(rec["outcome"], "pending")
+                self.assertIsNone(rec["final_score"])
+        stage6.SESSION_ALERTS.clear()
+
+    def test_a_missing_trigger_score_is_never_invented(self):
+        """No scoreline at fire time must record `None`, not a fabricated 0-0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "ready_to_push.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out), \
+                 patch.object(stage6, "SESSION_LOG_FILE",
+                              os.path.join(tmp, "s.json")):
+                orch = stage6.SupremeOrchestrator.__new__(
+                    stage6.SupremeOrchestrator)
+                stage6.SESSION_ALERTS.clear()
+                orch.fire_alert("F7", "A vs B", "✅ STANDARD", "m", 40.0, 50)
+                self.assertIsNone(stage6.SESSION_ALERTS[-1]["score_at_trigger"])
+        stage6.SESSION_ALERTS.clear()
+
+    def test_goals_after_counts_goals_scored_after_the_trigger(self):
+        """The verification question is whether anything followed the alert."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        finished_fx = {
+            "id": 42, "state": {"name": "FT"},
+            "scores": [{"score": {"description": "CURRENT",
+                                  "participant": "home", "goals": 3}},
+                       {"score": {"description": "CURRENT",
+                                  "participant": "away", "goals": 2}}],
+        }
+        base = {"f_id": "42", "outcome": "pending",
+                "score_home_trigger": 1, "score_away_trigger": 1}
+        self.assertTrue(orch.fixture_is_finished(finished_fx))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                import json as _json
+                with open(out, "w") as f:
+                    f.write(_json.dumps(base) + "\n")
+                settled = orch.resolve_alert_results({"42": finished_fx})
+                self.assertEqual(settled, 1)
+                rec = _json.loads(open(out).read().strip())
+        self.assertEqual(rec["final_score"], "3-2")
+        self.assertEqual(rec["goals_after"], 3)      # 5 total - 2 at trigger
+        self.assertEqual(rec["outcome"], "goal_followed")
+
+    def test_no_further_goal_is_reported_honestly(self):
+        """A storm that produced nothing must say so, not be quietly dropped."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        finished_fx = {
+            "id": 43, "state": {"name": "FT"},
+            "scores": [{"score": {"description": "CURRENT",
+                                  "participant": "home", "goals": 1}},
+                       {"score": {"description": "CURRENT",
+                                  "participant": "away", "goals": 1}}],
+        }
+        base = {"f_id": "43", "outcome": "pending",
+                "score_home_trigger": 1, "score_away_trigger": 1}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                import json as _json
+                with open(out, "w") as f:
+                    f.write(_json.dumps(base) + "\n")
+                orch.resolve_alert_results({"43": finished_fx})
+                rec = _json.loads(open(out).read().strip())
+        self.assertEqual(rec["goals_after"], 0)
+        self.assertEqual(rec["outcome"], "no_further_goal")
+
+    def test_unresolvable_alert_is_marked_unverifiable(self):
+        """An older record with no trigger score must be labelled, not guessed."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        finished_fx = {
+            "id": 44, "state": {"name": "FT"},
+            "scores": [{"score": {"description": "CURRENT",
+                                  "participant": "home", "goals": 2}},
+                       {"score": {"description": "CURRENT",
+                                  "participant": "away", "goals": 0}}],
+        }
+        base = {"f_id": "44", "outcome": "pending",
+                "score_home_trigger": None, "score_away_trigger": None}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                import json as _json
+                with open(out, "w") as f:
+                    f.write(_json.dumps(base) + "\n")
+                orch.resolve_alert_results({"44": finished_fx})
+                rec = _json.loads(open(out).read().strip())
+        self.assertEqual(rec["outcome"], "unverifiable")
+        self.assertIsNone(rec["goals_after"])
+        self.assertEqual(rec["final_score"], "2-0")
+
+    def test_a_live_match_is_never_settled(self):
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        live_fx = {"id": 45, "state": {"name": "INPLAY_2ND_HALF"},
+                   "scores": [{"score": {"description": "CURRENT",
+                                         "participant": "home", "goals": 9}}]}
+        base = {"f_id": "45", "outcome": "pending",
+                "score_home_trigger": 0, "score_away_trigger": 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                import json as _json
+                with open(out, "w") as f:
+                    f.write(_json.dumps(base) + "\n")
+                self.assertEqual(orch.resolve_alert_results({"45": live_fx}), 0)
+
+    def test_settled_alert_is_never_rewritten(self):
+        """Resolution only fills pending fields, so a settled alert is stable."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        done = {"f_id": "46", "outcome": "goal_followed", "goals_after": 2,
+                "final_score": "2-1"}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                import json as _json
+                with open(out, "w") as f:
+                    f.write(_json.dumps(done) + "\n")
+                self.assertEqual(orch.resolve_alert_results({}), 0)
+                rec = _json.loads(open(out).read().strip())
+        self.assertEqual(rec, done)
+
+    def test_alerts_api_filters_by_date(self):
+        """The day strip was decorative: the endpoint took no date and every
+        tab returned the whole log."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ready_to_push.json")
+            with open(path, "w") as f:
+                f.write(json.dumps({"f_id": "1", "user_id": None,
+                                    "time": "2026-09-26T10:00:00"}) + "\n")
+                f.write(json.dumps({"f_id": "2", "user_id": None,
+                                    "time": "2026-09-27T10:00:00"}) + "\n")
+
+            class _Req:
+                class state:
+                    user = {"user_id": "me"}
+
+            with patch.object(api_main.os.path, "exists", lambda p: True), \
+                 patch.object(api_main, "OUTPUT_DIR", tmp):
+                got = api_main.get_live_alerts(_Req(), date="2026-09-27")
+                self.assertEqual([r["f_id"] for r in got], ["2"])
+                # No date -> the whole log, as before.
+                every = api_main.get_live_alerts(_Req())
+                self.assertEqual(len(every), 2)
+                # A day with nothing on it must be empty, not "everything".
+                self.assertEqual(
+                    api_main.get_live_alerts(_Req(), date="2020-01-01"), [])
+
+
+    def test_squads_are_requested_for_live_fixtures_not_in_prematch(self):
+        """
+        THE REAL REASON CODE 6 BARELY ALERTED.
+
+        maintenance_thread used to iterate the PREMATCH database only. A match
+        that was live but absent from the prematch report — most youth,
+        women's and lower-league fixtures, exactly the ones that produce
+        alerts — never had its squads requested. investigate() then returned
+        INSUFFICIENT_SQUAD_DATA, h_triple/a_triple were never computed, and
+        the storm gates could not fire regardless of pressure or confidence.
+        Widening the time window cannot help a match whose squad data was
+        never fetched.
+        """
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        requested = []
+        class _Ex:
+            # submit(fn, tid) -> the id is the first vararg, not a[0] (that's
+            # the callable).
+            def submit(self, fn, *a):
+                requested.extend(a)
+        orch.executor = _Ex()
+        orch._fetch_and_store_squad = lambda tid: None
+        old_vault = dict(stage6.SQUAD_VAULT)
+        old_fetching = set(stage6.FETCHING_TEAMS)
+        stage6.SQUAD_VAULT.clear()
+        stage6.FETCHING_TEAMS.clear()
+        try:
+            live = [{"id": "L1", "participants": [
+                {"id": 111, "meta": {"location": "home"}},
+                {"id": 222, "meta": {"location": "away"}},
+            ]}]
+            orch.maintenance_thread({}, live)
+            self.assertIn(111, requested)
+            self.assertIn(222, requested)
+            # An empty players dict is a failed fetch, not a cached squad, so
+            # it must be re-requested rather than treated as covered. Team 222
+            # is marked as a SUCCESSFUL fetch and must be left alone.
+            # FETCHING_TEAMS must be cleared first: it deliberately survives
+            # across calls so a squad already being fetched is not requested
+            # twice, which is correct in production.
+            stage6.FETCHING_TEAMS.clear()
+            stage6.SQUAD_VAULT["111"] = {"players": {}}          # failed fetch
+            stage6.SQUAD_VAULT["222"] = {"players": {"p": {"doom": 1}}}
+            requested.clear()
+            orch.maintenance_thread({}, live)
+            self.assertIn(111, requested, "a failed fetch must be retried")
+            self.assertNotIn(222, requested, "a populated squad is not refetched")
+            # A team already in flight must NOT be requested again.
+            stage6.FETCHING_TEAMS.clear()
+            stage6.SQUAD_VAULT["111"] = {"players": {"q": {"doom": 1}}}
+            stage6.FETCHING_TEAMS.add(111)
+            requested.clear()
+            orch.maintenance_thread({}, live)
+            self.assertNotIn(111, requested, "in-flight team not re-requested")
+            self.assertNotIn(222, requested, "cached team not refetched")
+        finally:
+            stage6.SQUAD_VAULT.clear()
+            stage6.SQUAD_VAULT.update(old_vault)
+            stage6.FETCHING_TEAMS.clear()
+            stage6.FETCHING_TEAMS.update(old_fetching)
+
+
+
+
+
 
 
 
