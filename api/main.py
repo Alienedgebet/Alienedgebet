@@ -1547,7 +1547,10 @@ def _live_index() -> dict:
         for fid, md in (load_finished_archive(_today()) or {}).items():
             md = md if isinstance(md, dict) else {}
             idx[str(fid)] = {
-                "score": md.get("ft_score") or "0-0",
+                # NEVER default to "0-0". A score we did not read is
+                # indistinguishable from a real goalless draw, and a fabricated
+                # 0-0 on a match that had goals is worse than showing nothing.
+                "score": md.get("ft_score") or None,
                 "minute": int(md.get("minute", 0) or 0),
                 "state": "FT" if md.get("is_finished") else "",
                 "is_finished": bool(md.get("is_finished")),
@@ -1562,7 +1565,9 @@ def _live_index() -> dict:
             md = md if isinstance(md, dict) else {}
             if md.get("is_finished"):
                 idx[str(fid)] = {
-                    "score": md.get("ft_score") or "0-0",
+                    # See the note in the archive layer above: an unread score
+                    # is None, never a fabricated goalless draw.
+                    "score": md.get("ft_score") or None,
                     "minute": int(md.get("minute", 0) or 0),
                     "state": "FT",
                     "is_finished": True,
@@ -1626,7 +1631,9 @@ def _live_index() -> dict:
             minute = max(found) if found else 0
 
         entry = {
-            "score": md.get("ft_score") or "0-0",
+            # See the note in the archive layer above: an unread score is None,
+            # never a fabricated goalless draw.
+            "score": md.get("ft_score") or None,
             "minute": minute,
             "state": (fx.get("state") or {}).get("state", "") if isinstance(fx.get("state"), dict) else "",
             "is_finished": bool(md.get("is_finished")),
