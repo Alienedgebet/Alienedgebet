@@ -517,7 +517,8 @@ const LIVE_STAT_ROWS: Array<{
   { key: "shots_on_target", label: "Shots on target" },
   { key: "dangerous_attacks", label: "Dangerous attacks" },
   { key: "corners", label: "Corners" },
-  { key: "box_entries", label: "Box entries" },
+  { key: "shots_inside_box", label: "Shots in box" },
+  { key: "attacks", label: "Attacks" },
 ];
 
 function LiveStatsPanel({
@@ -793,15 +794,13 @@ export default function LivePage() {
       const v = raw?.[k];
       return typeof v === "number" && !Number.isNaN(v) ? v : 0;
     };
-    const boxRaw = raw?.["box"];
     return {
       possession: n("ball-possession"),
       shots_on_target: n("shots-on-target"),
       dangerous_attacks: n("dangerous-attacks"),
       corners: n("corners"),
-      box_entries:
-        typeof boxRaw === "number" && !Number.isNaN(boxRaw) ? boxRaw : null,
-      box_available: typeof boxRaw === "number" && !Number.isNaN(boxRaw),
+      shots_inside_box: n("shots-insidebox"),
+      attacks: n("attacks"),
     };
   };
 
@@ -1018,9 +1017,8 @@ export default function LivePage() {
                 </div>
 
                 {/* Pressure is COMPUTED from the live statistics shown above,
-                    not asserted. This panel previously always read
-                    "HIGH PENETRATION" even when the board showed 0 box
-                    entries on both sides. */}
+                    not asserted. It previously always read "HIGH PENETRATION"
+                    even when the board showed 0 box entries on both sides. */}
                 {(() => {
                   const stats = liveStatistics;
                   if (!stats) {
@@ -1031,12 +1029,17 @@ export default function LivePage() {
                       </p>
                     );
                   }
+                  // Box ENTRIES are not published in the in-play feed at all
+                  // (absent from every live team row), so the penetration test
+                  // uses shots from inside the box — a different metric, and
+                  // labelled as such — rather than a row that could only ever
+                  // read "no data".
                   const boxValues = [
-                    stats.home.box_entries,
-                    stats.away.box_entries,
+                    stats.home.shots_inside_box,
+                    stats.away.shots_inside_box,
                   ];
                   const boxAvailable = boxValues.every(
-                    (v) => v !== null && v !== undefined
+                    (v) => typeof v === "number" && !Number.isNaN(v)
                   );
                   const levels = [
                     {

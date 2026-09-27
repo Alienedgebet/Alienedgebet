@@ -482,45 +482,38 @@ export default function LiveAlertScannerPage() {
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
             <span className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-300">
               <span className="text-slate-500">Coverage</span>
-              {coverage.warming_up ? (
-                <>
-                  <span className="font-mono text-amber-300">
-                    still loading squads
-                  </span>
-                  {typeof coverage.pending_fetches === "number" &&
-                    coverage.pending_fetches > 0 && (
-                      <span className="font-mono text-slate-500">
-                        · {coverage.pending_fetches} fetch
-                        {coverage.pending_fetches === 1 ? "" : "es"} in flight
-                      </span>
-                    )}
-                </>
-              ) : (
-                <>
-                  <span className="font-mono text-emerald-300">
-                    {coverage.evaluated}/{coverage.total} evaluable
-                  </span>
-                  {coverage.unevaluated > 0 && (
-                    <span className="font-mono text-slate-500">
-                      · {coverage.unevaluated} not evaluated
-                    </span>
-                  )}
-                </>
+              {/* The real coverage is ALWAYS shown. An earlier version
+                  replaced it with "still loading squads" whenever any fetch
+                  was in flight — but the live feed turns over constantly, so
+                  something is nearly always in flight and the page sat on
+                  "still loading" and never displayed a coverage figure at all.
+                  The warm-up state is now a qualifier beside the number, not a
+                  substitute for it. */}
+              <span className="font-mono text-emerald-300">
+                {coverage.evaluated}/{coverage.total} evaluable
+              </span>
+              {coverage.unevaluated > 0 && (
+                <span className="font-mono text-slate-500">
+                  · {coverage.unevaluated} not evaluated
+                </span>
+              )}
+              {coverage.warming_up && (
+                <span className="font-mono text-amber-300/80">
+                  · {coverage.pending_fetches ?? 0} loading
+                </span>
               )}
             </span>
             <ChevronRight className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-90" />
           </summary>
           <div className="space-y-2 border-t border-white/10 px-4 py-3 text-[11.5px] leading-relaxed text-slate-400">
-            {coverage.warming_up ? (
-              <p>
-                Squads are still being downloaded for the live feed, so this
-                figure is{" "}
-                <strong className="text-amber-300">provisional</strong> and
-                will rise. It is not yet a statement about how much of today
-                Code 6 can actually judge.
+            <p>{coverage.reason}</p>
+            {coverage.warming_up && (
+              <p className="text-amber-300/80">
+                {coverage.pending_fetches ?? 0} squad download
+                {(coverage.pending_fetches ?? 0) === 1 ? " is" : "s are"} still
+                in flight for the live feed, so the figure above may rise
+                slightly as they land. Matches already counted are unaffected.
               </p>
-            ) : (
-              <p>{coverage.reason}</p>
             )}
             <p className="text-slate-500">
               This is a deliberate trade, not a fault: the structural bar is

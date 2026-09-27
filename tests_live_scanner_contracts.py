@@ -2483,32 +2483,59 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
                 (1, 2))
 
     # ── STORM GATES ARE A TRACK, NOT A DOUBLE COUNT ─────────────────────
-    def test_gates_do_not_both_fire_in_the_same_window(self):
-        """Observed live: a storm first caught at 46' fired BOTH developing
-        and sustained in the same cycle, because 'developing' is the first
-        cycle >=45 while 'sustained' covers 45-60. The card read "stages at
-        46', 46', 72'" — three stages that were really two moments. Gate N may
-        only fire if gate N-1 did not already fire for the fixture."""
+    def test_each_window_alerts_independently(self):
+        """
+        EACH WINDOW IS ITS OWN QUESTION. A storm still present at 60' is NEW
+        information — persistence — and must produce a second alert. Suppressing
+        a gate because the previous one fired (an earlier version of this code)
+        hid exactly that. Silence must mean "no storm in that window", never
+        "already reported".
+        """
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append(
+            (k.get("storm_stage"), a[5]))
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        struct = {"h_triple": True, "a_triple": False}
+        ctx = self._storm_ctx()
+        # 46' with the handshake: developing fires.
+        stage6.VALIDATION_STATE["FW1"] = "VALID_30"
+        orch.process_ai_gates("FW1", "A vs B", 46, ctx, struct, {}, score=(0, 0))
+        self.assertIn(("developing", 46), fired)
+        # 46' falls inside BOTH the >=45 and the 45-60 windows, so both gates
+        # legitimately fire on the same check — each window independently asks
+        # "is there a storm NOW?". That is the intended behaviour, not a
+        # double count: one question per window, one answer each.
+        self.assertIn(("sustained", 46), fired)
+        # A later cycle inside the same window must not re-fire: each gate
+        # reports a window once, not every cycle within it.
+        fired.clear()
+        orch.process_ai_gates("FW1", "A vs B", 52, ctx, struct, {}, score=(0, 0))
+        self.assertEqual(fired, [])
+        # Outside every window -> silence.
+        fired.clear()
+        orch.process_ai_gates("FW1", "A vs B", 80, ctx, struct, {}, score=(0, 0))
+        self.assertEqual(fired, [])
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+    def test_no_storm_in_a_window_means_silence(self):
+        """The other half of independence: with no structural break, a window
+        must stay silent even if an earlier one fired."""
         orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
         fired = []
         orch.fire_alert = lambda *a, **k: fired.append(k.get("storm_stage"))
         stage6.ALERT_HISTORY.clear()
         stage6.VALIDATION_STATE.clear()
-        struct = {"h_triple": True, "a_triple": False}
         ctx = self._storm_ctx()
-        # 46' with the original handshake set: developing fires.
-        stage6.VALIDATION_STATE["FG1"] = "VALID_30"
-        orch.process_ai_gates("FG1", "A vs B", 46, ctx, struct, {}, score=(0, 0))
-        self.assertIn("developing", fired)
-        # A later cycle inside 45-60 must NOT add a "sustained" alert.
-        fired.clear()
-        orch.process_ai_gates("FG1", "A vs B", 52, ctx, struct, {}, score=(0, 0))
-        self.assertNotIn("sustained", fired,
-                         "a stage already preceded must not re-fire")
-        # 72' is outside 45-60, so peaking is still reachable.
-        fired.clear()
-        orch.process_ai_gates("FG1", "A vs B", 72, ctx, struct, {}, score=(0, 0))
-        self.assertIn("peaking", fired)
+        no_break = {"h_triple": False, "a_triple": False}
+        # Nothing structural in the 45-60 window -> only gate 1's own path is
+        # available, and with no handshake it cannot fire either.
+        for minute in (46, 48, 55, 65, 72):
+            orch.process_ai_gates("FW2", "A vs B", minute, ctx, no_break, {},
+                                  score=(0, 0))
+        self.assertEqual(fired, [])
         stage6.ALERT_HISTORY.clear()
         stage6.VALIDATION_STATE.clear()
 
@@ -2574,10 +2601,14 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
             with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
                 with open(out, "w") as f:
                     f.write(json.dumps(rec) + "\n")
+                live_fx = {"id": 556, "state": {"name": "INPLAY_2ND_HALF"},
+                           "scores": [{"score": {"description": "CURRENT",
+                                                 "participant": "home",
+                                                 "goals": 0}}]}
                 with patch.object(
                         stage6.SupremeOrchestrator, "_ft_snapshot_scores",
                         staticmethod(lambda fid: None)):
-                    orch.resolve_alert_results({})
+                    orch.resolve_alert_results({"556": live_fx})
                 got = json.loads(open(out).read().strip())
         self.assertEqual(got["outcome"], "unverifiable")
         self.assertIsNone(got["final_score"])
@@ -2596,10 +2627,15 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
             with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
                 with open(out, "w") as f:
                     f.write(json.dumps(rec) + "\n")
+                live_fx = {"id": 557, "state": {"name": "INPLAY_2ND_HALF"},
+                           "scores": [{"score": {"description": "CURRENT",
+                                                 "participant": "home",
+                                                 "goals": 0}}]}
                 with patch.object(
                         stage6.SupremeOrchestrator, "_ft_snapshot_scores",
                         staticmethod(lambda fid: None)):
-                    self.assertEqual(orch.resolve_alert_results({}), 0)
+                    self.assertEqual(
+                        orch.resolve_alert_results({"557": live_fx}), 0)
                 got = json.loads(open(out).read().strip())
         self.assertEqual(got["outcome"], "pending")
         self.assertNotIn("unverifiable_reason", got)

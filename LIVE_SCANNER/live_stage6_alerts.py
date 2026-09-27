@@ -1107,35 +1107,31 @@ class SupremeOrchestrator:
             (struct.get('a_triple') and
              intel['match']['h_pressure_share'] > 50)
         )
-        # Gate N may only fire if gate N-1 did NOT already fire for this
-        # fixture. Without this the windows overlap and ONE moment of evidence
-        # produces two alerts: "developing" is the first cycle at or after 45'
-        # and "sustained" covers 45-60', so a storm first seen at 46' fired both
-        # in the same cycle and the card read "stages at 46', 46', 72'" — three
-        # stages that were really two moments.
+        # EACH WINDOW IS AN INDEPENDENT QUESTION.
         #
-        # The gates are now a genuine escalation track: whichever one FIRST
-        # catches the storm reports it, and later gates are only for storms
-        # that begin later. A storm caught at 46' reads developing -> peaking
-        # (it is by definition still strong at 72'); a storm that only appears
-        # at 52' reads sustained.
-        prev_suffix = None
+        # The windows deliberately overlap and each one fires on its own:
+        #   45  — is there a storm NOW?            -> developing
+        #   60  — is there still a storm NOW?      -> sustained
+        #   75  — is there a storm NOW?            -> peaking
+        # A match that still has a storm at 60' SHOULD produce a second alert,
+        # because that is new information: the storm persisted. Staying silent
+        # after the first alert would hide persistence, which is the whole
+        # thing worth seeing. Silence means "no storm in that window", not
+        # "already reported".
+        #
+        # An earlier version suppressed a gate whenever the previous one had
+        # fired. That was wrong: it hid exactly the persistence the user wants
+        # to see, and it reported a storm caught at 46' as a single event when
+        # the engine had in fact confirmed it twice.
         for key_suffix, win_start, win_end, min_conf, stage in STORM_GATES:
             if key_suffix == "SUPREME_45":
-                prev_suffix = key_suffix
                 continue                      # gate 1 is handled above
-            if prev_suffix and f"{f_id}_{prev_suffix}" in ALERT_HISTORY:
-                prev_suffix = key_suffix
-                continue                      # an earlier stage already fired
             if not (win_start <= minute <= win_end):
-                prev_suffix = key_suffix
                 continue
             if not structural_break:
-                prev_suffix = key_suffix
                 continue
             a_key = f"{f_id}_{key_suffix}"
             if a_key in ALERT_HISTORY or conf < min_conf:
-                prev_suffix = key_suffix
                 continue
             tier = ("🔥 PREMIUM"
                     if conf >= CONFIDENCE_PREMIUM_THRESHOLD
@@ -1337,9 +1333,26 @@ class SupremeOrchestrator:
                 # fall back to the live fixture.
                 from_snapshot = self._ft_snapshot_scores(f_id)
                 if from_snapshot is None:
-                    if not fx or not self.fixture_is_finished(fx):
-                        # Nothing readable yet. Age the record out below rather
-                        # than letting it claim the match is still running.
+                    if not fx:
+                        # Gone from the live feed AND no FT record. The match is
+                        # over and its score is unrecoverable. Saying
+                        # "unverifiable" NOW is honest; waiting (or letting the
+                        # 48h age-out do it) leaves a finished match sitting on
+                        # "Match in progress", which is how the verification
+                        # appeared to be losing finished matches.
+                        rec["final_score"] = None
+                        rec["goals_after"] = None
+                        rec["outcome"] = "unverifiable"
+                        rec["unverifiable_reason"] = (
+                            "The match is no longer in the live feed and no "
+                            "final result is retained for it, so its score "
+                            "cannot be read. The FT snapshot keeps roughly a day."
+                        )
+                        rec["resolved_at"] = datetime.now().isoformat()
+                        settled += 1
+                        continue
+                    if not self.fixture_is_finished(fx):
+                        # Still live and not finished — genuinely pending.
                         continue
                 # The authoritative FT score, or None. NEVER a defaulted 0-0:
                 # a 0-0 we did not actually read yields a confident
