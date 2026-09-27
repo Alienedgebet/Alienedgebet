@@ -531,13 +531,24 @@ def grade_row(market_type, row, actual_match):
             promoted["score_available"] = True
             return grade_row(market_type, row, promoted)
 
+        # The match is over and no final score could be read from ANY source:
+        # the live feed, the FT snapshot and the archive were all checked.
+        # The usual cause is a fixture that finished BETWEEN two scanner polls
+        # and was therefore never observed while finished, and whose archive
+        # has not been written yet (the archiver is a next-day process).
+        #
+        # Say that plainly. "—" on its own has to mean three different things
+        # at once — not finished, finished but unreadable, and genuinely
+        # unreadable — and the user cannot tell which they are looking at.
         return {
             "status": "FINISHED",
-            "score": "—",
+            "score": None,
             "minute": minute,
             "verdict": "PENDING",
-            "badge_text": "—",
-            "note": "Full time — result not available yet"
+            "badge_text": "Result unavailable",
+            "note": ("Full time, but no final score could be read — the match "
+                     "finished between scanner polls and no archive retains it "
+                     "yet. The nightly archiver will backfill this."),
         }
 
     # 2. LIVE IN-PLAY STATE
