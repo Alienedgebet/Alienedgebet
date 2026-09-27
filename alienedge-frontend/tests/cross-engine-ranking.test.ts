@@ -14,6 +14,7 @@ import {
   u2sQualifies,
   u2sQualifiesSharp,
   cornersRefined,
+  dedupeFixtureSides,
   GG_BASE_MARKS_MIN,
   GG_MCG_PROB_MIN,
   GG_FORENSIC_AUDIT_MAX,
@@ -200,6 +201,61 @@ check("withBorrowed keys off every fixture column and never mutates", () => {
     { dog_odds: 2 });
   const unknown = withBorrowed([{ Fixture: "Z vs W" }]);
   assert.deepEqual((unknown[0] as { borrowed: Record<string, unknown> }).borrowed, {});
+});
+
+/* ------------------------- per-side dedupe ------------------------- */
+
+check("both sides of one fixture collapse to the higher-probability side", () => {
+  const out = dedupeFixtureSides([
+    { fixture: "A vs B", side: "away", poisson_win_prob: "68.58%" },
+    { fixture: "A vs B", side: "home", poisson_win_prob: "5.10%" },
+  ]);
+  assert.equal(out.length, 1, "a fixture must not appear twice");
+  assert.equal(out[0].side, "away", "the side the engine rates higher survives");
+});
+
+check("dedupe keeps the first row on a tie, never a reshuffle", () => {
+  const out = dedupeFixtureSides([
+    { fixture: "A vs B", side: "home", poisson_win_prob: "50%" },
+    { fixture: "A vs B", side: "away", poisson_win_prob: "50%" },
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].side, "home", "an equal probability keeps the earlier row");
+});
+
+check("dedupe preserves the original row order across fixtures", () => {
+  const out = dedupeFixtureSides([
+    { fixture: "A vs B", side: "home", poisson_win_prob: "10%" },
+    { fixture: "C vs D", side: "away", poisson_win_prob: "80%" },
+    { fixture: "A vs B", side: "away", poisson_win_prob: "90%" },
+  ]);
+  assert.deepEqual(out.map((r) => r.fixture), ["A vs B", "C vs D"],
+    "the A vs B winner stays in its original slot");
+  assert.equal(out[0].side, "away");
+});
+
+check("a missing probability does not beat a real one", () => {
+  const out = dedupeFixtureSides([
+    { fixture: "A vs B", side: "home" },
+    { fixture: "A vs B", side: "away", poisson_win_prob: "60%" },
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].side, "away", "unknown is not treated as high");
+});
+
+check("dedupe is safe on empty input and on rows with no fixture", () => {
+  assert.deepEqual(dedupeFixtureSides([]), []);
+  const out = dedupeFixtureSides([{ side: "home" }, { side: "away" }]);
+  assert.equal(out.length, 1, "rows with no fixture name still collapse, not crash");
+});
+
+check("dedupe does not mutate its input", () => {
+  const input = [
+    { fixture: "A vs B", side: "away", poisson_win_prob: "68.58%" },
+    { fixture: "A vs B", side: "home", poisson_win_prob: "5.10%" },
+  ];
+  dedupeFixtureSides(input);
+  assert.equal(input.length, 2, "the caller's array is untouched");
 });
 
 check("empty and single-row inputs are safe", () => {

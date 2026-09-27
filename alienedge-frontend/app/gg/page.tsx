@@ -7,7 +7,6 @@ import {
   ggApi,
   type GGForensicPick,
   type GGO15Pick,
-  type GGPrecisionPick,
   type GGSupremePick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -150,39 +149,6 @@ const forensicsColumns: PredictionColumn<GGForensicPick>[] = [
   },
 ];
 
-const ggColumns: PredictionColumn<GGPrecisionPick>[] = [
-  {
-    key: "fixture",
-    header: "fixture",
-    render: (r) => (
-      <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />
-    ),
-  },
-  { key: "home_team", header: "home_team", render: (r) => <FixtureRiskTag row={r} label={r.home_team} /> },
-  { key: "away_team", header: "away_team", render: (r) => <FixtureRiskTag row={r} label={r.away_team} /> },
-  { key: "gg_tier", header: "gg_tier", render: (r) => <TierBadge tier={r.gg_tier} /> },
-  { key: "gg_score", header: "gg_score", align: "right", render: (r) => r.gg_score },
-  { key: "gg_signals_fired", header: "gg_signals_fired", align: "right", render: (r) => r.gg_signals_fired },
-  { key: "mc_btts_prob", header: "mc_btts_prob", render: (r) => <ProbCell value={r.mc_btts_prob * 100} showBar={false} /> },
-  { key: "venue_btts_combined", header: "venue_btts_combined", align: "right", render: (r) => r.venue_btts_combined },
-  { key: "h2h_btts_rate", header: "h2h_btts_rate", align: "right", render: (r) => r.h2h_btts_rate },
-  { key: "home_gk_liable", header: "Home GK Wall Liable", render: (r) => (r.home_gk_liable ? "Yes" : "No") },
-  { key: "away_gk_liable", header: "Away GK Wall Liable", render: (r) => (r.away_gk_liable ? "Yes" : "No") },
-  { key: "home_gk_cpg", header: "Home GK Wall", align: "right", render: (r) => r.home_gk_cpg.toFixed(2) },
-  { key: "away_gk_cpg", header: "Away GK Wall", align: "right", render: (r) => r.away_gk_cpg.toFixed(2) },
-  { key: "sig1_mc_btts", header: "sig1_mc_btts", align: "right", render: (r) => r.sig1_mc_btts },
-  { key: "sig2_venue_btts", header: "sig2_venue_btts", align: "right", render: (r) => r.sig2_venue_btts },
-  { key: "sig3_gk_vuln", header: "sig3_gk_vuln", align: "right", render: (r) => r.sig3_gk_vuln },
-  { key: "sig4_h2h_btts", header: "sig4_h2h_btts", align: "right", render: (r) => r.sig4_h2h_btts },
-  { key: "sig5_directional", header: "sig5_directional", align: "right", render: (r) => r.sig5_directional },
-  { key: "home_gk_note", header: "Home GK Note", className: "max-w-[160px] truncate", render: (r) => r.home_gk_note || "—" },
-  { key: "away_gk_note", header: "Away GK Note", className: "max-w-[160px] truncate", render: (r) => r.away_gk_note || "—" },
-  { key: "lambda_home", header: "lambda_home", align: "right", render: (r) => r.lambda_home },
-  { key: "lambda_away", header: "lambda_away", align: "right", render: (r) => r.lambda_away },
-  { key: "fatigue_home", header: "Home Fatigue", align: "right", render: (r) => r.fatigue_home.toFixed(2) },
-  { key: "fatigue_away", header: "Away Fatigue", align: "right", render: (r) => r.fatigue_away.toFixed(2) },
-  { key: "league_weight", header: "league_weight", align: "right", render: (r) => r.league_weight },
-];
 
 const o15Columns: PredictionColumn<GGO15Pick>[] = [
   { key: "fixture", header: "fixture", render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" /> },
@@ -296,18 +262,6 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
   );
 
   // 5. GG Precision BTTS Head (Verify -> Intelligent Pass Count -> Rest)
-  const ggColumnsWithVerify = useMemo(
-    () => [
-      createVerifyColumn<GGPrecisionPick>(),
-      createIntelligentPassColumn<GGPrecisionPick>({
-        market: "gg_precision",
-        getLabel: (r) => r.fixture,
-        date,
-      }),
-      ...ggColumns,
-    ],
-    [date]
-  );
 
   const live = precision.data;
   const precisionPayload = live;
@@ -375,25 +329,7 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
         />
       </div>
 
-      {/* ── 6. STAGE 4: GG Precision BTTS Head ───────────────────────── */}
-      <div>
-        <ChainBranch
-          title="GG Precision"
-          description={
-            precisionIsMock
-              ? "GG precision engine — Poisson, venue BTTS, GK vulnerability · Demo"
-              : "GG precision engine — Poisson, venue BTTS, GK vulnerability"
-          }
-          data={precisionPayload?.gg ?? []}
-          loading={precision.loading}
-          error={precision.error}
-          columns={ggColumnsWithVerify}
-          rowKey={(r, i) => `${r.fixture_id}-${i}`}
-          emptyMessage="No GG precision picks for this date."
-        />
-      </div>
-
-      {/* ── 7. STAGE 5: Over 1.5 Precision Twin Head ─────────────────── */}
+      {/* ── 6. GG OVER 1.5 (also shown on the Over 1.5 page) ────────── */}
       <div>
         <ChainBranch
           title="GG Over 1.5"

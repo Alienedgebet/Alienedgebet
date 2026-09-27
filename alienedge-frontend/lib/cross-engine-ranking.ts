@@ -371,11 +371,60 @@ export function sortCornersRefined<T extends object>(
 /* ---------------------------- WIN ---------------------------- */
 
 /**
+ * Keep ONE row per fixture: the side with the highest `poisson_win_prob`.
+ *
+ * `win_forecast` emits a row per SIDE, so every fixture appears exactly twice —
+ * once for the home bet and once for the away bet. On 2026-09-26 that is 224
+ * rows for 112 fixtures. Showing both is not just noise, it is incoherent: you
+ * cannot win both sides of the same match, and the two rows carry opposite
+ * verdicts, so the list contradicts itself.
+ *
+ * The surviving row is the side the engine rates highest, which is the bet the
+ * ordering is recommending. Ties and missing probabilities keep the first row
+ * seen, so this is stable and never invents a preference.
+ *
+ * The dropped row's verdict is discarded with it, which is the point: the
+ * other side is a real loss by construction (or a draw), and keeping it would
+ * put a guaranteed-miss row in a list sorted by expected accuracy.
+ */
+export function dedupeFixtureSides<T extends object>(rows: T[]): T[] {
+  const best = new Map<string, { row: T; prob: number; order: number }>();
+  rows.forEach((row, order) => {
+    const r = row as Record<string, unknown>;
+    const key = String(r.fixture ?? r.Fixture ?? "");
+    const prob = num(r.poisson_win_prob);
+    const existing = best.get(key);
+    if (!existing) {
+      best.set(key, { row, prob: prob ?? Number.NEGATIVE_INFINITY, order });
+      return;
+    }
+    // Strictly greater, so an equal or missing probability keeps the earlier
+    // row and the result does not depend on iteration order.
+    if (prob !== null && prob > existing.prob) {
+      // Replace the ROW but keep the ORIGINAL `order`. The winning side often
+      // appears later in the payload (home is usually written first), and
+      // letting it move the fixture's slot would silently reshuffle the list —
+      // exactly what the "dedupe never reorders" contract forbids.
+      best.set(key, { row, prob, order: existing.order });
+    }
+  });
+  // Re-emit in the ORIGINAL row order so deduping never reshuffles the list;
+  // sortWin() is applied after this and owns the ordering.
+  return [...best.values()]
+    .sort((a, b) => a.order - b.order)
+    .map((entry) => entry.row);
+}
+
+/**
  * `poisson_win_prob >= 41.09 AND win_odds <= 2.16`.
  *
  * Both fields are required. A row with no `win_odds` (the engine leaves it null
  * on roughly 2% of rows) is NOT a qualifier — "unknown price" must never be
  * read as "short price".
+ *
+ * NOTE: this reads `poisson_win_prob`, which /api/win/raw/ does NOT return —
+ * only /api/win/forecast/ does. Applying it to a payload without the field
+ * makes every row fail the test, which is a silent no-op rather than an error.
  */
 export function winQualifies(row: Record<string, unknown>): boolean {
   return atLeast(row.poisson_win_prob, WIN_POISSON_MIN) &&
