@@ -423,21 +423,48 @@ export default function LiveAlertScannerPage() {
       {coverage && coverage.total > 0 && (
         <details className="group rounded-2xl border border-white/10 bg-black/20">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
-            <span className="flex items-center gap-2 text-xs font-bold text-slate-300">
+            <span className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-300">
               <span className="text-slate-500">Coverage</span>
-              <span className="font-mono text-emerald-300">
-                {coverage.evaluated}/{coverage.total} evaluable
-              </span>
-              {coverage.unevaluated > 0 && (
-                <span className="font-mono text-slate-500">
-                  · {coverage.unevaluated} not evaluated
-                </span>
+              {coverage.warming_up ? (
+                <>
+                  <span className="font-mono text-amber-300">
+                    still loading squads
+                  </span>
+                  {typeof coverage.pending_fetches === "number" &&
+                    coverage.pending_fetches > 0 && (
+                      <span className="font-mono text-slate-500">
+                        · {coverage.pending_fetches} fetch
+                        {coverage.pending_fetches === 1 ? "" : "es"} in flight
+                      </span>
+                    )}
+                </>
+              ) : (
+                <>
+                  <span className="font-mono text-emerald-300">
+                    {coverage.evaluated}/{coverage.total} evaluable
+                  </span>
+                  {coverage.unevaluated > 0 && (
+                    <span className="font-mono text-slate-500">
+                      · {coverage.unevaluated} not evaluated
+                    </span>
+                  )}
+                </>
               )}
             </span>
             <ChevronRight className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-90" />
           </summary>
           <div className="space-y-2 border-t border-white/10 px-4 py-3 text-[11.5px] leading-relaxed text-slate-400">
-            <p>{coverage.reason}</p>
+            {coverage.warming_up ? (
+              <p>
+                Squads are still being downloaded for the live feed, so this
+                figure is{" "}
+                <strong className="text-amber-300">provisional</strong> and
+                will rise. It is not yet a statement about how much of today
+                Code 6 can actually judge.
+              </p>
+            ) : (
+              <p>{coverage.reason}</p>
+            )}
             <p className="text-slate-500">
               This is a deliberate trade, not a fault: the structural bar is
               never loosened to manufacture coverage, so a match Code 6 cannot
@@ -523,7 +550,12 @@ export default function LiveAlertScannerPage() {
         )}
         {!alertsQuery.loading && !alertsQuery.error && groups.length === 0 && (
           <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm leading-relaxed text-slate-400">
-            {coverage && coverage.unevaluated > 0 ? (
+            {coverage && coverage.warming_up ? (
+              <p className="text-[11.5px] text-amber-300/80">
+                Still loading squads for the live feed. Nothing has been judged
+                yet this cycle — the coverage figure above is provisional.
+              </p>
+            ) : coverage && coverage.unevaluated > 0 ? (
               <>
                 <p className="mb-2">
                   No storms fired on this day — but only{" "}

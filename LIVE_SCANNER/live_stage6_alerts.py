@@ -983,6 +983,22 @@ class SupremeOrchestrator:
             else:
                 unevaluated += 1
         total_matches = len(cycle_matches)
+        # WARM-UP GUARD
+        # On a cold start the squad vault is empty until maintenance_thread's
+        # background fetches land, so the first cycle or two after every
+        # restart reports a near-zero coverage figure. Publishing that as a
+        # plain percentage is actively misleading: it reads as "the engine
+        # cannot see anything" when the truth is "it has not finished
+        # looking yet". Observed live: 0/13 immediately after a restart,
+        # then 8/13 (62%) two cycles later with no other change.
+        #
+        # So while any squad fetch is still in flight the figure is marked
+        # provisional and the UI says "still loading" instead of publishing a
+        # number that has not settled. A 0% reading is only published once the
+        # fetch queue has actually drained, at which point it is real.
+        with FETCHING_LOCK:
+            still_fetching = len(FETCHING_TEAMS)
+        warming_up = still_fetching > 0
         board = {
             "session":   SESSION_ID,
             "cycle":     self.cycle,
@@ -994,6 +1010,9 @@ class SupremeOrchestrator:
                 "evaluated":   evaluated,
                 "unevaluated": unevaluated,
                 "total":       total_matches,
+                "warming_up":  warming_up,
+                "pending_fetches": still_fetching,
+                "provisional": warming_up,
                 "pct":         (round(100.0 * evaluated / total_matches)
                                if total_matches else 0),
                 "reason": (
