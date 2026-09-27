@@ -20,7 +20,6 @@ try:
     from LIVE_SCANNER.live_stage3_incoming import run_incoming_forensic_engine
     from LIVE_SCANNER.live_stage4_danger import run_danger_forensic_aggregator
     from LIVE_SCANNER.live_stage5_aggregator import run_master_aggregator
-    from LIVE_SCANNER.live_stage2_verification import run_live_validator_once
     from LIVE_SCANNER.live_stage6_alerts import SupremeOrchestrator
 except ImportError as e:
     logging.error(f"Import error in live engines: {e}")
@@ -30,7 +29,7 @@ except ImportError as e:
 def live_scanner_master_loop():
     logging.info("════════════════════════════════════════════════════════")
     logging.info("  ALIENEDGE 24/7 CONTINUOUS LIVE SCANNER RELAY ACTIVE")
-    logging.info("  Stages: 1 (Audit) ➔ 3 (Lineups) ➔ 4 (Danger) ➔ 5 (Handshake) ➔ 2 (Stats) ➔ 6 (Alerts)")
+    logging.info("  Stages: 1 (Audit) ➔ 3 (Lineups) ➔ 4 (Danger) ➔ 5 (Handshake) ➔ 6 (Alerts)")
     logging.info("════════════════════════════════════════════════════════")
 
     # Initialize Code 6 Orchestrator instance
@@ -67,13 +66,13 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.error(f"[Stage 5 Aggregator Handshake] Error: {e}")
 
-        # ── 5. STAGE 2: IN-PLAY MINUTE-BY-MINUTE VALIDATOR ───────────────────
-        # Single-cycle variant: the legacy run_live_validator_engine() owns an
-        # infinite while-True loop and would block stages 6 forever.
-        try:
-            run_live_validator_once(cycle_count)
-        except Exception as e:
-            logging.error(f"[Stage 2 Validator] Error: {e}")
+        # ── 5. STAGE 2: REMOVED ─────────────────────────────────────────────
+        # The live validator (live_stage2_verification.py) no longer runs. Its
+        # module is kept on disk so it stays reversible and its contract tests
+        # keep executing, but nothing invokes it, so it costs nothing per cycle.
+        # Its board endpoint is retired with it; the live page now reads team
+        # statistics from the Code 6 board, which already computes them.
+        # Settlement never depended on this stage and is unaffected.
 
         # ── 6. STAGE 6: EVALUATION & USER ALERTS ─────────────────────────────
         # run_single_cycle() performs one full pass (prematch load → live

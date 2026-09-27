@@ -119,8 +119,13 @@ function VerificationStrip({ group }: { group: StormGroup }) {
                 "font-mono text-xl font-black leading-none",
                 final ? "text-white" : "text-slate-600"
               )}
+              title={
+                final
+                  ? undefined
+                  : "The full-time score could not be read. No score is shown rather than a guessed one."
+              }
             >
-              {final ?? "—"}
+              {final ?? "?"}
             </p>
             <p className="mt-1 text-[9.5px] font-bold uppercase tracking-wide text-slate-500">
               final

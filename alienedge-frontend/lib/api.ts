@@ -1466,6 +1466,21 @@ export interface LiveOrchestratorMatch {
   /** Settled markets e.g. ["GG","O2.5"] */
   settled?: string[];
   /**
+   * Raw live team statistics for this fixture, published by Code 6 from the
+   * same payload it already analyses. This replaced the Code 2 validation
+   * board as the live page's source for team statistics, at no extra provider
+   * cost. Keys are the provider's own stat names (e.g. "shots-on-target").
+   */
+  statistics?: Record<string, Record<string, number>>;
+  /** Storm progression (read-only, never alertable on its own). */
+  storm?: {
+    stage?: "developing" | "sustained" | "peaking" | null;
+    first_seen?: number;
+    last_seen?: number;
+    confidence?: number;
+    chaos?: number;
+  } | null;
+  /**
    * Whether the structural bar could be tested at all.
    *   evaluated     — a squad was built for both sides, so a storm alert was
    *                   possible (or genuinely not warranted)

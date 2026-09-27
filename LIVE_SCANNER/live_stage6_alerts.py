@@ -728,6 +728,12 @@ class SupremeOrchestrator:
             "name": fixture_name,
             "id": f_id,
             "minute": minute,
+            # Live team statistics, published from the h_s/a_s this stage
+            # ALREADY extracted from the provider payload. The Code 2
+            # validator used to be the only source the live page read, but it
+            # no longer runs; surfacing the same numbers here costs nothing —
+            # no extra provider call, no extra work.
+            "statistics": {"home": h_s, "away": a_s},
             "storm": ({
                 "stage": storm.get("stage"),
                 "first_seen": storm.get("first_seen"),
@@ -1097,15 +1103,35 @@ class SupremeOrchestrator:
             (struct.get('a_triple') and
              intel['match']['h_pressure_share'] > 50)
         )
+        # Gate N may only fire if gate N-1 did NOT already fire for this
+        # fixture. Without this the windows overlap and ONE moment of evidence
+        # produces two alerts: "developing" is the first cycle at or after 45'
+        # and "sustained" covers 45-60', so a storm first seen at 46' fired both
+        # in the same cycle and the card read "stages at 46', 46', 72'" — three
+        # stages that were really two moments.
+        #
+        # The gates are now a genuine escalation track: whichever one FIRST
+        # catches the storm reports it, and later gates are only for storms
+        # that begin later. A storm caught at 46' reads developing -> peaking
+        # (it is by definition still strong at 72'); a storm that only appears
+        # at 52' reads sustained.
+        prev_suffix = None
         for key_suffix, win_start, win_end, min_conf, stage in STORM_GATES:
             if key_suffix == "SUPREME_45":
+                prev_suffix = key_suffix
                 continue                      # gate 1 is handled above
+            if prev_suffix and f"{f_id}_{prev_suffix}" in ALERT_HISTORY:
+                prev_suffix = key_suffix
+                continue                      # an earlier stage already fired
             if not (win_start <= minute <= win_end):
+                prev_suffix = key_suffix
                 continue
             if not structural_break:
+                prev_suffix = key_suffix
                 continue
             a_key = f"{f_id}_{key_suffix}"
             if a_key in ALERT_HISTORY or conf < min_conf:
+                prev_suffix = key_suffix
                 continue
             tier = ("🔥 PREMIUM"
                     if conf >= CONFIDENCE_PREMIUM_THRESHOLD
@@ -1161,6 +1187,80 @@ class SupremeOrchestrator:
         entry["chaos"] = intel["match"]["chaos_index"]
 
     # ── ALERT RESULT RESOLVER ─────────────────────────────────────────────
+    @staticmethod
+    def score_period(fx, period):
+        """
+        Read a specific named score period, e.g. "FULLTIME", "CURRENT".
+
+        `score_from_fixture` only matches CURRENT, which is correct for a live
+        read but WRONG at full time: SportMonks drops the CURRENT entry once
+        the whistle goes and leaves 1ST_HALF / 2ND_HALF / FULLTIME. That is why
+        every finished match used to resolve to 0-0.
+        Returns (home, away) or None when the period is absent.
+        """
+        h = a = None
+        for entry in (fx or {}).get("scores", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            s_obj = entry.get("score") or entry
+            if period.upper() not in str(s_obj.get("description", "")).upper():
+                continue
+            side = str(s_obj.get("participant", "")).lower()
+            try:
+                val = int(s_obj.get("goals"))
+            except (TypeError, ValueError):
+                continue
+            if side == "home":
+                h = val
+            elif side == "away":
+                a = val
+        if h is None or a is None:
+            return None
+        return h, a
+
+    def score_at_ft(self, f_id, fx):
+        """
+        The authoritative full-time scoreline, or None when it cannot be read.
+
+        ORDER MATTERS
+        1. The FT result snapshot (data/ft_result_snapshot.json) is the
+           settlement service's own record and is the authority: it already
+           carries ft_score / h_ft / a_ft for every finished fixture. This is
+           how Serbia vs Netherlands is known to have finished 1-2.
+        2. Fall back to the provider fixture's FULLTIME period.
+
+        RETURNS None, NEVER (0, 0)
+        A 0-0 that was never actually read is indistinguishable from a real
+        goalless draw, and it produces a confident "no further goal" verdict on
+        a match that had goals. That is fabricated evidence, which is strictly
+        worse than admitting the score is unavailable — so a caller that gets
+        None must record `unverifiable` and nothing else.
+        """
+        snap = self._ft_snapshot_scores(str(f_id))
+        if snap:
+            return snap
+        return self.score_period(fx, "FULLTIME")
+
+    @staticmethod
+    def _ft_snapshot_scores(f_id):
+        try:
+            from settlement_service import load_ft_snapshot
+            today = datetime.now().strftime("%Y-%m-%d")
+            for day in (today,
+                        (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")):
+                snap = load_ft_snapshot(day) or {}
+                row = snap.get(f_id)
+                if not isinstance(row, dict):
+                    continue
+                if row.get("ft_score"):
+                    return (int(row.get("h_ft") or 0),
+                            int(row.get("a_ft") or 0))
+                if row.get("h_ft") is not None and row.get("a_ft") is not None:
+                    return (int(row["h_ft"]), int(row["a_ft"]))
+        except Exception:
+            return None
+        return None
+
     @staticmethod
     def fixture_is_finished(fx):
         """
@@ -1224,21 +1324,32 @@ class SupremeOrchestrator:
                 fx = live_by_id.get(str(rec.get("f_id")))
                 if not fx or not self.fixture_is_finished(fx):
                     continue
-                h_ft, a_ft = self.score_from_fixture(fx)
+                # The authoritative FT score, or None. NEVER a defaulted 0-0:
+                # a 0-0 we did not actually read yields a confident
+                # "no further goal" verdict on a match that had goals, which is
+                # fabricated evidence. 17 records were wrong exactly this way
+                # before this was fixed.
+                ft = self.score_at_ft(rec.get("f_id"), fx)
                 h_trig = rec.get("score_home_trigger")
                 a_trig = rec.get("score_away_trigger")
-                rec["final_score"] = f"{h_ft}-{a_ft}"
-                if h_trig is None or a_trig is None:
-                    # No trigger scoreline was captured (a record written
-                    # before this change, or the caller had no fixture
-                    # data). Say so rather than inventing a 0-0 anchor.
+                if ft is None:
+                    rec["final_score"] = None
                     rec["goals_after"] = None
                     rec["outcome"] = "unverifiable"
                 else:
-                    after = (h_ft - int(h_trig)) + (a_ft - int(a_trig))
-                    rec["goals_after"] = max(0, after)
-                    rec["outcome"] = ("goal_followed" if after > 0
-                                      else "no_further_goal")
+                    h_ft, a_ft = ft
+                    rec["final_score"] = f"{h_ft}-{a_ft}"
+                    if h_trig is None or a_trig is None:
+                        # No trigger scoreline was captured (a record written
+                        # before that was added, or the caller had no fixture
+                        # data). Say so rather than inventing a 0-0 anchor.
+                        rec["goals_after"] = None
+                        rec["outcome"] = "unverifiable"
+                    else:
+                        after = (h_ft - int(h_trig)) + (a_ft - int(a_trig))
+                        rec["goals_after"] = max(0, after)
+                        rec["outcome"] = ("goal_followed" if after > 0
+                                          else "no_further_goal")
                 rec["resolved_at"] = datetime.now().isoformat()
                 settled += 1
 
