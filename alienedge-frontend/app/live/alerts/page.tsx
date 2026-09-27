@@ -292,6 +292,15 @@ export default function LiveAlertScannerPage() {
     [date],
     { fallback: MOCK_LIVE_ALERTS, cacheKey: `live-alerts-${date}` }
   );
+  // The board carries how much of the live feed could actually be judged. An
+  // empty alerts list is ambiguous without it: "no storms" and "the engine was
+  // blind" render identically otherwise.
+  const boardQuery = useApi(
+    () => liveApi.getOrchestrator(),
+    [],
+    { cacheKey: "live-orchestrator-coverage" }
+  );
+  const coverage = boardQuery.data?.coverage;
   const alerts = alertsQuery.data ?? [];
   const refreshing = alertsQuery.loading || alertsQuery.isRefetching;
   const [filterLevel, setFilterLevel] = useState<"ALL" | "PREMIUM" | "STANDARD" | "MONITOR">("ALL");
@@ -404,6 +413,41 @@ export default function LiveAlertScannerPage() {
         </div>
       </details>
 
+      {/* ── COVERAGE — the honesty line ──────────────────────────────────
+          Option A was chosen deliberately: the strict 2x bar is kept and the
+          unevaluable remainder is reported rather than covered by a weaker
+          fallback. But that trade is invisible unless it is stated, so the
+          split is published here. Without it, a blank alerts page is
+          unreadable — "no storms today" and "the engine was blind for half
+          of them" look exactly the same. */}
+      {coverage && coverage.total > 0 && (
+        <details className="group rounded-2xl border border-white/10 bg-black/20">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
+            <span className="flex items-center gap-2 text-xs font-bold text-slate-300">
+              <span className="text-slate-500">Coverage</span>
+              <span className="font-mono text-emerald-300">
+                {coverage.evaluated}/{coverage.total} evaluable
+              </span>
+              {coverage.unevaluated > 0 && (
+                <span className="font-mono text-slate-500">
+                  · {coverage.unevaluated} not evaluated
+                </span>
+              )}
+            </span>
+            <ChevronRight className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-90" />
+          </summary>
+          <div className="space-y-2 border-t border-white/10 px-4 py-3 text-[11.5px] leading-relaxed text-slate-400">
+            <p>{coverage.reason}</p>
+            <p className="text-slate-500">
+              This is a deliberate trade, not a fault: the structural bar is
+              never loosened to manufacture coverage, so a match Code 6 cannot
+              read simply cannot alert. A quiet page is only as meaningful as
+              the coverage figure above it.
+            </p>
+          </div>
+        </details>
+      )}
+
       {/* ── 2. DAY STRIP (now actually wired to a date filter) ─────── */}
       <QuickHistoryStrip />
 
@@ -479,10 +523,29 @@ export default function LiveAlertScannerPage() {
         )}
         {!alertsQuery.loading && !alertsQuery.error && groups.length === 0 && (
           <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm leading-relaxed text-slate-400">
-            No alerts fired on this day. A storm is only called when a squad is
-            at least twice as weak as its opponent <em>and</em> the stronger
-            side is dominating at the same time — rare by design, and rarer
-            still in a quiet day.
+            {coverage && coverage.unevaluated > 0 ? (
+              <>
+                <p className="mb-2">
+                  No storms fired on this day — but only{" "}
+                  <strong className="text-slate-200">
+                    {coverage.evaluated} of {coverage.total}
+                  </strong>{" "}
+                  live matches could be evaluated at all.
+                </p>
+                <p className="text-[11.5px] text-slate-500">
+                  The other {coverage.unevaluated} had no squad data, so they
+                  could not raise an alert whether or not a storm was present.
+                  Read this as a partly blind day, not a quiet one.
+                </p>
+              </>
+            ) : (
+              <>
+                No alerts fired on this day. A storm is only called when a
+                squad is at least twice as weak as its opponent{" "}
+                <em>and</em> the stronger side is dominating at the same time —
+                rare by design.
+              </>
+            )}
           </div>
         )}
         {groups.map((g) => (

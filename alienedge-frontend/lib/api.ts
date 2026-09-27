@@ -1465,6 +1465,30 @@ export interface LiveOrchestratorMatch {
   validation?: string | null;
   /** Settled markets e.g. ["GG","O2.5"] */
   settled?: string[];
+  /**
+   * Whether the structural bar could be tested at all.
+   *   evaluated     — a squad was built for both sides, so a storm alert was
+   *                   possible (or genuinely not warranted)
+   *   not_evaluated — no squad could be built, so no alert was possible.
+   *                   Silence here means BLIND, not QUIET.
+   */
+  evaluation?: "evaluated" | "not_evaluated" | null;
+  evaluation_note?: string | null;
+}
+
+/**
+ * How much of the live feed Code 6 was actually able to judge.
+ *
+ * Published so a blank alerts page is never ambiguous: "no storms today" and
+ * "the engine could not look at most of today's matches" look identical
+ * otherwise.
+ */
+export interface LiveCoverage {
+  evaluated: number;
+  unevaluated: number;
+  total: number;
+  pct: number;
+  reason: string;
 }
 
 export interface LiveOrchestratorBoard {
@@ -1473,6 +1497,7 @@ export interface LiveOrchestratorBoard {
   total_live: number;
   total_db: number;
   matches: LiveOrchestratorMatch[];
+  coverage?: LiveCoverage;
 }
 
 // ============================================================

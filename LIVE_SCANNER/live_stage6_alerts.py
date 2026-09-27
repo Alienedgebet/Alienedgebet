@@ -961,6 +961,45 @@ class SupremeOrchestrator:
     # ── NEW: JSON BOARD SNAPSHOT (for the API process to read) ─────────────
     def save_orchestrator_board(self, cycle_matches, total_live, total_db,
                                fixture_errors=None):
+        # EVALUATION COVERAGE
+        #
+        # The storm gates need a squad-derived structural reading (one side's
+        # average "doom" rating at least twice the other's). Code 6 builds
+        # those squads by replaying the LINEUPS of the team's fixtures over
+        # the last 150 days. The provider attaches lineups unevenly — U23,
+        # women's and lower-league fixtures routinely return fixtures with no
+        # lineups at all — so roughly half the live feed cannot be evaluated
+        # no matter what the pressure or confidence are.
+        #
+        # That is a deliberate trade: the strict 2x bar is kept and the
+        # unevaluable remainder is REPORTED, not papered over. But silence is
+        # not honest. "No alerts" and "the engine was blind" look identical on
+        # a blank screen, so the counts are published here and surfaced on the
+        # alerts page: an empty day must be readable as a quiet day or a blind
+        # day, never left ambiguous.
+        evaluated = 0
+        unevaluated = 0
+        for m in cycle_matches:
+            # Only "OK" means the structural test actually ran. The detective
+            # can also return INSUFFICIENT_SQUAD_DATA (no squad) or
+            # STALE_CACHE_FORMAT (a cached squad in the wrong shape) — both mean
+            # the 2x bar was never tested, so neither may count as coverage.
+            # Keying on "OK" rather than on one bad code means a future status
+            # is unevaluable by default instead of being silently counted as
+            # a clean read.
+            usable = (str(m.get("structural") or "") or "OK") == "OK"
+            m["evaluation"] = "evaluated" if usable else "not_evaluated"
+            m["evaluation_note"] = (
+                None if usable else
+                "No squad could be built for this fixture — the provider "
+                "returned no lineup data, so the 2x structural bar could not "
+                "be tested. It cannot raise a storm alert."
+            )
+            if usable:
+                evaluated += 1
+            else:
+                unevaluated += 1
+        total_matches = len(cycle_matches)
         board = {
             "session":   SESSION_ID,
             "cycle":     self.cycle,
@@ -968,6 +1007,22 @@ class SupremeOrchestrator:
             "total_db":   total_db,
             "matches":   cycle_matches,
             "errors":    fixture_errors or [],
+            "coverage": {
+                "evaluated":   evaluated,
+                "unevaluated": unevaluated,
+                "total":       total_matches,
+                "pct":         (round(100.0 * evaluated / total_matches)
+                               if total_matches else 0),
+                "reason": (
+                    "Code 6 rebuilds each squad from the lineups of that "
+                    "team's fixtures over the last 150 days. The provider "
+                    "attaches lineups unevenly, so fixtures involving U23, "
+                    "women's and lower-league teams often return none. Those "
+                    "matches are NOT evaluated: the strict 2x structural bar "
+                    "is never loosened to cover them, so they simply cannot "
+                    "raise a storm alert."
+                ),
+            },
         }
         try:
             tmp_path = ORCHESTRATOR_BOARD_FILE + ".tmp"
