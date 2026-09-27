@@ -5,6 +5,7 @@ import type { AxiosResponse } from "axios";
 import { CornerUpRight } from "lucide-react";
 import {
   cornersApi,
+  foundationApi,
   type CornerAggregatorPick,
   type CornerStage2Pick,
 } from "@/lib/api";
@@ -14,7 +15,8 @@ import { createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
-import { sortCorners } from "@/lib/signal-ranking";
+import { cornersQualifies } from "@/lib/signal-ranking";
+import { sortCornersRefined, withBorrowed } from "@/lib/cross-engine-ranking";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import {
@@ -146,10 +148,29 @@ export default function CornersPage() {
     () => async (): Promise<AxiosResponse<CornerAggregatorPick[]>> => {
       const response = await cornersApi.getAggregator(date);
       if (smartRank && Array.isArray(response.data)) {
+        // The borrowed refinement comes from the calibration engine, a
+        // DIFFERENT payload. A failed calibration fetch must not break the
+        // corners list, so it degrades to the own-engine rule alone rather
+        // than losing the ranking.
+        let borrowed: Record<string, Record<string, unknown>> = {};
+        try {
+          const calibration = await foundationApi.getCalibration(date);
+          if (Array.isArray(calibration.data)) {
+            for (const row of calibration.data) {
+              if (!row?.fixture) continue;
+              borrowed[row.fixture] = { parity_gap: row.parity_gap };
+            }
+          }
+        } catch {
+          borrowed = {};
+        }
         // Rebind .data rather than spreading the response: spreading widens
         // the type to a fresh object literal and breaks the ChainStage
         // fetcher contract.
-        response.data = sortCorners(response.data);
+        response.data = sortCornersRefined(
+          withBorrowed(response.data, borrowed),
+          (row) => cornersQualifies(row),
+        ) as CornerAggregatorPick[];
       }
       return response;
     },

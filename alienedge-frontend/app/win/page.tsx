@@ -1,13 +1,15 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Trophy } from "lucide-react";
 import {
   foundationApi,
+  underdogApi,
   winApi,
   type DnaProfile,
   type WinApexPick,
   type WinForecastPick,
+  type WinRawPick,
   type WinU2SPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -26,8 +28,36 @@ import {
   MOCK_DNA,
   MOCK_WIN_APEX,
   MOCK_WIN_FORECAST,
+  MOCK_WIN_RAW,
   MOCK_WIN_U2S,
 } from "@/lib/mock-chains";
+import type { AxiosResponse } from "axios";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortWin, sortU2S, withBorrowed } from "@/lib/cross-engine-ranking";
+
+// The Raw stage is the engine that emits poisson_win_prob + win_odds, the pair
+// the strongest ordering in the project is measured on.
+const rawColumns: PredictionColumn<WinRawPick>[] = [
+  {
+    key: "fixture",
+    header: "fixture",
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
+  },
+  { key: "side", header: "Side", render: (r) => r.side || "—" },
+  { key: "team_name", header: "Team", render: (r) => r.team_name || "—" },
+  { key: "win_odds", header: "Win Odds", align: "right", render: (r) => r.win_odds ?? "—" },
+  {
+    key: "poisson_win_prob",
+    header: "Poisson Win %",
+    align: "right",
+    render: (r) => r.poisson_win_prob ?? "—",
+  },
+  { key: "last_5_wins_overall", header: "W5 Overall", align: "right", render: (r) => r.last_5_wins_overall },
+  { key: "last_5_wins_at_venue", header: "W5 Venue", align: "right", render: (r) => r.last_5_wins_at_venue },
+  { key: "last_5_goals_scored", header: "G5 Scored", align: "right", render: (r) => r.last_5_goals_scored },
+  { key: "opp_last_5_conceded_raw", header: "Opp G5 Conceded", align: "right", render: (r) => r.opp_last_5_conceded_raw },
+  { key: "h2h_wins_last_5", header: "H2H W5", align: "right", render: (r) => r.h2h_wins_last_5 },
+];
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
@@ -334,6 +364,63 @@ const dnaColumns: PredictionColumn<DnaProfile>[] = [
 export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
+  // Default ON: poisson_win_prob >= 41.09 AND win_odds <= 2.16 is the strongest
+  // ordering measured in this project (587 rows, 65.1% vs 31.5% for the rest,
+  // corrected p = 0.0000 over 2,873 cut-points, bootstrap CI [+29.5, +37.8],
+  // leave-one-day-out 15 of 16 days, base 38.0%). Each row is an individual bet
+  // graded against its own side, so ranking by that bet's own probability is a
+  // real precision gain. See lib/cross-engine-ranking.ts.
+  const [smartRank, setSmartRank] = useState(true);
+
+  const rawColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<WinRawPick>(), ...rawColumns],
+    []
+  );
+
+  const fetchRaw = useMemo(
+    () => async (): Promise<AxiosResponse<WinRawPick[]>> => {
+      const response = await winApi.getRaw(date);
+      if (smartRank && Array.isArray(response.data)) {
+        // Rebind .data rather than spreading the response: spreading widens the
+        // type to a fresh object literal and breaks the ChainStage contract.
+        response.data = sortWin(response.data);
+      }
+      return response;
+    },
+    [date, smartRank]
+  );
+
+  // U2S is ADVISORY: its verdict grades the stored `Underdog` column, so this
+  // ordering ranks FIXTURE QUALITY and is not a prediction of the u2s market.
+  // It is defensible only because the borrowed dog_odds is itself
+  // pick-independent. Default OFF so it is never mistaken for the market.
+  const [smartRankU2S, setSmartRankU2S] = useState(false);
+
+  const fetchU2S = useMemo(
+    () => async (): Promise<AxiosResponse<WinU2SPick[]>> => {
+      const response = await winApi.getU2S(date);
+      if (!smartRankU2S || !Array.isArray(response.data)) return response;
+      // The borrowed dog_odds lives in the underdog base engine's payload.
+      // A failed fetch degrades to the own-engine rule rather than breaking.
+      let borrowed: Record<string, Record<string, unknown>> = {};
+      try {
+        const base = await underdogApi.getBase(date);
+        if (Array.isArray(base.data)) {
+          for (const row of base.data) {
+            if (!row?.fixture) continue;
+            borrowed[row.fixture] = { dog_odds: row.dog_odds };
+          }
+        }
+      } catch {
+        borrowed = {};
+      }
+      response.data = sortU2S(
+        withBorrowed(response.data, borrowed),
+      ) as WinU2SPick[];
+      return response;
+    },
+    [date, smartRankU2S]
+  );
 
   // 1. Win Apex (Verify -> DNA -> Intelligent Pass Count -> Rest)
   const apexColumnsWithVerifyAndDna = useMemo(
@@ -401,6 +488,13 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
             </p>
           </div>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          help="Picks the backtested combination to the top of the Raw stage: poisson_win_prob >= 41.09 AND win_odds <= 2.16 (587 rows, 65.1% vs 31.5% for the rest, +33.6pp, Bonferroni-corrected p = 0.0000 across 2,873 tested cut-points, better on 15 of 16 leave-one-day-out days). Each row is one bet graded against its own side. Re-check with: python3 signal_backtest.py --market win"
+        />
       </div>
 
       {/* 5-Day History Audit Strip */}
@@ -419,6 +513,19 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         refreshMs={VERIFY_REFRESH_MS}
       />
 
+      {/* Stage 1.5: Win Raw (smart-ranked — the measured ordering) */}
+      <ChainStage
+        title="Win Raw (Smart Ranked)"
+        description="Per-bet probability and price — the stage the Smart-rank ordering is measured on"
+        fetcher={fetchRaw}
+        deps={[date, smartRank]}
+        columns={rawColumnsWithVerify}
+        rowKey={(r, i) => `${r.fixture_id}-${i}`}
+        emptyMessage="No raw win rows for this date."
+        fallbackData={MOCK_WIN_RAW}
+        refreshMs={VERIFY_REFRESH_MS}
+      />
+
       {/* Stage 2: DNA & Goal Intent Board */}
       <ChainStage
         title="DNA & Goal Intent Board"
@@ -432,18 +539,30 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         refreshMs={VERIFY_REFRESH_MS}
       />
 
-      {/* Stage 4: Underdog-to-Score Signal (U2S) */}
-      <ChainStage
-        title="Underdog-to-Score Signal (U2S)"
-        description="Shots-on-target and scoring consistency analysis for underdog picks"
-        fetcher={() => winApi.getU2S(date)}
-        deps={[date]}
-        columns={u2sColumnsWithVerify}
-        rowKey={(r, i) => `${r.Fixture}-${i}`}
-        emptyMessage="No U2S signals for this date."
-        fallbackData={MOCK_WIN_U2S}
-        refreshMs={VERIFY_REFRESH_MS}
-      />
+      {/* Stage 4: Underdog-to-Score Signal (U2S) — smart ranked */}
+      <div>
+        <div className="mb-2 flex items-center justify-end">
+          <SignalRankToggle
+            active={smartRankU2S}
+            onChange={setSmartRankU2S}
+            activeLabel="Quality rank"
+            inactiveLabel="As served"
+            tentative
+            help="ADVISORY, off by default. U2S is graded against the stored Underdog column, so this ranks FIXTURE QUALITY, not the u2s market itself. Dog_Venue_SOT >= 12 AND Fav_Venue_SOT <= 15 gives 257 rows at 77.0% (base 66.5%); adding the borrowed underdog dog_odds <= 3.44 reaches 83.2% on 125 rows. The borrowed field is pick-independent, which is the only reason this is defensible. Re-check with: python3 signal_backtest.py --market u2s"
+          />
+        </div>
+        <ChainStage
+          title="Underdog-to-Score Signal (U2S)"
+          description="Shots-on-target and scoring consistency analysis for underdog picks"
+          fetcher={fetchU2S}
+          deps={[date, smartRankU2S]}
+          columns={u2sColumnsWithVerify}
+          rowKey={(r, i) => `${r.Fixture}-${i}`}
+          emptyMessage="No U2S signals for this date."
+          fallbackData={MOCK_WIN_U2S}
+          refreshMs={VERIFY_REFRESH_MS}
+        />
+      </div>
 
       {/* Stage 5: Win Forecast */}
       <ChainStage
