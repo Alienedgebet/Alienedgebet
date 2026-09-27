@@ -5,6 +5,8 @@ import { Flame } from "lucide-react";
 import type { AxiosResponse } from "axios";
 import {
   over15Api,
+  ggApi,
+  type GGO15Pick,
   type Over15PsychologyPick,
   type Over15Stage3Pick,
 } from "@/lib/api";
@@ -18,6 +20,59 @@ import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortO15 } from "@/lib/cross-engine-ranking";
+
+/**
+ * Columns for the GG Over 1.5 twin head.
+ *
+ * Deliberately identical to the GG page's "GG Over 1.5" block: it is the SAME
+ * payload (/api/gg/precision -> o15), so the two must render identically or the
+ * same fixture looks different depending on which page you are on.
+ */
+const ggo15Columns: PredictionColumn<GGO15Pick>[] = [
+  {
+    key: "fixture",
+    header: "fixture",
+    render: (r) => (
+      <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />
+    ),
+  },
+  { key: "home_team", header: "home_team", render: (r) => <FixtureRiskTag row={r} label={r.home_team} /> },
+  { key: "away_team", header: "away_team", render: (r) => <FixtureRiskTag row={r} label={r.away_team} /> },
+  { key: "o15_tier", header: "o15_tier", render: (r) => <TierBadge tier={r.o15_tier} /> },
+  { key: "o15_score", header: "o15_score", align: "right", render: (r) => r.o15_score },
+  {
+    key: "combined_lambda",
+    header: "combined_lambda",
+    align: "right",
+    render: (r) => Number(r.combined_lambda).toFixed(2),
+  },
+  {
+    key: "mc_over15_prob",
+    header: "mc_over15_prob",
+    render: (r) => <ProbCell value={r.mc_over15_prob * 100} showBar={false} />,
+  },
+  {
+    key: "combined_venue_goals_avg",
+    header: "combined_venue_goals_avg",
+    align: "right",
+    render: (r) => Number(r.combined_venue_goals_avg).toFixed(2),
+  },
+  {
+    key: "venue_goals_avg_home",
+    header: "venue_goals_avg_home",
+    align: "right",
+    render: (r) => Number(r.venue_goals_avg_home).toFixed(2),
+  },
+  {
+    key: "venue_goals_avg_away",
+    header: "venue_goals_avg_away",
+    align: "right",
+    render: (r) => Number(r.venue_goals_avg_away).toFixed(2),
+  },
+  { key: "league_weight", header: "league_weight", align: "right", render: (r) => r.league_weight ?? "—" },
+  { key: "fatigue_home", header: "Home Fatigue", align: "right", render: (r) => r.fatigue_home.toFixed(2) },
+  { key: "fatigue_away", header: "Away Fatigue", align: "right", render: (r) => r.fatigue_away.toFixed(2) },
+];
 
 const psychologyColumns: PredictionColumn<Over15PsychologyPick>[] = [
   {
@@ -106,6 +161,25 @@ export default function Over15Page() {
     []
   );
 
+  const ggo15ColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<GGO15Pick>(), ...ggo15Columns],
+    []
+  );
+
+  /**
+   * The GG Over 1.5 twin head — the SAME payload the GG page renders, so the
+   * two pages cannot drift apart. ChainStage consumes a bare row array, so the
+   * endpoint's { gg, o15 } envelope is unwrapped to just the `o15` half here;
+   * the endpoint still serves `gg` and the GG page still uses it.
+   */
+  const fetchGGO15 = useMemo(
+    () => async (): Promise<AxiosResponse<GGO15Pick[]>> => {
+      const response = await ggApi.getPrecision(date);
+      return { ...response, data: response.data?.o15 ?? [] };
+    },
+    [date]
+  );
+
   return (
     <div
       className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
@@ -161,6 +235,20 @@ export default function Over15Page() {
           rowKey={(r, i) => `${r.Match}-${i}`}
           emptyMessage="No stage 3 picks for this date."
           fallbackData={MOCK_O15_S3}
+          refreshMs={VERIFY_REFRESH_MS}
+        />
+      </div>
+
+      {/* ── 5. GG Over 1.5 (twin head — also shown on the GG page) ───── */}
+      <div>
+        <ChainStage
+          title="GG Over 1.5"
+          description="Precision twin head — lambda, venue goals avg, fatigue (same payload as the GG page)"
+          fetcher={fetchGGO15}
+          deps={[date]}
+          columns={ggo15ColumnsWithVerify}
+          rowKey={(r, i) => `${r.fixture_id}-${i}`}
+          emptyMessage="No GG Over 1.5 picks for this date."
           refreshMs={VERIFY_REFRESH_MS}
         />
       </div>

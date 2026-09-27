@@ -30,6 +30,7 @@ import {
   undersQualifies,
   sortWin,
   sortDraw,
+  dedupeFixtureSides,
   GG_BASE_MARKS_MIN,
   GG_MCG_PROB_MIN,
   GG_FORENSIC_AUDIT_MAX,
@@ -177,6 +178,31 @@ console.log("cross-engine-ranking (real data)");
   pass("draw ordering keeps every row",
     draw.length === (ledger.draw ?? []).length,
     `${draw.length} rows in, ${draw.length} rows out`);
+}
+
+{
+  // The win payload carries one row per SIDE, so the real data must collapse to
+  // exactly one row per fixture — and the survivors must be the higher-rated
+  // side, not whichever happened to be written first.
+  const rows = (ledger.win ?? []).map(asApiRow);
+  const out = dedupeFixtureSides(rows);
+  const fixtures = new Set(rows.map((r) => String(r.fixture)));
+  pass("win dedupes to one row per fixture",
+    out.length === fixtures.size && out.length < rows.length,
+    `${rows.length} rows / ${fixtures.size} fixtures -> ${out.length} rows`);
+  const best = new Map<string, number>();
+  for (const r of rows) {
+    const p = Number(String(r.poisson_win_prob ?? "").replace("%", ""));
+    if (!Number.isFinite(p)) continue;
+    const key = String(r.fixture);
+    best.set(key, Math.max(best.get(key) ?? Number.NEGATIVE_INFINITY, p));
+  }
+  const wrong = out.filter((r) => {
+    const p = Number(String(r.poisson_win_prob ?? "").replace("%", ""));
+    return Number.isFinite(p) && p < (best.get(String(r.fixture)) ?? 0);
+  });
+  pass("every survivor is the highest-rated side", wrong.length === 0,
+    `${out.length - wrong.length}/${out.length} survivors are the top side`);
 }
 
 // Every exported block must beat its own market baseline, otherwise the

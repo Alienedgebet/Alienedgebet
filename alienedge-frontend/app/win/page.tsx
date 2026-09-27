@@ -9,7 +9,6 @@ import {
   type DnaProfile,
   type WinApexPick,
   type WinForecastPick,
-  type WinRawPick,
   type WinU2SPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -28,36 +27,12 @@ import {
   MOCK_DNA,
   MOCK_WIN_APEX,
   MOCK_WIN_FORECAST,
-  MOCK_WIN_RAW,
   MOCK_WIN_U2S,
 } from "@/lib/mock-chains";
 import type { AxiosResponse } from "axios";
 import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
-import { sortWin, sortU2S, withBorrowed } from "@/lib/cross-engine-ranking";
+import { sortWin, sortU2S, withBorrowed, dedupeFixtureSides } from "@/lib/cross-engine-ranking";
 
-// The Raw stage is the engine that emits poisson_win_prob + win_odds, the pair
-// the strongest ordering in the project is measured on.
-const rawColumns: PredictionColumn<WinRawPick>[] = [
-  {
-    key: "fixture",
-    header: "fixture",
-    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
-  },
-  { key: "side", header: "Side", render: (r) => r.side || "—" },
-  { key: "team_name", header: "Team", render: (r) => r.team_name || "—" },
-  { key: "win_odds", header: "Win Odds", align: "right", render: (r) => r.win_odds ?? "—" },
-  {
-    key: "poisson_win_prob",
-    header: "Poisson Win %",
-    align: "right",
-    render: (r) => r.poisson_win_prob ?? "—",
-  },
-  { key: "last_5_wins_overall", header: "W5 Overall", align: "right", render: (r) => r.last_5_wins_overall },
-  { key: "last_5_wins_at_venue", header: "W5 Venue", align: "right", render: (r) => r.last_5_wins_at_venue },
-  { key: "last_5_goals_scored", header: "G5 Scored", align: "right", render: (r) => r.last_5_goals_scored },
-  { key: "opp_last_5_conceded_raw", header: "Opp G5 Conceded", align: "right", render: (r) => r.opp_last_5_conceded_raw },
-  { key: "h2h_wins_last_5", header: "H2H W5", align: "right", render: (r) => r.h2h_wins_last_5 },
-];
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
 
@@ -372,19 +347,19 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   // real precision gain. See lib/cross-engine-ranking.ts.
   const [smartRank, setSmartRank] = useState(true);
 
-  const rawColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<WinRawPick>(), ...rawColumns],
-    []
-  );
-
-  const fetchRaw = useMemo(
-    () => async (): Promise<AxiosResponse<WinRawPick[]>> => {
-      const response = await winApi.getRaw(date);
-      if (smartRank && Array.isArray(response.data)) {
-        // Rebind .data rather than spreading the response: spreading widens the
-        // type to a fresh object literal and breaks the ChainStage contract.
-        response.data = sortWin(response.data);
-      }
+  // The WIN ordering is applied to the FORECAST stage, not the Raw stage.
+  // `win_raw` has no `poisson_win_prob` at all (0 of 158 rows on 2026-09-27)
+  // while `win_forecast` has it on every row, so ranking the Raw payload would
+  // silently qualify nothing and show a blank probability column.
+  const fetchForecast = useMemo(
+    () => async (): Promise<AxiosResponse<WinForecastPick[]>> => {
+      const response = await foundationApi.getWinForecast(date);
+      if (!Array.isArray(response.data)) return response;
+      // Drop the losing side of each fixture FIRST, then rank what remains.
+      // Doing it the other way round would rank a bet that has already been
+      // eliminated by its own fixture's opposite row.
+      const onePerFixture = dedupeFixtureSides(response.data);
+      response.data = smartRank ? sortWin(onePerFixture) : onePerFixture;
       return response;
     },
     [date, smartRank]
@@ -513,19 +488,6 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         refreshMs={VERIFY_REFRESH_MS}
       />
 
-      {/* Stage 1.5: Win Raw (smart-ranked — the measured ordering) */}
-      <ChainStage
-        title="Win Raw (Smart Ranked)"
-        description="Per-bet probability and price — the stage the Smart-rank ordering is measured on"
-        fetcher={fetchRaw}
-        deps={[date, smartRank]}
-        columns={rawColumnsWithVerify}
-        rowKey={(r, i) => `${r.fixture_id}-${i}`}
-        emptyMessage="No raw win rows for this date."
-        fallbackData={MOCK_WIN_RAW}
-        refreshMs={VERIFY_REFRESH_MS}
-      />
-
       {/* Stage 2: DNA & Goal Intent Board */}
       <ChainStage
         title="DNA & Goal Intent Board"
@@ -564,12 +526,12 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         />
       </div>
 
-      {/* Stage 5: Win Forecast */}
+      {/* Stage 5: Win Forecast — one row per fixture, smart ranked */}
       <ChainStage
         title="Win Forecast"
         description="Poisson-ranked win probability with venue and H2H breakdown"
-        fetcher={() => foundationApi.getWinForecast(date)}
-        deps={[date]}
+        fetcher={fetchForecast}
+        deps={[date, smartRank]}
         columns={forecastColumnsWithVerify}
         rowKey={(r, i) => `${r.fixture_id}-${r.side}-${i}`}
         emptyMessage="No forecast data for this date."
