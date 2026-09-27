@@ -1180,9 +1180,16 @@ export interface LiveValidationSideStats {
   shots_on_target: number;
   dangerous_attacks: number;
   corners: number;
-  /** null when the provider did not supply a box-touch stat for this side. */
-  box_entries: number | null;
-  box_available?: boolean;
+  /**
+   * Shots from INSIDE the penalty box. This replaces the old `box_entries`
+   * row: the in-play feed carries no box-touch statistic at all (verified
+   * across 22 live team rows — the key is simply absent), so the previous row
+   * could only ever render "no data". These are NOT the same metric and are
+   * not presented as one; box entries exist only in the pre-match squad data.
+   */
+  shots_inside_box: number;
+  /** Total attacks made. */
+  attacks: number;
 }
 
 /** Stage 2 VALIDATION BOARD match — mirrors print_cycle_board cycle_log entry. */
