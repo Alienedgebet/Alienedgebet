@@ -2137,9 +2137,9 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
         finished_fx = {
             "id": 42, "state": {"name": "FT"},
-            "scores": [{"score": {"description": "CURRENT",
+            "scores": [{"score": {"description": "FULLTIME",
                                   "participant": "home", "goals": 3}},
-                       {"score": {"description": "CURRENT",
+                       {"score": {"description": "FULLTIME",
                                   "participant": "away", "goals": 2}}],
         }
         base = {"f_id": "42", "outcome": "pending",
@@ -2163,9 +2163,9 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
         finished_fx = {
             "id": 43, "state": {"name": "FT"},
-            "scores": [{"score": {"description": "CURRENT",
+            "scores": [{"score": {"description": "FULLTIME",
                                   "participant": "home", "goals": 1}},
-                       {"score": {"description": "CURRENT",
+                       {"score": {"description": "FULLTIME",
                                   "participant": "away", "goals": 1}}],
         }
         base = {"f_id": "43", "outcome": "pending",
@@ -2186,9 +2186,9 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
         orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
         finished_fx = {
             "id": 44, "state": {"name": "FT"},
-            "scores": [{"score": {"description": "CURRENT",
+            "scores": [{"score": {"description": "FULLTIME",
                                   "participant": "home", "goals": 2}},
-                       {"score": {"description": "CURRENT",
+                       {"score": {"description": "FULLTIME",
                                   "participant": "away", "goals": 0}}],
         }
         base = {"f_id": "44", "outcome": "pending",
@@ -2404,6 +2404,131 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
             finally:
                 stage6.FETCHING_TEAMS.clear()
                 stage6.FETCHING_TEAMS.update(old_fetching)
+
+
+    # ── FULL-TIME SCORE: THE FABRICATED 0-0 REGRESSION ───────────────────
+    def _finished_fx(self, fid, period="FULLTIME", h=1, a=2):
+        """A realistically finished fixture. Note there is NO `CURRENT`
+        period: SportMonks drops it at the whistle, which is precisely why
+        the old resolver returned 0-0 for every completed match."""
+        return {
+            "id": fid, "state": {"name": "FT"},
+            "scores": [
+                {"score": {"description": "1ST_HALF", "participant": "home",
+                           "goals": 0}},
+                {"score": {"description": period, "participant": "home",
+                           "goals": h}},
+                {"score": {"description": period, "participant": "away",
+                           "goals": a}},
+            ],
+        }
+
+    def test_current_is_not_read_at_full_time(self):
+        """THE BUG. `score_from_fixture` only matches CURRENT, so resolving a
+        finished match through it yields (0,0) — a scoreline that was never
+        read, and indistinguishable from a real goalless draw."""
+        fx = self._finished_fx(42, period="FULLTIME", h=1, a=2)
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        self.assertEqual(orch.score_from_fixture(fx), (0, 0))
+        # The correct period gives the truth.
+        self.assertEqual(orch.score_period(fx, "FULLTIME"), (1, 2))
+        # An absent period must be None, never (0, 0).
+        self.assertIsNone(orch.score_period(fx, "CURRENT"))
+
+    def test_final_score_falls_back_to_the_fulltime_period(self):
+        """With no FT snapshot available the FULLTIME period is used."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        with patch.object(stage6.SupremeOrchestrator, "_ft_snapshot_scores",
+                          staticmethod(lambda fid: None)):
+            self.assertEqual(orch.score_at_ft(42, self._finished_fx(42)), (1, 2))
+
+    def test_unreadable_final_score_is_never_invented(self):
+        """A finished match whose score cannot be read must resolve to
+        `unverifiable` with a null final_score — never a fabricated 0-0 that
+        produces a confident "no further goal"."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        with patch.object(stage6.SupremeOrchestrator, "_ft_snapshot_scores",
+                          staticmethod(lambda fid: None)):
+            self.assertIsNone(orch.score_at_ft(
+                43, {"id": 43, "state": {"name": "FT"}, "scores": []}))
+        import tempfile as _t
+        with _t.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "a.json")
+            rec = {"f_id": "43", "outcome": "pending",
+                   "score_home_trigger": 0, "score_away_trigger": 0}
+            with patch.object(stage6, "OUTPUT_ALERTS_FILE", out):
+                with open(out, "w") as f:
+                    f.write(json.dumps(rec) + "\n")
+                with patch.object(
+                        stage6.SupremeOrchestrator, "_ft_snapshot_scores",
+                        staticmethod(lambda fid: None)):
+                    orch.resolve_alert_results(
+                        {"43": {"id": 43, "state": {"name": "FT"},
+                                "scores": []}})
+                got = json.loads(open(out).read().strip())
+        self.assertIsNone(got["final_score"])
+        self.assertIsNone(got["goals_after"])
+        self.assertEqual(got["outcome"], "unverifiable")
+
+    def test_final_score_prefers_the_settlement_snapshot(self):
+        """The snapshot is the authority — it is how Serbia vs Netherlands is
+        known to have finished 1-2 while the live read said 0-0."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        with patch.object(
+                stage6.SupremeOrchestrator, "_ft_snapshot_scores",
+                staticmethod(lambda fid: (1, 2))):
+            # Even with a misleading FULLTIME period, the snapshot wins.
+            self.assertEqual(
+                orch.score_at_ft(19676687, self._finished_fx(19676687, h=0, a=0)),
+                (1, 2))
+
+    # ── STORM GATES ARE A TRACK, NOT A DOUBLE COUNT ─────────────────────
+    def test_gates_do_not_both_fire_in_the_same_window(self):
+        """Observed live: a storm first caught at 46' fired BOTH developing
+        and sustained in the same cycle, because 'developing' is the first
+        cycle >=45 while 'sustained' covers 45-60. The card read "stages at
+        46', 46', 72'" — three stages that were really two moments. Gate N may
+        only fire if gate N-1 did not already fire for the fixture."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append(k.get("storm_stage"))
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        struct = {"h_triple": True, "a_triple": False}
+        ctx = self._storm_ctx()
+        # 46' with the original handshake set: developing fires.
+        stage6.VALIDATION_STATE["FG1"] = "VALID_30"
+        orch.process_ai_gates("FG1", "A vs B", 46, ctx, struct, {}, score=(0, 0))
+        self.assertIn("developing", fired)
+        # A later cycle inside 45-60 must NOT add a "sustained" alert.
+        fired.clear()
+        orch.process_ai_gates("FG1", "A vs B", 52, ctx, struct, {}, score=(0, 0))
+        self.assertNotIn("sustained", fired,
+                         "a stage already preceded must not re-fire")
+        # 72' is outside 45-60, so peaking is still reachable.
+        fired.clear()
+        orch.process_ai_gates("FG1", "A vs B", 72, ctx, struct, {}, score=(0, 0))
+        self.assertIn("peaking", fired)
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+    def test_a_late_starting_storm_still_reports_its_first_stage(self):
+        """The escalation guard must not silence a storm that genuinely only
+        appears later — that is the whole point of widening the window."""
+        orch = stage6.SupremeOrchestrator.__new__(stage6.SupremeOrchestrator)
+        fired = []
+        orch.fire_alert = lambda *a, **k: fired.append(k.get("storm_stage"))
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+        struct = {"h_triple": True, "a_triple": False}
+        ctx = self._storm_ctx()
+        # No handshake at all, first structural sighting at 52'.
+        orch.process_ai_gates("FG2", "A vs B", 52, ctx, struct, {}, score=(0, 0))
+        self.assertIn("sustained", fired)
+        stage6.ALERT_HISTORY.clear()
+        stage6.VALIDATION_STATE.clear()
+
+
 
 
 
