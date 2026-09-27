@@ -531,6 +531,12 @@ type MonitorRow = {
   market: string;
   state: string;
   kind: "pick" | "read";
+  /** A settled prediction still carries the 30'/45'/60' record. */
+  settled?: boolean;
+  /** The three checkpoints, shown for a settled pick. */
+  at30?: string;
+  at45?: string;
+  at60?: string;
   comparison?: string;
   comparisonNote?: string;
 };
@@ -543,13 +549,16 @@ type MonitorRow = {
 function MonitorListTable({ rows }: { rows: MonitorRow[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[440px] text-left font-mono text-[11px]">
+      <table className="w-full min-w-[620px] text-left font-mono text-[11px]">
         <thead className="text-[9px] uppercase tracking-wide text-slate-500">
           <tr>
             <th className="w-8 py-1 pr-2 font-medium">#</th>
             <th className="py-1 pr-2 font-medium">Market</th>
-            <th className="py-1 pr-2 font-medium">State</th>
-            <th className="py-1 font-medium">30&apos;&rarr;45&apos;</th>
+            <th className="py-1 pr-2 font-medium">30&apos;</th>
+            <th className="py-1 pr-2 font-medium">45&apos;</th>
+            <th className="py-1 pr-2 font-medium">60&apos;</th>
+            <th className="py-1 pr-2 font-medium">30&apos;&rarr;45&apos;</th>
+            <th className="py-1 font-medium">State</th>
           </tr>
         </thead>
         <tbody>
@@ -576,22 +585,26 @@ function MonitorListTable({ rows }: { rows: MonitorRow[] }) {
                   {displayMarketLabel(r.market)}
                 </span>
               </td>
+              {/* The three checkpoints. A dash means that checkpoint has not
+                  been reached or was never recorded — never a guess. */}
+              {([30, 45, 60] as const).map((cp) => {
+                const val = cp === 30 ? r.at30 : cp === 45 ? r.at45 : r.at60;
+                return (
+                  <td key={cp} className="py-1 pr-2">
+                    {val ? (
+                      <span
+                        className="rounded border border-white/15 bg-white/5 px-1.5 py-0.5 text-[10px] font-bold text-slate-300"
+                        title={`${cp}' checkpoint`}
+                      >
+                        {LEDGER_VERDICT_STYLE[val]?.label ?? val}
+                      </span>
+                    ) : (
+                      <span className="text-slate-600">—</span>
+                    )}
+                  </td>
+                );
+              })}
               <td className="py-1 pr-2">
-                <span
-                  className={cn(
-                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
-                    r.kind === "read"
-                      ? READ_STATE_STYLE[r.state] ??
-                        "border-white/15 bg-white/5 text-slate-300"
-                      : "border-white/20 bg-white/5 text-slate-200"
-                  )}
-                >
-                  {r.kind === "read"
-                    ? r.state.replace("_", " ")
-                    : (LEDGER_VERDICT_STYLE[r.state]?.label ?? r.state)}
-                </span>
-              </td>
-              <td className="py-1">
                 {r.comparison ? (
                   <span
                     className={cn(
@@ -606,6 +619,23 @@ function MonitorListTable({ rows }: { rows: MonitorRow[] }) {
                 ) : (
                   <span className="text-slate-600">—</span>
                 )}
+              </td>
+              <td className="py-1">
+                <span
+                  className={cn(
+                    "rounded border px-1.5 py-0.5 text-[10px] font-bold",
+                    r.kind === "read"
+                      ? READ_STATE_STYLE[r.state] ??
+                        "border-white/15 bg-white/5 text-slate-300"
+                      : r.settled
+                        ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
+                        : "border-white/20 bg-white/5 text-slate-200"
+                  )}
+                >
+                  {r.kind === "read"
+                    ? r.state.replace("_", " ")
+                    : (LEDGER_VERDICT_STYLE[r.state]?.label ?? r.state)}
+                </span>
               </td>
             </tr>
           ))}
@@ -1202,11 +1232,23 @@ export default function LivePage() {
     const rows: Omit<MonitorRow, "n">[] = [];
 
     for (const p of activePredictions) {
-      if (p.status === "SETTLED") continue;
+      // BUG FIXED: settled picks were filtered out of this list, so a match
+      // whose predictions had all settled rendered as "0 PICKS" and claimed
+      // Code 1 had attached no prediction — while the cards directly below
+      // showed two SETTLED predictions. A settled pick is still a prediction
+      // Code 2 monitored and verified, and it is the one carrying the 30'/45'/60'
+      // record, so it must be listed.
       rows.push({
         market: p.label,
         state: p.verdict ?? p.status ?? "MONITORING",
         kind: "pick",
+        settled: p.status === "SETTLED",
+        // A settled pick has no live verdict, so the three checkpoints are
+        // what the row must show instead — otherwise it reads as a bare
+        // "SETTLED" with no evidence of any validation.
+        at30: p.verdict_30 ?? undefined,
+        at45: p.verdict_45 ?? undefined,
+        at60: p.verdict_60 ?? undefined,
         comparison: p.comparison_30_45,
         comparisonNote: p.comparison_note,
       });

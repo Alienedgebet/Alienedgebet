@@ -1959,9 +1959,20 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
             # A settled prediction has a definitive answer. The gate verdicts are
             # no longer meaningful, so they are recorded as SETTLED rather than
             # left missing for the UI to render as UNKNOWN.
+            #
+            # BUG FIXED: this branch used to append a bare dict and `continue`,
+            # which DISCARDED the whole validation history for that pick. The
+            # 30' observation, the 45' verdict, the 60' final validation and the
+            # 30'->45' comparison all lived in the ledger entry, and none of it
+            # reached the board — so a settled prediction showed "SETTLED" with
+            # no evidence of the work Code 2 had actually done, and the per-match
+            # monitor list appeared empty. The ledger is the record; a settled
+            # pick must still show how it got there.
             stage, stage_note = prediction_lifecycle_step(
                 pick, "SETTLED", V_SETTLED, minute, True)
             _notify_settled(ctx, label, ptype, target, done_reason)
+            settled_entry = MATCH_VALIDATION_STATE[f_id].get(p_key)
+            settled_entry = settled_entry if isinstance(settled_entry, dict) else {}
             prediction_rows.append({
                 "key":         p_key,
                 "label":       label,
@@ -1978,21 +1989,49 @@ def process_triple_phase_audit(ctx, picks, cycle_log):
                 "triggered":   True,
                 "minute":      minute,
                 "final_score": f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+                # The full validation trail, preserved on settlement.
+                "verdict_30":  settled_entry.get("verdict_30"),
+                "verdict_45":  settled_entry.get("verdict_45"),
+                "verdict_60":  settled_entry.get("verdict_60"),
+                "verdict_30_minute": settled_entry.get("verdict_30_minute"),
+                "verdict_45_minute": settled_entry.get("verdict_45_minute"),
+                "verdict_60_minute": settled_entry.get("verdict_60_minute"),
+                "late_30":     bool(settled_entry.get("late_30")),
+                "late_45":     bool(settled_entry.get("late_45")),
+                "late_60":     bool(settled_entry.get("late_60")),
+                "backfilled":  bool(settled_entry.get("backfilled")),
+                "comparison_30_45": settled_entry.get("comparison_30_45"),
+                "comparison_note": settled_entry.get("comparison_note"),
+                "verdict_note": (settled_entry.get("verdict_60_note")
+                                 or settled_entry.get("verdict_note")),
             })
             continue
 
         if MATCH_VALIDATION_STATE[f_id].get(p_key) == "DONE":
             match_summary_lines.append(f"   ✅ [{label}] Previously settled")
+            done_entry = MATCH_VALIDATION_STATE[f_id].get(p_key)
+            done_entry = done_entry if isinstance(done_entry, dict) else {}
             prediction_rows.append({
                 "key":         p_key,
                 "label":       label,
                 "type":        ptype,
                 "target":      target,
                 "status":      "SETTLED",
+                "stage":       "SETTLED",
+                "stage_note":  "Outcome decided in an earlier cycle",
                 "settlement":  "Settled in an earlier cycle",
                 "triggered":   True,
                 "minute":      minute,
                 "final_score": f"{ctx['home']['goals']}-{ctx['away']['goals']}",
+                # Same rule: a settled pick keeps its validation trail.
+                "verdict_30":  done_entry.get("verdict_30"),
+                "verdict_45":  done_entry.get("verdict_45"),
+                "verdict_60":  done_entry.get("verdict_60"),
+                "verdict_30_minute": done_entry.get("verdict_30_minute"),
+                "verdict_45_minute": done_entry.get("verdict_45_minute"),
+                "verdict_60_minute": done_entry.get("verdict_60_minute"),
+                "comparison_30_45": done_entry.get("comparison_30_45"),
+                "comparison_note": done_entry.get("comparison_note"),
             })
             continue
 
@@ -2685,6 +2724,11 @@ def _finished_snapshot_board_entry(std):
                 "late_45":       bool(entry.get("late_45")),
                 "late_60":       bool(entry.get("late_60")),
                 "backfilled":    bool(entry.get("backfilled")),
+                # The 30'->45' comparison belongs on the completed row too:
+                # it is the record of how the match moved between the two
+                # checkpoints, and it was being dropped here.
+                "comparison_30_45": entry.get("comparison_30_45"),
+                "comparison_note":  entry.get("comparison_note"),
                 "checkpoints":   list(entry.get("checkpoints") or []),
                 "triggered":     bool(entry.get("alerted")),
                 "settlement":    None,
