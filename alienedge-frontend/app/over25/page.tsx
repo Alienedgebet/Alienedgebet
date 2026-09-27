@@ -1,12 +1,14 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { TrendingUp } from "lucide-react";
+import type { AxiosResponse } from "axios";
 import {
   over25Api,
   specialsApi,
   type Over25ApexPick,
   type Over25GoldPick,
+  type Over25Stage1Pick,
   type Over25Stage2Pick,
   type FHVIPick,
 } from "@/lib/api";
@@ -20,11 +22,28 @@ import { ChainStage, TierBadge, ProbCell, ScoreBar, type PredictionColumn } from
 import {
   MOCK_O25_APEX,
   MOCK_O25_GOLD,
+  MOCK_O25_S1,
   MOCK_O25_S2,
   MOCK_FHVI,
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortO25, withBorrowed } from "@/lib/cross-engine-ranking";
+
+// Stage 1 (probabilistic) is the engine that emits the Confidence / Odds pair
+// the O25 ordering is measured on.
+const stage1Columns: PredictionColumn<Over25Stage1Pick>[] = [
+  {
+    key: "fixture",
+    header: "fixture",
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
+  },
+  { key: "Time", header: "Time", render: (r) => r.Time || "—" },
+  { key: "Odds", header: "Odds", align: "right", render: (r) => r.Odds },
+  { key: "Confidence", header: "Confidence", align: "right", render: (r) => r.Confidence },
+  { key: "Algorithm", header: "Algorithm", render: (r) => r.Algorithm || "—" },
+];
 
 const apexColumns: PredictionColumn<Over25ApexPick>[] = [
   {
@@ -145,6 +164,9 @@ const fhviColumns: PredictionColumn<FHVIPick>[] = [
 
 export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
+  // Default ON for the Stage 1 ordering; see the fetchStage1 comment below for
+  // why the toggle is marked UNPROVEN rather than evidence-backed.
+  const [smartRank, setSmartRank] = useState(true);
   const { data: dnaV2 } = useDnaV2();
 
   // 1. Apex (Verify -> DNA -> Rest)
@@ -190,6 +212,52 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
     [date]
   );
 
+  const stage1ColumnsWithVerify = useMemo(
+    () => [
+      createVerifyColumn<Over25Stage1Pick>(),
+      createIntelligentPassColumn<Over25Stage1Pick>({
+        market: "over25",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...stage1Columns,
+    ],
+    [date]
+  );
+
+  // Default ON but marked UNPROVEN in the UI: Confidence >= 69 AND Odds <= 1.47
+  // reaches 109 rows at 80.7% vs 63.3% for the rest (+17.4pp), but its
+  // Bonferroni-corrected p is 0.084, which does NOT clear 0.05. The borrowed
+  // over25_forecast.pos_gap >= 9 tier reaches 91.4% on only 35 rows and its
+  // leave-one-day-out could not be evaluated at that depth. It is offered
+  // because the ordering is display-only and reversible, and the toggle says so.
+  const fetchStage1 = useMemo(
+    () => async (): Promise<AxiosResponse<Over25Stage1Pick[]>> => {
+      const response = await over25Api.getStage1(date);
+      if (smartRank && Array.isArray(response.data)) {
+        // The borrowed pos_gap lives in the forecast engine's payload, a
+        // different stage. A failed fetch degrades to the own-engine rule.
+        let borrowed: Record<string, Record<string, unknown>> = {};
+        try {
+          const forecast = await over25Api.getForecast(date);
+          if (Array.isArray(forecast.data)) {
+            for (const row of forecast.data) {
+              if (!row?.fixture) continue;
+              borrowed[row.fixture] = { pos_gap: row.pos_gap };
+            }
+          }
+        } catch {
+          borrowed = {};
+        }
+        response.data = sortO25(
+          withBorrowed(response.data, borrowed),
+        ) as Over25Stage1Pick[];
+      }
+      return response;
+    },
+    [date, smartRank]
+  );
+
   return (
     <div
       data-embedded={embedded || undefined}
@@ -210,10 +278,33 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
             </p>
           </div>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          tentative
+          help="UNPROVEN. Picks Confidence >= 69 AND Odds <= 1.47 to the top of the Probabilistic stage: 109 rows at 80.7% vs 63.3% for the rest (+17.4pp), but the Bonferroni-corrected p is 0.084, which does not clear 0.05. The top tier also borrows pos_gap >= 9 from the forecast engine, reaching 91.4% on only 35 rows. Display-only and reversible. Re-check with: python3 signal_backtest.py --market o25"
+        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
+
+      {/* ── 3. STAGE 0: Over 2.5 Probabilistic (smart-ranked) ─────────── */}
+      <div>
+        <ChainStage
+          title="Over 2.5 Probabilistic"
+          description="Stage 1 probabilistic engine — the Confidence / Odds pair the ordering is measured on"
+          fetcher={fetchStage1}
+          deps={[date, smartRank]}
+          columns={stage1ColumnsWithVerify}
+          rowKey={(r, i) => `${r.id}-${i}`}
+          emptyMessage="No stage 1 picks for this date."
+          fallbackData={MOCK_O25_S1}
+          refreshMs={VERIFY_REFRESH_MS}
+        />
+      </div>
 
       {/* ── 3. STAGE 1: Over 2.5 Apex ────────────────────────────────── */}
       <div>

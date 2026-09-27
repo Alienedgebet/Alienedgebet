@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Flame } from "lucide-react";
+import type { AxiosResponse } from "axios";
 import {
   over15Api,
   type Over15PsychologyPick,
@@ -15,6 +16,8 @@ import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/compon
 import { MOCK_O15_PSYCH, MOCK_O15_S3 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortO15 } from "@/lib/cross-engine-ranking";
 
 const psychologyColumns: PredictionColumn<Over15PsychologyPick>[] = [
   {
@@ -55,6 +58,25 @@ const stage3Columns: PredictionColumn<Over15Stage3Pick>[] = [
 
 export default function Over15Page() {
   const { date } = useSelectedDate();
+  // Default ON: Poisson% >= 55.6 AND Grade >= 5 is the ordering the full-history
+  // backtest supports (120 rows, 93.3% vs 72.8% for the rest, corrected
+  // p = 0.035, bootstrap 95% CI [+9.4, +31.6] pp). It applies to the "Over 1.5
+  // Gold" stage, which is the engine that emits those two fields.
+  // See lib/cross-engine-ranking.ts.
+  const [smartRank, setSmartRank] = useState(true);
+
+  const fetchStage3 = useMemo(
+    () => async (): Promise<AxiosResponse<Over15Stage3Pick[]>> => {
+      const response = await over15Api.getStage3(date);
+      if (smartRank && Array.isArray(response.data)) {
+        // Rebind .data rather than spreading the response: spreading widens the
+        // type to a fresh object literal and breaks the ChainStage contract.
+        response.data = sortO15(response.data);
+      }
+      return response;
+    },
+    [date, smartRank]
+  );
 
   // 1. Psychology (Verify -> Rest)
   const psychologyColumnsWithVerify = useMemo(
@@ -101,6 +123,13 @@ export default function Over15Page() {
             2-stage engine chain — psychology audit &amp; base stage
           </p>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          help="Picks the backtested combination to the top: Poisson% >= 55.6 AND Grade >= 5 (120 rows, 93.3% vs 72.8% for the rest, corrected p = 0.035, bootstrap 95% CI [+9.4, +31.6] pp). Applies to the Over 1.5 Gold stage. Re-check with: python3 signal_backtest.py --market o15"
+        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
@@ -126,8 +155,8 @@ export default function Over15Page() {
         <ChainStage
           title="Over 1.5 Gold"
           description="Foundation base"
-          fetcher={() => over15Api.getStage3(date)}
-          deps={[date]}
+          fetcher={fetchStage3}
+          deps={[date, smartRank]}
           columns={stage3ColumnsWithVerify}
           rowKey={(r, i) => `${r.Match}-${i}`}
           emptyMessage="No stage 3 picks for this date."

@@ -1,8 +1,10 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Scale } from "lucide-react";
 import { specialsApi, type DrawPick } from "@/lib/api";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortDraw } from "@/lib/cross-engine-ranking";
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi, VERIFY_REFRESH_MS } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
@@ -57,6 +59,12 @@ const drawColumns: PredictionColumn<DrawPick>[] = [
 export default function DrawPage() {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
+  // Default ON: composite_draw_score >= 0.391 AND h2h_draws >= 1 clears the
+  // Bonferroni correction outright (288 rows, 46.9% vs 17.6% for the rest,
+  // +29.2pp, corrected p = 0.0000 over 11,830 cut-points, bootstrap CI
+  // [+23.6, +35.4], leave-one-day-out 10/13, base 25.0%).
+  // See lib/cross-engine-ranking.ts.
+  const [smartRank, setSmartRank] = useState(true);
   const result = useApi(() => specialsApi.getDraw(date), [date], {
     fallback: MOCK_DRAW,
     cacheKey: `draw:${date}`,
@@ -85,6 +93,22 @@ export default function DrawPage() {
   const payload = result.data;
   const isMock = result.isMock;
 
+  // Applied AFTER the fetch so the mock/demo path and the real path are ordered
+  // identically, and only to the main draw list. The parity branch below is a
+  // DIFFERENT market (score gap <= 2) whose rule was not measured, so it keeps
+  // the engine's own order.
+  const orderedDraws = useMemo(
+    () =>
+      smartRank && payload?.draws
+        ? sortDraw(payload.draws)
+        : payload?.draws ?? [],
+    // Depend on `payload` itself, not `payload?.draws`: the React Compiler
+    // infers the coarser dependency and skips optimisation when a narrower one
+    // is declared, because a narrower dep can fire more often than the value
+    // it guards.
+    [payload, smartRank]
+  );
+
   return (
     <div className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6">
       {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
@@ -102,6 +126,13 @@ export default function DrawPage() {
             </p>
           </div>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          help="Picks the backtested combination to the top of the Draw Magnet list: composite_draw_score >= 0.391 AND h2h_draws >= 1 (288 rows, 46.9% vs 17.6% for the rest, +29.2pp, Bonferroni-corrected p = 0.0000 across 11,830 tested cut-points, better on 10 of 13 leave-one-day-out days). Does not affect the parity branch. Re-check with: python3 signal_backtest.py --market draw"
+        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
@@ -111,7 +142,7 @@ export default function DrawPage() {
       <ChainBranch
         title="Draw Magnet"
         description={isMock ? "Full ranked draw list · Demo" : "Full ranked draw list"}
-        data={payload?.draws ?? []}
+        data={orderedDraws}
         loading={result.loading}
         error={result.error}
         columns={drawColumnsWithVerifyAndDna}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { TrendingDown } from "lucide-react";
 import { specialsApi, type UndersPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -13,6 +13,8 @@ import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_UNDERS } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortUnders } from "@/lib/cross-engine-ranking";
 
 const u25Columns: PredictionColumn<UndersPick>[] = [
   {
@@ -110,6 +112,13 @@ const u35Columns: PredictionColumn<UndersPick>[] = [
 export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
+  // Default ON but marked UNPROVEN: combined_lambda >= 2.4 AND
+  // mc_u25_prob >= 0.565 lifts U2.5 to 65.2% (from 44.0%) and U3.5 to 89.1%
+  // (from 66.5%) on 46 rows each, with bootstrap CIs excluding zero. It fails
+  // Bonferroni (8.98 and 1.28) because 2,436 and 2,035 cut-points were swept,
+  // and both markets select the same 46 fixtures. Real effect, not yet proven —
+  // hence the amber "Unproven" badge on the toggle.
+  const [smartRank, setSmartRank] = useState(true);
   const result = useApi(() => specialsApi.getUnders(date), [date], {
     fallback: MOCK_UNDERS,
     cacheKey: `unders:${date}`,
@@ -148,6 +157,17 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
   const payload = live;
   const isMock = result.isMock;
 
+  // The same measured rule drives both lists, but each falls back to its OWN
+  // score column so the non-qualifying block still has a sensible order.
+  const orderedU25 = useMemo(
+    () => (smartRank && payload?.u25 ? sortUnders(payload.u25, "u25_score") : payload?.u25 ?? []),
+    [payload, smartRank]
+  );
+  const orderedU35 = useMemo(
+    () => (smartRank && payload?.u35 ? sortUnders(payload.u35, "u35_score") : payload?.u35 ?? []),
+    [payload, smartRank]
+  );
+
   return (
     <div
       data-embedded={embedded || undefined}
@@ -168,6 +188,14 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
             </p>
           </div>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          tentative
+          help="UNPROVEN. Picks combined_lambda >= 2.4 AND mc_u25_prob >= 0.565 to the top of both lists: U2.5 rises to 65.2% from a 44.0% base and U3.5 to 89.1% from 66.5%, on 46 rows each with bootstrap CIs excluding zero. It does NOT clear Bonferroni (8.98 / 1.28) because 2,436 and 2,035 cut-points were swept, and both lists select the same 46 fixtures. Display-only and reversible. Re-check with: python3 signal_backtest.py --market u25"
+        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
@@ -182,7 +210,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
               ? "Defensive Under Empire — head 1/2 · Demo"
               : "Defensive Under Empire — head 1/2"
           }
-          data={payload?.u25 ?? []}
+          data={orderedU25}
           loading={result.loading}
           error={result.error}
           columns={u25ColumnsWithVerifyAndDna}
@@ -200,7 +228,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
               ? "Defensive Under Empire — head 2/2 · Demo"
               : "Defensive Under Empire — head 2/2"
           }
-          data={payload?.u35 ?? []}
+          data={orderedU35}
           loading={result.loading}
           error={result.error}
           columns={u35ColumnsWithVerifyAndDna}

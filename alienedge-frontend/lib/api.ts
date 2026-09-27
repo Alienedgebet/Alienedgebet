@@ -528,6 +528,13 @@ export interface WinRawPick extends FixtureRisk {
   side: string;
   team_name: string;
   win_odds: number;
+  /**
+   * Present in the payload and used by the Smart-rank ordering, but missing
+   * from this interface until now. Declared optional because roughly 2% of rows
+   * carry no price at all; the ordering treats a missing value as unknown, not
+   * as a short price.
+   */
+  poisson_win_prob?: string | number;
   last_5_wins_overall: number;
   last_5_wins_at_venue: number;
   last_5_goals_scored: number;

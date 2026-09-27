@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Zap } from "lucide-react";
+import type { AxiosResponse } from "axios";
 import {
   ggApi,
   type GGForensicPick,
@@ -29,6 +30,8 @@ import {
   MOCK_GG_SUPREME,
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
+import { sortGG, withBorrowed } from "@/lib/cross-engine-ranking";
 
 const supremeColumns: PredictionColumn<GGSupremePick>[] = [
   {
@@ -205,11 +208,55 @@ const o15Columns: PredictionColumn<GGO15Pick>[] = [
 export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
+  // Default ON: Base_Marks >= 3 AND Monte_GG_Prob >= 74.32 is the ordering the
+  // full-history backtest supports (291 rows, 70.4% vs 56.0% for the rest,
+  // corrected p = 0.013, leave-one-day-out 5/7). The top tier additionally
+  // borrows gg_forensics.Forensic_Audit <= 3, lifting it to 75.2% on 129 rows
+  // (leave-one-day-out 6/6). See lib/cross-engine-ranking.ts.
+  const [smartRank, setSmartRank] = useState(true);
   const precision = useApi(() => ggApi.getPrecision(date), [date], {
     fallback: MOCK_GG_PRECISION,
     cacheKey: `gg-precision:${date}`,
     refreshMs: VERIFY_REFRESH_MS,
   });
+
+  /**
+   * The borrowed forensic audit lives in a DIFFERENT engine's payload, so the
+   * fetcher joins it in by fixture. A failed forensics fetch must NOT break the
+   * supreme list — the own-engine rule still applies on its own, so the page
+   * degrades to the two-tier ordering instead of losing the ranking entirely.
+   */
+  const fetchSupreme = useMemo(
+    () => async (): Promise<AxiosResponse<GGSupremePick[]>> => {
+      const response = await ggApi.getSupreme(date);
+      if (!smartRank || !Array.isArray(response.data)) return response;
+
+      let borrowed: Record<string, Record<string, unknown>> = {};
+      try {
+        const forensics = await ggApi.getForensics(date);
+        if (Array.isArray(forensics.data)) {
+          for (const row of forensics.data) {
+            // GGForensicPick declares 'Fixture' (capitalised); the cache also
+            // carries a lowercase 'fixture' on some rows, so read both rather
+            // than dropping the join whenever one shape appears.
+            const label = row.Fixture ?? (row as unknown as Record<string, unknown>).fixture;
+            if (!label) continue;
+            borrowed[String(label)] = {
+              Forensic_Audit: row.Forensic_Audit,
+            };
+          }
+        }
+      } catch {
+        borrowed = {};
+      }
+      // Rebind .data rather than spreading the response: spreading widens the
+      // type to a fresh object literal and breaks the ChainStage fetcher
+      // contract (same reason the corners page does it this way).
+      response.data = sortGG(withBorrowed(response.data, borrowed)) as GGSupremePick[];
+      return response;
+    },
+    [date, smartRank]
+  );
 
   // 1. GG Supreme (Verify -> DNA -> Intelligent Pass Count -> Rest)
   const supremeColumnsWithVerifyAndDna = useMemo(
@@ -286,6 +333,13 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
             </p>
           </div>
         </div>
+        <SignalRankToggle
+          active={smartRank}
+          onChange={setSmartRank}
+          activeLabel="Smart rank"
+          inactiveLabel="As served"
+          help="Picks the backtested combination to the top: Base_Marks >= 3 AND Monte_GG_Prob >= 74.32 (291 rows, 70.4% vs 56.0% for the rest, corrected p = 0.013, better on 5 of 7 leave-one-day-out days). The top tier also borrows the forensic audit from the Forensics engine (Forensic_Audit <= 3), lifting it to 75.2% on 129 rows. Re-check with: python3 signal_backtest.py --market gg"
+        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
@@ -296,8 +350,8 @@ export function GGMarketPanel({ embedded = false }: { embedded?: boolean }) {
         <ChainStage
           title="GG Intelligence"
           description="Top-of-chain picks after full 3-stage GG audit"
-          fetcher={() => ggApi.getSupreme(date)}
-          deps={[date]}
+          fetcher={fetchSupreme}
+          deps={[date, smartRank]}
           columns={supremeColumnsWithVerifyAndDna}
           rowKey={(r, i) => `${r.fixture_id}-${i}`}
           emptyMessage="No supreme picks for this date."
