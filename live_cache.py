@@ -133,9 +133,20 @@ def get_live_scores_cached(force_refresh: bool = False) -> list:
             }
             # Write atomically (tmp + os.replace). Truncate-then-dump left a
             # window where any concurrent reader saw truncated JSON, which is
-            # exactly how a healthy cache gets read as corrupt. Same pattern
-            # already used by _write_json_atomic() below.
-            _tmp_cache = LIVE_CACHE_FILE + ".tmp"
+            # exactly how a healthy cache gets read as corrupt.
+            #
+            # 2026-09-28 HOTFIX: the temp name includes the PID. It used to be a
+            # fixed "<file>.tmp", so two uvicorn workers writing at the same
+            # moment raced — worker A renamed the temp file into place, then
+            # worker B's os.replace() raised FileNotFoundError because the temp
+            # file it had just written was already gone. The API logged
+            # "[CACHE EXCEPTION] Live in-play fetch failed" and served a
+            # STALE in-play cache, which is what made live statistics lag and
+            # never recover. This bug predates the current work (it is in the
+            # log from Sep 25), but it is a live-statistics defect and it is
+            # fixed here. A per-PID temp name makes concurrent writers
+            # independent; os.replace stays atomic for readers either way.
+            _tmp_cache = f"{LIVE_CACHE_FILE}.{os.getpid()}.tmp"
             with open(_tmp_cache, "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, indent=2)
             os.replace(_tmp_cache, LIVE_CACHE_FILE)
@@ -260,9 +271,14 @@ def get_prematch_fixtures_cached(target_date: str, force_refresh: bool = False) 
                 "count": len(all_fixtures),
                 "data": all_fixtures
             }
-            with open(cache_path + ".tmp", "w", encoding="utf-8") as f:
+            # Per-PID temp name, for the same concurrent-writer reason as the
+            # in-play cache above: a shared fixed ".tmp" is a rename race
+            # between the two API workers, and the loser raises and silently
+            # keeps serving a stale file.
+            _tmp = f"{cache_path}.{os.getpid()}.tmp"
+            with open(_tmp, "w", encoding="utf-8") as f:
                 json.dump(cache_payload, f, indent=2)
-            os.replace(cache_path + ".tmp", cache_path)
+            os.replace(_tmp, cache_path)
         except Exception: pass
 
     return all_fixtures
@@ -325,13 +341,26 @@ def write_feed(path, payload, acquisition_ok=True, label=None):
     """Write one Live feed without ever replacing a good feed with the result of a
     FAILED acquisition.
 
-    * acquisition_ok=False AND the new payload is EMPTY AND the file already holds a
-      non-empty feed  ->  the existing feed is preserved untouched and "preserved" is
-      returned (the failure is logged, with the feed's age).
+    * acquisition_ok=False AND the new payload is EMPTY -> the existing feed is
+      left completely untouched, whether or not it holds anything. Returns
+      "preserved".
     * anything else (successful acquisition, or a legitimate empty day) -> the payload
       is written atomically, exactly as every writer did before.
 
     Returns "written" or "preserved".
+
+    2026-09-28 HOTFIX. The guard used to protect a feed only when the file
+    already held a NON-EMPTY result. That is not enough, and the gap is exactly
+    what blanked the live board: a rate-limit storm (429) emptied the feeds on
+    one cycle, and on the next cycle there was "nothing to preserve", so the
+    empty result was written again. Two more cycles and the board showed zero
+    fixtures with no error anywhere, and Stage 6 had no picks to turn into
+    alerts — the whole push pipeline went quiet while the scanner reported
+    success every cycle.
+
+    The rule is now simpler and stronger: a FAILED acquisition never writes
+    anything, ever. An empty feed produced by a failure is indistinguishable
+    from "no matches today", which is a claim we have no evidence for.
     """
     label = label or os.path.basename(path)
     if not payload and not acquisition_ok:
@@ -345,7 +374,12 @@ def write_feed(path, payload, acquisition_ok=True, label=None):
             _log(f"[FEED GUARD] {label}: acquisition FAILED — existing feed "
                  f"({len(existing)} entries, age {age_txt}) PRESERVED; the empty "
                  f"result was NOT written.")
-            return "preserved"
+        else:
+            _log(f"[FEED GUARD] {label}: acquisition FAILED and no feed exists — "
+                 f"NOTHING WRITTEN. Whatever was there is left alone rather than "
+                 f"overwritten with a failure we cannot distinguish from "
+                 f"'no matches today'.")
+        return "preserved"
 
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:

@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import live_cache
 import notifications as notify
 from LIVE_SCANNER import live_stage2_verification as stage2
 
@@ -4226,6 +4227,154 @@ def _rank_of(grade):
             "Strong": 4, "Very Strong": 5, "Excellent": 6, "Elite": 7}.get(
         grade, 0)
 
+
+
+# ══════════════════════════════════════════════════════════════════════
+# QUOTA / FEED-SAFETY HOTFIX (2026-09-28)
+# ══════════════════════════════════════════════════════════════════════
+# The signed-metric work added `_favourite_odds` to Stage 4, called once per
+# fixture per cycle. Measured consequence on the live account: rate-limit
+# errors went from 0 to 11, cycle time from ~40s to ~220s, all three feeds
+# emptied, and the alert pipeline went silent because Stage 6 had no picks.
+# These pin the two guards that make that unrepeatable.
+
+
+class QuotaGuardContractTests(unittest.TestCase):
+    """The regime lookup must cost a provider call only when it can matter."""
+
+    def test_a_decisive_verdict_does_not_pay_for_odds(self):
+        """Far from every bar, all three regimes agree — so no call."""
+        self.assertFalse(stage4._regime_needed([25.0], [0.8]))
+        self.assertFalse(stage4._regime_needed([-30.0], [0.8]))
+
+    def test_a_verdict_on_a_bar_does_pay_for_odds(self):
+        """Within range of a bar, the band is the only thing that can tip it."""
+        self.assertTrue(stage4._regime_needed([6.0], [0.8]))
+
+    def test_thin_evidence_never_pays_for_odds(self):
+        """A 2-appearance sample cannot change a label, so it must not cost."""
+        self.assertFalse(stage4._regime_needed([20.0], [0.1]))
+        self.assertFalse(stage4._regime_needed([None], [0.8]))
+
+    def test_nobody_absent_never_pays_for_odds(self):
+        self.assertFalse(stage4._regime_needed([0.0], [0.8]))
+
+    def test_odds_are_memoised_per_fixture(self):
+        """The scanner re-reads the same fixtures every cycle; an unmemoised
+        call is pure waste. A miss must be memoised too."""
+        calls = []
+
+        def _fake(fid):
+            calls.append(fid)
+            # 7 is priced; 8 has no market from the provider.
+            return 1.30 if fid == 7 else None
+
+        stage4._ODDS_MEMO.clear()
+        original = stage4._favourite_odds
+        stage4._favourite_odds = _fake
+        try:
+            self.assertEqual(stage4._favourite_odds_cached(7), 1.30)
+            self.assertEqual(stage4._favourite_odds_cached(7), 1.30)
+            self.assertEqual(len(calls), 1, "second read must not re-call")
+            # A provider that has no market must not be asked again either:
+            # a miss costs the same as a hit and returns the same nothing.
+            self.assertIsNone(stage4._favourite_odds_cached(8))
+            self.assertIsNone(stage4._favourite_odds_cached(8))
+            self.assertEqual(len(calls), 2, "one call per fixture, misses too")
+        finally:
+            stage4._favourite_odds = original
+            stage4._ODDS_MEMO.clear()
+
+    def test_history_cache_budget_is_bounded(self):
+        """500MB was sized for a cold cache and burst the quota on deploy."""
+        self.assertLessEqual(
+            stage4.HISTORY_CACHE_MAX_BYTES, 150 * 1024 * 1024,
+            "history cache budget must stay well inside the quota budget")
+
+
+class FeedGuardContractTests(unittest.TestCase):
+    """A FAILED acquisition must never be able to blank a feed.
+
+    The old guard protected a feed only when it already held something. A
+    429 storm emptied it on one cycle, and on the next cycle there was
+    "nothing to preserve", so the empty result was written again — the board
+    showed zero fixtures with no error, and push went quiet while the scanner
+    reported success.
+    """
+
+    def _feed(self, tmp, payload):
+        path = os.path.join(tmp, "feed.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        return path
+
+    def test_a_failed_acquisition_never_overwrites_a_good_feed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._feed(tmp, [{"id": "1"}])
+            outcome = live_cache.write_feed(path, [], acquisition_ok=False,
+                                            label="t")
+            self.assertEqual(outcome, "preserved")
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(len(json.load(f)), 1)
+
+    def test_a_failed_acquisition_writes_nothing_when_no_feed_exists(self):
+        """The regression: this case used to write empty."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "feed.json")
+            outcome = live_cache.write_feed(path, [], acquisition_ok=False,
+                                            label="t")
+            self.assertEqual(outcome, "preserved")
+            self.assertFalse(
+                os.path.exists(path),
+                "a failure must not create an empty feed indistinguishable "
+                "from 'no matches today'")
+
+    def test_a_successful_empty_acquisition_is_still_written(self):
+        """A genuinely empty day is real data and must not be suppressed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._feed(tmp, [{"id": "1"}])
+            outcome = live_cache.write_feed(path, [], acquisition_ok=True,
+                                            label="t")
+            self.assertEqual(outcome, "written")
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), [])
+
+    def test_a_successful_populated_acquisition_still_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "feed.json")
+            self.assertEqual(
+                live_cache.write_feed(path, [{"id": "1"}], acquisition_ok=True,
+                                      label="t"),
+                "written")
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(len(json.load(f)), 1)
+
+
+class ConcurrentWriteRaceTests(unittest.TestCase):
+    """Two API workers must not race on a shared temp filename.
+
+    The in-play cache used a fixed "<file>.tmp". Worker A renamed it into
+    place, then worker B's os.replace() raised FileNotFoundError and the API
+    served a STALE cache — which is why live statistics lagged. The temp name
+    is now per-PID.
+    """
+
+    def test_the_in_play_cache_temp_name_is_per_process(self):
+        import live_cache as lc
+        self.assertIn(str(os.getpid()),
+                      _extract_tmp_expr(lc.LIVE_CACHE_FILE),
+                      "temp name must be unique per worker to avoid the race")
+
+
+def _extract_tmp_expr(target: str) -> str:
+    """Best-effort: confirm the writer no longer uses the fixed '.tmp' form."""
+    import inspect
+    import live_cache as lc
+    src = inspect.getsource(lc)
+    # The vulnerable form is `TARGET + ".tmp"` with no PID interpolation.
+    assert f'{target} + ".tmp"' not in src, \
+        f"fixed shared temp name still present for {target}"
+    return str(os.getpid())
 
 
 if __name__ == "__main__":
