@@ -1585,7 +1585,23 @@ export type LiveConditionType =
   | "sot"
   | "corners"
   | "da"
-  | "key_player_lost";
+  | "key_player_lost"
+  | "goals";
+
+/**
+ * The scoreline gate. Mirrors LIVE_SCANNER/user_rules_store.py
+ * VALID_GOAL_DIRECTIONS exactly — a value outside this set is rejected with a
+ * 422 by the server.
+ *
+ *   under 2.5 -> fires while the total is still <= 2 (the trade is still live)
+ *   over  2.5 -> fires once the total has reached 3      (the line is beaten)
+ *   exact 3   -> fires only at exactly 3 goals
+ *
+ * The asymmetry is deliberate: an UNDER alert is useful BEFORE the line is
+ * crossed, an OVER alert only AFTER. Treating them the same would fire the
+ * under gate when the market is already dead.
+ */
+export type RuleGoalDirection = "under" | "over" | "exact";
 
 export type UserRuleLive =
   | { type: "snapshot" }
@@ -1595,7 +1611,8 @@ export type UserRuleLive =
   | { type: "sot"; side: RuleSide; min_value: number }
   | { type: "corners"; side: RuleSide; min_value: number }
   | { type: "da"; side: RuleSide; min_value: number }
-  | { type: "key_player_lost"; side: RuleSide; min_count: number };
+  | { type: "key_player_lost"; side: RuleSide; min_count: number }
+  | { type: "goals"; direction: RuleGoalDirection; line: number };
 
 export interface UserRuleMinuteWindow {
   start: number;
@@ -1609,14 +1626,66 @@ export interface UserRuleDef {
   prematch: UserRulePrematch;
   live: UserRuleLive;
   minute_window?: UserRuleMinuteWindow;
+  /**
+   * Fixture ids the user accepted in the setup board. SOFT by design: the
+   * evaluator never tests membership, so a rule still fires on any qualifying
+   * match. These are the matches that get marked and ranked first.
+   */
+  watchlist?: string[];
   active: boolean;
   created_at?: string;
 }
 
 export type UserRuleCreate = Omit<UserRuleDef, "rule_id" | "created_at" | "user_id">;
 export type UserRulePatch = Partial<
-  Pick<UserRuleDef, "label" | "prematch" | "live" | "minute_window" | "active">
+  Pick<UserRuleDef, "label" | "prematch" | "live" | "minute_window" | "active" | "watchlist">
 >;
+
+/** The real, already-on-disk facts shown on a candidate card. */
+export interface RuleCandidateEvidence {
+  has_lineup?: boolean;
+  has_formation?: boolean;
+  formations?: Record<string, string>;
+  home_missing?: number | null;
+  away_missing?: number | null;
+  home_gk_out?: boolean;
+  away_gk_out?: boolean;
+  home_breach?: boolean;
+  away_breach?: boolean;
+  home_danger_status?: string | null;
+  away_danger_status?: string | null;
+  home_formation?: string | null;
+  away_formation?: string | null;
+  chemistry?: Record<string, string> | null;
+  flags?: Record<string, boolean> | null;
+  metrics?: Record<string, number> | null;
+  picks?: { type?: string; target_loc?: string }[];
+  kickoff_utc?: string | null;
+  status_text?: string | null;
+  state?: string | null;
+}
+
+/**
+ * One row of the setup board: a known fixture scored against the user's chosen
+ * prematch condition by the SAME predicate the live cycle will use.
+ *
+ * `met` is a boolean, never a guess, and `reason` is the predicate's own
+ * wording. `live_score` is null when the fixture is not live — which the UI
+ * must render as unknown, never as 0-0.
+ */
+export interface RuleCandidateMatch {
+  fixture_id: string;
+  name: string;
+  home_name?: string | null;
+  away_name?: string | null;
+  met: boolean;
+  reason: string;
+  evidence: RuleCandidateEvidence;
+  live_score: [number, number] | null;
+  kickoff_utc?: string | null;
+  state?: string | null;
+}
+
 
 /** Must match LIVE_SCANNER/user_rules_store.py VALID_PREMATCH_FLAGS exactly. */
 export const PREMATCH_FLAG_OPTIONS: { value: PrematchFlagKey; label: string }[] = [
@@ -2090,6 +2159,15 @@ export const userRulesApi = {
 
   create: (rule: UserRuleCreate): Promise<AxiosResponse<UserRuleDef>> =>
     api.post("/api/live/user-rules", rule),
+
+  /**
+   * Every known fixture scored against the chosen prematch condition, by the
+   * same predicate the live cycle uses. Read-only; nothing is persisted.
+   */
+  getCandidates: (
+    prematch: UserRulePrematch
+  ): Promise<AxiosResponse<RuleCandidateMatch[]>> =>
+    api.post("/api/live/user-rules/candidates", { prematch }),
 
   update: (ruleId: string, patch: UserRulePatch): Promise<AxiosResponse<UserRuleDef>> =>
     api.patch(`/api/live/user-rules/${ruleId}`, patch),

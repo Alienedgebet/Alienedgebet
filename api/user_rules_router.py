@@ -27,6 +27,7 @@ from LIVE_SCANNER.user_rules_store import (
     create_rule,
     update_rule,
     delete_rule,
+    find_candidates,
     RuleValidationError,
 )
 
@@ -72,12 +73,17 @@ class LiveCondition(BaseModel):
         ...,
         description=(
             "'snapshot' | 'pressure_share' | 'chaos_index' | 'xg' | 'sot' | "
-            "'corners' | 'da' | 'key_player_lost'"
+            "'corners' | 'da' | 'key_player_lost' | 'goals'"
         ),
     )
     side: Optional[str] = None
     min_value: Optional[float] = None
     min_count: Optional[int] = None
+    # Scoreline gate ('goals'): direction is "under" | "over" | "exact" and
+    # `line` is the goal total. There is no `side` — a goal limitation is
+    # always about the match total, never one side's tally.
+    direction: Optional[str] = None
+    line: Optional[float] = None
 
 
 class MinuteWindow(BaseModel):
@@ -93,6 +99,9 @@ class UserRuleIn(BaseModel):
     prematch: PrematchCondition
     live: LiveCondition
     minute_window: Optional[MinuteWindow] = None
+    # Fixture ids the user accepted in the setup board. SOFT: it ranks and
+    # marks alerts, it never filters them.
+    watchlist: Optional[list[str]] = None
     active: bool = True
 
 
@@ -101,7 +110,14 @@ class UserRulePatch(BaseModel):
     prematch: Optional[PrematchCondition] = None
     live: Optional[LiveCondition] = None
     minute_window: Optional[MinuteWindow] = None
+    watchlist: Optional[list[str]] = None
     active: Optional[bool] = None
+
+
+class CandidateRequest(BaseModel):
+    """Just the prematch condition to score the whole fixture board against."""
+
+    prematch: PrematchCondition
 
 
 # ==============================================================================
@@ -110,6 +126,68 @@ class UserRulePatch(BaseModel):
 def _rate(request: Request, bucket: str, limit: int) -> None:
     if not check_rate_limit(f"{bucket}:{request.client.host if request.client else 'unknown'}", limit, 60):
         raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+
+
+# ── CANDIDATE BOARD SUPPORT ───────────────────────────────────────────────
+# The setup board needs the running scoreline of whatever is live right now, so
+# a user setting "under 2.5" can see, before saving, which matches are already
+# past their own limit. Read from the board stage 6 already publishes — no new
+# provider call, and no score is invented for a fixture that is not live.
+LIVE_DASHBOARD_FILE = os.path.join(OUTPUT_DIR, "live_dashboard.json")
+
+
+def _live_score_index() -> dict:
+    """fixture_id -> (h, a) for fixtures that are actually live right now."""
+    index: dict = {}
+    try:
+        with open(LIVE_DASHBOARD_FILE, "r", encoding="utf-8") as f:
+            board = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return index
+
+    for row in (board or {}).get("matches", []) or []:
+        if not isinstance(row, dict):
+            continue
+        fid = row.get("id")
+        if fid is None:
+            continue
+        stats = row.get("statistics") or {}
+        try:
+            h = int(float((stats.get("home") or {}).get("goals")))
+            a = int(float((stats.get("away") or {}).get("goals")))
+        except (TypeError, ValueError):
+            # A live fixture whose goals block is missing is UNKNOWN, not 0-0.
+            # Leaving it out keeps the board honest instead of showing a
+            # goalless draw nobody ever saw.
+            continue
+        index[str(fid)] = (h, a)
+    return index
+
+
+@router.post("/user-rules/candidates")
+def post_user_rule_candidates(payload: CandidateRequest, request: Request):
+    """
+    Every known fixture, scored against the user's chosen prematch condition.
+
+    Read-only: it touches no rule store and no engine state, it only reads the
+    four prematch sources the live cycle already reads. The condition is
+    validated with the same validator a save would use, so the board can never
+    offer a combination that the save endpoint would reject with a 422.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    _rate(request, f"candidates:{user['user_id']}", 60)
+
+    # Imported here, not at module scope: stage6 pulls in requests/dotenv and
+    # a rate gate that has no business being initialised by the rules router.
+    from LIVE_SCANNER.live_stage6_alerts import build_prematch_db
+
+    clean = payload.model_dump(exclude_none=True)
+    try:
+        return find_candidates(clean, build_prematch_db(), _live_score_index())
+    except RuleValidationError:
+        raise HTTPException(status_code=422, detail="The prematch condition is invalid.")
 
 
 @router.get("/user-rules")

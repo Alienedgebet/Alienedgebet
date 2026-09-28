@@ -238,6 +238,120 @@ def safe_get(d, *keys, default=None):
         cur = cur[k]
     return cur
 
+def build_prematch_db():
+    """
+    THE MERGE OF ALL FOUR PREMATCH SOURCES, keyed by fixture_id.
+
+    Promoted out of SupremeOrchestrator.load_all_prematch_data() so the
+    rules API can score the setup board's candidate matches with the
+    identical merge the live cycle uses. Two copies of this merge would
+    drift, and a candidate board that disagrees with what actually fires
+    is worse than no board at all.
+
+    Read-only and total: a missing or malformed source is logged and
+    skipped, never fatal, and always returns whatever did load.
+    """
+    db = {}
+
+    if os.path.exists(AGGREGATOR_REPORT_FILE):
+        try:
+            with open(AGGREGATOR_REPORT_FILE, 'r', encoding='utf-8') as f:
+                data  = json.load(f)
+                items = data if isinstance(data, list) else data.values()
+                for item in items:
+                    fid = str(item.get('fixture_id'))
+                    db[fid] = item
+                    if 'h_id' not in item:
+                        dr = item.get('danger_report', {})
+                        db[fid]['h_id'] = str(
+                            dr.get('home', {}).get('id', '')
+                        )
+                        db[fid]['a_id'] = str(
+                            dr.get('away', {}).get('id', '')
+                        )
+        except Exception as e:
+            logging.warning(f"Aggregator file error: {e}")
+
+    if os.path.exists(SH_GG_WINNER_FILE):
+        try:
+            with open(SH_GG_WINNER_FILE, 'r', encoding='utf-8') as f:
+                data  = json.load(f)
+                items = data if isinstance(data, list) else data.values()
+                for item in items:
+                    fid = str(item.get('fixture_id'))
+                    if fid not in db: db[fid] = item
+                    else:             db[fid].update(item)
+                    if 'h_id' not in db[fid]:
+                        db[fid]['h_id'] = str(
+                            safe_get(item,'teams','home','id') or ''
+                        )
+                        db[fid]['a_id'] = str(
+                            safe_get(item,'teams','away','id') or ''
+                        )
+        except Exception as e:
+            logging.warning(f"SH-GG file error: {e}")
+
+    # NEW: Gold Over 2.5 engine feed — fourth prematch source, same
+    # fixture_id-keyed merge pattern as SH-GG above. Some fixtures carry
+    # their prematch flags ONLY here (e.g. h2h_o25_100 from the gold
+    # engine), so without this merge user rules referencing those flags
+    # could never fire. flags/metrics are dict-merged so a fixture present
+    # in both feeds keeps the union of flags instead of being clobbered.
+    GOLD_O25_FILE = os.path.join(OUTPUT_DIR, "gold_over_25_feed.json")
+    if os.path.exists(GOLD_O25_FILE):
+        try:
+            with open(GOLD_O25_FILE, 'r', encoding='utf-8') as f:
+                data  = json.load(f)
+                items = data if isinstance(data, list) else data.values()
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    fid = str(item.get('fixture_id'))
+                    if not fid or fid == 'None':
+                        continue
+                    if fid not in db:
+                        db[fid] = item
+                    else:
+                        for k, v in item.items():
+                            if (k in ("flags", "metrics")
+                                    and isinstance(v, dict)
+                                    and isinstance(db[fid].get(k), dict)):
+                                db[fid][k].update(v)
+                            else:
+                                db[fid].setdefault(k, v)
+                    if 'h_id' not in db[fid]:
+                        db[fid]['h_id'] = str(
+                            safe_get(item,'teams','home','id') or ''
+                        )
+                        db[fid]['a_id'] = str(
+                            safe_get(item,'teams','away','id') or ''
+                        )
+        except Exception as e:
+            logging.warning(f"Gold O2.5 file error: {e}")
+
+    # NEW: Stage 1's GK liability + missing-key-player audit — third
+    # prematch source. Keyed by fixture_id like the other two. Uses
+    # dict.update() so it never overwrites flags/chemistry already
+    # merged in above; it only adds the "home"/"away" audit block.
+    if os.path.exists(PREMATCH_TEAM_AUDIT_FILE):
+        try:
+            with open(PREMATCH_TEAM_AUDIT_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for fid, item in data.items():
+                    fid = str(fid)
+                    if fid not in db:
+                        db[fid] = {}
+                    db[fid]['team_audit'] = item
+                    if 'h_id' not in db[fid] and 'home' in item:
+                        db[fid]['h_id'] = str(item['home'].get('team_id', ''))
+                        db[fid]['a_id'] = str(item['away'].get('team_id', ''))
+        except Exception as e:
+            logging.warning(f"Prematch team audit file error: {e}")
+
+    return db
+
+
+
 def GET(url, params=None):
     if params is None: params = {}
     params.setdefault("api_token", API_TOKEN)
@@ -582,7 +696,19 @@ class UserRuleEvaluator:
     alert, tagged with the user_id/rule_id that triggered it, so the
     frontend can show each user only their own alerts.
     """
-    def evaluate(self, f_id, intel, structural, pre, minute, key_loss, all_rules):
+    def evaluate(self, f_id, intel, structural, pre, minute, key_loss, all_rules,
+                 score=None):
+        """
+        `score` is the running (h, a) scoreline for this fixture, already read
+        by score_from_fixture() and already handed to fire_alert(). It is
+        threaded through here so a user rule with a scoreline GATE can ask
+        "is this trade still available?" before the alert is raised — the one
+        question the prematch condition alone can never answer.
+
+        Defaulted to None so any existing caller keeps working, and None means
+        "unreadable", which the gate treats as a refusal to fire rather than
+        as a 0-0.
+        """
         triggered = []
         conf = intel['match']['confidence_score']
 
@@ -594,7 +720,10 @@ class UserRuleEvaluator:
             tier = "📊 MONITOR"
 
         for rule in all_rules:
-            hit = evaluate_rule_for_match(rule, intel, pre, minute, key_loss)
+            hit = evaluate_rule_for_match(
+                rule, intel, pre, minute, key_loss,
+                score=score, fixture_id=f_id,
+            )
             if hit is None:
                 continue
             triggered.append({
@@ -605,6 +734,11 @@ class UserRuleEvaluator:
                 "user_id":   hit["user_id"],
                 "rule_id":   hit["rule_id"],
                 "rule_label": hit["label"],
+                # Soft preference — surfaced for ranking and marking only. It
+                # never suppressed this alert; it is recorded because the user
+                # personally accepted this match in the setup board.
+                "watchlisted": hit.get("watchlisted", False),
+                "score":       hit.get("score"),
             })
 
         return triggered
@@ -702,7 +836,8 @@ class SupremeOrchestrator:
 
         user_alerts = self.UserLogic.evaluate(
             f_id, intel, structural, pre, minute, key_loss,
-            list_rules(active_only=True)
+            list_rules(active_only=True),
+            score=current_score,
         )
         fired_this = []
         for ua in user_alerts:
@@ -1515,104 +1650,10 @@ class SupremeOrchestrator:
 
     # ── PREMATCH LOADER ───────────────────────────────────────────────────
     def load_all_prematch_data(self):
-        db = {}
-
-        if os.path.exists(AGGREGATOR_REPORT_FILE):
-            try:
-                with open(AGGREGATOR_REPORT_FILE, 'r', encoding='utf-8') as f:
-                    data  = json.load(f)
-                    items = data if isinstance(data, list) else data.values()
-                    for item in items:
-                        fid = str(item.get('fixture_id'))
-                        db[fid] = item
-                        if 'h_id' not in item:
-                            dr = item.get('danger_report', {})
-                            db[fid]['h_id'] = str(
-                                dr.get('home', {}).get('id', '')
-                            )
-                            db[fid]['a_id'] = str(
-                                dr.get('away', {}).get('id', '')
-                            )
-            except Exception as e:
-                logging.warning(f"Aggregator file error: {e}")
-
-        if os.path.exists(SH_GG_WINNER_FILE):
-            try:
-                with open(SH_GG_WINNER_FILE, 'r', encoding='utf-8') as f:
-                    data  = json.load(f)
-                    items = data if isinstance(data, list) else data.values()
-                    for item in items:
-                        fid = str(item.get('fixture_id'))
-                        if fid not in db: db[fid] = item
-                        else:             db[fid].update(item)
-                        if 'h_id' not in db[fid]:
-                            db[fid]['h_id'] = str(
-                                safe_get(item,'teams','home','id') or ''
-                            )
-                            db[fid]['a_id'] = str(
-                                safe_get(item,'teams','away','id') or ''
-                            )
-            except Exception as e:
-                logging.warning(f"SH-GG file error: {e}")
-
-        # NEW: Gold Over 2.5 engine feed — fourth prematch source, same
-        # fixture_id-keyed merge pattern as SH-GG above. Some fixtures carry
-        # their prematch flags ONLY here (e.g. h2h_o25_100 from the gold
-        # engine), so without this merge user rules referencing those flags
-        # could never fire. flags/metrics are dict-merged so a fixture present
-        # in both feeds keeps the union of flags instead of being clobbered.
-        GOLD_O25_FILE = os.path.join(OUTPUT_DIR, "gold_over_25_feed.json")
-        if os.path.exists(GOLD_O25_FILE):
-            try:
-                with open(GOLD_O25_FILE, 'r', encoding='utf-8') as f:
-                    data  = json.load(f)
-                    items = data if isinstance(data, list) else data.values()
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        fid = str(item.get('fixture_id'))
-                        if not fid or fid == 'None':
-                            continue
-                        if fid not in db:
-                            db[fid] = item
-                        else:
-                            for k, v in item.items():
-                                if (k in ("flags", "metrics")
-                                        and isinstance(v, dict)
-                                        and isinstance(db[fid].get(k), dict)):
-                                    db[fid][k].update(v)
-                                else:
-                                    db[fid].setdefault(k, v)
-                        if 'h_id' not in db[fid]:
-                            db[fid]['h_id'] = str(
-                                safe_get(item,'teams','home','id') or ''
-                            )
-                            db[fid]['a_id'] = str(
-                                safe_get(item,'teams','away','id') or ''
-                            )
-            except Exception as e:
-                logging.warning(f"Gold O2.5 file error: {e}")
-
-        # NEW: Stage 1's GK liability + missing-key-player audit — third
-        # prematch source. Keyed by fixture_id like the other two. Uses
-        # dict.update() so it never overwrites flags/chemistry already
-        # merged in above; it only adds the "home"/"away" audit block.
-        if os.path.exists(PREMATCH_TEAM_AUDIT_FILE):
-            try:
-                with open(PREMATCH_TEAM_AUDIT_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for fid, item in data.items():
-                        fid = str(fid)
-                        if fid not in db:
-                            db[fid] = {}
-                        db[fid]['team_audit'] = item
-                        if 'h_id' not in db[fid] and 'home' in item:
-                            db[fid]['h_id'] = str(item['home'].get('team_id', ''))
-                            db[fid]['a_id'] = str(item['away'].get('team_id', ''))
-            except Exception as e:
-                logging.warning(f"Prematch team audit file error: {e}")
-
-        return db
+        # Thin wrapper. The body moved to the module-level build_prematch_db()
+        # so the rules API can score candidate matches with the EXACT same
+        # merge the cycle uses, instead of a second, drifting copy of it.
+        return build_prematch_db()
 
     # ── STALE MEMORY CLEANUP ──────────────────────────────────────────────
     def cleanup_stale_memory(self, live_ids):
