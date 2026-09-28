@@ -604,9 +604,23 @@ class LiveScannerContractTests(unittest.TestCase):
             "MONITORING")
 
     # ── PUSH NOTIFICATIONS ─────────────────────────────────────────────────
-    def test_only_triggered_and_settled_are_notifiable(self):
-        # SUPPORTED is reversible, so it must never be announced.
-        self.assertEqual(notify.ALLOWED_EVENTS, {"TRIGGERED", "SETTLED"})
+    def test_only_irreversible_events_are_notifiable(self):
+        """
+        The contract is that REVERSIBLE states are never announced, not that
+        the set is exactly two entries.
+
+        SUPPORTED and its siblings read differently on consecutive cycles: a
+        prediction can be SUPPORTED now and CONTRADICTED next. Announcing them
+        pushes a signal that un-happens, which is the misleading behaviour the
+        validator was rebuilt to eliminate.
+
+        USER_ALERT joined the set deliberately. It is the user pressing their
+        own rule and it cannot un-fire, so it is announcement-worthy — and it
+        is the only event that is scoped to a single account rather than
+        broadcast (see the audience tests below).
+        """
+        self.assertEqual(
+            notify.ALLOWED_EVENTS, {"TRIGGERED", "SETTLED", "USER_ALERT"})
         with tempfile.TemporaryDirectory() as tmp:
             _patch_notify_paths(tmp)
             for event in ("SUPPORTED", "REJECTED", "NEUTRAL", "MONITORING", ""):
@@ -3161,6 +3175,260 @@ class CandidatesEndpointContractTests(unittest.TestCase):
             self.assertIsInstance(score, tuple)
             self.assertEqual(len(score), 2)
             self.assertTrue(all(isinstance(g, int) and g >= 0 for g in score), f"{fid}: {score}")
+
+
+class UserAlertPushContractTests(unittest.TestCase):
+    """
+    "Where will they receive it? Will they have to come to the app?"
+
+    A "Setup my alert" rule could fire perfectly, be written correctly to
+    ready_to_push.json, and STILL never reach the user — which is exactly
+    what was happening: the whole push pipeline existed but its only caller
+    was the Code 2 validator, which had been removed.
+
+    These pin the three properties that make delivery real and safe:
+      * a user's alert reaches THEIR devices and nobody else's,
+      * every one of their devices is covered, and a dead one is pruned
+        without unsubscribing the rest,
+      * nothing here can break a live cycle.
+    """
+
+    def test_user_alert_is_recorded_with_its_audience(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            key = notify.emit_event(
+                "USER_ALERT", "19715226", "Necaxa v America", "ALERT", None,
+                audience_user_id="uA", rule_id="r1", rule_label="Under 2.5",
+                minute=38, score_at_trigger="2-0", gate="under 2.5")
+            self.assertIsNotNone(key)
+            rec = notify.read_events()[-1]
+            self.assertEqual(rec["event"], "USER_ALERT")
+            self.assertEqual(rec["audience_user_id"], "uA")
+            self.assertEqual(rec["gate"], "under 2.5")
+            self.assertEqual(rec["score_at_trigger"], "2-0")
+
+    def test_a_private_alert_never_reaches_another_user(self):
+        """
+        THE isolation contract. dispatch() is a broadcast for system events, so
+        without audience scoping one user's private alert would be pushed to
+        every account on the system.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription(
+                "uA", "https://push/A", {"p256dh": "k", "auth": "a"})
+            notify.save_subscription(
+                "uB", "https://push/B", {"p256dh": "k", "auth": "a"})
+
+            sent_to = []
+
+            def fake_send(sub, payload, priv, pub):
+                sent_to.append(sub["endpoint"])
+                return "sent"
+
+            event = {"event": "USER_ALERT", "key": "k1",
+                     "audience_user_id": "uA"}
+            with patch.object(notify, "_vapid_keys",
+                              return_value=("priv", "pub")), \
+                 patch.object(notify, "_send_one", fake_send):
+                notify.dispatch([event])
+
+            self.assertEqual(sent_to, ["https://push/A"],
+                             "user B must never receive user A's alert")
+
+    def test_a_system_event_is_still_broadcast(self):
+        """Audience scoping must not silence the system events."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription(
+                "uA", "https://push/A", {"p256dh": "k", "auth": "a"})
+            notify.save_subscription(
+                "uB", "https://push/B", {"p256dh": "k", "auth": "a"})
+            sent_to = []
+            with patch.object(notify, "_vapid_keys",
+                              return_value=("priv", "pub")), \
+                 patch.object(notify, "_send_one",
+                              lambda s, p, a, b: (sent_to.append(s["endpoint"]), "sent")[1]):
+                notify.dispatch([{"event": "TRIGGERED", "key": "k1",
+                                  "market": "GG", "fixture": "A v B"}])
+            self.assertEqual(sorted(sent_to), ["https://push/A", "https://push/B"])
+
+    def test_every_device_of_the_owner_is_notified(self):
+        """A phone and a laptop must BOTH be covered."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription(
+                "uA", "https://push/phone", {"p256dh": "k", "auth": "a"})
+            notify.save_subscription(
+                "uA", "https://push/laptop", {"p256dh": "k", "auth": "a"})
+            sent_to = []
+            with patch.object(notify, "_vapid_keys",
+                              return_value=("priv", "pub")), \
+                 patch.object(notify, "_send_one",
+                              lambda s, p, a, b: (sent_to.append(s["endpoint"]), "sent")[1]):
+                notify.dispatch([{"event": "USER_ALERT", "key": "k1",
+                                  "audience_user_id": "uA"}])
+            self.assertEqual(sorted(sent_to),
+                             ["https://push/laptop", "https://push/phone"])
+
+    def test_a_second_device_does_not_evict_the_first(self):
+        """
+        The old store was keyed by user_id alone, so subscribing on a laptop
+        silently REPLACED the phone. The user would believe both were covered
+        and miss every alert on one of them.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription(
+                "uA", "https://push/phone", {"p256dh": "k", "auth": "a"})
+            notify.save_subscription(
+                "uA", "https://push/laptop", {"p256dh": "k", "auth": "a"})
+            prefs = notify.get_prefs("uA")
+            self.assertTrue(prefs["subscribed"])
+            self.assertEqual(prefs["devices"], 2)
+
+    def test_a_legacy_single_endpoint_record_still_works(self):
+        """
+        The old flat shape {user_id: {endpoint, keys, prefs}} must keep
+        working, or the first read after deploy would silently unsubscribe
+        everyone already using the app.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            legacy = {"uA": {"endpoint": "https://push/old", "keys": {},
+                             "prefs": {"triggered": True, "settled": True},
+                             "created_at": "2026-01-01T00:00:00+00:00",
+                             "updated_at": "2026-01-01T00:00:00+00:00"}}
+            with open(notify.SUBS_FILE, "w", encoding="utf-8") as f:
+                json.dump(legacy, f)
+            prefs = notify.get_prefs("uA")
+            self.assertTrue(prefs["subscribed"])
+            self.assertEqual(prefs["devices"], 1)
+            sent_to = []
+            with patch.object(notify, "_vapid_keys",
+                              return_value=("priv", "pub")), \
+                 patch.object(notify, "_send_one",
+                              lambda s, p, a, b: (sent_to.append(s["endpoint"]), "sent")[1]):
+                notify.dispatch([{"event": "USER_ALERT", "key": "k1",
+                                  "audience_user_id": "uA"}])
+            self.assertEqual(sent_to, ["https://push/old"])
+
+    def test_a_dead_device_is_pruned_without_losing_the_account(self):
+        """A 410 on the laptop must not unsubscribe the phone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription(
+                "uA", "https://push/phone", {"p256dh": "k", "auth": "a"})
+            notify.save_subscription(
+                "uA", "https://push/laptop", {"p256dh": "k", "auth": "a"})
+
+            def send(sub, payload, priv, pub):
+                return "gone" if sub["endpoint"] == "https://push/laptop" else "sent"
+
+            with patch.object(notify, "_vapid_keys",
+                              return_value=("priv", "pub")), \
+                 patch.object(notify, "_send_one", send):
+                notify.dispatch([{"event": "USER_ALERT", "key": "k1",
+                                  "audience_user_id": "uA"}])
+            prefs = notify.get_prefs("uA")
+            self.assertTrue(prefs["subscribed"], "the phone must survive")
+            self.assertEqual(prefs["devices"], 1)
+
+    def test_switching_user_alert_off_actually_suppresses_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription(
+                "uA", "https://push/A", {"p256dh": "k", "auth": "a"})
+            notify.update_prefs("uA", {"user_alert": False})
+            self.assertFalse(notify.get_prefs("uA")["user_alert"])
+            sent_to = []
+            with patch.object(notify, "_vapid_keys",
+                              return_value=("priv", "pub")), \
+                 patch.object(notify, "_send_one",
+                              lambda s, p, a, b: (sent_to.append(s["endpoint"]), "sent")[1]):
+                notify.dispatch([{"event": "USER_ALERT", "key": "k1",
+                                  "audience_user_id": "uA"}])
+            self.assertEqual(sent_to, [], "opted-out alert must not be pushed")
+
+    def test_prefs_apply_to_every_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            notify.save_subscription(
+                "uA", "https://push/phone", {"p256dh": "k", "auth": "a"})
+            notify.save_subscription(
+                "uA", "https://push/laptop", {"p256dh": "k", "auth": "a"})
+            notify.update_prefs("uA", {"user_alert": False})
+            for sub in notify._user_devices(notify.list_subscriptions(), "uA"):
+                self.assertFalse(sub["prefs"]["user_alert"])
+
+    def test_the_lockscreen_carries_the_scoreline(self):
+        """'under 2.5' is not actionable without knowing the match is inside it."""
+        payload = notify.build_payload({
+            "event": "USER_ALERT", "fixture": "Necaxa v America",
+            "rule_label": "Under 2.5 after danger breach",
+            "minute": 38, "score_at_trigger": "2-0", "gate": "under 2.5",
+            "fixture_id": "19715226",
+        })
+        self.assertIn("under 2.5", payload["body"])
+        self.assertIn("2-0", payload["body"])
+        self.assertIn("38'", payload["body"])
+        self.assertEqual(payload["data"]["url"],
+                         "/live/edges?fixture=19715226")
+
+    def test_a_failed_push_never_escapes_into_the_scanner(self):
+        """notifications.py's standing contract, enforced at the entry point."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            # A real pending event, so dispatch() is actually reached. Without
+            # one the no-op path returns early and the guard is never tested.
+            notify.emit_event("USER_ALERT", "1", "A v B", "ALERT", None,
+                              audience_user_id="uA")
+            self.assertEqual(len(notify.pending_events()), 1)
+            with patch.object(notify, "dispatch",
+                              side_effect=RuntimeError("push service on fire")):
+                summary = notify.dispatch_pending(limit=10)
+            self.assertTrue(summary.get("error"))
+            self.assertEqual(summary.get("sent"), 0)
+
+    def test_dispatch_pending_is_a_noop_with_nothing_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _patch_notify_paths(tmp)
+            summary = notify.dispatch_pending(limit=10)
+            self.assertEqual(summary.get("pending"), 0)
+            self.assertEqual(summary.get("sent"), 0)
+
+    def test_the_goal_gate_is_described_in_words(self):
+        from LIVE_SCANNER.user_rules_store import describe_goal_gate
+        self.assertEqual(
+            describe_goal_gate({"direction": "under", "line": 2.5}), "under 2.5")
+        self.assertEqual(
+            describe_goal_gate({"direction": "over", "line": 3}), "over 3")
+        self.assertEqual(
+            describe_goal_gate({"direction": "exact", "line": 3}), "exactly 3 goals")
+        self.assertIsNone(describe_goal_gate({"direction": "nonsense", "line": 2}))
+        self.assertIsNone(describe_goal_gate({}))
+
+    def test_the_rule_alert_carries_its_gate_to_the_evaluator(self):
+        from LIVE_SCANNER import user_rules_store as rules
+        rule = {"rule_id": "r", "user_id": "u", "label": "L",
+                "prematch": {"type": "none"},
+                "live": {"type": "goals", "direction": "under", "line": 2.5},
+                "active": True}
+        hit = rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0), fixture_id="1")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["gate"], "under 2.5")
+
+    def test_a_rule_with_no_gate_reports_none(self):
+        from LIVE_SCANNER import user_rules_store as rules
+        rule = {"rule_id": "r", "user_id": "u", "label": "L",
+                "prematch": {"type": "none"},
+                "live": {"type": "pressure_share", "side": "home", "min_value": 50},
+                "active": True}
+        hit = rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0), fixture_id="1")
+        self.assertIsNotNone(hit)
+        self.assertIsNone(hit["gate"])
 
 
 if __name__ == "__main__":

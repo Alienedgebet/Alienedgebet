@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
+import { PushToggle, usePushNotifications } from "../edges/PushToggle";
 import { cn } from "@/lib/utils";
 import {
   userRulesApi,
@@ -242,6 +243,10 @@ function scoreInsideGate(
 export default function LiveRulesPage() {
   const { user } = useAuth();
   const userId = user?.user_id || null;
+  // Where the alert will actually land. Read here so the setup page can tell
+  // the user honestly that, without push switched on, they will have to open
+  // the app themselves to see it.
+  const { state: pushState } = usePushNotifications();
 
   const [rules, setRules] = useState<UserRuleDef[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1095,6 +1100,19 @@ export default function LiveRulesPage() {
           </p>
         )}
         {error && <p className="text-2xs text-accent-red">{error}</p>}
+
+        {/* ── WHERE THIS ALERT WILL REACH YOU ── */}
+        <div className="rounded-xl border border-border/70 bg-bg-elevated/30 p-4">
+          <p className="mb-2.5 text-2xs font-semibold uppercase tracking-wider text-text-muted">
+            Where this alert will reach you
+          </p>
+          <PushToggle className="border-0 bg-transparent p-0" />
+          <p className="mt-2.5 text-2xs leading-relaxed text-text-muted">
+            {pushState.subscribed
+              ? "This alert will be pushed to your phone and shown here, whether or not the app is open."
+              : "Turn on push above to be alerted on your phone. Without it this alert only appears when you open the app."}
+          </p>
+        </div>
 
         <div className="flex items-center gap-3">
           <Button
