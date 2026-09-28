@@ -15,6 +15,7 @@ usage still works the same way under v1.
 import os
 import sys
 import json
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -36,6 +37,162 @@ router = APIRouter(prefix="/api/live", tags=["live-user-rules"])
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 READY_TO_PUSH_FILE = os.path.join(OUTPUT_DIR, "ready_to_push.json")
+ORCHESTRATOR_BOARD_FILE = os.path.join(OUTPUT_DIR, "orchestrator_board.json")
+
+
+# ==============================================================================
+# ALERT STATUS — "where is this alert right now?"
+# ==============================================================================
+#
+# An alert that has never fired is indistinguishable from one that can never
+# fire. The alert log alone cannot tell them apart, because a log only records
+# things that happened. So status is assembled from three sources:
+#
+#   rule_live      (the board)  which rules match a LIVE fixture at this instant
+#   ready_to_push  (the log)    what this rule has actually fired, and when
+#   subscriptions               whether this user could even receive it
+#
+# All three are read-only. Nothing here creates, mutates or deletes an alert.
+ALERT_HISTORY_MAX_AGE_HOURS = 48
+
+
+def _read_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def _parse_iso(value):
+    """
+    Parse a timestamp to an aware datetime, or None.
+
+    The alert log writes NAIVE local timestamps (`datetime.now().isoformat()`),
+    while the staleness cutoffs are timezone-aware UTC. Comparing the two
+    raises TypeError, which took the whole status endpoint down on every real
+    call. A naive timestamp is therefore interpreted in the server's own local
+    zone — which is how it was written — and only then compared.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed
+
+
+def _rule_fire_history(user_id: str) -> dict:
+    """rule_id -> {count, last: {...}} from the alert log, newest last."""
+    if not os.path.exists(READY_TO_PUSH_FILE):
+        return {}
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=ALERT_HISTORY_MAX_AGE_HOURS)
+    out: dict = {}
+    try:
+        with open(READY_TO_PUSH_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("user_id") != user_id or not rec.get("rule_id"):
+                    continue
+                stamp = _parse_iso(rec.get("time"))
+                if stamp is not None and stamp < cutoff:
+                    continue
+                entry = {
+                    "fixture_id": rec.get("f_id"),
+                    "fixture": rec.get("fixture"),
+                    "minute": rec.get("minute"),
+                    "score": rec.get("score_at_trigger"),
+                    "time": rec.get("time"),
+                    "outcome": rec.get("outcome"),
+                }
+                slot = out.setdefault(rec["rule_id"], {"count": 0, "last": None})
+                slot["count"] += 1
+                # The file is append-ordered, so the last one seen is newest.
+                slot["last"] = entry
+    except OSError:
+        return {}
+    return out
+
+
+@router.get("/user-rules/status")
+def get_user_rule_status(request: Request):
+    """
+    Per-rule status: is this alert waiting, matching right now, or already
+    fired?
+
+    Only possible by combining the live board with the fire history — a log
+    records what happened, never what is about to. That is the difference
+    between "waiting for a match" and "no match can ever satisfy this".
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    rules = list_rules(user_id=user["user_id"])
+    history = _rule_fire_history(user["user_id"])
+    board = _read_json(ORCHESTRATOR_BOARD_FILE, {}) or {}
+    rule_live = board.get("rule_live") or {}
+    board_age = _parse_iso(board.get("generated_at"))
+
+    # Whether this user could receive a push at all, on their own devices.
+    try:
+        from notifications import get_prefs as _push_prefs
+        prefs = _push_prefs(user["user_id"])
+        push_ready = bool(prefs.get("subscribed"))
+    except Exception:
+        # Never let a notification-store problem hide the alert status.
+        push_ready = None
+
+    out = []
+    for rule in rules:
+        rid = rule["rule_id"]
+        live = rule_live.get(rid) or []
+        hist = history.get(rid) or {}
+        last = hist.get("last")
+        active = bool(rule.get("active", True))
+
+        if not active:
+            status, label = "paused", "Paused"
+        elif live:
+            status, label = "live", "Qualifying now"
+        elif last:
+            status, label = "fired", "Alerted"
+        else:
+            status, label = "waiting", "Waiting"
+
+        # "It matches right now but this device cannot receive it" is the one
+        # combination that otherwise looks like silence. Say it explicitly
+        # rather than leaving the user to wonder why nothing arrived.
+        needs_push = bool(live) and push_ready is False
+
+        out.append({
+            "rule_id": rid,
+            "label": rule.get("label", "Untitled Rule"),
+            "active": active,
+            "status": status,
+            "status_label": label,
+            "live_count": len(live),
+            "live_matches": live,
+            "fired_count": hist.get("count", 0),
+            "last_fired": last,
+            "needs_push": needs_push,
+            "push_ready": push_ready,
+            # None when the board has never been written, so the UI can say so
+            # rather than rendering a confident "nothing right now".
+            "board_age": board.get("generated_at") if board else None,
+            "board_stale": bool(
+                board_age is not None
+                and (datetime.now(timezone.utc) - board_age) > timedelta(minutes=10)
+            ),
+        })
+    return out
 
 
 # ==============================================================================

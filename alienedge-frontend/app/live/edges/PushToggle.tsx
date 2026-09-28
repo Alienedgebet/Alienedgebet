@@ -283,17 +283,17 @@ export function PushToggle({ className }: { className?: string }) {
         )}
       >
         <p className="font-bold uppercase text-slate-300">Match alerts</p>
+        {/* ONE reason and one reassurance. The previous version stacked three
+            paragraphs, two of which said the same thing ("your alerts still
+            appear in the app"), plus a further duplicate on the setup page.
+            A user who cannot get a push has one question — how do I fix it —
+            and one fact they need not lose: the alert still works. */}
         <p className="mt-1">
-          {/* The ACTUAL reason, not a generic "unavailable here". The old copy
-              blamed iPhone unconditionally, which sent every desktop user on
-              an insecure origin chasing the wrong fix. */}
           {PUSH_BLOCKER_HELP[state.blocker === "ok" ? "no-push-api" : state.blocker]}
         </p>
-        <p className="mt-1 text-slate-500">
-          Your alerts are still saved and appear in the app.
-        </p>
-        {/* A concrete, copyable target beats a vague complaint when the cause
-            is the deployment rather than the user's browser. */}
+        <p className="mt-1 text-slate-500">Your alerts still appear in the app.</p>
+        {/* A concrete address beats a vague complaint when the cause is the
+            deployment rather than the user's own device. */}
         {state.blocker === "insecure-origin" && (
           <p className="mt-2 text-slate-500">
             Current address: <span className="text-slate-400">{window.location.origin}</span>

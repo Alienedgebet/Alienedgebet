@@ -38,6 +38,7 @@ import {
   type RuleGoalDirection,
   type RuleConditionMode,
   type UserRuleLiveGroup,
+  type RuleStatus,
   type LiveConditionType,
 } from "@/lib/api";
 
@@ -178,6 +179,88 @@ function describePrematch(p: UserRulePrematch): string {
     default:
       return "Unknown";
   }
+}
+
+/**
+ * The status of one saved alert, in the words a user actually cares about: is
+ * it waiting, is something happening, or did it go off.
+ *
+ * `board_stale` is honoured deliberately: when the live board is older than
+ * expected, "nothing qualifying right now" is not a fact, and rendering it as
+ * a confident state would be a lie. It says so instead.
+ */
+function RuleStatusCard({ status }: { status: RuleStatus }) {
+  const last = status.last_fired;
+  const first = status.live_matches[0];
+
+  const badge =
+    status.status === "paused" ? "PAUSED" :
+    status.board_stale && status.status === "waiting" ? "STATUS UNKNOWN" :
+    status.status === "live"
+      ? `QUALIFYING NOW · ${status.live_count}`
+      : status.status === "fired" ? "ALERTED" : "WAITING";
+
+  const badgeTone =
+    status.status === "live" ? "border-accent-amber/40 bg-accent-amber/10 text-accent-amber" :
+    status.status === "fired" ? "border-accent-green/40 bg-accent-green/10 text-accent-green" :
+    status.status === "waiting" ? "border-accent-indigo/40 bg-accent-indigo/10 text-accent-indigo" :
+    "border-border/60 text-text-dim";
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-bg-primary/40 px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide",
+            badgeTone
+          )}
+          title={
+            status.board_stale && status.status === "waiting"
+              ? "The live scanner has not reported recently, so this alert's live state is unknown."
+              : undefined
+          }
+        >
+          {badge}
+          {status.needs_push && <span className="text-accent-red">· NO PUSH</span>}
+        </span>
+        <span className="truncate text-xs font-semibold text-text-primary">{status.label}</span>
+      </div>
+
+      {status.live_count > 0 && (
+        <p className="mt-1.5 text-2xs leading-relaxed text-accent-amber">
+          <span className="font-semibold">Right now:</span>{" "}
+          {status.live_count === 1 ? first.name : `${status.live_count} matches qualify`}
+          {first?.score ? ` · ${first.score}` : ""}
+          {first?.minute != null ? ` · ${first.minute}'` : ""}
+          {first?.gate ? ` · ${first.gate}` : ""}
+        </p>
+      )}
+
+      {!status.live_count && last && (
+        <p className="mt-1.5 text-2xs leading-relaxed text-text-dim">
+          <span className="text-text-secondary">Last fired:</span>{" "}
+          {last.fixture ?? "a match"}
+          {last.score ? ` · ${last.score}` : ""}
+          {last.minute != null ? ` · ${last.minute}'` : ""}
+        </p>
+      )}
+
+      {!status.live_count && !last && status.status === "waiting" && (
+        <p className="mt-1.5 text-2xs leading-relaxed text-text-dim">
+          {status.board_stale
+            ? "The live scanner has not reported recently, so this is unconfirmed rather than empty."
+            : "Armed and watching. No match meets it right now."}
+        </p>
+      )}
+
+      {status.needs_push && (
+        <p className="mt-1.5 text-2xs leading-relaxed text-accent-red">
+          A match qualifies right now, but push is not switched on for this device — you would
+          only see it by opening the app.
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** One live condition the user has added to the group. */
@@ -331,9 +414,37 @@ export default function LiveRulesPage() {
   const { state: pushState } = usePushNotifications();
 
   const [rules, setRules] = useState<UserRuleDef[]>([]);
+  // Per-rule status: waiting / qualifying now / alerted. Polled because the
+  // live scanner rewrites the board every cycle — a status that only loads on
+  // first paint would repeat the frozen-on-arrival problem this page already
+  // had with the alert list.
+  const [statuses, setStatuses] = useState<RuleStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Polled on the same cadence the scanner runs. setState only ever happens in
+  // the async callback, never synchronously in the effect body.
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    const load = () =>
+      userRulesApi
+        .getStatus()
+        .then((res) => {
+          if (!cancelled) setStatuses(res.data ?? []);
+        })
+        .catch(() => {
+          // A status failure must never break the page — the rules list below
+          // is still perfectly usable without it.
+        });
+    load();
+    const timer = window.setInterval(load, 45_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [userId]);
 
   const [label, setLabel] = useState("");
 
@@ -1211,16 +1322,15 @@ export default function LiveRulesPage() {
             Where this alert will reach you
           </p>
           <PushToggle className="border-0 bg-transparent p-0" />
-          {/* The wording follows the actual state. The old copy said "turn on
-              push above" unconditionally, which was nonsense in the very case
-              the user hit it — the toggle is not rendered at all when push is
-              blocked, so there was nothing "above" to turn on. */}
+          {/* Deliberately minimal here. PushToggle already states the reason and
+              that alerts still work; repeating it underneath produced three
+              stacked messages saying one thing, two of them word-for-word
+              identical. All that is left to say is the one thing PushToggle
+              cannot know — that this alert is saved and running. */}
           <p className="mt-2.5 text-2xs leading-relaxed text-text-muted">
-            {pushState.supported && !pushState.subscribed
-              ? "Turn push on above and this alert will reach your phone, whether or not the app is open."
-              : pushState.subscribed
-                ? "This alert will be pushed to your phone and shown here, whether or not the app is open."
-                : "Push is not available in this browser right now, so this alert will appear in the app. The reason is shown above."}
+            {pushState.subscribed
+              ? "This alert will be pushed to your phone and shown here, whether or not the app is open."
+              : "Your alert is saved and will run. Its current status is shown below."}
           </p>
         </div>
 
@@ -1263,8 +1373,10 @@ export default function LiveRulesPage() {
             {rules.map((rule) => {
               const { pre, live, window } = describeRule(rule);
               const watchCount = rule.watchlist?.length ?? 0;
+              const status = statuses.find((s) => s.rule_id === rule.rule_id);
               return (
-                <div key={rule.rule_id} className="flex items-center justify-between gap-3 py-3">
+                <div key={rule.rule_id} className="py-3">
+                  <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <p className="flex items-center gap-1.5 truncate text-xs font-semibold text-text-primary">
                       {watchCount > 0 && (
@@ -1307,6 +1419,14 @@ export default function LiveRulesPage() {
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
+                  </div>
+                  {/* The alert's own state. A rule that has never fired and a
+                      rule that can never fire look identical without this. */}
+                  {status && (
+                    <div className="mt-2">
+                      <RuleStatusCard status={status} />
+                    </div>
+                  )}
                 </div>
               );
             })}

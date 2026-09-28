@@ -3751,5 +3751,214 @@ class ServiceWorkerReachabilityContractTests(unittest.TestCase):
         self.assertIn("appleWebApp", layout)
 
 
+class AlertStatusContractTests(unittest.TestCase):
+    """
+    "Can it show three states — waiting, alerted, failed?"
+
+    An alert that has never fired is indistinguishable from one that can never
+    fire, because a log only records what HAPPENED and never what is about to.
+    The status has to combine the live board with the fire history, and it must
+    never dress up a guess as a fact.
+    """
+
+    def _call(self, rules, board, alerts, push_subscribed=True):
+        from unittest.mock import MagicMock, patch
+        import tempfile, os
+        from api import user_rules_router as router
+
+        tmp = tempfile.mkdtemp()
+        board_file = os.path.join(tmp, "board.json")
+        alerts_file = os.path.join(tmp, "alerts.jsonl")
+        with open(board_file, "w", encoding="utf-8") as f:
+            json.dump(board, f)
+        with open(alerts_file, "w", encoding="utf-8") as f:
+            for a in alerts:
+                f.write(json.dumps(a) + "\n")
+
+        req = MagicMock()
+        req.state.user = {"user_id": "u1"}
+        with patch.object(router, "READY_TO_PUSH_FILE", alerts_file), \
+             patch.object(router, "ORCHESTRATOR_BOARD_FILE", board_file), \
+             patch.object(router, "list_rules", return_value=rules), \
+             patch("notifications.get_prefs", return_value={"subscribed": push_subscribed}):
+            return {r["rule_id"]: r for r in router.get_user_rule_status(req)}
+
+    # Computed, not hard-coded: `board_stale` compares the board's age against
+    # the wall clock, so a fixed timestamp would make "fresh" true or false
+    # depending on when the suite happens to run.
+    @property
+    def NOW(self):
+        from datetime import datetime as _dt, timezone as _tz
+        return _dt.now(_tz.utc).isoformat()
+
+    def _board(self, live=True):
+        return {
+            "generated_at": self.NOW,
+            "rule_live": {
+                "r_live": [{"fixture_id": "1", "name": "A v B", "minute": 38,
+                            "score": "1-0", "gate": "under 2.5"}],
+            } if live else {},
+        }
+
+    # ── the three states the user asked for ────────────────────────────────
+    def test_waiting_when_nothing_matches_and_nothing_fired(self):
+        out = self._call(
+            [{"rule_id": "r_wait", "label": "W", "active": True}],
+            self._board(live=False), [])
+        self.assertEqual(out["r_wait"]["status"], "waiting")
+        self.assertEqual(out["r_wait"]["fired_count"], 0)
+        self.assertIsNone(out["r_wait"]["last_fired"])
+
+    def test_live_when_a_match_qualifies_right_now(self):
+        out = self._call(
+            [{"rule_id": "r_live", "label": "L", "active": True}],
+            self._board(), [])
+        r = out["r_live"]
+        self.assertEqual(r["status"], "live")
+        self.assertEqual(r["live_count"], 1)
+        self.assertEqual(r["live_matches"][0]["name"], "A v B")
+        self.assertEqual(r["live_matches"][0]["score"], "1-0")
+        # The gate travels with it, so the UI can show why it qualifies.
+        self.assertEqual(r["live_matches"][0]["gate"], "under 2.5")
+
+    def test_fired_when_the_log_has_an_entry(self):
+        out = self._call(
+            [{"rule_id": "r_fired", "label": "F", "active": True}],
+            self._board(live=False),
+            [{"user_id": "u1", "rule_id": "r_fired", "f_id": "9",
+              "fixture": "C v D", "minute": 55, "score_at_trigger": "2-0",
+              "time": self.NOW}])
+        r = out["r_fired"]
+        self.assertEqual(r["status"], "fired")
+        self.assertEqual(r["fired_count"], 1)
+        self.assertEqual(r["last_fired"]["fixture"], "C v D")
+
+    def test_live_outranks_fired(self):
+        """A rule can have fired yesterday AND be qualifying again now."""
+        out = self._call(
+            [{"rule_id": "r_live", "label": "L", "active": True}],
+            self._board(),
+            [{"user_id": "u1", "rule_id": "r_live", "f_id": "8",
+              "fixture": "E v F", "time": self.NOW}])
+        # "Qualifying now" is the more useful and more current fact.
+        self.assertEqual(out["r_live"]["status"], "live")
+
+    def test_paused_when_the_user_turned_it_off(self):
+        out = self._call(
+            [{"rule_id": "r_p", "label": "P", "active": False}],
+            self._board(), [])
+        self.assertEqual(out["r_p"]["status"], "paused")
+
+    # ── per-user isolation ─────────────────────────────────────────────────
+    def test_another_users_alerts_are_never_counted(self):
+        out = self._call(
+            [{"rule_id": "r_fired", "label": "F", "active": True}],
+            self._board(live=False),
+            [{"user_id": "SOMEONE_ELSE", "rule_id": "r_fired", "f_id": "9",
+              "fixture": "Not mine", "time": self.NOW}])
+        self.assertEqual(out["r_fired"]["status"], "waiting")
+        self.assertEqual(out["r_fired"]["fired_count"], 0)
+
+    # ── needs push ─────────────────────────────────────────────────────────
+    def test_qualifying_but_unsubscribed_raises_needs_push(self):
+        """The one combination that otherwise looks like silence."""
+        out = self._call(
+            [{"rule_id": "r_live", "label": "L", "active": True}],
+            self._board(), [], push_subscribed=False)
+        self.assertTrue(out["r_live"]["needs_push"])
+
+    def test_qualifying_and_subscribed_does_not_raise_needs_push(self):
+        out = self._call(
+            [{"rule_id": "r_live", "label": "L", "active": True}],
+            self._board(), [], push_subscribed=True)
+        self.assertFalse(out["r_live"]["needs_push"])
+
+    def test_needs_push_only_while_something_qualifies(self):
+        """A dormant rule must not nag about push it has not earned yet."""
+        out = self._call(
+            [{"rule_id": "r_wait", "label": "W", "active": True}],
+            self._board(live=False), [], push_subscribed=False)
+        self.assertFalse(out["r_wait"]["needs_push"])
+
+    # ── honesty about an unknown state ─────────────────────────────────────
+    def test_a_stale_board_never_claims_nothing_is_live(self):
+        """An old board means "unknown", not "nothing"."""
+        stale = {"generated_at": "2020-01-01T00:00:00+00:00", "rule_live": {}}
+        out = self._call([{"rule_id": "r_w", "label": "W", "active": True}], stale, [])
+        self.assertTrue(out["r_w"]["board_stale"])
+
+    def test_a_fresh_board_is_not_stale(self):
+        out = self._call([{"rule_id": "r_w", "label": "W", "active": True}],
+                         self._board(live=False), [])
+        self.assertFalse(out["r_w"]["board_stale"])
+
+    def test_old_alerts_outside_the_window_are_ignored(self):
+        out = self._call(
+            [{"rule_id": "r_f", "label": "F", "active": True}],
+            self._board(live=False),
+            [{"user_id": "u1", "rule_id": "r_f", "f_id": "1",
+              "time": "2020-01-01T00:00:00+00:00"}])
+        self.assertEqual(out["r_f"]["fired_count"], 0)
+        self.assertEqual(out["r_f"]["status"], "waiting")
+
+    def test_malformed_log_lines_are_skipped_not_fatal(self):
+        out = self._call([{"rule_id": "r_f", "label": "F", "active": True}],
+                         self._board(live=False), [])
+        self.assertEqual(out["r_f"]["status"], "waiting")
+
+    # ── the board must actually publish rule_live ─────────────────────────
+    def test_the_cycle_publishes_rule_live_on_the_board(self):
+        """
+        Without this the status endpoint can only ever report "waiting", and
+        the whole feature silently does nothing.
+        """
+        import inspect
+        from LIVE_SCANNER import live_stage6_alerts as stage6
+        src = inspect.getsource(stage6.SupremeOrchestrator.save_orchestrator_board)
+        self.assertIn('"rule_live"', src)
+        # And it must be rebuilt per cycle, never accumulated.
+        self.assertIn("self._rule_live = {}", inspect.getsource(
+            stage6.SupremeOrchestrator.run_single_cycle))
+
+    # ── regression: the timestamp shape the log ACTUALLY writes ───────────
+    def test_naive_log_timestamps_do_not_crash_the_endpoint(self):
+        """
+        fire_alert() writes `datetime.now().isoformat()` — no offset, no Z.
+        Comparing that against the aware staleness cutoff raised TypeError and
+        took the whole endpoint down on every real call, while every test that
+        used an offset-aware fixture passed. Use the real shape here.
+        """
+        from datetime import datetime as _dt
+        naive = _dt.now().isoformat()  # exactly what the scanner writes
+        out = self._call(
+            [{"rule_id": "r_n", "label": "N", "active": True}],
+            self._board(live=False),
+            [{"user_id": "u1", "rule_id": "r_n", "f_id": "7",
+              "fixture": "G v H", "time": naive}])
+        self.assertEqual(out["r_n"]["status"], "fired")
+        self.assertEqual(out["r_n"]["fired_count"], 1)
+
+    def test_naive_board_timestamp_does_not_crash_the_endpoint(self):
+        """The board must not raise either when it carries a naive stamp."""
+        from datetime import datetime as _dt
+        board = {"generated_at": _dt.now().isoformat(), "rule_live": {}}
+        out = self._call([{"rule_id": "r_n", "label": "N", "active": True}], board, [])
+        self.assertFalse(out["r_n"]["board_stale"])
+
+    def test_unparseable_timestamp_still_reports_the_alert_and_does_not_crash(self):
+        """
+        A record whose timestamp cannot be read has still HAPPENED, so it is
+        still shown. Dropping it would hide a real alert because of a cosmetic
+        data fault — the opposite of what the user wants. It simply cannot be
+        age-filtered, so it is kept without one.
+        """
+        out = self._call(
+            [{"rule_id": "r_n", "label": "N", "active": True}],
+            self._board(live=False),
+            [{"user_id": "u1", "rule_id": "r_n", "f_id": "7", "time": "not-a-date"}])
+        self.assertEqual(out["r_n"]["status"], "fired")
+        self.assertEqual(out["r_n"]["fired_count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
