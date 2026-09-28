@@ -31,14 +31,11 @@ import {
   ShieldAlert,
   ShieldCheck,
   Shuffle,
+  Users,
   XCircle,
 } from "lucide-react";
 
-import {
-  liveApi,
-  type LiveIncomingDetail,
-  type LivePrematchTeamAudit,
-} from "@/lib/api";
+import { liveApi, type LiveIncomingDetail } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -106,6 +103,8 @@ function confidenceWord(c: number): string {
   return "none";
 }
 
+/* ── shared presentational pieces ─────────────────────────────────── */
+
 function Section({
   title,
   icon: Icon,
@@ -138,10 +137,9 @@ function Section({
 /**
  * Explicit "we do not have this" state.
  *
- * The page is a drill-down, so a missing piece has to say WHY it is missing.
- * A silent blank would read as "nothing to report" when it actually means "the
- * evidence for this half of the chain has not landed yet", which is the exact
- * confusion that made the old feed look like it had opinions it did not have.
+ * A missing piece has to say WHY it is missing. A silent blank reads as
+ * "nothing to report" when it actually means "this half of the chain has not
+ * landed yet", which is the confusion that made this page look broken.
  */
 function Unavailable({ what, why }: { what: string; why: string }) {
   return (
@@ -152,6 +150,22 @@ function Unavailable({ what, why }: { what: string; why: string }) {
   );
 }
 
+/** A value that is genuinely absent renders as words, never as a number. */
+function NotMeasured({ hint }: { hint?: string }) {
+  return (
+    <span className="font-normal text-text-dim" title={hint}>
+      not measured
+    </span>
+  );
+}
+
+const RISK_STYLE: Record<string, string> = {
+  FULL_STRENGTH: "border-emerald-500/50 bg-emerald-500/10 text-emerald-300",
+  CLEAR: "border-accent-green/40 bg-accent-green/10 text-accent-green",
+  ELEVATED: "border-amber-500/50 bg-amber-500/10 text-amber-300",
+  HEAVY: "border-rose-500/60 bg-rose-500/15 text-rose-300",
+};
+
 function Metric({
   label,
   value,
@@ -159,7 +173,8 @@ function Metric({
   tone = "flat",
 }: {
   label: string;
-  value: string;
+  /** null means the value was never measured — rendered as words, not 0.0. */
+  value: string | null;
   hint?: string;
   tone?: "good" | "bad" | "warn" | "flat";
 }) {
@@ -169,14 +184,15 @@ function Metric({
       <p
         className={cn(
           "mt-0.5 truncate text-xs font-semibold",
-          tone === "good" && "text-emerald-300",
-          tone === "bad" && "text-rose-300",
-          tone === "warn" && "text-amber-300",
-          tone === "flat" && "text-text-primary"
+          value === null && "font-normal",
+          value !== null && tone === "good" && "text-emerald-300",
+          value !== null && tone === "bad" && "text-rose-300",
+          value !== null && tone === "warn" && "text-amber-300",
+          value !== null && tone === "flat" && "text-text-primary"
         )}
-        title={value}
+        title={value ?? hint}
       >
-        {value}
+        {value === null ? <NotMeasured hint={hint} /> : value}
       </p>
       {hint && (
         <p className="mt-0.5 text-2xs leading-snug text-text-dim" title={hint}>
@@ -187,24 +203,150 @@ function Metric({
   );
 }
 
-/* ── the team block (table + signed impact) ───────────────────────── */
+/* ── both teams, side by side, BEFORE any detail ──────────────────── */
 
-function TeamBlock({
+/**
+ * The head-to-head strip.
+ *
+ * Placed above both tables on purpose. The question "is this keeper down?"
+ * and "how many are missing?" is a comparison BETWEEN the two sides, and
+ * answering it required scrolling past one team's full eleven and then
+ * reading the other. Both answers are now adjacent.
+ */
+function HeadToHead({
+  teams,
+  fixture,
+}: {
+  teams: LiveIncomingDetail["teams"];
+  fixture: string;
+}) {
+  const sides: Array<"home" | "away"> = ["home", "away"];
+  return (
+    <div className="grid gap-3 sm:grid-cols-2">
+      {sides.map((side) => {
+        const t = teams[side];
+        if (!t) {
+          return (
+            <div
+              key={side}
+              className="rounded-xl border border-dashed border-border-bright bg-bg-elevated/30 px-4 py-3"
+            >
+              <p className="text-2xs uppercase tracking-wide text-text-dim">
+                {side}
+              </p>
+              <p className="mt-1 text-xs text-text-dim">Not available</p>
+            </div>
+          );
+        }
+        const gkOk = t.gk_ok;
+        return (
+          <div
+            key={side}
+            className="flex flex-col gap-2.5 rounded-xl border border-border/70 bg-bg-elevated/40 px-4 py-3"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="text-2xs uppercase tracking-wide text-text-dim">
+                  {side}
+                </p>
+                <p className="text-sm font-semibold text-text-primary">
+                  {t.raw?.team_name ?? "Unknown team"}
+                </p>
+              </div>
+              <span
+                className={cn(
+                  "rounded-lg border px-2 py-0.5 text-2xs font-bold",
+                  RISK_STYLE[t.risk] ?? RISK_STYLE.FULL_STRENGTH
+                )}
+              >
+                {t.risk} RISK
+              </span>
+            </div>
+
+            {/* The two answers that matter, immediately visible. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={cn(
+                  "rounded border px-2 py-0.5 text-2xs font-bold",
+                  gkOk
+                    ? "border-accent-green/50 bg-accent-green/10 text-accent-green"
+                    : "border-rose-500/50 bg-rose-500/10 text-rose-300"
+                )}
+                title={t.gk_status || undefined}
+              >
+                GK {gkOk ? "OK" : "DOWN"}
+              </span>
+              <span
+                className={cn(
+                  "rounded border px-2 py-0.5 text-2xs font-bold",
+                  (t.miss ?? 0) >= 4
+                    ? "border-rose-500/50 bg-rose-500/10 text-rose-300"
+                    : (t.miss ?? 0) >= 2
+                    ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                    : "border-border-bright bg-bg-elevated text-text-secondary"
+                )}
+              >
+                {(t.miss ?? 0) > 0 ? `${t.miss} MISSING` : "FULL STRENGTH"}
+              </span>
+            </div>
+
+            {t.gk_status && (
+              <p className="text-2xs leading-relaxed text-text-secondary">
+                {t.gk_status}
+              </p>
+            )}
+
+            {t.missing_names.length > 0 && (
+              <p className="text-2xs leading-relaxed text-text-dim">
+                Absent: {t.missing_names.join(", ")}
+              </p>
+            )}
+
+            {/* The Edge's own percentages, so the header matches the Edge. */}
+            <div className="grid grid-cols-3 gap-2">
+              <Metric
+                label="miss"
+                value={String(t.miss ?? 0)}
+                hint="key players absent from the XI"
+              />
+              <Metric
+                label="KMV"
+                value={
+                  typeof t.kmv === "number" ? `${t.kmv.toFixed(1)}%` : null
+                }
+                hint="Key Missing Vulnerability — the hole left behind"
+              />
+              <Metric
+                label="RV"
+                value={
+                  typeof t.rv === "number" ? `${t.rv.toFixed(1)}%` : null
+                }
+                hint="Replacement Vulnerability — the depth penalty"
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── one team's full detail ────────────────────────────────────────── */
+
+function TeamDetail({
   side,
   team,
-  danger,
+  signed,
   picks,
 }: {
   side: "home" | "away";
-  team?: LivePrematchTeamAudit;
-  danger?: LiveIncomingDetail["danger"][keyof LiveIncomingDetail["danger"]];
+  team?: LiveIncomingDetail["teams"][keyof LiveIncomingDetail["teams"]];
+  signed?: LiveIncomingDetail["danger"][keyof LiveIncomingDetail["danger"]];
   picks: LiveIncomingDetail["picks"];
 }) {
-  const verdict = danger?.verdict ?? "UNKNOWN";
-  const style = VERDICT_STYLE[verdict] ?? VERDICT_STYLE.UNKNOWN;
-  const Icon = style.icon;
   const players = team?.players ?? [];
   const teamPicks = picks.filter((p) => p.target_loc === side);
+  const hasData = players.length > 0;
 
   return (
     <div
@@ -215,95 +357,30 @@ function TeamBlock({
         <div>
           <p className="text-2xs uppercase tracking-wide text-text-dim">{side}</p>
           <h3 className="text-base font-semibold text-text-primary">
-            {team?.team_name ?? danger?.team_name ?? "Unknown team"}
+            {team?.raw?.team_name ?? "Unknown team"}
           </h3>
-          {danger?.formation && danger.formation !== "N/A" && (
-            <p className="mt-0.5 font-mono text-2xs text-text-dim">
-              formation {danger.formation}
-              {danger.style?.label ? ` · ${danger.style.label} style` : ""}
-            </p>
-          )}
         </div>
-        <span
-          className={cn(
-            "flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-2xs font-bold",
-            style.className
-          )}
-        >
-          <Icon className="h-3.5 w-3.5" />
-          {style.label}
-        </span>
+        {team && (
+          <span
+            className={cn(
+              "rounded-lg border px-2.5 py-1 text-2xs font-bold",
+              RISK_STYLE[team.risk] ?? RISK_STYLE.FULL_STRENGTH
+            )}
+          >
+            {team.risk} RISK · {team.miss} MISSING
+          </span>
+        )}
       </div>
 
-      {/* WHY — the sentence that justifies the badge. */}
-      {danger?.verdict_reason && (
+      {team?.gk_status && (
         <p className="rounded-lg border border-border/60 bg-bg-base/50 px-3 py-2 text-2xs leading-relaxed text-text-secondary">
-          {danger.verdict_reason}
+          <span className="font-semibold text-text-primary">
+            GK {team.gk_ok ? "OK" : "DOWN"}:
+          </span>{" "}
+          {team.gk_status}
         </p>
       )}
 
-      {/* The signed numbers, with the confidence that produced them. */}
-      {typeof danger?.net_impact === "number" && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Metric
-            label="net impact"
-            value={`${danger.net_impact > 0 ? "+" : ""}${danger.net_impact.toFixed(1)}`}
-            hint={
-              typeof danger.quality_lost === "number" &&
-              typeof danger.replacement_credit === "number"
-                ? `lost ${danger.quality_lost.toFixed(1)} of quality, replaced with ${danger.replacement_credit.toFixed(1)}`
-                : undefined
-            }
-            tone={
-              danger.net_impact > 0
-                ? "bad"
-                : danger.net_impact < 0
-                ? "good"
-                : "flat"
-            }
-          />
-          <Metric
-            label="confidence"
-            value={
-              typeof danger.impact_confidence === "number"
-                ? danger.impact_confidence.toFixed(2)
-                : "—"
-            }
-            hint={
-              typeof danger.impact_confidence === "number"
-                ? `${confidenceWord(danger.impact_confidence)} evidence`
-                : undefined
-            }
-            tone={(danger.impact_confidence ?? 0) >= 0.45 ? "good" : "warn"}
-          />
-          <Metric
-            label="market read"
-            value={
-              danger.regime
-                ? (REGIME_LABEL[danger.regime] ?? danger.regime)
-                : "—"
-            }
-            hint="how the market prices this side"
-          />
-          <Metric
-            label="goalkeeper"
-            value={
-              danger.gk_verdict ??
-              (danger.gk_leak != null ? "unrated" : "—")
-            }
-            hint={danger.gk_note}
-            tone={
-              danger.gk_verdict === "DANGER"
-                ? "bad"
-                : danger.gk_verdict === "BLESSING"
-                ? "good"
-                : "flat"
-            }
-          />
-        </div>
-      )}
-
-      {/* Picks that name this side. */}
       {teamPicks.length > 0 && (
         <ul className="flex flex-col gap-1.5">
           {teamPicks.map((p, i) => (
@@ -325,15 +402,11 @@ function TeamBlock({
         </ul>
       )}
 
-      {/* The key-11 table — same shape as the Live Match page. */}
-      {players.length === 0 ? (
+      {/* The table, from the same feed the Live Match page renders. */}
+      {!hasData ? (
         <Unavailable
           what="No starting XI table for this side"
-          why={
-            danger?.data_available === false
-              ? "The engines have no historical squad data for this team yet, so there is no key eleven to compare the lineup against. Nothing is being hidden — there is genuinely nothing measured."
-              : "Code 1 has not published an official XI for this side, or the team was unavailable on the last cycle. The engine refuses to substitute the bench for a starting eleven, so the table stays empty rather than being filled with players who did not start."
-          }
+          why="Code 1 has no published row for this team on the current cycle — most often because the official XI has not been published yet, or the team was unavailable. Nothing is shown rather than filling the table with players who did not start."
         />
       ) : (
         <div className="overflow-x-auto">
@@ -380,7 +453,7 @@ function TeamBlock({
                         missing ? "text-rose-300" : "text-emerald-300"
                       )}
                     >
-                      {pl.status}
+                      {missing ? "■ MISSING" : "STARTING"}
                     </td>
                   </tr>
                 );
@@ -390,48 +463,47 @@ function TeamBlock({
         </div>
       )}
 
-      {/* The absent, with the quality evidence that now drives the verdict. */}
-      {danger?.missing_details && danger.missing_details.length > 0 && (
-        <div className="flex flex-col gap-1.5">
+      {/* Code 4's signed read, explicitly SECONDARY. */}
+      {signed?.signed_verdict && (
+        <div className="rounded-lg border border-border/60 bg-bg-base/40 px-3 py-2">
           <p className="text-2xs font-semibold uppercase tracking-wide text-text-dim">
-            Absent key players — and what they were worth
+            Signed read (Code 4) — secondary
           </p>
-          <ul className="flex flex-col gap-1">
-            {danger.missing_details.map((m) => (
-              <li
-                key={m.name}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/50 bg-bg-base/40 px-2.5 py-1.5"
-              >
-                <span className="text-2xs font-medium text-text-primary">
-                  {m.name}
-                  <span className="ml-1.5 text-text-dim">{m.pos}</span>
-                </span>
-                <span className="font-mono text-2xs text-text-secondary">
-                  {typeof m.rating === "number" ? (
-                    <>
-                      rating {m.rating.toFixed(2)} · {m.apps ?? 0} apps ·{" "}
-                      {m.mins ?? 0} min
-                      <span
-                        className={cn(
-                          "ml-1.5 font-semibold",
-                          m.rating >= 6.8 ? "text-rose-300" : "text-emerald-300"
-                        )}
-                      >
-                        {m.rating >= 6.8 ? "▲ above typical" : "▼ below typical"}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="text-text-dim">no rating on record</span>
-                  )}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <p className="text-2xs leading-relaxed text-text-dim">
-            A player rated above 6.80 leaving is damage; one rated below it is
-            either neutral or an upgrade. That sign — not the headcount — is what
-            sets the badge.
+          <p className="mt-1 text-2xs leading-relaxed text-text-secondary">
+            {signed.signed_reason}
           </p>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <Metric
+              label="net impact"
+              value={
+                typeof signed.net_impact === "number"
+                  ? `${signed.net_impact > 0 ? "+" : ""}${signed.net_impact.toFixed(1)}`
+                  : null
+              }
+              hint="positive = quality lost, negative = upgraded"
+              tone={
+                (signed.net_impact ?? 0) > 0
+                  ? "bad"
+                  : (signed.net_impact ?? 0) < 0
+                  ? "good"
+                  : "flat"
+              }
+            />
+            <Metric
+              label="confidence"
+              value={
+                typeof signed.impact_confidence === "number"
+                  ? `${signed.impact_confidence.toFixed(2)} (${confidenceWord(
+                      signed.impact_confidence
+                    )})`
+                  : null
+              }
+              hint="how much evidence stands behind the number"
+              tone={
+                (signed.impact_confidence ?? 0) >= 0.45 ? "good" : "warn"
+              }
+            />
+          </div>
         </div>
       )}
     </div>
@@ -467,7 +539,7 @@ export default function IncomingDetailPage() {
     return (
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 py-6">
         <Skeleton className="h-8 w-72 rounded-xl bg-bg-elevated" />
-        <Skeleton className="h-40 rounded-xl bg-bg-elevated" />
+        <Skeleton className="h-32 rounded-xl bg-bg-elevated" />
         <Skeleton className="h-64 rounded-xl bg-bg-elevated" />
       </div>
     );
@@ -544,6 +616,19 @@ export default function IncomingDetailPage() {
         </p>
       )}
 
+      {/* ── BOTH TEAMS FIRST: keeper + missing count, before any table ── */}
+      <Section
+        title="Both teams at a glance"
+        icon={Info}
+        right={
+          <span className="text-2xs text-text-dim">
+            same figures as the Live Match page
+          </span>
+        }
+      >
+        <HeadToHead teams={teams} fixture={row.fixture} />
+      </Section>
+
       {/* ── the picks ── */}
       <Section title="What the incoming feed predicted" icon={Radio}>
         {row.picks.length === 0 ? (
@@ -573,33 +658,25 @@ export default function IncomingDetailPage() {
         )}
       </Section>
 
-      {/* ── both teams ── */}
-      <Section
-        title="The evidence, per team"
-        icon={Info}
-        right={
-          <span className="text-2xs text-text-dim">
-            table + keeper + signed impact
-          </span>
-        }
-      >
-        {!row.table_available && !row.danger_available ? (
+      {/* ── the full tables, one per team ── */}
+      <Section title="The starting XI, player by player" icon={Users}>
+        {!row.table_available ? (
           <Unavailable
             what="No team evidence for this fixture"
-            why="Neither the Code 1 starting-XI table nor the Code 4 danger card holds a row for this fixture. The engines agree there is nothing measured yet."
+            why="Code 1 holds no published row for this fixture yet, so there is no starting eleven to show."
           />
         ) : (
           <div className="flex flex-col gap-3">
-            <TeamBlock
+            <TeamDetail
               side="home"
               team={teams.home}
-              danger={danger.home}
+              signed={danger.home}
               picks={row.picks}
             />
-            <TeamBlock
+            <TeamDetail
               side="away"
               team={teams.away}
-              danger={danger.away}
+              signed={danger.away}
               picks={row.picks}
             />
           </div>
@@ -693,8 +770,8 @@ export default function IncomingDetailPage() {
                   ))}
                 </ul>
                 <p className="mt-1.5 text-2xs leading-relaxed text-text-dim">
-                  These are recorded rather than hidden: they are markets where a
-                  naive reading would have contradicted itself.
+                  Recorded rather than hidden: these are markets where a naive
+                  reading would have contradicted itself.
                 </p>
               </div>
             )}

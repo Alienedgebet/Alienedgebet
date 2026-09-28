@@ -1270,6 +1270,35 @@ export interface LiveIncomingPick {
   };
 }
 
+/** One side of a fixture, as the Live Match page reports it (Code 1). */
+export interface LiveIncomingTeamView {
+  gk_ok: boolean;
+  /** e.g. "Solid Form (0.8 per 90)" — the Edge's own wording. */
+  gk_status: string;
+  /** Count of absent key players, and the Edge's risk band for it. */
+  miss: number;
+  risk: "FULL STRENGTH" | "CLEAR" | "ELEVATED" | "HEAVY" | string;
+  /** Key Missing Vulnerability, as a percentage. */
+  kmv: number | null;
+  /** Replacement Vulnerability, as a percentage. */
+  rv: number | null;
+  missing_names: string[];
+  players: LivePrematchPlayerRow[];
+  raw?: LivePrematchTeamAudit;
+}
+
+/** Code 4's signed opinion about one side. Secondary, never authoritative. */
+export interface LiveIncomingSignedRead {
+  signed_verdict?: "DANGER" | "ROTATION" | "BLESSING" | "UNKNOWN";
+  signed_reason?: string;
+  /** Positive = quality lost, negative = the XI was upgraded. */
+  net_impact?: number | null;
+  /** 0-1. Below 0.45 the evidence is too thin to call. */
+  impact_confidence?: number | null;
+  rotation_uplift?: number;
+  gk_note?: string;
+}
+
 /**
  * One fixture's full incoming-prediction drill-down, from
  * GET /api/live/incoming/{fixtureId}. A pure join across the four local
@@ -1287,14 +1316,23 @@ export interface LiveIncomingDetail {
   };
   picks: LiveIncomingPick["picks"];
 
-  /** Code 1's key-11 table — the same object the Live Match page renders. */
-  teams: Partial<Record<"home" | "away", LivePrematchTeamAudit>>;
+  /**
+   * One side, as the Live Match (Edge) page reports it.
+   *
+   * Code 1 is the single source of truth here (2026-09-28). The endpoint
+   * previously served Code 1's player table beside Code 4's own "absent" list,
+   * and the two disagreed about who was missing — the Edge said Ignasi Miquel
+   * was out while the danger card named a different goalkeeper entirely, so
+   * one screen read "GK OK" and the other "GK UNKNOWN" for the same match.
+   */
+  teams: Partial<Record<"home" | "away", LiveIncomingTeamView>>;
   table_available: boolean;
 
-  /** Code 4's per-side danger card, now carrying the SIGNED impact. */
-  danger: Partial<
-    Record<"home" | "away", LiveDangerReport["home_team"]>
-  >;
+  /**
+   * Code 4's signed read, kept strictly as a SECONDARY opinion. It may add
+   * insight; it may never contradict the table it sits under.
+   */
+  danger: Partial<Record<"home" | "away", LiveIncomingSignedRead>>;
   danger_available: boolean;
 
   /** Code 5's market grades, post-coherence. */
