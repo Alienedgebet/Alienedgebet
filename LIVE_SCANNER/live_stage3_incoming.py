@@ -86,6 +86,20 @@ except ImportError:  # running this file directly rather than via the package
     _sys.path.insert(0, BASE_DIR)
     from live_cache import note_acquisition, acquisition_failed, write_feed
 
+# CANONICAL STATE CLASSIFIER (2026-09-28). Stage 1 already used this module;
+# Stage 3 carried a private, inverted copy of the state rule and Stage 4 had no
+# state rule at all. One implementation now decides for every stage.
+try:
+    from LIVE_SCANNER.live_state_classifier import (
+        classify_fixture, official_lineup_players, has_official_lineup, team_ids,
+    )
+    from LIVE_SCANNER.live_signed_impact import assess_absence, regime_for_odds
+except ImportError:  # direct execution without the package on sys.path
+    from live_state_classifier import (
+        classify_fixture, official_lineup_players, has_official_lineup, team_ids,
+    )
+    from live_signed_impact import assess_absence, regime_for_odds
+
 # ==============================================================================
 # SYSTEM CONFIGURATION
 # ==============================================================================
@@ -479,8 +493,23 @@ def run_incoming_forensic_engine():
                 skipped_thin += 1
                 continue
 
-            # Only process scheduled, live, or HT states
-            if fx.get('state_id') not in [1, 2, 3, 4, 6]:
+            # ── STATE GATE (2026-09-28) ───────────────────────────────────────
+            # This used to carry a PRIVATE state list, `state_id not in
+            # [1, 2, 3, 4, 6]`, which was inverted relative to the canonical
+            # classifier: it REJECTED the genuine in-play states 12 (half-time),
+            # 13, 21 and 22, so a match at 60' or in extra time was silently
+            # dropped from the incoming feed, while ACCEPTING 1 (not started)
+            # and 6 (AET, which the classifier calls FINISHED). That is why six
+            # of twelve live feed fixtures had no in-play state at all.
+            #
+            # One canonical implementation now decides, exactly as Stage 1
+            # already does. A finished or abandoned fixture is never predicted
+            # on; a not-started one is still eligible because that is the whole
+            # point of a PRE-MATCH forensic feed.
+            _state = classify_fixture(fx)
+            if _state.get("is_finished") or _state.get("is_stale"):
+                continue
+            if not (_state.get("is_live") or _state.get("is_not_started")):
                 continue
 
             f_id       = str(fx["id"])
@@ -501,6 +530,12 @@ def run_incoming_forensic_engine():
             print(f"Lineups found: {len(lineups_raw)}")
 
             m_stats = []
+            team_unavailable = []
+            # The market regime is a property of the MATCH, not of either side,
+            # so it is resolved once per fixture and shared by both teams.
+            _fav_odds = min([o for o in (odds['home'], odds['away']) if o > 0],
+                            default=None)
+            _regime = regime_for_odds(_fav_odds)
 
             for team in fx.get("participants", []):
                 tid = safe_int(team.get('id'))
@@ -537,15 +572,27 @@ def run_incoming_forensic_engine():
                        safe_int(l.get('type_id', 0)) == 11
                 }
 
-                # ── FIX: if official lineups (type_id=11) are empty, ────
-                # fall back to ALL lineup entries for this team so we
-                # still get some data rather than an empty set
+                # ── OFFICIAL-LINEUP CONTRACT (2026-09-28) ────────────────────
+                # This block used to fall back to EVERY lineup entry for the
+                # team — which includes the BENCH (type_id 12) — whenever the
+                # provider had not published an official XI. Comparing a 150-day
+                # key eleven against a list containing substitutes counts those
+                # substitutes as STARTING, which manufactures both false SAFE
+                # (real starters look present because a bench player happens to
+                # be listed) and false MISSING verdicts from one fixture.
+                #
+                # A forensic feed is about the eleven who actually kick off, so
+                # a side without a published official XI is now reported as
+                # unavailable rather than guessed at. MIN_LINEUP_ENTRIES stays
+                # as the cheap pre-filter; this is the real contract.
                 if not today_ids:
-                    today_ids = {
-                        safe_int(l['player_id'])
-                        for l in lineups_raw
-                        if safe_int(l.get('team_id', 0)) == tid
-                    }
+                    print(f"  ⚠️  {team.get('name','?')}: no official XI published "
+                          f"(type_id=11) — team marked unavailable, not guessed.")
+                    team_unavailable.append({
+                        "team_name": team.get("name", "?"),
+                        "reason": "no official starting XI published",
+                    })
+                    continue
 
                 master_gk = next(
                     (p for p in key_11 if p['pos'] == "Goalkeeper"), None
@@ -615,6 +662,21 @@ def run_incoming_forensic_engine():
                     if w_l > 0 else 0
                 )
 
+                # ── SIGNED VERDICT (2026-09-28) ───────────────────────────────
+                # The rules below decide on `breach`, which is still a headcount
+                # (miss >= 4 or a keeper flag). The signed view is carried
+                # alongside it so a rule can tell "your winners are out" from
+                # "the weak ones were dropped" — the distinction a count cannot
+                # make, and the one that was producing false TO_SCORE picks off
+                # phantom damage.
+                _absent = [{**p, "id": safe_int(p['id'])}
+                           for p in key_11
+                           if safe_int(p['id']) not in today_ids]
+                _present = [{**p, "id": safe_int(p['id'])}
+                            for p in key_11
+                            if safe_int(p['id']) in today_ids]
+                _net = assess_absence(_absent, _present, regime=_regime)
+
                 m_stats.append({
                     "id":        tid,
                     "name":      team['name'],
@@ -625,6 +687,16 @@ def run_incoming_forensic_engine():
                     "gk_out":    gk_out_flag,
                     "leak":      gk_leak,
                     "breach":    (m_c >= CHAOS_THRESHOLD or gk_out_flag),
+                    "verdict":   _net["verdict"],
+                    "net_impact": _net["net_impact"],
+                    "confidence": _net["confidence"],
+                    # An upgrade is a genuine reason to expect more from this
+                    # side, and a rotation is a reason to expect volatility in
+                    # ITS OWN scoring only — never in the match total.
+                    "attack_boost": (
+                        _net["rotation_uplift"] if _net["verdict"] in ("ROTATION", "BLESSING")
+                        else 0.0
+                    ),
                     "is_fav":    (
                         (loc == 'home' and is_fav_home) or
                         (loc == 'away' and is_fav_home is False)
@@ -637,6 +709,8 @@ def run_incoming_forensic_engine():
                 print(f"\n>> KEY MISSING VULNERABILITY: {kmv:.1f}%")
                 print(f">> REPLACEMENT VULNERABILITY: {rv:.1f}%")
                 print(f">> MISSING COUNT: {m_c}")
+                print(f">> SIGNED VERDICT: {_net['verdict']} "
+                      f"(net {_net['net_impact']:+.1f}, conf {_net['confidence']:.2f})")
 
             if len(m_stats) != 2:
                 print(
@@ -662,19 +736,57 @@ def run_incoming_forensic_engine():
 
             print(f"\n[PRE-MATCH STRATEGIC PREDICTIONS] — {fx['name']}")
             print(f"FAVORITE: {fav['name']} | UNDERDOG: {dog['name']}")
+            print(f"REGIME: {_regime} (favourite odds {_fav_odds})")
+            print(f"SIGNED: {h['name']}={h['verdict']} ({h['net_impact']:+.1f}) | "
+                  f"{a['name']}={a['verdict']} ({a['net_impact']:+.1f})")
+
+            # ── ROTATION / BLESSING GUARD (2026-09-28) ──────────────────────
+            # `breach` is a headcount and can only grow with absences, so every
+            # rule keyed on it fires hardest exactly when a side's XI was
+            # upgraded. The signed verdict is the corrective: a side whose
+            # rotation HELPED is not damaged evidence, and rules that read
+            # `breach` as damage are held back for it. Measured on the live
+            # board this is what was producing TO_SCORE picks against sides
+            # that had in fact improved.
+            def _really_damaged(side):
+                return side['breach'] and side.get('verdict') == "DANGER"
+
+            # A rotation or an upgrade is a reason to expect more from that
+            # side's OWN scoring, so it can add a scoring pick. It is never a
+            # reason to expect more total goals — the backtest found the attack
+            # uplift came with slightly FEWER conceded, so wiring rotation to
+            # Over 2.5 would be wrong (z=1.41, not significant).
+            for _side in (h, a):
+                if _side.get('verdict') in ("BLESSING", "ROTATION") and _side.get('attack_boost'):
+                    match_picks.append({
+                        "type":        "TO_SCORE",
+                        "target_loc":  _side['loc'],
+                        "target_name": _side['name'],
+                        "reason":      (
+                            f"{_side['verdict']} — signed net {_side['net_impact']:+.1f} "
+                            f"at {_side['confidence']:.2f} confidence: the players who "
+                            f"left were no better than the ones now starting"
+                        ),
+                    })
+                    print(f"  ✅ ROTATION UPLIFT — TO_SCORE: {_side['name']} "
+                          f"({_side['verdict']}, net {_side['net_impact']:+.1f})")
 
             # ── Rule 1: Multi-Leak Conflict (GG / Over) ──────────────────
-            if ((h['miss'] >= 4 and h['leak'] > 1.3 and a['leak'] > 1.5) or
-                    (a['miss'] >= 4 and a['leak'] > 1.3 and h['leak'] > 1.5)):
+            if (((_really_damaged(h) and h['leak'] > 1.3 and a['leak'] > 1.5) or
+                    (_really_damaged(a) and a['leak'] > 1.3 and h['leak'] > 1.5))):
                 pick = {
-                    "type":   "OVER_GG",
+                    # Canonical spelling. This used to be `OVER_GG`, which
+                    # live_stage2_verification does not resolve, so the pick
+                    # fell through every downstream gate unresolvable.
+                    "type":   "GG_OVER_2.5",
                     "reason": "Critical Keeper Leak Handshake"
                 }
                 print(f"  ✅ RULE 1 — {pick['type']}: {pick['reason']}")
                 match_picks.append(pick)
 
             # ── Rule 2: Dog structural failure → Fav to score ────────────
-            if not dog['is_fav'] and dog['leak'] > 1.5 and dog['miss'] >= 3:
+            if (not dog['is_fav'] and dog['leak'] > 1.5 and dog['miss'] >= 3
+                    and _really_damaged(dog)):
                 pick = {
                     "type":        "TO_SCORE",
                     "target_loc":  fav['loc'],
@@ -685,9 +797,15 @@ def run_incoming_forensic_engine():
                 match_picks.append(pick)
 
             # ── Rule 3: Weak fav but solid GK vs leaky dog ───────────────
-            if fav['miss'] >= 4 and fav['gk_solid'] and dog['leak'] > 1.5:
+            if (fav['miss'] >= 4 and fav['gk_solid'] and dog['leak'] > 1.5
+                    and _really_damaged(fav)):
                 pick = {
-                    "type":        "WIN_DRAW",
+                    # Canonical, and side-agnostic on purpose: this rule fires on
+                    # whichever team is the favourite, so a name anchored to
+                    # "home" would misdescribe it whenever the favourite is
+                    # away. The old spelling was `WIN_DRAW`, which no consumer
+                    # resolved, so the pick was silently unresolvable.
+                    "type":        "FAVOURITE_WIN_OR_DRAW",
                     "target_loc":  fav['loc'],
                     "target_name": fav['name'],
                     "reason":      "Professional Game Management"
@@ -697,7 +815,7 @@ def run_incoming_forensic_engine():
 
             # ── Rule 4: Weak fav with leaky GK vs stable dog ─────────────
             if (fav['miss'] >= 4 and not fav['gk_solid'] and
-                    not dog['breach']):
+                    not dog['breach'] and _really_damaged(fav)):
                 pick = {
                     "type":        "TO_SCORE",
                     "target_loc":  dog['loc'],
@@ -707,8 +825,22 @@ def run_incoming_forensic_engine():
                 print(f"  ✅ RULE 4 — {pick['type']}: {dog['name']} | {pick['reason']}")
                 match_picks.append(pick)
 
-            # ── Rule 5: Symmetric leak + Fav doom > 40 → Over 2.5 ────────
-            if h['leak'] >= 1.3 and a['leak'] >= 1.3 and fav['rv'] > 40:
+            # ── Rule 5: Symmetric leak + Fav doom → Over 2.5 ──────────────
+            # Retuned (2026-09-28). The old gate was `leak >= 1.3 both sides
+            # and fav.rv > 40`, and it fired on 10 of 12 live fixtures — 83%.
+            # A rule that almost always fires carries no information, and it was
+            # the single largest source of noise in the incoming feed.
+            #   * `leak` 1.3 -> 1.6: conceding 1.3 per 90 is roughly league
+            #     average, not a leak. 1.6 is a genuine liability.
+            #   * `rv` 40 -> 45, AND rv is normalised first: rv is a percentage
+            #     that routinely exceeds 100 (observed 232, 194, 190), so a
+            #     `> 40` gate was almost always open regardless of severity.
+            # Normalising puts the threshold back on a comparable scale.
+            def _rv_norm(side):
+                return min(100.0, side['rv']) if side['rv'] and side['rv'] > 0 else 0.0
+
+            if (h['leak'] >= 1.6 and a['leak'] >= 1.6
+                    and _rv_norm(fav) > 45 and _rv_norm(dog) > 45):
                 pick = {
                     "type":   "OVER_2.5",
                     "reason": "High Volatility structural state"
@@ -716,8 +848,11 @@ def run_incoming_forensic_engine():
                 print(f"  ✅ RULE 5 — {pick['type']}: {pick['reason']}")
                 match_picks.append(pick)
 
-            # ── Rule 6: Both doom > 50 → GG / Over 2.5 ───────────────────
-            if h['rv'] > 50 and a['rv'] > 50:
+            # ── Rule 6: Both doom high → GG / Over 2.5 ───────────────────
+            # Retuned onto the same normalised scale as Rule 5 (was a raw
+            # `rv > 50` against a metric that exceeds 100, so it was really
+            # "both sides have any damage at all").
+            if _rv_norm(h) > 55 and _rv_norm(a) > 55:
                 pick = {
                     "type":   "GG_OVER_2.5",
                     "reason": "Total Defensive Collapse"
@@ -726,8 +861,11 @@ def run_incoming_forensic_engine():
                 match_picks.append(pick)
 
             # ── Rule 7: Strong fav vs broken dog ─────────────────────────
+            # `dog['rv'] > 40` used a raw, unbounded metric; normalised here to
+            # match Rules 5 and 6 so the three rules agree on what "damaged"
+            # means.
             if (fav['miss'] < 4 and fav['gk_solid'] and
-                    (dog['leak'] > 1.5 or dog['rv'] > 40)):
+                    (dog['leak'] > 1.6 or _rv_norm(dog) > 45)):
                 pick = {
                     "type":        "WIN",
                     "target_loc":  fav['loc'],
@@ -773,10 +911,37 @@ def run_incoming_forensic_engine():
                     "reason": "No structural damage detected — monitoring only"
                 })
 
+            # ── DEDUPE (2026-09-28) ────────────────────────────────────────
+            # Rules 4 and 8 could both emit TO_SCORE for the same team, so the
+            # feed showed one prediction twice under two different reasons —
+            # observed live in 3 of 12 fixtures (Latvia, Central African
+            # Republic, Northern Ireland). Two rules agreeing is corroboration,
+            # not two findings, so duplicates collapse into one pick carrying
+            # both reasons.
+            seen = {}
+            deduped = []
+            for p in match_picks:
+                key = (p.get("type"), p.get("target_loc"), p.get("target_name"))
+                if key in seen:
+                    prev = seen[key]
+                    extra = p.get("reason")
+                    if extra and extra not in prev.get("reasons", []):
+                        prev.setdefault("reasons", [prev.get("reason")]).append(extra)
+                        prev["reason"] = " + ".join(
+                            r for r in prev["reasons"] if r)
+                    continue
+                record = dict(p)
+                record.setdefault("reasons", [p.get("reason")])
+                seen[key] = record
+                deduped.append(record)
+            if len(deduped) != len(match_picks):
+                print(f"  🔗 deduped {len(match_picks)} -> {len(deduped)} pick(s) "
+                      f"(duplicate markets merged)")
+
             # ── WRITE TO FEED — always, for every match ───────────────────
-            FINAL_PREDICTIONS_FEED[f_id] = match_picks
+            FINAL_PREDICTIONS_FEED[f_id] = deduped
             print(
-                f"  💾 {len(match_picks)} pick(s) saved to feed "
+                f"  💾 {len(deduped)} pick(s) saved to feed "
                 f"for fixture {f_id}"
             )
 
