@@ -89,8 +89,16 @@ VALID_PREMATCH_TYPES = {
 VALID_LIVE_TYPES = {
     "snapshot", "pressure_share", "chaos_index",
     "xg", "sot", "corners", "da", "key_player_lost",
+    # The scoreline gate. See _scoreline_condition_met() for why this exists
+    # and why it is the one condition that fails CLOSED.
+    "goals",
 }
 VALID_SIDES = {"home", "away", "any"}
+
+# Scoreline gate directions. `under`/`over` take a fractional line (2.5),
+# `exact` takes a whole number of goals (3).
+VALID_GOAL_DIRECTIONS = {"under", "over", "exact"}
+MAX_GOAL_LINE = 10
 
 
 class RuleValidationError(ValueError):
@@ -251,7 +259,59 @@ def _validate_live(live: dict) -> dict:
             raise RuleValidationError("live.min_count must be at least 1.")
         return {"type": "key_player_lost", "side": side, "min_count": min_count}
 
+    if ltype == "goals":
+        # The scoreline gate. There is deliberately NO `side`: a goal
+        # limitation is a statement about the MATCH total, because a market
+        # like OVER 2.5 is won or lost on the combined count, never on one
+        # side's tally.
+        direction = str(live.get("direction", "")).strip().lower()
+        if direction not in VALID_GOAL_DIRECTIONS:
+            raise RuleValidationError(
+                f"live.direction must be one of {sorted(VALID_GOAL_DIRECTIONS)}."
+            )
+        try:
+            line = float(live.get("line"))
+        except (TypeError, ValueError):
+            raise RuleValidationError("live.line must be a number of goals.")
+        if line < 0 or line > MAX_GOAL_LINE:
+            raise RuleValidationError(
+                f"live.line must be between 0 and {MAX_GOAL_LINE}."
+            )
+        if direction == "exact" and line != int(line):
+            raise RuleValidationError(
+                "live.line for an exact goal count must be a whole number."
+            )
+        return {"type": "goals", "direction": direction, "line": line}
+
     raise RuleValidationError(f"Unhandled live.type: {ltype}")
+
+
+def _validate_watchlist(raw) -> list[str]:
+    """
+    The user's accepted matches. DELIBERATELY SOFT.
+
+    A watchlist is a statement of intent — "these are the fixtures I am
+    watching" — NOT a filter. The evaluator never tests membership, so a rule
+    still fires on any fixture that meets its conditions, including one the
+    user did not click. Accepting a match only raises it to the top of the
+    feed and marks it, so the user can see at a glance that a match they
+    personally care about went live.
+
+    A rule with no watchlist is entirely normal (all three pre-existing rules
+    in data/user_rules.json have none), so the default is an empty list.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise RuleValidationError("watchlist must be an array of fixture ids.")
+    out: list[str] = []
+    for item in raw:
+        fid = str(item).strip()
+        # Fixture ids are numeric strings from the provider. Accept anything
+        # non-empty, but de-duplicate so a double-click cannot bloat the rule.
+        if fid and fid not in out:
+            out.append(fid)
+    return out
 
 
 def validate_rule_payload(payload: dict) -> dict:
@@ -281,6 +341,7 @@ def validate_rule_payload(payload: dict) -> dict:
         "prematch": prematch,
         "live": live,
         "active": bool(payload.get("active", True)),
+        "watchlist": _validate_watchlist(payload.get("watchlist")),
     }
     if minute_window is not None:
         result["minute_window"] = minute_window
@@ -318,7 +379,7 @@ def update_rule(rule_id: str, patch: dict, user_id: str | None = None) -> dict |
         if target is None or (user_id is not None and target.get("user_id") != user_id):
             return None
         merged = {**target, **patch}
-        if any(k in patch for k in ("prematch", "live", "label", "user_id", "minute_window")):
+        if any(k in patch for k in ("prematch", "live", "label", "user_id", "minute_window", "watchlist")):
             validated = validate_rule_payload(merged)
             merged = {
                 **validated,
@@ -435,6 +496,117 @@ def _prematch_condition_met(rule_prematch: dict, pre: dict) -> tuple[bool, str]:
     return False, "Unknown prematch condition"
 
 
+# ==============================================================================
+# CANDIDATE DISCOVERY — "show me every match that falls under this condition"
+# ==============================================================================
+def _candidate_evidence(pre: dict) -> dict:
+    """
+    The handful of real, already-on-disk facts shown on a candidate card, so a
+    user can judge a match without opening it. Every value is read from a
+    field the four real prematch sources actually publish — nothing is derived
+    or invented here.
+    """
+    audit = pre.get("team_audit") or {}
+    danger = pre.get("danger_report") or {}
+    chem = pre.get("match_chemistry_list") or {}
+    h_audit = audit.get("home") or {}
+    a_audit = audit.get("away") or {}
+    h_danger = danger.get("home") or {}
+    a_danger = danger.get("away") or {}
+
+    return {
+        "has_lineup": bool(audit.get("has_lineup")),
+        "has_formation": bool(audit.get("has_formation")),
+        "formations": audit.get("formations") or {},
+        "home_missing": h_audit.get("missing_count"),
+        "away_missing": a_audit.get("missing_count"),
+        "home_gk_out": bool(h_audit.get("gk_out")),
+        "away_gk_out": bool(a_audit.get("gk_out")),
+        "home_breach": bool(h_danger.get("breach")),
+        "away_breach": bool(a_danger.get("breach")),
+        "home_danger_status": h_danger.get("status"),
+        "away_danger_status": a_danger.get("status"),
+        "home_formation": h_danger.get("formation"),
+        "away_formation": a_danger.get("formation"),
+        "chemistry": chem or None,
+        "flags": (pre.get("flags") or {}) or None,
+        "metrics": (pre.get("metrics") or {}) or None,
+        "picks": pre.get("picks") or pre.get("incoming_probabilities") or [],
+        "kickoff_utc": audit.get("kickoff_utc"),
+        "status_text": audit.get("status_text"),
+        "state": audit.get("state"),
+    }
+
+
+def find_candidates(prematch: dict, prematch_db: dict, live_scores: dict | None = None) -> list[dict]:
+    """
+    Every known fixture, scored against the user's chosen prematch condition.
+
+    The match set is `prematch_db` — the SAME fixture_id-keyed merge of all
+    four sources that the live cycle itself uses (stage6.load_all_prematch_data).
+    Reusing it here is the point: the card a user accepts is scored by the
+    identical predicate the cycle will later use, so "3 matches matched" cannot
+    quietly disagree with what actually fires.
+
+    `live_scores` maps fixture_id -> (h, a) and is best-effort: it only adds a
+    read-only "current score" to the card so the user can see, at setup time,
+    which of the matches they are watching are already past their own goal
+    limit. A fixture absent from it simply has no score shown — it is never
+    rendered as 0-0.
+
+    Returns rows sorted with matches FIRST (most actionable at the top), then
+    by kickoff. Every row carries `met` plus the `reason` string the predicate
+    itself produced, so nothing on the card is a UI guess.
+    """
+    # Validate the incoming condition with the SAME validator the save path
+    # uses, so the board can never offer a condition that a save would reject.
+    normalized = _validate_prematch(prematch or {"type": "none"})
+
+    live_scores = live_scores or {}
+    rows: list[dict] = []
+
+    for fid, pre in (prematch_db or {}).items():
+        if not isinstance(pre, dict):
+            continue
+        met, reason = _prematch_condition_met(normalized, pre)
+
+        teams = pre.get("teams") if isinstance(pre.get("teams"), dict) else {}
+        audit_sides = pre.get("team_audit") or {}
+        home_name = ((teams.get("home") or {}).get("name")) or (audit_sides.get("home") or {}).get("team_name")
+        away_name = ((teams.get("away") or {}).get("name")) or (audit_sides.get("away") or {}).get("team_name")
+
+        # Source of truth for the display name, most-specific first: the
+        # aggregator's own "Home vs Away" string, then an explicit name, then
+        # the two team names, then the bare id. Never an empty label.
+        name = (
+            pre.get("fixture")
+            or pre.get("name")
+            or (" vs ".join([str(x) for x in (home_name, away_name) if x]))
+            or f"Fixture {fid}"
+        )
+
+        score = live_scores.get(str(fid))
+        evidence = _candidate_evidence(pre)
+
+        rows.append({
+            "fixture_id": str(fid),
+            "name": name,
+            "home_name": home_name,
+            "away_name": away_name,
+            "met": bool(met),
+            "reason": reason,
+            "evidence": evidence,
+            # None means "not known", which the UI must show as unknown, never
+            # as a goalless draw.
+            "live_score": list(score) if isinstance(score, (tuple, list)) else None,
+            "kickoff_utc": evidence.get("kickoff_utc"),
+            "state": evidence.get("state"),
+        })
+
+    rows.sort(key=lambda r: (not r["met"], str(r.get("kickoff_utc") or ""), r["name"]))
+    return rows
+
+
 def _live_condition_met(rule_live: dict, intel: dict, key_loss: dict) -> tuple[bool, str]:
     ltype = rule_live.get("type")
     intel = intel or {}
@@ -445,6 +617,13 @@ def _live_condition_met(rule_live: dict, intel: dict, key_loss: dict) -> tuple[b
 
     if ltype == "snapshot":
         return True, "Live snapshot (always fires)"
+
+    if ltype == "goals":
+        # Already fully decided by _scoreline_condition_met(), which
+        # evaluate_rule_for_match() runs BEFORE calling this function. It must
+        # NOT return False here: a passing gate would be vetoed by a function
+        # that simply has no branch for it, and the rule could never fire.
+        return True, "Scoreline gate already passed"
 
     if ltype == "pressure_share":
         side = rule_live.get("side", "any")
@@ -547,6 +726,91 @@ def _live_condition_met(rule_live: dict, intel: dict, key_loss: dict) -> tuple[b
     return False, "Unknown live condition"
 
 
+def _scoreline_condition_met(rule_live: dict, score) -> tuple[bool, str]:
+    """
+    THE SCORELINE GATE — the limitation the user sets on the goal count.
+
+    THE PROBLEM IT SOLVES
+    A prematch condition is a statement about the FIXTURE ("this side has 100%
+    second-half H2H over 2.5"). It says nothing about whether the price is
+    still available. A 2-0 at 38' makes OVER 2.5 a dead market, yet the old
+    rule set had no way to say so, so an alert could arrive for a trade that
+    could not be taken any more. This gate is the user's answer: set the goal
+    limit, and the alert is only allowed through while the scoreline is still
+    inside it.
+
+        direction=over,  line=2.5  ->  total >= 3   the line is already beaten
+        direction=under, line=2.5  ->  total <= 2   the line is still alive
+        direction=exact, line=3    ->  total == 3   only the named total
+
+    Note the asymmetry, which is the whole point. For OVER, the alert is
+    useful once the line HAS been crossed — that is the confirmation. For
+    UNDER, usefulness is the opposite: the alert is useful while the line has
+    NOT been crossed, because that is the last moment the price still exists.
+    Treating both as `total >= line` would fire the UNDER gate only once the
+    market was already dead.
+
+    FAILS CLOSED. `score` of None means the provider published no readable
+    scoreline this cycle. That is UNKNOWN, not 0-0 (see
+    stage6.score_from_fixture, which returns None rather than fabricating a
+    goalless draw for exactly this reason). A gate whose entire job is to know
+    the scoreline must never pass on a scoreline it does not have.
+    """
+    direction = rule_live.get("direction", "under")
+    line = rule_live.get("line")
+    if line is None:
+        return False, "Scoreline gate has no goal line set"
+
+    if score is None:
+        return False, (
+            f"Scoreline gate: scoreline unavailable this cycle, "
+            f"cannot confirm {direction} {line} — not alerting"
+        )
+    if not isinstance(score, (tuple, list)) or len(score) < 2:
+        return False, (
+            f"Scoreline gate: scoreline unreadable ({score!r}), "
+            f"cannot confirm {direction} {line} — not alerting"
+        )
+    try:
+        h, a = int(score[0]), int(score[1])
+    except (TypeError, ValueError):
+        return False, (
+            f"Scoreline gate: scoreline not numeric ({score!r}), "
+            f"cannot confirm {direction} {line} — not alerting"
+        )
+
+    total = h + a
+    base = int(float(line))  # floor() for a positive line
+
+    if direction == "under":
+        # "Still available" semantics — see the docstring. A fractional line
+        # (2.5) keeps the market alive up to 2 goals; a whole line (3.0) is a
+        # push at 3, so the market is still there at 3 too.
+        met = total <= base
+        return met, (
+            f"Scoreline {h}-{a} ({total} goals) — "
+            f"under {line} {'still available ✅' if met else 'already gone ❌'}"
+        )
+
+    if direction == "over":
+        # The line must actually be crossed. A push at a whole line is not a
+        # win, so over 3.0 needs 4 — consistent with `under 3.0` still being
+        # alive at 3, which is the same fact seen from the other side.
+        needed = base + 1
+        met = total >= needed
+        return met, (
+            f"Scoreline {h}-{a} ({total} goals) — "
+            f"over {line} {'beaten ✅' if met else 'not yet ❌'}"
+        )
+
+    # exact
+    met = total == int(line)
+    return met, (
+        f"Scoreline {h}-{a} ({total} goals) — "
+        f"exactly {int(line)}: {'✅' if met else '❌'}"
+    )
+
+
 def safe_dig(d, *keys, default=None):
     """Small local safe-nested-get, kept here so this module has no runtime
     dependency on live_stage6_alerts.py's safe_get (avoids circular import)."""
@@ -558,8 +822,29 @@ def safe_dig(d, *keys, default=None):
     return cur
 
 
-def evaluate_rule_for_match(rule: dict, intel: dict, pre: dict, minute: int, key_loss: dict) -> dict | None:
-    """Returns a triggered-alert dict if this rule fires this cycle, else None."""
+def evaluate_rule_for_match(
+    rule: dict,
+    intel: dict,
+    pre: dict,
+    minute: int,
+    key_loss: dict,
+    score=None,
+    fixture_id: str | None = None,
+) -> dict | None:
+    """
+    Returns a triggered-alert dict if this rule fires this cycle, else None.
+
+    `score` and `fixture_id` are keyword-only-ish additions (both defaulted) so
+    the 166 existing contract tests and any other caller keep working
+    unchanged. `score` is the running (h, a) tuple from
+    stage6.score_from_fixture, or None when it could not be read.
+
+    ORDER MATTERS for honesty of the audit trail, not for correctness — every
+    gate must pass. The scoreline gate is checked immediately after the
+    prematch filter and BEFORE the live-stat threshold, because it is the
+    cheapest question to answer and the one most likely to be the reason a
+    rule stayed silent.
+    """
     if not rule.get("active", True):
         return None
 
@@ -571,14 +856,31 @@ def evaluate_rule_for_match(rule: dict, intel: dict, pre: dict, minute: int, key
     if not pre_met:
         return None
 
-    live_met, live_note = _live_condition_met(rule.get("live", {}), intel, key_loss)
+    rule_live = rule.get("live", {})
+
+    # ── THE SCORELINE GATE ────────────────────────────────────────────────
+    # Handled separately from _live_condition_met because it is a limitation
+    # on the alert, not a stat being watched: it decides whether the user can
+    # still act, not what the match is doing.
+    score_note = ""
+    if rule_live.get("type") == "goals":
+        score_met, score_note = _scoreline_condition_met(rule_live, score)
+        if not score_met:
+            return None
+
+    live_met, live_note = _live_condition_met(rule_live, intel, key_loss)
     if not live_met:
         return None
 
     conf = ((intel or {}).get("match") or {}).get("confidence_score", 0)
     full_note = f"{pre_note} | {live_note}"
+    if score_note:
+        full_note = f"{full_note} | {score_note}"
     if window_note:
         full_note = f"{window_note} {full_note}"
+
+    watchlist = [str(f) for f in (rule.get("watchlist") or [])]
+    watchlisted = bool(fixture_id) and str(fixture_id) in watchlist
 
     return {
         "rule_id": rule["rule_id"],
@@ -586,4 +888,8 @@ def evaluate_rule_for_match(rule: dict, intel: dict, pre: dict, minute: int, key
         "label": rule.get("label", "Untitled Rule"),
         "note": full_note,
         "conf": conf,
+        # Soft preference: recorded, never enforced. The alert is emitted
+        # either way; this flag only lets the UI rank and mark it.
+        "watchlisted": watchlisted,
+        "score": list(score) if isinstance(score, (tuple, list)) else None,
     }

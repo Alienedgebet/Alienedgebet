@@ -36,8 +36,25 @@ def _patch_notify_paths(tmp):
 from LIVE_SCANNER import live_stage4_danger as stage4
 from LIVE_SCANNER import live_stage5_aggregator as stage5
 from LIVE_SCANNER import live_stage6_alerts as stage6
+from LIVE_SCANNER import user_rules_store as rules
 from api import main as api_main
 from LIVE_SCANNER import live_state_classifier as classifier
+
+# Shared, minimal live payloads for the user-rule contracts. Enough for
+# `analyze_match_state`-shaped intel to be read without raising; deliberately
+# NOT a real cycle's output, because these tests assert gate logic, not engine
+# output.
+_INTEL = {
+    "match": {
+        "confidence_score": 80,
+        "h_pressure_share": 60.0,
+        "a_pressure_share": 40.0,
+        "chaos_index": 12.0,
+    },
+    "home": {"live_xg": 1.2, "sot": 4, "corn": 3, "da": 30},
+    "away": {"live_xg": 0.8, "sot": 2, "corn": 1, "da": 20},
+}
+_KEY_LOSS = {"h_lost": 0, "a_lost": 0}
 
 
 class LiveScannerContractTests(unittest.TestCase):
@@ -2688,5 +2705,389 @@ class SettledPredictionKeepsItsTrailTests(unittest.TestCase):
 # mid-module, where unittest.main() called sys.exit() at import time and every
 # test class declared after it was silently never defined or run. The suite
 # reported "OK" while roughly half the contracts were dead code.
+class ScorelineGateContractTests(unittest.TestCase):
+    """
+    THE USER'S SCORELINE LIMITATION.
+
+    "I set up a prematch condition of SH over 2.5 — I should be able to set its
+    live condition to under 2.5, or set the goal I want."
+
+    These pin the three properties that make that honest:
+      * under and over are NOT the same test (the asymmetry is the feature),
+      * an unreadable scoreline never satisfies the gate (fails closed),
+      * a rule with no watchlist behaves exactly as it did before.
+    """
+
+    @staticmethod
+    def _rule(live, **extra):
+        rule = {
+            "rule_id": "r_test",
+            "user_id": "u_test",
+            "label": "Test",
+            "prematch": {"type": "none"},
+            "live": live,
+            "active": True,
+        }
+        rule.update(extra)
+        return rule
+
+    # ── the under/over asymmetry ───────────────────────────────────────────
+    def test_under_gate_fires_while_the_line_is_still_alive(self):
+        """UNDER 2.5 is useful BEFORE the line is crossed — that is the point."""
+        rule = self._rule({"type": "goals", "direction": "under", "line": 2.5})
+        for score in [(0, 0), (1, 0), (1, 1), (2, 0), (0, 2)]:
+            self.assertIsNotNone(
+                rules.evaluate_rule_for_match(
+                    rule, _INTEL, {}, 40, _KEY_LOSS, score=score
+                ),
+                f"under 2.5 should still fire at {score}",
+            )
+
+    def test_under_gate_goes_silent_once_the_line_is_gone(self):
+        """At 2-1 the over-2.5 market is already lost; the alert must not fire."""
+        rule = self._rule({"type": "goals", "direction": "under", "line": 2.5})
+        for score in [(2, 1), (3, 0), (1, 2), (4, 4)]:
+            self.assertIsNone(
+                rules.evaluate_rule_for_match(
+                    rule, _INTEL, {}, 40, _KEY_LOSS, score=score
+                ),
+                f"under 2.5 must NOT fire at {score}",
+            )
+
+    def test_over_gate_is_the_mirror_of_under(self):
+        """OVER 2.5 is useful only AFTER the line is beaten."""
+        under = self._rule({"type": "goals", "direction": "under", "line": 2.5})
+        over = self._rule({"type": "goals", "direction": "over", "line": 2.5})
+        # Below the line: UNDER is useful (the price still exists), OVER is not.
+        for score in [(0, 0), (1, 1), (2, 0)]:
+            self.assertIsNotNone(
+                rules.evaluate_rule_for_match(under, _INTEL, {}, 40, _KEY_LOSS, score=score),
+                f"under 2.5 should fire at {score}",
+            )
+            self.assertIsNone(
+                rules.evaluate_rule_for_match(over, _INTEL, {}, 40, _KEY_LOSS, score=score),
+                f"over 2.5 must not fire at {score}",
+            )
+        # Past the line: the exact mirror image.
+        for score in [(2, 1), (3, 0), (1, 2)]:
+            self.assertIsNone(
+                rules.evaluate_rule_for_match(under, _INTEL, {}, 40, _KEY_LOSS, score=score)
+            )
+            self.assertIsNotNone(
+                rules.evaluate_rule_for_match(over, _INTEL, {}, 40, _KEY_LOSS, score=score),
+                f"over 2.5 should fire at {score}",
+            )
+
+    def test_whole_line_is_a_push_not_a_win(self):
+        """over 3.0 needs 4 goals, and under 3.0 is still alive at 3."""
+        over3 = self._rule({"type": "goals", "direction": "over", "line": 3})
+        under3 = self._rule({"type": "goals", "direction": "under", "line": 3})
+        self.assertIsNone(
+            rules.evaluate_rule_for_match(over3, _INTEL, {}, 40, _KEY_LOSS, score=(2, 1))
+        )
+        self.assertIsNotNone(
+            rules.evaluate_rule_for_match(under3, _INTEL, {}, 40, _KEY_LOSS, score=(2, 1))
+        )
+        self.assertIsNotNone(
+            rules.evaluate_rule_for_match(over3, _INTEL, {}, 40, _KEY_LOSS, score=(2, 2))
+        )
+
+    def test_exact_gate_fires_on_one_total_only(self):
+        rule = self._rule({"type": "goals", "direction": "exact", "line": 3})
+        for score, expected in [((1, 1), False), ((2, 0), False), ((2, 1), True),
+                                ((1, 2), True), ((3, 0), True), ((2, 2), False)]:
+            hit = rules.evaluate_rule_for_match(
+                rule, _INTEL, {}, 40, _KEY_LOSS, score=score
+            )
+            self.assertEqual(hit is not None, expected, f"exact 3 at {score}")
+
+    # ── fails closed ───────────────────────────────────────────────────────
+    def test_unreadable_scoreline_never_satisfies_the_gate(self):
+        """
+        None means "the provider published nothing", NOT 0-0. A gate whose whole
+        job is to know the scoreline must not pass on a scoreline it lacks —
+        otherwise a 0-0-looking read would fire the under gate for a match that
+        may already be 3-0.
+        """
+        for bad in (None, (), ("x", None), (None, None)):
+            rule = self._rule({"type": "goals", "direction": "under", "line": 2.5})
+            self.assertIsNone(
+                rules.evaluate_rule_for_match(
+                    rule, _INTEL, {}, 40, _KEY_LOSS, score=bad
+                ),
+                f"unreadable score {bad!r} must not satisfy the gate",
+            )
+
+    def test_failing_closed_is_not_silently_swallowed(self):
+        """The rule must be silent, but the reason must still be reportable."""
+        met, note = rules._scoreline_condition_met(
+            {"direction": "under", "line": 2.5}, None
+        )
+        self.assertFalse(met)
+        self.assertIn("unavailable", note)
+        self.assertIn("not alerting", note)
+
+    # ── the gate must not be vetoed by the live-stat path ─────────────────
+    def test_passing_gate_is_not_vetoed_by_the_live_condition_check(self):
+        """
+        Regression guard. `_live_condition_met` has no branch for `goals`,
+        because the gate is decided before it is called. If that function ever
+        fell through to its "Unknown live condition" default, a PASSING gate
+        would be vetoed and the rule could never fire at all.
+        """
+        met, _ = rules._live_condition_met(
+            {"type": "goals", "direction": "under", "line": 2.5}, _INTEL, _KEY_LOSS
+        )
+        self.assertTrue(met)
+
+    # ── validation ─────────────────────────────────────────────────────────
+    def test_goal_gate_rejects_a_bad_direction(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"type": "goals", "direction": "sideways", "line": 2.5},
+            })
+
+    def test_goal_gate_rejects_a_fractional_exact_line(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"type": "goals", "direction": "exact", "line": 2.5},
+            })
+
+    def test_goal_gate_rejects_an_out_of_range_line(self):
+        for line in (-1, 99):
+            with self.assertRaises(rules.RuleValidationError):
+                rules.validate_rule_payload({
+                    "user_id": "u", "prematch": {"type": "none"},
+                    "live": {"type": "goals", "direction": "under", "line": line},
+                })
+
+    def test_goal_gate_requires_a_line(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"type": "goals", "direction": "under"},
+            })
+
+    def test_valid_goal_gate_round_trips(self):
+        out = rules.validate_rule_payload({
+            "user_id": "u", "prematch": {"type": "none"},
+            "live": {"type": "goals", "direction": "under", "line": 2.5},
+        })
+        self.assertEqual(out["live"], {"type": "goals", "direction": "under", "line": 2.5})
+
+    # ── the window and the prematch filter still run first ─────────────────
+    def test_gate_does_not_bypass_the_minute_window(self):
+        rule = self._rule(
+            {"type": "goals", "direction": "under", "line": 2.5},
+            minute_window={"start": 30, "end": 50},
+        )
+        self.assertIsNone(
+            rules.evaluate_rule_for_match(rule, _INTEL, {}, 10, _KEY_LOSS, score=(0, 0))
+        )
+        self.assertIsNotNone(
+            rules.evaluate_rule_for_match(rule, _INTEL, {}, 40, _KEY_LOSS, score=(0, 0))
+        )
+
+    def test_gate_does_not_bypass_the_prematch_filter(self):
+        rule = self._rule({"type": "goals", "direction": "under", "line": 2.5})
+        rule["prematch"] = {"type": "key_missing", "side": "any", "min_count": 5}
+        # No team_audit at all -> the prematch condition cannot be met.
+        self.assertIsNone(
+            rules.evaluate_rule_for_match(rule, _INTEL, {}, 40, _KEY_LOSS, score=(0, 0))
+        )
+
+    # ── backward compatibility ─────────────────────────────────────────────
+    def test_a_rule_without_a_watchlist_still_fires_everywhere(self):
+        """
+        The three pre-existing rules in data/user_rules.json have no watchlist.
+        A missing one must mean "no preference", never "match nothing".
+        """
+        rule = self._rule({"type": "goals", "direction": "under", "line": 2.5})
+        self.assertNotIn("watchlist", rule)
+        hit = rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 1), fixture_id="999"
+        )
+        self.assertIsNotNone(hit)
+        self.assertFalse(hit["watchlisted"])
+
+
+class WatchlistContractTests(unittest.TestCase):
+    """Accepted matches are a SOFT preference — recorded, never enforced."""
+
+    @staticmethod
+    def _rule(watchlist):
+        return {
+            "rule_id": "r_w",
+            "user_id": "u_w",
+            "label": "W",
+            "prematch": {"type": "none"},
+            "live": {"type": "goals", "direction": "under", "line": 2.5},
+            "watchlist": watchlist,
+            "active": True,
+        }
+
+    def test_a_watchlisted_match_is_flagged(self):
+        hit = rules.evaluate_rule_for_match(
+            self._rule(["111"]), _INTEL, {}, 40, _KEY_LOSS,
+            score=(0, 0), fixture_id="111",
+        )
+        self.assertTrue(hit["watchlisted"])
+
+    def test_a_non_watchlisted_match_still_fires(self):
+        """
+        THE DEFINING PROPERTY OF "SOFT". A match the user never clicked still
+        raises the alert; it is simply not flagged. If this ever returns None,
+        the watchlist has silently become a hard filter.
+        """
+        hit = rules.evaluate_rule_for_match(
+            self._rule(["111"]), _INTEL, {}, 40, _KEY_LOSS,
+            score=(0, 0), fixture_id="222",
+        )
+        self.assertIsNotNone(hit)
+        self.assertFalse(hit["watchlisted"])
+
+    def test_watchlist_ids_are_string_normalised_and_deduped(self):
+        out = rules.validate_rule_payload({
+            "user_id": "u", "prematch": {"type": "none"},
+            "live": {"type": "goals", "direction": "under", "line": 2.5},
+            "watchlist": [111, "111", " 222 ", "", "   "],
+        })
+        self.assertEqual(out["watchlist"], ["111", "222"])
+
+    def test_watchlist_defaults_to_empty_not_none(self):
+        out = rules.validate_rule_payload({
+            "user_id": "u", "prematch": {"type": "none"},
+            "live": {"type": "goals", "direction": "under", "line": 2.5},
+        })
+        self.assertEqual(out["watchlist"], [])
+
+    def test_watchlist_must_be_a_list(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"type": "goals", "direction": "over", "line": 2.5},
+                "watchlist": "111,222",
+            })
+
+    def test_the_scoreline_travels_with_the_alert(self):
+        hit = rules.evaluate_rule_for_match(
+            self._rule([]), _INTEL, {}, 40, _KEY_LOSS,
+            score=(2, 0), fixture_id="111",
+        )
+        self.assertEqual(hit["score"], [2, 0])
+
+
+class CandidateBoardContractTests(unittest.TestCase):
+    """
+    "Can Step 1 show all the matches that fall under any condition, and let me
+    click accept?"
+
+    The board is only trustworthy if it scores matches with the SAME predicate
+    the live cycle uses, so these compare the two directly rather than pinning
+    hard-coded counts that would drift every morning.
+    """
+
+    @staticmethod
+    def _db():
+        return {
+            "1": {  # 3 key players missing, GK down
+                "fixture": "A vs B",
+                "team_audit": {
+                    "home": {"missing_count": 3, "gk_out": True},
+                    "away": {"missing_count": 0, "gk_out": False},
+                    "has_lineup": True, "has_formation": True,
+                    "formations": {"10": "4-3-3"},
+                },
+            },
+            "2": {  # nothing wrong
+                "fixture": "C vs D",
+                "team_audit": {
+                    "home": {"missing_count": 0, "gk_out": False},
+                    "away": {"missing_count": 0, "gk_out": False},
+                },
+            },
+            "3": {  # in the feeds, but stage 1 published NO audit for it
+                "fixture": "E vs F",
+            },
+        }
+
+    def test_board_reports_every_fixture_not_only_the_matches(self):
+        """The user asked to see ALL matches, then pick. Hiding the misses
+        would make the board a filter instead of a chooser."""
+        cond = {"type": "key_missing", "side": "any", "min_count": 2}
+        rows = rules.find_candidates(cond, self._db())
+        self.assertEqual(len(rows), 3)
+        # The misses are PRESENT, not filtered out — the user asked to see every
+        # match and choose, not to be handed a pre-filtered list.
+        self.assertEqual(sum(1 for r in rows if r["met"]), 1)
+        self.assertEqual(sum(1 for r in rows if not r["met"]), 2)
+
+    def test_matching_rows_sort_above_non_matching(self):
+        rows = rules.find_candidates(
+            {"type": "key_missing", "side": "any", "min_count": 2}, self._db()
+        )
+        self.assertTrue(rows[0]["met"])
+        self.assertEqual(rows[0]["fixture_id"], "1")
+        self.assertFalse(rows[1]["met"])
+
+    def test_board_agrees_with_the_live_predicate(self):
+        """
+        The board and the cycle must never disagree. Scored here with the exact
+        condition the live evaluator would use for this fixture.
+        """
+        cond = {"type": "key_missing", "side": "any", "min_count": 2}
+        rows = rules.find_candidates(cond, self._db())
+        for r in rows:
+            live_met, _ = rules._prematch_condition_met(cond, self._db()[r["fixture_id"]])
+            self.assertEqual(r["met"], live_met, r["fixture_id"])
+
+    def test_evidence_comes_from_the_audit_and_nothing_is_invented(self):
+        rows = rules.find_candidates({"type": "none"}, self._db())
+        hit = next(r for r in rows if r["fixture_id"] == "1")
+        self.assertTrue(hit["evidence"]["has_formation"])
+        self.assertEqual(hit["evidence"]["home_missing"], 3)
+        self.assertTrue(hit["evidence"]["home_gk_out"])
+        # A real count of zero is shown as zero...
+        clean = next(r for r in rows if r["fixture_id"] == "2")
+        self.assertEqual(clean["evidence"]["home_missing"], 0)
+        # ...but a fixture with NO audit at all is null, never coerced to 0.
+        # "0 key players missing" and "we have no squad data" are opposite
+        # facts and only one of them is a reason to act.
+        blind = next(r for r in rows if r["fixture_id"] == "3")
+        self.assertIsNone(blind["evidence"]["home_missing"])
+        self.assertFalse(blind["evidence"]["has_lineup"])
+
+    def test_a_fixture_that_is_not_live_carries_no_score(self):
+        """Never a fabricated 0-0 for a match that has not kicked off."""
+        rows = rules.find_candidates({"type": "none"}, self._db())
+        self.assertIsNone(next(r for r in rows if r["fixture_id"] == "1")["live_score"])
+
+    def test_a_live_fixture_carries_its_real_score(self):
+        rows = rules.find_candidates(
+            {"type": "none"}, self._db(), {"1": (2, 0)}
+        )
+        self.assertEqual(next(r for r in rows if r["fixture_id"] == "1")["live_score"], [2, 0])
+
+    def test_the_board_validates_with_the_save_validator(self):
+        """A condition the save would 422 must not be offered by the board."""
+        with self.assertRaises(rules.RuleValidationError):
+            rules.find_candidates(
+                {"type": "key_missing", "side": "nowhere", "min_count": 2}, self._db()
+            )
+
+    def test_board_survives_a_malformed_source_row(self):
+        db = {"1": {"fixture": "A vs B"}, "2": "not-a-dict", "3": {}}
+        rows = rules.find_candidates({"type": "none"}, db)
+        ids = {r["fixture_id"] for r in rows}
+        self.assertIn("1", ids)
+        self.assertNotIn("2", ids)   # skipped, not crashed on
+
+    def test_board_never_returns_a_blank_name(self):
+        rows = rules.find_candidates({"type": "none"}, {"9": {}})
+        self.assertTrue(rows[0]["name"].strip())
+
+
 if __name__ == "__main__":
     unittest.main()
