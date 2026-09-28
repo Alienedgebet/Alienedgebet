@@ -2844,15 +2844,24 @@ class ScorelineGateContractTests(unittest.TestCase):
     # ── the gate must not be vetoed by the live-stat path ─────────────────
     def test_passing_gate_is_not_vetoed_by_the_live_condition_check(self):
         """
-        Regression guard. `_live_condition_met` has no branch for `goals`,
-        because the gate is decided before it is called. If that function ever
-        fell through to its "Unknown live condition" default, a PASSING gate
-        would be vetoed and the rule could never fire at all.
+        Regression guard, twice over.
+
+        The gate was originally decided OUTSIDE _live_condition_met, which had
+        no branch for it, so a passing gate fell through to the "Unknown live
+        condition" default and was vetoed — the rule could never fire. The gate
+        is now a peer condition inside the group, and this pins that a genuine
+        pass survives the plumbing.
+
+        The second assertion is the opposite case: with no readable scoreline
+        the gate must refuse, even though every other condition is fine.
         """
-        met, _ = rules._live_condition_met(
-            {"type": "goals", "direction": "under", "line": 2.5}, _INTEL, _KEY_LOSS
-        )
-        self.assertTrue(met)
+        gate = {"type": "goals", "direction": "under", "line": 2.5}
+        met, note = rules._live_condition_met(gate, _INTEL, _KEY_LOSS, score=(1, 0))
+        self.assertTrue(met, note)
+        # Unreadable scoreline still fails closed through this same path.
+        met_none, note_none = rules._live_condition_met(gate, _INTEL, _KEY_LOSS)
+        self.assertFalse(met_none)
+        self.assertIn("not alerting", note_none)
 
     # ── validation ─────────────────────────────────────────────────────────
     def test_goal_gate_rejects_a_bad_direction(self):
@@ -2889,7 +2898,14 @@ class ScorelineGateContractTests(unittest.TestCase):
             "user_id": "u", "prematch": {"type": "none"},
             "live": {"type": "goals", "direction": "under", "line": 2.5},
         })
-        self.assertEqual(out["live"], {"type": "goals", "direction": "under", "line": 2.5})
+        # A single condition is normalised into a one-condition group, so the
+        # evaluator has exactly one code path and the old saved rules behave
+        # identically to how they did before.
+        self.assertEqual(out["live"], {
+            "conditions": [{"type": "goals", "direction": "under", "line": 2.5}],
+            "mode": "all",
+            "threshold": 1,
+        })
 
     # ── the window and the prematch filter still run first ─────────────────
     def test_gate_does_not_bypass_the_minute_window(self):
@@ -3399,13 +3415,31 @@ class UserAlertPushContractTests(unittest.TestCase):
 
     def test_the_goal_gate_is_described_in_words(self):
         from LIVE_SCANNER.user_rules_store import describe_goal_gate
+
+        def group(*conds):
+            return {"conditions": list(conds), "mode": "all",
+                    "threshold": len(conds)}
+
+        under = {"type": "goals", "direction": "under", "line": 2.5}
+        self.assertEqual(describe_goal_gate(group(under)), "under 2.5")
         self.assertEqual(
-            describe_goal_gate({"direction": "under", "line": 2.5}), "under 2.5")
+            describe_goal_gate(group({"type": "goals", "direction": "over", "line": 3})),
+            "over 3")
         self.assertEqual(
-            describe_goal_gate({"direction": "over", "line": 3}), "over 3")
+            describe_goal_gate(group({"type": "goals", "direction": "exact", "line": 3})),
+            "exactly 3 goals")
+        # The gate is found among siblings, not only when it is alone.
         self.assertEqual(
-            describe_goal_gate({"direction": "exact", "line": 3}), "exactly 3 goals")
-        self.assertIsNone(describe_goal_gate({"direction": "nonsense", "line": 2}))
+            describe_goal_gate(group(
+                {"type": "sot", "side": "home", "min_value": 4}, under)),
+            "under 2.5")
+        # A group with no gate at all.
+        self.assertIsNone(
+            describe_goal_gate(group({"type": "sot", "side": "home", "min_value": 4})))
+        self.assertIsNone(describe_goal_gate({"conditions": []}))
+        # A legacy single-condition dict is still a dict, so it must be wrapped
+        # rather than read as an (empty) group.
+        self.assertEqual(describe_goal_gate(under), "under 2.5")
         self.assertIsNone(describe_goal_gate({}))
 
     def test_the_rule_alert_carries_its_gate_to_the_evaluator(self):
@@ -3429,6 +3463,207 @@ class UserAlertPushContractTests(unittest.TestCase):
             rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0), fixture_id="1")
         self.assertIsNotNone(hit)
         self.assertIsNone(hit["gate"])
+
+
+class LiveConditionGroupContractTests(unittest.TestCase):
+    """
+    "The live condition should be flexible — I should be able to select all
+    the conditions I want, not be limited to only one."
+
+    A group is {conditions: [...], mode: "all" | "at_least", threshold: N}.
+    Prematch stays single-select by design; only the live half is a group.
+    """
+
+    @staticmethod
+    def _rule(conditions, mode="all", threshold=None, **extra):
+        live = {"conditions": conditions, "mode": mode}
+        if threshold is not None:
+            live["threshold"] = threshold
+        rule = {"rule_id": "r", "user_id": "u", "label": "L",
+                "prematch": {"type": "none"}, "live": live, "active": True}
+        rule.update(extra)
+        return rule
+
+    # Under 2.5 AND home pressure >= 55. _INTEL has h_pressure_share = 60.
+    GATE = {"type": "goals", "direction": "under", "line": 2.5}
+    PRESSURE = {"type": "pressure_share", "side": "home", "min_value": 55}
+    # SOT is 4 for home, so min 4 passes and min 9 fails.
+    SOT_PASS = {"type": "sot", "side": "home", "min_value": 4}
+    SOT_FAIL = {"type": "sot", "side": "home", "min_value": 9}
+
+    # ── the headline case: scoreline composes with another condition ───────
+    def test_the_gate_combines_with_another_live_condition(self):
+        """"under 2.5 AND home pressure > 60" was inexpressible before."""
+        rule = self._rule([self.GATE, self.PRESSURE])
+        # 1-0, pressure 60 -> both hold.
+        self.assertIsNotNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0)))
+        # 2-1 -> three goals, the scoreline is gone, so the whole rule stays
+        # silent even though the pressure condition still holds.
+        self.assertIsNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(2, 1)))
+        # 3-0: three goals, so under 2.5 is gone again. The gate holds the
+        # line from BOTH directions, and the pressure condition is irrelevant
+        # to that decision.
+        self.assertIsNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(3, 0)))
+        # 0-0 stays inside the limit at any scoreline the user allows.
+        self.assertIsNotNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(0, 0)))
+
+    def test_a_failing_sibling_still_blocks_in_all_mode(self):
+        rule = self._rule([self.GATE, self.SOT_FAIL])
+        self.assertIsNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0)))
+
+    # ── at_least N of K ────────────────────────────────────────────────────
+    def test_at_least_two_of_three_fires_when_two_hold(self):
+        rule = self._rule([self.GATE, self.SOT_PASS, self.SOT_FAIL],
+                          mode="at_least", threshold=2)
+        self.assertIsNotNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0)))
+
+    def test_at_least_two_of_three_is_silent_when_only_one_holds(self):
+        rule = self._rule([self.GATE, self.SOT_FAIL, self.SOT_FAIL],
+                          mode="at_least", threshold=2)
+        self.assertIsNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0)))
+
+    def test_at_least_one_of_two_is_equivalent_to_or(self):
+        rule = self._rule([self.GATE, self.SOT_FAIL],
+                          mode="at_least", threshold=1)
+        # The gate holds, the SOT condition does not — OR still fires.
+        self.assertIsNotNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0)))
+        # Gate gone at 2-1, SOT still failing — now nothing holds.
+        self.assertIsNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(2, 1)))
+
+    def test_all_mode_is_the_default(self):
+        rule = self._rule([self.GATE, self.SOT_PASS])
+        self.assertIsNotNone(rules.evaluate_rule_for_match(
+            rule, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0)))
+
+    # ── backward compatibility ─────────────────────────────────────────────
+    def test_a_legacy_single_condition_rule_still_works(self):
+        """Every alert saved before multi-select must keep behaving the same."""
+        legacy = {"rule_id": "r", "user_id": "u", "label": "L",
+                  "prematch": {"type": "none"},
+                  "live": {"type": "goals", "direction": "under", "line": 2.5},
+                  "active": True}
+        self.assertIsNotNone(rules.evaluate_rule_for_match(
+            legacy, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0)))
+        self.assertIsNone(rules.evaluate_rule_for_match(
+            legacy, _INTEL, {}, 40, _KEY_LOSS, score=(2, 1)))
+
+    def test_a_legacy_rule_still_reports_its_gate(self):
+        legacy = {"rule_id": "r", "user_id": "u", "label": "L",
+                  "prematch": {"type": "none"},
+                  "live": {"type": "goals", "direction": "under", "line": 2.5},
+                  "active": True}
+        hit = rules.evaluate_rule_for_match(
+            legacy, _INTEL, {}, 40, _KEY_LOSS, score=(1, 0))
+        self.assertEqual(hit["gate"], "under 2.5")
+
+    # ── validation ─────────────────────────────────────────────────────────
+    def test_an_empty_group_is_rejected(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"conditions": [], "mode": "all"}})
+
+    def test_an_unknown_mode_is_rejected(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"conditions": [self.GATE], "mode": "sideways"}})
+
+    def test_a_threshold_above_the_condition_count_is_rejected(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"conditions": [self.GATE], "mode": "at_least",
+                         "threshold": 3}})
+
+    def test_a_zero_threshold_is_rejected(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"conditions": [self.GATE], "mode": "at_least",
+                         "threshold": 0}})
+
+    def test_a_bad_condition_inside_a_group_is_still_rejected(self):
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"conditions": [self.GATE,
+                                        {"type": "goals", "direction": "sideways",
+                                         "line": 2}]}})
+
+    def test_too_many_conditions_are_rejected(self):
+        many = [{"type": "sot", "side": "home", "min_value": 1} for _ in range(9)]
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u", "prematch": {"type": "none"},
+                "live": {"conditions": many, "mode": "all"}})
+
+    def test_threshold_defaults_to_all_when_omitted(self):
+        out = rules.validate_rule_payload({
+            "user_id": "u", "prematch": {"type": "none"},
+            "live": {"conditions": [self.GATE, self.SOT_PASS]}})
+        self.assertEqual(out["live"]["mode"], "all")
+        self.assertEqual(out["live"]["threshold"], 2)
+
+    # ── the note must explain a silent rule ───────────────────────────────
+    def test_the_note_names_every_condition(self):
+        """A rule that never fires must say WHY, not just go quiet."""
+        met, note = rules._live_conditions_met(
+            {"conditions": [self.GATE, self.SOT_FAIL], "mode": "all",
+             "threshold": 2}, _INTEL, _KEY_LOSS, score=(1, 0))
+        self.assertFalse(met)
+        self.assertIn("1/2", note)          # how many held
+        self.assertIn("under 2.5", note)     # the gate, by name
+        self.assertIn("SOT", note)           # the blocker, by name
+        self.assertIn("9", note)             # and its real numbers
+
+    def test_the_note_states_the_threshold_in_at_least_mode(self):
+        met, note = rules._live_conditions_met(
+            {"conditions": [self.GATE, self.SOT_FAIL, self.SOT_FAIL],
+             "mode": "at_least", "threshold": 2},
+            _INTEL, _KEY_LOSS, score=(1, 0))
+        self.assertFalse(met)
+        self.assertIn("need 2", note)
+
+    def test_one_broken_condition_does_not_take_down_the_group(self):
+        """
+        An unreadable condition must be reported as UNMET, never raised, and
+        must not stop its siblings from being evaluated. If this ever raised,
+        one bad condition in a group would take down the whole live cycle.
+        """
+        met, note = rules._live_conditions_met(
+            {"conditions": [{"type": "not_a_real_type"}, self.GATE],
+             "mode": "all", "threshold": 2},
+            _INTEL, _KEY_LOSS, score=(1, 0))
+        self.assertFalse(met)
+        self.assertIn("Unknown live condition", note)
+        # The good sibling was still evaluated and still passed.
+        self.assertIn("1/2", note)
+        self.assertIn("under 2.5", note)
+
+    def test_prematch_remains_single_select(self):
+        """
+        Prematch is deliberately NOT a group. A second prematch condition must
+        be rejected rather than silently ignored, so a user never believes
+        they narrowed the board when they did not.
+        """
+        with self.assertRaises(rules.RuleValidationError):
+            rules.validate_rule_payload({
+                "user_id": "u",
+                "prematch": {"conditions": [
+                    {"type": "flag", "flag": "h2h_o25_100"},
+                    {"type": "key_missing", "side": "any", "min_count": 2}],
+                },
+                "live": {"type": "goals", "direction": "under", "line": 2.5}})
 
 
 if __name__ == "__main__":

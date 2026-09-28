@@ -28,6 +28,7 @@ import {
   type UserRuleDef,
   type UserRulePrematch,
   type UserRuleLive,
+  type UserRuleLiveAny,
   type RuleCandidateMatch,
   type PrematchFlagKey,
   type PrematchRateMetric,
@@ -35,6 +36,8 @@ import {
   type ChemistryLevel,
   type RuleSide,
   type RuleGoalDirection,
+  type RuleConditionMode,
+  type UserRuleLiveGroup,
   type LiveConditionType,
 } from "@/lib/api";
 
@@ -177,6 +180,66 @@ function describePrematch(p: UserRulePrematch): string {
   }
 }
 
+/** One live condition the user has added to the group. */
+type LiveConditionDraft = {
+  id: string;
+  type: Exclude<LiveConditionType, "goals">;
+  side: RuleSide;
+  min_value: number;
+  min_count: number;
+};
+
+/**
+ * Live value slider bounds per type — keeps the UI honest about what range
+ * each real stat actually moves in, so the user is not asked to pick a
+ * "pressure share" of 400.
+ *
+ * Module-level, not component-level: newLiveDraft() seeds each condition's
+ * default from this and is itself a module-level helper.
+ */
+function liveSliderConfig(type: LiveConditionType): { min: number; max: number; step: number } {
+  switch (type) {
+    case "pressure_share":
+      return { min: 40, max: 80, step: 1 };
+    case "chaos_index":
+      return { min: 0, max: 12, step: 0.5 };
+    case "xg":
+      return { min: 0, max: 4, step: 0.1 };
+    case "sot":
+      return { min: 0, max: 12, step: 1 };
+    case "corners":
+      return { min: 0, max: 12, step: 1 };
+    case "da":
+      return { min: 0, max: 60, step: 1 };
+    default:
+      return { min: 0, max: 100, step: 1 };
+  }
+}
+
+let draftSeq = 0;
+function nextDraftId(): string {
+  draftSeq += 1;
+  return `c${draftSeq}`;
+}
+
+function newLiveDraft(type: Exclude<LiveConditionType, "goals">): LiveConditionDraft {
+  const cfg = liveSliderConfig(type);
+  return {
+    id: nextDraftId(),
+    type,
+    side: type === "chaos_index" ? "any" : "home",
+    min_value: cfg?.max ?? 5,
+    min_count: 1,
+  };
+}
+
+function draftToCondition(d: LiveConditionDraft): UserRuleLive {
+  if (d.type === "key_player_lost") {
+    return { type: "key_player_lost", side: d.side, min_count: d.min_count };
+  }
+  return buildLive(d.type, d.side, d.min_value, d.side, d.min_count);
+}
+
 function describeGoalGate(direction: RuleGoalDirection, line: number): string {
   return `Scoreline ${GOAL_DIRECTION_LABELS[direction].toLowerCase()} ${line}`;
 }
@@ -206,10 +269,29 @@ function describeLive(l: UserRuleLive): string {
   }
 }
 
+/**
+ * Describe a rule's live half, whichever shape it is stored in.
+ *
+ * Saved rules are always groups, but one saved before multi-select is still a
+ * bare single condition on disk, so both must read. The group is labelled by
+ * HOW it is decided, not just what it checks — "under 2.5" and "under 2.5 AND
+ * xG 2" are very different alerts and must not look identical in the list.
+ */
+function describeLiveAny(live: UserRuleLiveAny): string {
+  if (!("conditions" in live)) return describeLive(live);
+  const parts = live.conditions.map(describeLive);
+  if (parts.length === 0) return "Every live update";
+  if (live.mode === "all" || live.threshold >= parts.length) {
+    return parts.length === 1 ? parts[0] : `ALL of ${parts.length} (${parts.join(" + ")})`;
+  }
+  if (live.threshold === 1) return `ANY of ${parts.length} (${parts.join(" + ")})`;
+  return `ANY ${live.threshold} of ${parts.length} (${parts.join(" + ")})`;
+}
+
 function describeRule(rule: UserRuleDef): { pre: string; live: string; window: string } {
   return {
     pre: describePrematch(rule.prematch),
-    live: describeLive(rule.live),
+    live: describeLiveAny(rule.live),
     window: rule.minute_window
       ? `${rule.minute_window.start}'–${rule.minute_window.end}'`
       : "Full match",
@@ -281,19 +363,19 @@ export default function LiveRulesPage() {
   // marking; never used to suppress an alert.
   const [watchlist, setWatchlist] = useState<string[]>([]);
 
-  // ── The scoreline gate ──────────────────────────────────────────────────
+  // ── The scoreline gate, now ONE member of the live condition group ─────
+  // It used to be an exclusive mode that replaced the live condition, which
+  // made "under 2.5 AND home pressure > 60%" inexpressible.
   const [useGoalGate, setUseGoalGate] = useState(true);
   const [goalDirection, setGoalDirection] = useState<RuleGoalDirection>("under");
   const [goalLine, setGoalLine] = useState(2.5);
 
-  // Live state
-  const [liveType, setLiveType] = useState<Exclude<LiveConditionType, "goals">>(
-    "pressure_share"
-  );
-  const [liveSide, setLiveSide] = useState<RuleSide>("any");
-  const [liveMinValue, setLiveMinValue] = useState(55);
-  const [keyLostSide, setKeyLostSide] = useState<RuleSide>("any");
-  const [keyLostCount, setKeyLostCount] = useState(1);
+  // ── Live conditions: any number, with how many must hold ───────────────
+  const [liveDrafts, setLiveDrafts] = useState<LiveConditionDraft[]>([
+    newLiveDraft("pressure_share"),
+  ]);
+  const [condMode, setCondMode] = useState<RuleConditionMode>("all");
+  const [condThreshold, setCondThreshold] = useState(1);
 
   // Minute window state
   const [useWindow, setUseWindow] = useState(false);
@@ -440,26 +522,58 @@ export default function LiveRulesPage() {
     );
   }
 
-  // Live value slider bounds/defaults per type — keeps the UI honest about
-  // what range each real stat actually moves in.
-  function liveSliderConfig(type: LiveConditionType): { min: number; max: number; step: number } {
-    switch (type) {
-      case "pressure_share":
-        return { min: 40, max: 80, step: 1 };
-      case "chaos_index":
-        return { min: 0, max: 12, step: 0.5 };
-      case "xg":
-        return { min: 0, max: 4, step: 0.1 };
-      case "sot":
-        return { min: 0, max: 12, step: 1 };
-      case "corners":
-        return { min: 0, max: 12, step: 1 };
-      case "da":
-        return { min: 0, max: 60, step: 1 };
-      default:
-        return { min: 0, max: 100, step: 1 };
-    }
+  function addLiveCondition(type: Exclude<LiveConditionType, "goals">) {
+    setLiveDrafts((prev) =>
+      prev.some((d) => d.type === type)
+        ? prev // already in the group — no silent duplicates
+        : [...prev, newLiveDraft(type)]
+    );
   }
+
+  function removeLiveCondition(id: string) {
+    setLiveDrafts((prev) => prev.filter((d) => d.id !== id));
+  }
+
+  function updateLiveCondition(id: string, patch: Partial<LiveConditionDraft>) {
+    setLiveDrafts((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+  }
+
+  /**
+   * The live condition group exactly as it will be saved.
+   *
+   * The scoreline gate is a member of this list like any other, not a separate
+   * mode — which is what makes "under 2.5 AND home pressure > 60%" possible.
+   * `snapshot` is dropped when other conditions exist because it always passes
+   * and would make an "all" group trivially true.
+   */
+  const liveGroup = useMemo<UserRuleLiveGroup>(() => {
+    const conditions: UserRuleLive[] = liveDrafts.map(draftToCondition);
+    if (useGoalGate) {
+      conditions.unshift({ type: "goals", direction: goalDirection, line: goalLine });
+    }
+    const meaningful = conditions.filter((c) => c.type !== "snapshot");
+    const final = meaningful.length > 0 ? meaningful : conditions;
+    // The threshold can never exceed the number of conditions; clamping here
+    // means removing a card can never leave the user saving an invalid rule.
+    const threshold = Math.min(Math.max(1, condThreshold), final.length);
+    return { conditions: final, mode: condMode, threshold };
+  }, [liveDrafts, useGoalGate, goalDirection, goalLine, condMode, condThreshold]);
+
+  const liveConditionCount = liveGroup.conditions.length;
+
+  /** One line describing how the group is decided, for the review strip. */
+  const liveGroupSummary = useMemo(() => {
+    const parts = liveGroup.conditions.map((c) => describeLive(c));
+    if (parts.length === 0) return "no live condition";
+    const joined = parts.join(" + ");
+    if (liveGroup.mode === "all" || liveGroup.threshold >= parts.length) {
+      return `ALL of: ${joined}`;
+    }
+    if (liveGroup.threshold === 1) return `ANY of: ${joined}`;
+    return `ANY ${liveGroup.threshold} of ${parts.length}: ${joined}`;
+  }, [liveGroup]);
+
+
 
   async function handleSave() {
     if (!userId) return;
@@ -470,14 +584,10 @@ export default function LiveRulesPage() {
       // The scoreline gate REPLACES the live condition when it is on: the gate
       // is the limitation, and there is nothing to add on top of "the total is
       // still under the line". Turning it off falls back to the live stat.
-      const live: UserRuleLive = useGoalGate
-        ? { type: "goals", direction: goalDirection, line: goalLine }
-        : buildLive(liveType, liveSide, liveMinValue, keyLostSide, keyLostCount);
-
       await userRulesApi.create({
         label: label.trim() || "Untitled Rule",
         prematch,
-        live,
+        live: liveGroup,
         ...(useWindow ? { minute_window: { start: windowStart, end: windowEnd } } : {}),
         watchlist,
         active: true,
@@ -514,9 +624,11 @@ export default function LiveRulesPage() {
 
   // A rule needs at least one real condition. The scoreline gate counts as one
   // on its own, so a prematch-less rule is still valid while the gate is on.
-  const invalidCombo = prematchType === "none" && liveType === "snapshot" && !useGoalGate;
-  const sliderCfg = liveSliderConfig(liveType);
-  const liveNeedsSide = LIVE_SIDED_TYPES.includes(liveType) && liveType !== "key_player_lost";
+  // A rule needs at least one real condition. The scoreline gate counts on its
+  // own, so a prematch-less rule is still valid while it is in the group.
+  const invalidCombo =
+    prematchType === "none" &&
+    liveGroup.conditions.every((c) => c.type === "snapshot");
 
   return (
     <div className="flex flex-col gap-5 p-6">
@@ -765,243 +877,245 @@ export default function LiveRulesPage() {
           </div>
         </section>
 
-        {/* ══ STEP 2 — THE SCORELINE GATE ══ */}
+        {/* ══ STEP 2 — LIVE CONDITIONS (pick any combination) ══ */}
         <section className="rounded-xl border border-accent-amber/25 bg-accent-amber/[0.04] p-4">
           <StepHeader
             n={2}
-            icon={<Target className="h-4 w-4" />}
-            title="Scoreline gate"
-            subtitle="The goal limit the alert must respect before it is allowed to reach you."
+            icon={<Radio className="h-4 w-4" />}
+            title="Live conditions"
+            subtitle="Add as many as you like, then choose how many must be met before the alert goes out."
             accent="amber"
           />
 
-          <div className="mb-3 flex flex-wrap gap-1.5">
-            <Chip active={useGoalGate} accent="amber" onClick={() => setUseGoalGate(true)}>
-              Limit the scoreline
-            </Chip>
-            <Chip active={!useGoalGate} accent="amber" onClick={() => setUseGoalGate(false)}>
-              No goal limit
-            </Chip>
-          </div>
+          {/* ── the scoreline gate, one member of the group ── */}
+          <div className="mb-3 rounded-lg border border-accent-amber/30 bg-bg-primary/40 p-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5 text-2xs font-semibold uppercase tracking-wider text-accent-amber">
+                <Target className="h-3.5 w-3.5" />
+                Scoreline gate
+              </span>
+              <Chip active={useGoalGate} accent="amber" onClick={() => setUseGoalGate((v) => !v)}>
+                {useGoalGate ? "Added" : "Not added"}
+              </Chip>
+            </div>
 
-          {useGoalGate ? (
-            <>
-              <div className="mb-3 flex flex-wrap gap-1.5">
-                {(Object.keys(GOAL_DIRECTION_LABELS) as RuleGoalDirection[]).map((d) => (
-                  <Chip
-                    key={d}
-                    active={goalDirection === d}
-                    accent="amber"
-                    onClick={() => {
-                      setGoalDirection(d);
-                      // `exact` only accepts whole goals and the server rejects
-                      // a fractional one with a 422, so snap the line here
-                      // rather than letting the user save something invalid.
-                      if (d === "exact") setGoalLine(Math.round(goalLine));
-                    }}
-                  >
-                    {GOAL_DIRECTION_LABELS[d]}
-                  </Chip>
-                ))}
-              </div>
-
-              <p className="mb-3 text-2xs leading-relaxed text-text-secondary">
-                {GOAL_DIRECTION_HINTS[goalDirection]}
-              </p>
-
-              <div className="mb-3 flex flex-wrap items-center gap-2">
-                <span className="text-2xs text-text-dim">Goal line</span>
-                <div className="flex items-center gap-1">
-                  <StepperButton
-                    onClick={() =>
-                      setGoalLine((v) => Math.max(0, v - (goalDirection === "exact" ? 1 : 0.5)))
-                    }
-                    disabled={goalLine <= 0}
-                  >
-                    −
-                  </StepperButton>
-                  <span className="min-w-[3.5rem] text-center font-mono text-sm font-semibold text-text-primary">
-                    {goalLine}
-                  </span>
-                  <StepperButton
-                    onClick={() =>
-                      setGoalLine((v) => Math.min(10, v + (goalDirection === "exact" ? 1 : 0.5)))
-                    }
-                    disabled={goalLine >= 10}
-                  >
-                    +
-                  </StepperButton>
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {(goalDirection === "exact"
-                    ? [1, 2, 3, 4, 5]
-                    : [0.5, 1.5, 2.5, 3.5, 4.5]
-                  ).map((v) => (
-                    <Chip key={v} active={goalLine === v} accent="amber" onClick={() => setGoalLine(v)}>
-                      {v}
+            {useGoalGate && (
+              <>
+                <div className="mb-2.5 flex flex-wrap gap-1.5">
+                  {(Object.keys(GOAL_DIRECTION_LABELS) as RuleGoalDirection[]).map((d) => (
+                    <Chip
+                      key={d}
+                      active={goalDirection === d}
+                      accent="amber"
+                      onClick={() => {
+                        setGoalDirection(d);
+                        // `exact` only accepts whole goals and the server rejects
+                        // a fractional one with a 422, so snap the line here
+                        // rather than letting the user save something invalid.
+                        if (d === "exact") setGoalLine(Math.round(goalLine));
+                      }}
+                    >
+                      {GOAL_DIRECTION_LABELS[d]}
                     </Chip>
                   ))}
                 </div>
-              </div>
-
-              {watchlistInsideGate && watchlistInsideGate.total > 0 && (
-                <div
-                  className={cn(
-                    "flex items-start gap-2 rounded-lg border px-3 py-2.5",
-                    watchlistInsideGate.scored === 0
-                      ? "border-border/60 bg-bg-primary/30"
-                      : watchlistInsideGate.inside > 0
-                        ? "border-accent-green/25 bg-accent-green/[0.06]"
-                        : "border-accent-red/30 bg-accent-red/[0.06]"
-                  )}
-                >
-                  <Radio
-                    className={cn(
-                      "mt-px h-3.5 w-3.5 shrink-0",
-                      watchlistInsideGate.scored === 0
-                        ? "text-text-dim"
-                        : watchlistInsideGate.inside > 0
-                          ? "text-accent-green"
-                          : "text-accent-red"
+                <p className="mb-2.5 text-2xs leading-relaxed text-text-secondary">
+                  {GOAL_DIRECTION_HINTS[goalDirection]}
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-2xs text-text-dim">Goal line</span>
+                  <div className="flex items-center gap-1">
+                    <StepperButton
+                      onClick={() =>
+                        setGoalLine((v) => Math.max(0, v - (goalDirection === "exact" ? 1 : 0.5)))
+                      }
+                      disabled={goalLine <= 0}
+                    >
+                      −
+                    </StepperButton>
+                    <span className="min-w-[3.5rem] text-center font-mono text-sm font-semibold text-text-primary">
+                      {goalLine}
+                    </span>
+                    <StepperButton
+                      onClick={() =>
+                        setGoalLine((v) => Math.min(10, v + (goalDirection === "exact" ? 1 : 0.5)))
+                      }
+                      disabled={goalLine >= 10}
+                    >
+                      +
+                    </StepperButton>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(goalDirection === "exact" ? [1, 2, 3, 4, 5] : [0.5, 1.5, 2.5, 3.5, 4.5]).map(
+                      (v) => (
+                        <Chip key={v} active={goalLine === v} accent="amber" onClick={() => setGoalLine(v)}>
+                          {v}
+                        </Chip>
+                      )
                     )}
-                  />
-                  <p className="text-2xs leading-relaxed text-text-secondary">
-                    {watchlistInsideGate.scored === 0 ? (
-                      <>
-                        None of your {watchlistInsideGate.total} accepted match
-                        {watchlistInsideGate.total === 1 ? " is" : "es are"} live yet, so there is
-                        no scoreline to check. The gate applies from kickoff.
-                      </>
-                    ) : watchlistInsideGate.inside > 0 ? (
-                      <>
-                        <span className="font-semibold text-accent-green">
-                          {watchlistInsideGate.inside} of {watchlistInsideGate.scored}
-                        </span>{" "}
-                        live accepted match{watchlistInsideGate.scored === 1 ? " is" : "es are"}{" "}
-                        still {GOAL_DIRECTION_LABELS[goalDirection].toLowerCase()} {goalLine}.
-                      </>
-                    ) : (
-                      <>
-                        <span className="font-semibold text-accent-red">
-                          All {watchlistInsideGate.scored}
-                        </span>{" "}
-                        live accepted match{watchlistInsideGate.scored === 1 ? " has" : "es have"}{" "}
-                        already run past {GOAL_DIRECTION_LABELS[goalDirection].toLowerCase()}{" "}
-                        {goalLine}. Other fixtures that qualify will still alert — these will not.
-                      </>
-                    )}
-                  </p>
+                  </div>
                 </div>
-              )}
-            </>
-          ) : (
-            <p className="text-2xs leading-relaxed text-text-dim">
-              No goal limit. The alert is raised whenever the live condition below is met, however
-              far the match has already run.
-            </p>
-          )}
-        </section>
-
-        {/* ══ STEP 3 — LIVE CONDITION ══ */}
-        <section
-          className={cn(
-            "rounded-xl border p-4 transition-opacity",
-            useGoalGate
-              ? "border-border/50 opacity-50"
-              : "border-border/70 bg-bg-elevated/30"
-          )}
-        >
-          <StepHeader
-            n={3}
-            icon={<Radio className="h-4 w-4" />}
-            title="Live condition"
-            subtitle={
-              useGoalGate
-                ? "Not used while the scoreline gate is on — the gate is the whole live test."
-                : "The live signal that must be true at that moment for the alert to go out."
-            }
-            accent="cyan"
-          />
-          <div className="mb-3 flex flex-wrap gap-1.5">
-            {(Object.keys(LIVE_TYPE_LABELS) as Exclude<LiveConditionType, "goals">[]).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setLiveType(t)}
-                className={cn(
-                  "rounded border px-2.5 py-1 text-2xs font-semibold uppercase tracking-wide transition-colors",
-                  liveType === t
-                    ? "border-accent-cyan/50 bg-accent-cyan/15 text-accent-cyan"
-                    : "border-border/60 text-text-dim hover:border-border"
-                )}
-              >
-                {LIVE_TYPE_LABELS[t]}
-              </button>
-            ))}
+              </>
+            )}
           </div>
 
-          {liveType === "snapshot" && (
-            <p className="text-2xs text-text-dim">
-              Fires on every live cycle once the prematch condition is met — use this for a
-              running feed rather than a spike alert.
-            </p>
-          )}
+          {/* ── the other live conditions, as removable cards ── */}
+          <div className="flex flex-col gap-2">
+            {liveDrafts.map((d) => {
+              const cfg = liveSliderConfig(d.type);
+              const needsSide = LIVE_SIDED_TYPES.includes(d.type) && d.type !== "key_player_lost";
+              const isCount = d.type === "key_player_lost";
+              return (
+                <div
+                  key={d.id}
+                  className="rounded-lg border border-border/70 bg-bg-primary/40 p-3"
+                >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-2xs font-semibold uppercase tracking-wider text-text-secondary">
+                      {LIVE_TYPE_LABELS[d.type]}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeLiveCondition(d.id)}
+                      aria-label={`Remove ${LIVE_TYPE_LABELS[d.type]}`}
+                      className="flex h-6 w-6 items-center justify-center rounded border border-border/60 text-text-dim transition-colors hover:border-accent-red/40 hover:text-accent-red"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
 
-          {liveNeedsSide && (
-            <div className="flex flex-col gap-3">
-              <SideSelector value={liveSide} onChange={setLiveSide} accent="cyan" />
-              <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
-                Minimum {LIVE_TYPE_LABELS[liveType].toLowerCase()} · {liveMinValue}
-                <input
-                  type="range"
-                  min={sliderCfg.min}
-                  max={sliderCfg.max}
-                  step={sliderCfg.step}
-                  value={liveMinValue}
-                  onChange={(e) => setLiveMinValue(Number(e.target.value))}
-                  className="accent-accent-cyan"
-                />
-              </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {needsSide && (
+                      <SideSelector
+                        value={d.side}
+                        onChange={(v) => updateLiveCondition(d.id, { side: v })}
+                        accent="cyan"
+                      />
+                    )}
+                    <div className="flex min-w-[10rem] flex-1 items-center gap-2">
+                      <input
+                        type="range"
+                        min={isCount ? 1 : cfg?.min ?? 0}
+                        max={isCount ? 5 : cfg?.max ?? 100}
+                        step={isCount ? 1 : cfg?.step ?? 1}
+                        value={isCount ? d.min_count : d.min_value}
+                        onChange={(e) =>
+                          updateLiveCondition(
+                            d.id,
+                            isCount
+                              ? { min_count: Number(e.target.value) }
+                              : { min_value: Number(e.target.value) }
+                          )
+                        }
+                        className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-border accent-accent-cyan"
+                      />
+                      <span className="min-w-[2.5rem] text-right font-mono text-xs font-semibold text-text-primary">
+                        {isCount ? d.min_count : d.min_value}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ── add another ── */}
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {(Object.keys(LIVE_TYPE_LABELS) as Exclude<LiveConditionType, "goals">[])
+              .filter((t) => !liveDrafts.some((d) => d.type === t))
+              .map((t) => (
+                <Chip key={t} active={false} accent="cyan" onClick={() => addLiveCondition(t)}>
+                  + {LIVE_TYPE_LABELS[t]}
+                </Chip>
+              ))}
+            {liveDrafts.length + (useGoalGate ? 1 : 0) === 0 && (
+              <span className="text-2xs text-text-dim">
+                Add at least one condition.
+              </span>
+            )}
+          </div>
+
+          {/* ── how many must be met ── */}
+          {liveConditionCount > 1 && (
+            <div className="mt-3 rounded-lg border border-border/70 bg-bg-primary/40 p-3">
+              <p className="mb-2 text-2xs font-semibold uppercase tracking-wider text-text-muted">
+                How many must be met?
+              </p>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Chip active={condMode === "all"} accent="cyan" onClick={() => setCondMode("all")}>
+                  All {liveConditionCount}
+                </Chip>
+                {Array.from({ length: liveConditionCount - 1 }, (_, i) => i + 1).map((n) => (
+                  <Chip
+                    key={n}
+                    active={condMode === "at_least" && condThreshold === n}
+                    accent="cyan"
+                    onClick={() => {
+                      setCondMode("at_least");
+                      setCondThreshold(n);
+                    }}
+                  >
+                    Any {n}
+                  </Chip>
+                ))}
+              </div>
+              <p className="mt-2 text-2xs leading-relaxed text-text-secondary">
+                {liveGroupSummary}
+              </p>
             </div>
           )}
 
-          {liveType === "chaos_index" && (
-            <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
-              Minimum chaos index · {liveMinValue}
-              <input
-                type="range"
-                min={sliderCfg.min}
-                max={sliderCfg.max}
-                step={sliderCfg.step}
-                value={liveMinValue}
-                onChange={(e) => setLiveMinValue(Number(e.target.value))}
-                className="accent-accent-amber"
+          {watchlistInsideGate && watchlistInsideGate.total > 0 && (
+            <div
+              className={cn(
+                "mt-3 flex items-start gap-2 rounded-lg border px-3 py-2.5",
+                watchlistInsideGate.scored === 0
+                  ? "border-border/60 bg-bg-primary/30"
+                  : watchlistInsideGate.inside > 0
+                    ? "border-accent-green/25 bg-accent-green/[0.06]"
+                    : "border-accent-red/30 bg-accent-red/[0.06]"
+              )}
+            >
+              <Radio
+                className={cn(
+                  "mt-px h-3.5 w-3.5 shrink-0",
+                  watchlistInsideGate.scored === 0
+                    ? "text-text-dim"
+                    : watchlistInsideGate.inside > 0
+                      ? "text-accent-green"
+                      : "text-accent-red"
+                )}
               />
-            </label>
-          )}
-
-          {liveType === "key_player_lost" && (
-            <div className="flex flex-col gap-3">
-              <p className="text-2xs text-text-dim">
-                Genuinely live — fires only when a starting key player (top-11 by squad worth) is
-                actually substituted off during the match, tracked in real time.
+              <p className="text-2xs leading-relaxed text-text-secondary">
+                {watchlistInsideGate.scored === 0 ? (
+                  <>
+                    None of your {watchlistInsideGate.total} accepted match
+                    {watchlistInsideGate.total === 1 ? " is" : "es are"} live yet, so there is
+                    no scoreline to check. The gate applies from kickoff.
+                  </>
+                ) : watchlistInsideGate.inside > 0 ? (
+                  <>
+                    <span className="font-semibold text-accent-green">
+                      {watchlistInsideGate.inside} of {watchlistInsideGate.scored}
+                    </span>{" "}
+                    live accepted match{watchlistInsideGate.scored === 1 ? " is" : "es are"}{" "}
+                    still {GOAL_DIRECTION_LABELS[goalDirection].toLowerCase()} {goalLine}.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold text-accent-red">
+                      All {watchlistInsideGate.scored}
+                    </span>{" "}
+                    live accepted match{watchlistInsideGate.scored === 1 ? " has" : "es have"}{" "}
+                    already run past {GOAL_DIRECTION_LABELS[goalDirection].toLowerCase()}{" "}
+                    {goalLine}. Other fixtures that qualify will still alert — these will not.
+                  </>
+                )}
               </p>
-              <SideSelector value={keyLostSide} onChange={setKeyLostSide} accent="cyan" />
-              <label className="flex flex-col gap-1.5 text-2xs text-text-dim">
-                Minimum key players lost · {keyLostCount}
-                <input
-                  type="range"
-                  min={1}
-                  max={3}
-                  step={1}
-                  value={keyLostCount}
-                  onChange={(e) => setKeyLostCount(Number(e.target.value))}
-                  className="accent-accent-cyan"
-                />
-              </label>
             </div>
           )}
         </section>
+
 
         {/* ══ STEP 4 — MINUTE WINDOW ══ */}
         <section className="rounded-xl border border-border/70 bg-bg-elevated/30 p-4">
@@ -1062,17 +1176,7 @@ export default function LiveRulesPage() {
             />
             <ReviewLine
               n="2"
-              text={
-                useGoalGate
-                  ? `Only let the alert through while the running total is ${
-                      goalDirection === "under"
-                        ? `still under ${goalLine} — the last moment the price exists`
-                        : goalDirection === "over"
-                          ? `past ${goalLine} — the line has been beaten`
-                          : `exactly ${goalLine} goals`
-                    }.`
-                  : `Go out on every live update once that holds.`
-              }
+              text={`Go out when — ${liveGroupSummary}.`}
             />
             <ReviewLine
               n="3"

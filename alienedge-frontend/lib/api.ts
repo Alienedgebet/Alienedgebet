@@ -1614,6 +1614,30 @@ export type UserRuleLive =
   | { type: "key_player_lost"; side: RuleSide; min_count: number }
   | { type: "goals"; direction: RuleGoalDirection; line: number };
 
+/**
+ * A CONDITION GROUP: any number of live conditions plus how many must hold.
+ *
+ *   mode="all"      every condition must hold
+ *   mode="at_least" `threshold` of them must hold — any N of the K chosen
+ *
+ * Prematch is deliberately NOT a group: exactly one prematch signal, so the
+ * match board is never silently widened behind the user's back.
+ */
+export interface UserRuleLiveGroup {
+  conditions: UserRuleLive[];
+  mode: "all" | "at_least";
+  threshold: number;
+}
+
+/**
+ * The live half of a rule. A bare single condition is still accepted and
+ * normalised to a one-condition group, so alerts saved before multi-select
+ * keep working.
+ */
+export type UserRuleLiveAny = UserRuleLive | UserRuleLiveGroup;
+
+export type RuleConditionMode = "all" | "at_least";
+
 export interface UserRuleMinuteWindow {
   start: number;
   end: number;
@@ -1624,7 +1648,7 @@ export interface UserRuleDef {
   user_id: string;
   label: string;
   prematch: UserRulePrematch;
-  live: UserRuleLive;
+  live: UserRuleLiveAny;
   minute_window?: UserRuleMinuteWindow;
   /**
    * Fixture ids the user accepted in the setup board. SOFT by design: the
