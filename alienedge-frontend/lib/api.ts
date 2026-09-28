@@ -1638,6 +1638,55 @@ export type UserRuleLiveAny = UserRuleLive | UserRuleLiveGroup;
 
 export type RuleConditionMode = "all" | "at_least";
 
+/** Where a saved alert stands right now. */
+export type RuleAlertStatus = "waiting" | "live" | "fired" | "paused";
+
+/** A live fixture currently satisfying this rule. */
+export interface RuleLiveMatch {
+  fixture_id: string;
+  name: string;
+  minute?: number | null;
+  score?: string | null;
+  gate?: string | null;
+  note?: string | null;
+}
+
+/** The last alert this rule actually fired, as recorded in the alert log. */
+export interface RuleLastFired {
+  fixture_id?: string | null;
+  fixture?: string | null;
+  minute?: number | null;
+  score?: string | null;
+  time?: string | null;
+  outcome?: string | null;
+}
+
+/**
+ * Per-rule status, assembled by the API from the live board AND the fire
+ * history. Neither alone can answer the question that matters: a rule that has
+ * never fired looks identical whether it is about to fire or can never fire.
+ */
+export interface RuleStatus {
+  rule_id: string;
+  label: string;
+  active: boolean;
+  status: RuleAlertStatus;
+  status_label: string;
+  live_count: number;
+  live_matches: RuleLiveMatch[];
+  fired_count: number;
+  last_fired: RuleLastFired | null;
+  /** Qualifying right now, but this device could not receive it. */
+  needs_push: boolean;
+  /** null when the notification store could not be read — say nothing rather
+   * than guess. */
+  push_ready: boolean | null;
+  board_age?: string | null;
+  /** The live board is older than expected, so "nothing qualifying" is not
+   * trustworthy and must not be presented as fact. */
+  board_stale: boolean;
+}
+
 export interface UserRuleMinuteWindow {
   start: number;
   end: number;
@@ -2192,6 +2241,10 @@ export const userRulesApi = {
     prematch: UserRulePrematch
   ): Promise<AxiosResponse<RuleCandidateMatch[]>> =>
     api.post("/api/live/user-rules/candidates", { prematch }),
+
+  /** Per-rule status: waiting, qualifying now, or already alerted. */
+  getStatus: (): Promise<AxiosResponse<RuleStatus[]>> =>
+    api.get("/api/live/user-rules/status"),
 
   update: (ruleId: string, patch: UserRulePatch): Promise<AxiosResponse<UserRuleDef>> =>
     api.patch(`/api/live/user-rules/${ruleId}`, patch),

@@ -754,6 +754,10 @@ class SupremeOrchestrator:
         self.UserLogic = UserRuleEvaluator()
         self.executor  = ThreadPoolExecutor(max_workers=5)
         self.cycle     = 0
+        # rule_id -> the live fixtures matching it THIS cycle. Rebuilt from
+        # scratch every cycle so it always describes the present moment; a stale
+        # entry would claim a match is still live after it has finished.
+        self._rule_live = {}
         # FIX: seed ALERT_HISTORY from the persisted on-disk alert log so a
         # restart cannot re-fire alerts that already went out. fire_alert()
         # appends every record as one JSONL line in ready_to_push.json while
@@ -840,6 +844,23 @@ class SupremeOrchestrator:
             list_rules(active_only=True),
             score=current_score,
         )
+        # Record WHICH rules match this fixture right now, independent of
+        # whether an alert was actually fired. The setup board needs to be able
+        # to say "3 of your alerts match a live match right now" — otherwise a
+        # rule that has not fired is indistinguishable from a rule that will
+        # never fire, and the user cannot tell a working alert from a broken
+        # one. This is deliberately a different thing from ALERT_HISTORY, which
+        # only ever holds keys that DID fire.
+        for ua in user_alerts:
+            self._rule_live.setdefault(ua.get("rule_id"), []).append({
+                "fixture_id": f_id,
+                "name": fixture_name,
+                "minute": minute,
+                "score": (f"{current_score[0]}-{current_score[1]}"
+                          if current_score else None),
+                "gate": ua.get("gate"),
+                "note": ua.get("msg"),
+            })
         fired_this = []
         for ua in user_alerts:
             tier = ua.get("tier")
@@ -903,6 +924,9 @@ class SupremeOrchestrator:
     def run_single_cycle(self):
         """Run one full pass, isolating bad fixtures from the cycle board."""
         self.cycle += 1
+        # Reset BEFORE any fixture is processed, so the published map is exactly
+        # this cycle's truth and never a mixture of two cycles.
+        self._rule_live = {}
         db = self.load_all_prematch_data()
         if not db:
             logging.info("[MOCK MODE] No prematch report found. Live-only monitoring active.")
@@ -1182,6 +1206,12 @@ class SupremeOrchestrator:
             "total_db":   total_db,
             "matches":   cycle_matches,
             "errors":    fixture_errors or [],
+            # Which of the user's rules match a LIVE fixture at this instant.
+            # Read by the rules API to answer "is anything happening for this
+            # alert right now?", which the alert log alone cannot: a rule that
+            # has never fired looks identical whether it is about to fire or is
+            # permanently unsatisfiable.
+            "rule_live": getattr(self, "_rule_live", {}) or {},
             "coverage": {
                 "evaluated":   evaluated,
                 "unevaluated": unevaluated,
