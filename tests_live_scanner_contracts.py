@@ -3666,5 +3666,90 @@ class LiveConditionGroupContractTests(unittest.TestCase):
                 "live": {"type": "goals", "direction": "under", "line": 2.5}})
 
 
+class ServiceWorkerReachabilityContractTests(unittest.TestCase):
+    """
+    Web Push cannot work if the browser cannot fetch /sw.js.
+
+    The service worker script was NOT in the auth middleware's public
+    allowlist, so it answered 307 (redirect to /login) for any request without
+    a session cookie. A service worker registration is entitled to fetch that
+    script at moments when a redirect is fatal, and a redirect is never a valid
+    service worker response — so registration can fail in ways that look like
+    "push is unsupported" and send the user chasing the wrong fix.
+
+    These are static checks against the source, because the failure is a
+    routing decision, not runtime state.
+    """
+
+    @staticmethod
+    def _middleware() -> str:
+        from pathlib import Path
+        return (Path(__file__).parent / "alienedge-frontend" / "middleware.ts").read_text(
+            encoding="utf-8"
+        )
+
+    @staticmethod
+    def _sw() -> str:
+        from pathlib import Path
+        return (Path(__file__).parent / "alienedge-frontend" / "public" / "sw.js").read_text(
+            encoding="utf-8"
+        )
+
+    def test_sw_js_is_publicly_servable(self):
+        self.assertIn('pathname === "/sw.js"', self._middleware())
+
+    def test_the_manifest_is_publicly_servable(self):
+        self.assertIn('pathname === "/manifest.webmanifest"', self._middleware())
+
+    def test_the_icons_are_publicly_servable(self):
+        self.assertIn('pathname.startsWith("/icons/")', self._middleware())
+        self.assertIn('pathname === "/apple-touch-icon.png"', self._middleware())
+
+    def test_the_sw_only_references_icons_that_exist(self):
+        """
+        A notification whose icon 404s still appears, but with a broken-image
+        placeholder, which on iOS can suppress the alert entirely. The worker
+        referenced /icon-192.png and /badge-72.png, neither of which existed.
+        """
+        sw = self._sw()
+        referenced = [
+            line.split('"')[1]
+            for line in sw.splitlines()
+            if 'icon:' in line or 'badge:' in line
+        ]
+        self.assertTrue(referenced, "expected the worker to set an icon")
+        for url in referenced:
+            path = (Path(__file__).parent / "alienedge-frontend" / "public" / url.lstrip("/"))
+            self.assertTrue(path.exists(), f"sw.js references missing icon: {url}")
+
+    def test_a_push_cannot_redirect_the_user_off_origin(self):
+        """
+        The push payload is remote input. Following a URL from it unchecked
+        would let a compromised or malformed push bounce a user anywhere.
+        """
+        sw = self._sw()
+        self.assertIn("self.location.origin", sw)
+
+    def test_the_manifest_points_at_real_icons(self):
+        import json
+        from pathlib import Path
+        root = Path(__file__).parent / "alienedge-frontend" / "public"
+        manifest = json.loads((root / "manifest.webmanifest").read_text(encoding="utf-8"))
+        self.assertTrue(manifest["icons"], "manifest declares no icons")
+        for icon in manifest["icons"]:
+            self.assertTrue((root / icon["src"].lstrip("/")).exists(),
+                            f"missing manifest icon: {icon['src']}")
+        # Standalone display is what makes an installed app feel like an app.
+        self.assertEqual(manifest["display"], "standalone")
+
+    def test_the_layout_links_the_manifest(self):
+        from pathlib import Path
+        layout = (Path(__file__).parent / "alienedge-frontend" / "app" / "layout.tsx").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('manifest: "/manifest.webmanifest"', layout)
+        self.assertIn("appleWebApp", layout)
+
+
 if __name__ == "__main__":
     unittest.main()

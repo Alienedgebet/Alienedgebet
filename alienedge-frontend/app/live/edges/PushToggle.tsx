@@ -24,6 +24,8 @@ type PushState = {
   userAlert: boolean;
   /** How many of this user's devices are registered. */
   devices: number;
+  /** Why push is unavailable, or "ok". Drives the message shown to the user. */
+  blocker: PushBlocker;
 };
 
 function urlBase64ToUint8Array(base64String: string) {
@@ -32,6 +34,90 @@ function urlBase64ToUint8Array(base64String: string) {
   const rawData = window.atob(base64);
   return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
 }
+
+/**
+ * WHY push is unavailable, stated precisely.
+ *
+ * The original component collapsed every failure into one "unavailable here,
+ * on iPhone add to the Home Screen" message. That is wrong whenever the real
+ * cause is something else — most often an insecure origin — so a user on
+ * desktop Chrome over HTTP was told to install an iPhone app. Each cause needs
+ * its own instruction, and the user has to be able to act on it.
+ */
+export type PushBlocker =
+  | "ok"
+  | "insecure-origin"
+  | "no-push-api"
+  | "permission-denied"
+  | "ios-not-installed"
+  | "server-no-key";
+
+/** Is this a context the browser will grant a service worker to? */
+function isSecureOrigin(): boolean {
+  if (typeof window === "undefined") return false;
+  // localhost counts as secure by definition, which is precisely why a
+  // developer's own machine can work when the deployed site cannot.
+  return window.isSecureContext === true;
+}
+
+function isIos(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    // iPadOS 13+ reports as a Mac; the touch-point count is the tell.
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  );
+}
+
+/**
+ * iOS only exposes the Push API to a web app installed from the Home Screen
+ * and opened from there. In an ordinary Safari tab the API is simply absent,
+ * which is indistinguishable from an ancient browser unless you check the
+ * platform too.
+ */
+function isStandalone(): boolean {
+  if (typeof window === "undefined") return false;
+  return (
+    window.matchMedia?.("(display-mode: standalone)").matches === true ||
+    (navigator as { standalone?: boolean }).standalone === true
+  );
+}
+
+export function diagnosePush(opts: {
+  hasSw: boolean;
+  hasPushApi: boolean;
+  secureOrigin: boolean;
+  permission: NotificationPermission | "unsupported";
+  serverSupported: boolean | undefined;
+  isIos: boolean;
+  standalone: boolean;
+}): PushBlocker {
+  // Checked FIRST. Over plain HTTP the Push API is simply not exposed, and
+  // blaming the browser or the platform there sends the user chasing the
+  // wrong problem entirely.
+  if (!opts.secureOrigin) return "insecure-origin";
+  if (!opts.hasSw || !opts.hasPushApi) {
+    if (opts.isIos && !opts.standalone) return "ios-not-installed";
+    return "no-push-api";
+  }
+  if (opts.permission === "denied") return "permission-denied";
+  if (opts.serverSupported === false) return "server-no-key";
+  return "ok";
+}
+
+/** Plain-English fix for each blocker. Deliberately actionable. */
+export const PUSH_BLOCKER_HELP: Record<Exclude<PushBlocker, "ok">, string> = {
+  "insecure-origin":
+    "This page is not on HTTPS, and browsers only allow push on a secure connection. Open the app over https:// and this button will appear.",
+  "no-push-api":
+    "This browser does not offer push notifications here. Chrome, Edge, Firefox and Safari on macOS all do. Your alerts still show up in the app.",
+  "permission-denied":
+    "Notifications are blocked for this site. Re-allow them in your browser's site settings, then reload this page.",
+  "ios-not-installed":
+    "On iPhone, web push only works from an app added to the Home Screen. Tap Share → Add to Home Screen, then open AlienEdge from there and this button will appear.",
+  "server-no-key":
+    "The server has no push key configured, so alerts cannot be sent yet. They are still recorded and shown in the app.",
+};
 
 export function usePushNotifications() {
   // Initial load uses the app's own useApi hook (the same pattern the rest of
@@ -45,14 +131,12 @@ export function usePushNotifications() {
 
   // Browser capability is a pure derivation from globals, not state: it does
   // not change during a session, so it needs no effect and no re-render.
-  const hasSw =
-    typeof window !== "undefined" &&
-    "serviceWorker" in navigator &&
-    "PushManager" in window;
-  const permission: NotificationPermission | "unsupported" =
-    typeof window !== "undefined" && "PushManager" in window
-      ? Notification.permission
-      : "unsupported";
+  const hasPushApi =
+    typeof window !== "undefined" && "PushManager" in window;
+  const hasSw = typeof window !== "undefined" && "serviceWorker" in navigator;
+  const permission: NotificationPermission | "unsupported" = hasPushApi
+    ? Notification.permission
+    : "unsupported";
 
   const server = (prefs.data ?? {}) as {
     supported?: boolean;
@@ -64,8 +148,20 @@ export function usePushNotifications() {
     devices?: number;
   };
 
+  const blocker = diagnosePush({
+    hasSw,
+    hasPushApi,
+    secureOrigin: isSecureOrigin(),
+    permission,
+    serverSupported: server.supported,
+    isIos: isIos(),
+    standalone: isStandalone(),
+  });
+
   const state: PushState = {
-    supported: Boolean(server.supported) && hasSw,
+    // Derived from the diagnosis, not computed separately, so the toggle and
+    // the message can never disagree about why push is unavailable.
+    supported: blocker === "ok",
     permission,
     subscribed: Boolean(server.subscribed),
     vapidPublicKey: server.vapid_public_key ?? null,
@@ -73,6 +169,7 @@ export function usePushNotifications() {
     settled: server.settled !== false,
     userAlert: server.user_alert !== false,
     devices: server.devices ?? (server.subscribed ? 1 : 0),
+    blocker,
   };
 
   const refresh = useCallback(async () => {
@@ -83,7 +180,11 @@ export function usePushNotifications() {
   const enable = useCallback(async () => {
     setError(null);
     if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
-      setError("This browser does not support push notifications.");
+      // Use the same diagnosis the UI shows, so a failure here can never
+      // contradict the message the user was just looking at.
+      setError(
+        PUSH_BLOCKER_HELP[blocker === "ok" ? "no-push-api" : blocker]
+      );
       return;
     }
     setBusy(true);
@@ -117,7 +218,9 @@ export function usePushNotifications() {
     } finally {
       setBusy(false);
     }
-  }, [refresh]);
+    // `blocker` is declared so the guard message can never lag behind the
+    // diagnosis the user is currently looking at.
+  }, [refresh, blocker]);
 
   const disable = useCallback(async () => {
     setBusy(true);
@@ -181,9 +284,21 @@ export function PushToggle({ className }: { className?: string }) {
       >
         <p className="font-bold uppercase text-slate-300">Match alerts</p>
         <p className="mt-1">
-          Push notifications are unavailable here. On iPhone they require adding
-          this site to the Home Screen. Live alerts stay visible in the app.
+          {/* The ACTUAL reason, not a generic "unavailable here". The old copy
+              blamed iPhone unconditionally, which sent every desktop user on
+              an insecure origin chasing the wrong fix. */}
+          {PUSH_BLOCKER_HELP[state.blocker === "ok" ? "no-push-api" : state.blocker]}
         </p>
+        <p className="mt-1 text-slate-500">
+          Your alerts are still saved and appear in the app.
+        </p>
+        {/* A concrete, copyable target beats a vague complaint when the cause
+            is the deployment rather than the user's browser. */}
+        {state.blocker === "insecure-origin" && (
+          <p className="mt-2 text-slate-500">
+            Current address: <span className="text-slate-400">{window.location.origin}</span>
+          </p>
+        )}
       </div>
     );
   }
@@ -245,17 +360,10 @@ export function PushToggle({ className }: { className?: string }) {
 
       {error && <p className="mt-2 text-[10px] text-rose-300">{error}</p>}
 
-      {state.permission === "denied" && (
-        <p className="mt-2 text-[10px] text-amber-300">
-          Notifications are blocked. Re-enable them for this site in your browser
-          settings.
-        </p>
-      )}
-
       <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-        Alerts fire only when a prediction is armed or reaches a final result. A
-        prediction that is merely &ldquo;building&rdquo; is never sent, because that
-        state can still reverse.
+        Your own alerts fire the moment their conditions are met. Predictions are only
+        announced when armed or finally settled &mdash; one that is merely
+        &ldquo;building&rdquo; is never sent, because that state can still reverse.
       </p>
     </div>
   );

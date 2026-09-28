@@ -31,8 +31,8 @@ self.addEventListener("push", (event) => {
   const title = payload.title || "AlienEdge";
   const options = {
     body: payload.body || "",
-    icon: "/icon-192.png",
-    badge: "/badge-72.png",
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-192.png",
     tag: payload.tag || "alienedge",
     renotify: true,
     requireInteraction: false,
@@ -46,7 +46,20 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const target = (event.notification.data && event.notification.data.url) || "/live/edges";
+  const url = event.notification.data && event.notification.data.url;
+  // Only ever follow a SAME-ORIGIN target. A push endpoint is remote input, and
+  // blindly navigating to a URL from one would let it bounce the user anywhere.
+  let target = "/live/alerts";
+  if (url) {
+    try {
+      const resolved = new URL(url, self.location.origin);
+      if (resolved.origin === self.location.origin) {
+        target = resolved.pathname + resolved.search;
+      }
+    } catch (err) {
+      /* keep the same-origin fallback */
+    }
+  }
 
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {

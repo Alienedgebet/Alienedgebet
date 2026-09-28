@@ -1211,10 +1211,16 @@ export default function LiveRulesPage() {
             Where this alert will reach you
           </p>
           <PushToggle className="border-0 bg-transparent p-0" />
+          {/* The wording follows the actual state. The old copy said "turn on
+              push above" unconditionally, which was nonsense in the very case
+              the user hit it — the toggle is not rendered at all when push is
+              blocked, so there was nothing "above" to turn on. */}
           <p className="mt-2.5 text-2xs leading-relaxed text-text-muted">
-            {pushState.subscribed
-              ? "This alert will be pushed to your phone and shown here, whether or not the app is open."
-              : "Turn on push above to be alerted on your phone. Without it this alert only appears when you open the app."}
+            {pushState.supported && !pushState.subscribed
+              ? "Turn push on above and this alert will reach your phone, whether or not the app is open."
+              : pushState.subscribed
+                ? "This alert will be pushed to your phone and shown here, whether or not the app is open."
+                : "Push is not available in this browser right now, so this alert will appear in the app. The reason is shown above."}
           </p>
         </div>
 
