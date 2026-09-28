@@ -15,7 +15,7 @@ usage still works the same way under v1.
 import os
 import sys
 import json
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -69,6 +69,8 @@ class PrematchCondition(BaseModel):
 
 
 class LiveCondition(BaseModel):
+    """One live condition, e.g. {"type": "goals", "direction": "under",
+    "line": 2.5}. Several of these can be combined — see LiveConditionGroup."""
     type: str = Field(
         ...,
         description=(
@@ -86,6 +88,21 @@ class LiveCondition(BaseModel):
     line: Optional[float] = None
 
 
+class LiveConditionGroup(BaseModel):
+    """
+    The live half of a rule: any number of conditions plus how many must hold.
+
+    mode="all"      every condition must hold
+    mode="at_least" `threshold` of them must hold — any N of the K chosen
+
+    A bare single LiveCondition is still accepted and normalised to a
+    one-condition group, so alerts saved before multi-select keep working.
+    """
+    conditions: list[LiveCondition]
+    mode: str = "all"
+    threshold: Optional[int] = None
+
+
 class MinuteWindow(BaseModel):
     start: int = 0
     end: int = 120
@@ -97,7 +114,8 @@ class UserRuleIn(BaseModel):
     user_id: Optional[str] = None
     label: str = "Untitled Rule"
     prematch: PrematchCondition
-    live: LiveCondition
+    # Either a group of conditions, or a single condition (legacy shape).
+    live: Union[LiveConditionGroup, LiveCondition]
     minute_window: Optional[MinuteWindow] = None
     # Fixture ids the user accepted in the setup board. SOFT: it ranks and
     # marks alerts, it never filters them.
@@ -108,7 +126,7 @@ class UserRuleIn(BaseModel):
 class UserRulePatch(BaseModel):
     label: Optional[str] = None
     prematch: Optional[PrematchCondition] = None
-    live: Optional[LiveCondition] = None
+    live: Optional[Union[LiveConditionGroup, LiveCondition]] = None
     minute_window: Optional[MinuteWindow] = None
     watchlist: Optional[list[str]] = None
     active: Optional[bool] = None

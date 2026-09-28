@@ -216,7 +216,63 @@ def _validate_prematch(prematch: dict) -> dict:
     raise RuleValidationError(f"Unhandled prematch.type: {ptype}")
 
 
-def _validate_live(live: dict) -> dict:
+VALID_CONDITION_MODES = {"all", "at_least"}
+MAX_LIVE_CONDITIONS = 8  # every real type in VALID_LIVE_TYPES, plus headroom
+
+
+def _validate_live(live) -> dict:
+    """
+    Normalise and validate the live half of a rule into a CONDITION GROUP.
+
+    ACCEPTED INPUTS
+      * a single condition, e.g. {"type": "goals", "direction": "under",
+        "line": 2.5} — the original shape. Normalised to a one-condition
+        group in "all" mode, which is exactly the old behaviour. This is what
+        keeps every alert saved before multi-select working untouched.
+      * a group, e.g. {"conditions": [...], "mode": "at_least", "threshold": 2}
+
+    RETURNED SHAPE is always the group, so the evaluator has one code path.
+    """
+    # Legacy single condition.
+    if not isinstance(live, dict) or "conditions" not in live:
+        return {
+            "conditions": [_validate_one_live_condition(live or {"type": "snapshot"})],
+            "mode": "all",
+            "threshold": 1,
+        }
+
+    conditions = live.get("conditions")
+    if not isinstance(conditions, list) or not conditions:
+        raise RuleValidationError("live.conditions must be a non-empty list.")
+    if len(conditions) > MAX_LIVE_CONDITIONS:
+        raise RuleValidationError(
+            f"live.conditions accepts at most {MAX_LIVE_CONDITIONS} conditions."
+        )
+
+    normalized = [_validate_one_live_condition(c) for c in conditions]
+
+    mode = str(live.get("mode", "all")).strip().lower()
+    if mode not in VALID_CONDITION_MODES:
+        raise RuleValidationError(
+            f"live.mode must be one of {sorted(VALID_CONDITION_MODES)}."
+        )
+
+    try:
+        threshold = int(live.get("threshold", len(normalized)))
+    except (TypeError, ValueError):
+        raise RuleValidationError("live.threshold must be a whole number.")
+    if threshold < 1 or threshold > len(normalized):
+        raise RuleValidationError(
+            f"live.threshold must be between 1 and {len(normalized)} "
+            f"(you selected {len(normalized)} condition(s))."
+        )
+
+    # "all" ignores the threshold, but a nonsensical one is still a typo worth
+    # rejecting rather than silently accepting.
+    return {"conditions": normalized, "mode": mode, "threshold": threshold}
+
+
+def _validate_one_live_condition(live: dict) -> dict:
     ltype = live.get("type")
     if ltype not in VALID_LIVE_TYPES:
         raise RuleValidationError(f"Unknown live.type: {ltype}")
@@ -607,7 +663,16 @@ def find_candidates(prematch: dict, prematch_db: dict, live_scores: dict | None 
     return rows
 
 
-def _live_condition_met(rule_live: dict, intel: dict, key_loss: dict) -> tuple[bool, str]:
+def _live_condition_met(rule_live: dict, intel: dict, key_loss: dict, score=None) -> tuple[bool, str]:
+    """
+    Evaluate ONE live condition.
+
+    `goals` is evaluated here like any other condition. It used to be a
+    special case decided before this function was called, which meant it could
+    not be combined with anything — "under 2.5 AND home pressure > 60%" was
+    inexpressible. It is now a peer, so the scoreline limitation composes with
+    the rest of the user's selection.
+    """
     ltype = rule_live.get("type")
     intel = intel or {}
     match_intel = intel.get("match") or {}
@@ -619,11 +684,9 @@ def _live_condition_met(rule_live: dict, intel: dict, key_loss: dict) -> tuple[b
         return True, "Live snapshot (always fires)"
 
     if ltype == "goals":
-        # Already fully decided by _scoreline_condition_met(), which
-        # evaluate_rule_for_match() runs BEFORE calling this function. It must
-        # NOT return False here: a passing gate would be vetoed by a function
-        # that simply has no branch for it, and the rule could never fire.
-        return True, "Scoreline gate already passed"
+        # Delegates rather than re-implementing, so the gate keeps its one
+        # definition — including failing closed on an unreadable scoreline.
+        return _scoreline_condition_met(rule_live, score)
 
     if ltype == "pressure_share":
         side = rule_live.get("side", "any")
@@ -822,22 +885,83 @@ def safe_dig(d, *keys, default=None):
     return cur
 
 
-def describe_goal_gate(rule_live: dict) -> str | None:
+def _live_conditions_met(group, intel, key_loss, score=None) -> tuple[bool, str]:
+    """
+    Evaluate a whole live condition group and decide it by the chosen mode.
+
+        mode="all"       every selected condition must hold
+        mode="at_least"  `threshold` of them must hold — any N of the K chosen
+
+    The note is the audit trail. A rule that never fires is far more useful
+    when it says WHICH condition held it back, so every condition is named,
+    the passing ones ticked, and the blocking ones called out. A silent rule
+    looks identical to a broken one.
+    """
+    # Tolerate a bare single condition so a legacy stored rule evaluates
+    # through this one path too.
+    if not isinstance(group, dict) or "conditions" not in group:
+        group = {"conditions": [group or {"type": "snapshot"}],
+                 "mode": "all", "threshold": 1}
+
+    conditions = group.get("conditions") or []
+    mode = group.get("mode", "all")
+    try:
+        threshold = int(group.get("threshold", len(conditions)))
+    except (TypeError, ValueError):
+        threshold = len(conditions)
+
+    if not conditions:
+        return True, "No live condition set (fires every update)"
+
+    results = []
+    for cond in conditions:
+        try:
+            met, note = _live_condition_met(cond, intel, key_loss, score)
+        except Exception as exc:
+            # One malformed condition must not take the whole evaluation down;
+            # it is reported as unmet so the note stays truthful.
+            met, note = False, f"{cond.get('type', '?')}: could not be read ({exc})"
+        results.append((bool(met), str(note)))
+
+    passed = sum(1 for met, _ in results if met)
+    total = len(results)
+    met_overall = passed >= threshold if mode == "at_least" else passed == total
+
+    summary = (
+        f"{passed}/{total} live conditions met "
+        f"({'all required' if mode == 'all' else f'need {threshold}'})"
+    )
+    detail = " | ".join(note for _, note in results)
+    return met_overall, f"{summary} — {detail}"
+
+
+def describe_goal_gate(group) -> str | None:
     """The scoreline limitation in plain words, e.g. "under 2.5".
 
-    Shown on the lockscreen notification, so it must survive being read at a
-    glance with no context. Returns None when there is no usable gate.
+    Reads a group and returns the FIRST goal gate it contains, or None. Shown on
+    the lockscreen notification, so it must survive being read at a glance with
+    no context.
     """
-    direction = rule_live.get("direction")
-    line = rule_live.get("line")
-    if direction not in VALID_GOAL_DIRECTIONS or line is None:
-        return None
-    text = int(line) if float(line) == int(line) else line
-    if direction == "under":
-        return f"under {text}"
-    if direction == "over":
-        return f"over {text}"
-    return f"exactly {text} goals"
+    if not isinstance(group, dict):
+        group = {"conditions": [group]} if group else {}
+    elif "conditions" not in group:
+        # A stored legacy single condition, e.g. {"type": "goals", ...}. It IS
+        # a dict, so the isinstance check alone does not catch it.
+        group = {"conditions": [group]}
+    for cond in group.get("conditions") or []:
+        if isinstance(cond, dict) and cond.get("type") == "goals":
+            direction = cond.get("direction")
+            line = cond.get("line")
+            if direction not in VALID_GOAL_DIRECTIONS or line is None:
+                continue
+            text = int(line) if float(line) == int(line) else line
+            if direction == "under":
+                return f"under {text}"
+            if direction == "over":
+                return f"over {text}"
+            return f"exactly {text} goals"
+    return None
+
 
 
 def evaluate_rule_for_match(
@@ -876,24 +1000,16 @@ def evaluate_rule_for_match(
 
     rule_live = rule.get("live", {})
 
-    # ── THE SCORELINE GATE ────────────────────────────────────────────────
-    # Handled separately from _live_condition_met because it is a limitation
-    # on the alert, not a stat being watched: it decides whether the user can
-    # still act, not what the match is doing.
-    score_note = ""
-    if rule_live.get("type") == "goals":
-        score_met, score_note = _scoreline_condition_met(rule_live, score)
-        if not score_met:
-            return None
-
-    live_met, live_note = _live_condition_met(rule_live, intel, key_loss)
+    # The live half is a CONDITION GROUP, decided by its own mode: all of them,
+    # or at least `threshold` of them. The scoreline gate is one member of that
+    # group, not a separate step, which is what makes "under 2.5 AND home
+    # pressure > 60%" expressible at last.
+    live_met, live_note = _live_conditions_met(rule_live, intel, key_loss, score)
     if not live_met:
         return None
 
     conf = ((intel or {}).get("match") or {}).get("confidence_score", 0)
     full_note = f"{pre_note} | {live_note}"
-    if score_note:
-        full_note = f"{full_note} | {score_note}"
     if window_note:
         full_note = f"{window_note} {full_note}"
 
@@ -910,10 +1026,11 @@ def evaluate_rule_for_match(
         # either way; this flag only lets the UI rank and mark it.
         "watchlisted": watchlisted,
         "score": list(score) if isinstance(score, (tuple, list)) else None,
-        # The scoreline limitation in words, or None when the rule has no goal
+        # The scoreline limitation in words, or None when the group has no goal
         # gate. Carried onto the push notification because "under 2.5" is not
         # actionable from a lockscreen without knowing the match is still
         # inside it.
-        "gate": describe_goal_gate(rule_live) if rule_live.get("type") == "goals" else None,
+        "gate": describe_goal_gate(rule_live),
     }
+
 
