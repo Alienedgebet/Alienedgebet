@@ -366,7 +366,32 @@ def get_key_players_forensics(team_id: int):
         avg_r = sum(d["ratings"])/len(d["ratings"]) if d["ratings"] else 6.0
         worth = (d["mins"] * avg_r) + (d["star"] * 1000)
         c_p90 = (d["conceded"] / d["mins"] * 90) if d["mins"] > 0 else 0.0
-        worth_list.append({"id": pid, "name": d["name"], "pos": d["pos"], "worth": worth, "c_p90": c_p90})
+        # 2026-09-28 FIX. avg_rating, apps and mins were COMPUTED here and then
+        # dropped on the floor. Everything downstream that judges a player by
+        # quality read None, so the signed-impact metric scored 0.00 confidence
+        # for every absent player and the entire board read ROTATION with no
+        # evidence — and the Incoming detail page showed "no rating on record"
+        # for players whose rating was plainly visible in the Live Match table.
+        #
+        #   `avg_r` is the mean rating above, `apps` is how many rating entries
+        #   were observed, `mins` is the minutes already accumulated. All three
+        #   are in hand, so this costs no extra provider call.
+        #
+        # `avg_r` is deliberately NOT defaulted to 6.0 when no rating exists:
+        # a fabricated 6.0 reads as "exactly average" and quietly drags the
+        # signed verdict toward zero. A player with no observed rating carries
+        # `avg_rating: None` so the metric can shrink their contribution to
+        # nothing instead of inventing a value for them.
+        worth_list.append({
+            "id": pid,
+            "name": d["name"],
+            "pos": d["pos"],
+            "worth": worth,
+            "c_p90": c_p90,
+            "avg_rating": (avg_r if d["ratings"] else None),
+            "apps": len(d["ratings"]),
+            "mins": d["mins"],
+        })
 
     key_gks = sorted([p for p in worth_list if p['pos'] == "Goalkeeper"], key=lambda x: x['worth'], reverse=True)[:1]
     key_others = sorted([p for p in worth_list if p['pos'] != "Goalkeeper"], key=lambda x: x['worth'], reverse=True)[:10]

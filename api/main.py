@@ -1417,6 +1417,27 @@ def _incoming_rows_from_disk():
     return rows
 
 
+def _missing_risk_label(miss: int) -> str:
+    """Mirror of the Live Match page's `missingRisk()` bands.
+
+    The Edge labels a side by HEADCOUNT of absent key players: 0-1 clear,
+    2-3 elevated, 4+ heavy. This page follows the Edge, so it has to use the
+    same bands or the two screens will disagree on the label for the same
+    match. Defined here rather than imported because the Edge's helper lives
+    in the frontend and this is the API."""
+    try:
+        n = int(miss or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n >= 4:
+        return "HEAVY"
+    if n >= 2:
+        return "ELEVATED"
+    if n >= 1:
+        return "CLEAR"
+    return "FULL STRENGTH"
+
+
 @app.get("/api/live/incoming/{fixture_id}", tags=["Live"])
 def get_live_incoming_detail(fixture_id: str):
     """Everything behind ONE incoming prediction, for the drill-down page.
@@ -1508,6 +1529,57 @@ def get_live_incoming_detail(fixture_id: str):
     # ── live scoreboard, when the match is actually running ───────────
     live_idx = _live_index_cached()
     live = live_idx.get(fid)
+
+    # ── MERGE: Code 1 is the single source of truth ────────────────────
+    # 2026-09-28 FIX. The page used to render Code 1's player table beside
+    # Code 4's "absent" list, and the two disagreed about who was even missing:
+    # for Leganes vs Castellon the Live Match edge said Ignasi Miquel was out,
+    # while this endpoint's danger card named Juan Soriano — a different
+    # goalkeeper, because Code 4 ranks key players on `mins * rating` with no
+    # appearances term while Code 1 uses `monthly_apps * 8000 + ...`. The
+    # result was one screen saying "GK OK" and the other "GK UNKNOWN" for the
+    # same match, side by side.
+    #
+    # The user's decision is that this page follows the EDGE. So the Edge's
+    # values are authoritative and are merged in here, server-side, so no
+    # client can accidentally mix the two sources. Code 4's signed verdict is
+    # kept, but strictly as a clearly-labelled secondary read: it may add
+    # insight, it may never contradict the table it sits under.
+    for side in ("home", "away"):
+        edge = teams.get(side)
+        danger_side = danger_sides.get(side)
+        if not isinstance(edge, dict):
+            continue
+        # Build the Edge's own view of this side, so the page renders one
+        # coherent object rather than stitching two feeds in the browser.
+        edge_players = edge.get("players") or []
+        edge_missing = [
+            p for p in edge_players
+            if isinstance(p, dict) and str(p.get("status", "")).startswith("MISSING")
+        ]
+        edge_view = {
+            "gk_ok": not bool(edge.get("gk_out")),
+            "gk_status": edge.get("gk_status") or "",
+            "miss": edge.get("miss", 0),
+            "kmv": edge.get("kmv"),
+            "rv": edge.get("rv"),
+            "risk": _missing_risk_label(edge.get("miss", 0) or 0),
+            "missing_names": [
+                p.get("name") for p in edge_missing if p.get("name")
+            ],
+            "players": edge_players,
+        }
+        teams[side] = {**edge_view, "raw": edge}
+        if isinstance(danger_side, dict):
+            # Keep the signed verdict, clearly scoped as secondary.
+            danger_sides[side] = {
+                "signed_verdict": danger_side.get("verdict"),
+                "signed_reason": danger_side.get("verdict_reason"),
+                "net_impact": danger_side.get("net_impact"),
+                "impact_confidence": danger_side.get("impact_confidence"),
+                "rotation_uplift": danger_side.get("rotation_uplift"),
+                "gk_note": danger_side.get("gk_note"),
+            }
 
     # Explain, per side, exactly which pieces are present. The page shows this
     # instead of an empty panel, so a user can tell "no evidence yet" from
