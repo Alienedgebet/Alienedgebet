@@ -183,9 +183,12 @@ def post_user_rule_candidates(payload: CandidateRequest, request: Request):
     # a rate gate that has no business being initialised by the rules router.
     from LIVE_SCANNER.live_stage6_alerts import build_prematch_db
 
-    clean = payload.model_dump(exclude_none=True)
+    # `payload.model_dump()` yields {"prematch": {...}} — the WRAPPER. Passing
+    # that straight to find_candidates() gave it a dict with no "type" key, so
+    # every condition was rejected as invalid. Unwrap the condition itself.
+    condition = payload.model_dump(exclude_none=True).get("prematch") or {"type": "none"}
     try:
-        return find_candidates(clean, build_prematch_db(), _live_score_index())
+        return find_candidates(condition, build_prematch_db(), _live_score_index())
     except RuleValidationError:
         raise HTTPException(status_code=422, detail="The prematch condition is invalid.")
 
