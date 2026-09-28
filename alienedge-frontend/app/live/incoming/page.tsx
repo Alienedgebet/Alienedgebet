@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
-import { AlertTriangle, Handshake, Radio } from "lucide-react";
+import Link from "next/link";
+import { AlertTriangle, ChevronRight, Handshake, Radio } from "lucide-react";
 import {
   getChemistryColor,
   liveApi,
@@ -50,10 +51,20 @@ const incomingColumns: PredictionColumn<LiveIncomingPick>[] = [
     // second time in its own column, is demoted to the cell tooltip.
     key: "fixture",
     header: "fixture",
+    // Clickable since 2026-09-28: the fixture name opens the drill-down page
+    // carrying the full key-11 table, the keeper assessment, the signed impact
+    // and the Code 3 / Code 5 reconciliation. The link wraps only the name, so
+    // the row's other cells stay inert and the shared PredictionTable needs no
+    // row-click plumbing.
     render: (r) => (
-      <span className="font-medium text-text-primary" title={`fixture_id ${r.fixture_id}`}>
+      <Link
+        href={`/live/incoming/${r.fixture_id}`}
+        className="font-medium text-text-primary underline-offset-2 hover:text-accent-cyan hover:underline"
+        title={`Open the full forensic breakdown for ${r.fixture}`}
+      >
         {r.fixture}
-      </span>
+        <ChevronRight className="ml-1 inline h-3 w-3 align-[-1px] text-text-dim" />
+      </Link>
     ),
   },
   {
@@ -340,6 +351,10 @@ export default function LiveIncomingPage() {
             </h2>
             <p className="text-2xs text-text-dim">
               Rules 1–8 → incoming_predictions.json · {incomingRows.length} fixtures
+              {" · "}
+              <span className="text-accent-cyan/80">
+                click a fixture for the full breakdown
+              </span>
             </p>
           </div>
         </div>

@@ -1270,6 +1270,69 @@ export interface LiveIncomingPick {
   };
 }
 
+/**
+ * One fixture's full incoming-prediction drill-down, from
+ * GET /api/live/incoming/{fixtureId}. A pure join across the four local
+ * artifacts, so the page can show the entire chain behind a pick without the
+ * engines making another provider call.
+ */
+export interface LiveIncomingDetail {
+  fixture_id: string;
+  fixture: string;
+  live?: {
+    score: string;
+    minute: number;
+    state: string;
+    is_finished: boolean;
+  };
+  picks: LiveIncomingPick["picks"];
+
+  /** Code 1's key-11 table — the same object the Live Match page renders. */
+  teams: Partial<Record<"home" | "away", LivePrematchTeamAudit>>;
+  table_available: boolean;
+
+  /** Code 4's per-side danger card, now carrying the SIGNED impact. */
+  danger: Partial<
+    Record<"home" | "away", LiveDangerReport["home_team"]>
+  >;
+  danger_available: boolean;
+
+  /** Code 5's market grades, post-coherence. */
+  chemistry: Record<string, string>;
+  chemistry_available: boolean;
+
+  /** Code 3 vs Code 5 reconciliation. */
+  handshake?: {
+    status: "CONFLICT" | "CORROBORATED" | "NO_OVERLAP";
+    agreements: number;
+    conflicts: number;
+    summary: string;
+    detail: Array<{
+      type: string;
+      target_name?: string;
+      target_loc?: string;
+      reason?: string;
+      market: string;
+      market_grade: string;
+      verdict: "AGREES" | "CONFLICTS" | "NEUTRAL";
+    }>;
+    coherence_notes: string[];
+  } | null;
+
+  /**
+   * Which inputs actually landed. Drives an explicit "not available" state
+   * rather than a blank panel, so the user can tell missing evidence from a
+   * missing page.
+   */
+  availability: {
+    picks: boolean;
+    table: boolean;
+    danger: boolean;
+    chemistry: boolean;
+  };
+  partial: boolean;
+}
+
 export interface LiveDangerReport {
   fixture: string;
   fixture_id: string;
@@ -1282,9 +1345,32 @@ export interface LiveDangerReport {
     vulnerability_pct: number | null;
     gk_leak: number | null;
     gk_leak_available?: boolean;
-    missing_details: Array<{ name: string; pos: string }>;
+    missing_details: Array<{
+      name: string;
+      pos: string;
+      /** Present since 2026-09-28 — the quality evidence behind the absence. */
+      rating?: number | null;
+      apps?: number | null;
+      mins?: number | null;
+      worth?: number | null;
+    }>;
     formation: string;
     style: { label: string; score: number | null; da: number | null; available?: boolean };
+
+    // ── SIGNED IMPACT (2026-09-28) ──────────────────────────────────────
+    // The verdict now carries the SIGN of a rotation rather than a count of
+    // absences. `vulnerability_pct` above is retained for compatibility but
+    // no longer decides the badge — `net_impact` does.
+    verdict?: "DANGER" | "ROTATION" | "BLESSING" | "UNKNOWN";
+    verdict_reason?: string;
+    net_impact?: number;
+    impact_confidence?: number;
+    regime?: "STRONG_FAVOURITE" | "MID_FIELD" | "BIG_DOG";
+    quality_lost?: number;
+    replacement_credit?: number;
+    rotation_uplift?: number;
+    gk_verdict?: string;
+    gk_note?: string;
   };
   away_team: {
     team_name: string;
@@ -1295,9 +1381,32 @@ export interface LiveDangerReport {
     vulnerability_pct: number | null;
     gk_leak: number | null;
     gk_leak_available?: boolean;
-    missing_details: Array<{ name: string; pos: string }>;
+    missing_details: Array<{
+      name: string;
+      pos: string;
+      /** Present since 2026-09-28 — the quality evidence behind the absence. */
+      rating?: number | null;
+      apps?: number | null;
+      mins?: number | null;
+      worth?: number | null;
+    }>;
     formation: string;
     style: { label: string; score: number | null; da: number | null; available?: boolean };
+
+    // ── SIGNED IMPACT (2026-09-28) ──────────────────────────────────────
+    // The verdict now carries the SIGN of a rotation rather than a count of
+    // absences. `vulnerability_pct` above is retained for compatibility but
+    // no longer decides the badge — `net_impact` does.
+    verdict?: "DANGER" | "ROTATION" | "BLESSING" | "UNKNOWN";
+    verdict_reason?: string;
+    net_impact?: number;
+    impact_confidence?: number;
+    regime?: "STRONG_FAVOURITE" | "MID_FIELD" | "BIG_DOG";
+    quality_lost?: number;
+    replacement_credit?: number;
+    rotation_uplift?: number;
+    gk_verdict?: string;
+    gk_note?: string;
   };
   style_alignment: string;
   match_chemistry_list: {
@@ -2207,6 +2316,16 @@ export const liveApi = {
 
   getIncoming: (): Promise<AxiosResponse<LiveIncomingPick[]>> =>
     api.get("/api/live/incoming"),
+
+  /**
+   * Full drill-down for one incoming fixture: the key-11 table, the keeper
+   * assessment, the signed impact, the market chemistry and the Code 3 / Code 5
+   * reconciliation. Served as a local-file join, so it costs no provider quota.
+   */
+  getIncomingDetail: (
+    fixtureId: string | number
+  ): Promise<AxiosResponse<LiveIncomingDetail>> =>
+    api.get(`/api/live/incoming/${fixtureId}`),
 
   getDanger: (): Promise<AxiosResponse<LiveDangerReport[]>> =>
     api.get("/api/live/danger"),

@@ -1417,6 +1417,126 @@ def _incoming_rows_from_disk():
     return rows
 
 
+@app.get("/api/live/incoming/{fixture_id}", tags=["Live"])
+def get_live_incoming_detail(fixture_id: str):
+    """Everything behind ONE incoming prediction, for the drill-down page.
+
+    The Incoming page lists fixtures and the user needs to answer "why is this
+    team called that?" — which means the full key-11 table, the keeper
+    assessment, the signed impact, the danger card, the market chemistry and
+    the Code 3 / Code 5 reconciliation, all for a single fixture.
+
+    Every one of those is ALREADY on disk:
+
+        incoming_predictions.json  -> the picks and their lead reasons
+        prematch_team_audit.json   -> the 11-player table with GK status,
+                                     the same structure the Live Match page
+                                     renders, including per-player MISSING
+        danger_audit.json          -> signed impact, per-player quality
+        aggregator_report.json     -> market chemistry + handshake
+
+    So this is a pure join across local files: no SportMonks call, no quota
+    cost, and nothing an engine owns is modified. A missing piece is reported
+    as an explicit `null` with a reason so the page can say "not available"
+    rather than silently rendering a blank or, worse, borrowing another
+    fixture's numbers.
+    """
+    fid = str(fixture_id)
+
+    # ── the picks this page is about ──────────────────────────────────
+    incoming = _read_json(os.path.join(DATA_DIR, "incoming_predictions.json"), {})
+    picks = []
+    if isinstance(incoming, dict):
+        raw = incoming.get(fid)
+        if isinstance(raw, list):
+            picks = raw
+        elif isinstance(raw, dict):
+            picks = raw.get("picks") or []
+    elif isinstance(incoming, list):
+        for row in incoming:
+            if isinstance(row, dict) and str(row.get("fixture_id")) == fid:
+                picks = row.get("picks") or []
+                break
+
+    # ── names ─────────────────────────────────────────────────────────
+    names = _fixture_name_index()
+    fixture_name = names.get(fid) or fid
+
+    # ── the player table (Code 1) ─────────────────────────────────────
+    prematch = _read_json(os.path.join(DATA_DIR, "prematch_team_audit.json"), {})
+    audit_row = prematch.get(fid) if isinstance(prematch, dict) else None
+    if audit_row is None and isinstance(prematch, list):
+        for row in prematch:
+            if isinstance(row, dict) and str(row.get("fixture_id")) == fid:
+                audit_row = row
+                break
+    if isinstance(audit_row, dict) and audit_row.get("fixture"):
+        fixture_name = audit_row["fixture"]
+
+    teams = {}
+    if isinstance(audit_row, dict):
+        for side in ("home", "away"):
+            t = audit_row.get(side)
+            if isinstance(t, dict):
+                teams[side] = t
+
+    # ── the danger card (Code 4) ──────────────────────────────────────
+    danger_rows = _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
+    if isinstance(danger_rows, dict):
+        danger_rows = list(danger_rows.values())
+    danger_row = next(
+        (r for r in danger_rows
+         if isinstance(r, dict) and str(r.get("fixture_id")) == fid), None)
+
+    danger_sides = {}
+    if isinstance(danger_row, dict):
+        danger_sides = {
+            "home": danger_row.get("home_team") or {},
+            "away": danger_row.get("away_team") or {},
+        }
+        if not fixture_name or fixture_name == fid:
+            fixture_name = danger_row.get("fixture") or fid
+
+    # ── market chemistry + handshake (Code 5) ─────────────────────────
+    agg_rows = _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
+    if isinstance(agg_rows, dict):
+        agg_rows = list(agg_rows.values())
+    agg_row = next(
+        (r for r in agg_rows
+         if isinstance(r, dict) and str(r.get("fixture_id")) == fid), None)
+
+    # ── live scoreboard, when the match is actually running ───────────
+    live_idx = _live_index_cached()
+    live = live_idx.get(fid)
+
+    # Explain, per side, exactly which pieces are present. The page shows this
+    # instead of an empty panel, so a user can tell "no evidence yet" from
+    # "the engine never looked".
+    availability = {
+        "picks": bool(picks),
+        "table": bool(teams),
+        "danger": bool(danger_row),
+        "chemistry": bool(agg_row),
+    }
+
+    return {
+        "fixture_id": fid,
+        "fixture": fixture_name,
+        "live": live,
+        "picks": picks,
+        "teams": teams,
+        "table_available": availability["table"],
+        "danger": danger_sides,
+        "danger_available": availability["danger"],
+        "chemistry": (agg_row or {}).get("match_chemistry_list") or {},
+        "handshake": (agg_row or {}).get("handshake") or None,
+        "chemistry_available": availability["chemistry"],
+        "availability": availability,
+        # Set when the fixture is in the feed but nothing else has landed yet.
+        "partial": any(availability.values()) and not all(availability.values()),
+    }
+
+
 @app.get("/api/live/prematch", tags=["Live"])
 def get_live_prematch():
     raw = _read_json(os.path.join(DATA_DIR, "prematch_team_audit.json"), {})

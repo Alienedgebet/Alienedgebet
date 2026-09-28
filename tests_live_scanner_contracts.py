@@ -34,6 +34,7 @@ def _patch_notify_paths(tmp):
     notify.SENT_FILE = os.path.join(tmp, "push_sent.json")
     notify.DELIVERED_FILE = os.path.join(tmp, "push_delivered.json")
 from LIVE_SCANNER import live_stage4_danger as stage4
+from LIVE_SCANNER import live_signed_impact as si
 from LIVE_SCANNER import live_stage5_aggregator as stage5
 from LIVE_SCANNER import live_stage6_alerts as stage6
 from LIVE_SCANNER import user_rules_store as rules
@@ -3958,6 +3959,273 @@ class AlertStatusContractTests(unittest.TestCase):
             [{"user_id": "u1", "rule_id": "r_n", "f_id": "7", "time": "not-a-date"}])
         self.assertEqual(out["r_n"]["status"], "fired")
         self.assertEqual(out["r_n"]["fired_count"], 1)
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SIGNED IMPACT (2026-09-28)
+# ══════════════════════════════════════════════════════════════════════
+# The audit found Stage 4 deciding DANGER/SAFE from a headcount
+# (`len(missing) >= 4 or gk_hole`) while DISPLAYING a `vulnerability_pct`
+# that never influenced the verdict — and structurally unable to report
+# that a rotation had UPGRADED a side. These pin the signed replacement.
+#
+# The motivating evidence, measured on the live board: 10 of 22 sides were
+# labelled DANGER while the players who left were, on average, WORSE than
+# the players who started. Northern Ireland vs Hungary was the clearest —
+# 8 missing (the heaviest damage on the board) with the eight out averaging
+# 6.83 against 7.41 for the eleven in.
+
+
+def _player(name, pos, rating, apps, mins):
+    return {"name": name, "pos": pos, "avg_rating": rating,
+            "apps": apps, "mins": mins}
+
+
+def _xi(rating, apps=20, mins=1800):
+    """A realistic key eleven at one given quality level.
+
+    Two players cannot exercise this metric: the weights are positional
+    (GK 50, DEF 9, MID 4.5, ATT 1.5) and the DANGER bar was calibrated on the
+    live board's real distribution, so a two-man sample lands under it and the
+    verdict stays ROTATION. Building a full XI is what actually answers the
+    question "is losing this side of its squad damage or an upgrade?".
+    """
+    return ([_player("GK", "Goalkeeper", rating, apps, mins)]
+            + [_player(f"D{i}", "Defender", rating, apps, mins) for i in range(4)]
+            + [_player(f"M{i}", "Midfielder", rating, apps, mins) for i in range(3)]
+            + [_player(f"A{i}", "Attacker", rating, apps, mins) for i in range(3)])
+
+
+# A proven, above-average XI (7.20) and a genuinely poor one (6.30), with
+# thin-sample replacements that must not be able to cancel a real difference.
+_PROVEN = _xi(7.20)
+_WEAK = _xi(6.30)
+_REPLACEMENTS = _xi(6.90, apps=1, mins=90)
+
+
+class SignedImpactContractTests(unittest.TestCase):
+    """The sign convention, the confidence shrink, and the keeper rule."""
+
+    def test_confidence_is_full_only_for_a_well_evidenced_player(self):
+        self.assertEqual(si.confidence(30, 2700), 1.0)
+        # 2 apps / 126 min is the median "missing key player" on the live
+        # board. It must earn almost no say in the verdict.
+        self.assertLess(si.confidence(2, 126), 0.25)
+
+    def test_confidence_never_raises_and_survives_junk(self):
+        for bad in (None, -5, "x", float("nan")):
+            c = si.confidence(bad, bad)
+            self.assertGreaterEqual(c, 0.0)
+            self.assertLessEqual(c, 1.0)
+
+    def test_losing_your_best_players_is_damage(self):
+        out = si.assess_absence(_PROVEN, _REPLACEMENTS, regime="MID_FIELD")
+        self.assertGreater(out["net_impact"], 0,
+                           "better players leaving must read as a LOSS")
+        self.assertEqual(out["verdict"], si.STATE_DANGER)
+
+    def test_losing_your_worst_players_is_an_upgrade(self):
+        """The case the headcount could never express."""
+        out = si.assess_absence(_WEAK, _REPLACEMENTS, regime="MID_FIELD")
+        self.assertLess(out["net_impact"], 0,
+                        "worse players leaving must read as a GAIN")
+        self.assertEqual(out["verdict"], si.STATE_BLESSING)
+
+    def test_thin_evidence_is_rotation_even_against_a_strong_favourite(self):
+        """A 2-app sample must not be able to outvote a favourite's price."""
+        thin = [_player("X", "Attacker", 7.40, 2, 126)]
+        out = si.assess_absence(thin, _REPLACEMENTS, regime="STRONG_FAVOURITE")
+        self.assertEqual(out["verdict"], si.STATE_ROTATION)
+        self.assertEqual(out["rotation_uplift"], si.ROTATION_ATTACK_UPLIFT)
+
+    def test_no_replacement_group_means_no_verdict(self):
+        """The upgrade claim is meaningless without a comparison group."""
+        out = si.assess_absence(_PROVEN, [], regime="MID_FIELD")
+        self.assertEqual(out["verdict"], si.STATE_UNKNOWN)
+
+    def test_both_sides_of_the_comparison_are_measured_on_one_ruler(self):
+        """Regression: the replacement group was originally NOT shrunk.
+
+        A one-appearance replacement with a 6.90 rating contributed a full
+        0.15 of credit and cancelled real quality loss, turning a clear
+        DANGER into ROTATION. Both sides must carry the same shrink.
+        """
+        out = si.assess_absence(_PROVEN, _REPLACEMENTS, regime="MID_FIELD")
+        self.assertEqual(out["verdict"], si.STATE_DANGER,
+                         "a noisy replacement must not cancel proven loss")
+
+    def test_the_regime_gate_orders_the_bars_correctly(self):
+        """The regime gate is what the user's odd/even insight became.
+
+        A strong favourite's XI IS the product, so it must take a BIGGER hit
+        before the engine calls it damage; a big dog's XI is already written
+        off, so a SMALLER one suffices. The ordering is the meaning; the exact
+        numbers are calibration and are deliberately not pinned here.
+        """
+        self.assertGreater(si._DANGER_BAR["STRONG_FAVOURITE"],
+                           si._DANGER_BAR["MID_FIELD"],
+                           "a favourite must be harder to call damaged")
+        self.assertLess(si._DANGER_BAR["BIG_DOG"],
+                        si._DANGER_BAR["MID_FIELD"],
+                        "a big dog must be easier to call damaged")
+        self.assertGreater(si._DANGER_BAR["BIG_DOG"], 0.0,
+                           "the bar must stay positive, or every "
+                           "fixture is 'damaged'")
+
+    def test_unknown_keeper_is_unknown_not_guilty(self):
+        """A debutant is unproven, not proven poor.
+
+        The old code returned (85.0, True, "DEBUT/UNKNOWN GK (Max Risk)")
+        purely because it could not find a starting keeper, and 26% of
+        cached keepers have under three appearances.
+        """
+        out = si.assess_goalkeeper(None, None, regime="MID_FIELD")
+        self.assertEqual(out["label"], si.STATE_UNKNOWN)
+        self.assertFalse(out["liability"])
+
+    def test_an_unnamed_keeper_still_matters_to_a_strong_favourite(self):
+        out = si.assess_goalkeeper(None, None, regime="STRONG_FAVOURITE")
+        self.assertEqual(out["label"], si.STATE_DANGER)
+        self.assertTrue(out["liability"])
+
+    def test_a_debutant_keeper_is_unknown_even_with_a_proven_benchmark(self):
+        out = si.assess_goalkeeper(
+            {"apps": 1, "avg_rating": 6.5, "mins": 90},
+            {"apps": 20, "avg_rating": 7.2}, regime="MID_FIELD")
+        self.assertEqual(out["label"], si.STATE_UNKNOWN)
+
+    def test_a_proven_keeper_downgrade_is_damage(self):
+        out = si.assess_goalkeeper(
+            {"apps": 20, "avg_rating": 6.4, "mins": 1800},
+            {"apps": 22, "avg_rating": 7.3}, regime="MID_FIELD")
+        self.assertEqual(out["label"], si.STATE_DANGER)
+        self.assertTrue(out["liability"])
+
+    def test_regime_needs_odds_and_degrades_to_mid_field_without_them(self):
+        self.assertEqual(si.regime_for_odds(1.25), "STRONG_FAVOURITE")
+        self.assertEqual(si.regime_for_odds(3.10), "BIG_DOG")
+        for missing in (None, 0, -1, "x"):
+            self.assertEqual(si.regime_for_odds(missing), "MID_FIELD")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CODE 5 COHERENCE (2026-09-28)
+# ══════════════════════════════════════════════════════════════════════
+# Seven independent if/elif ladders asserted impossible combinations in
+# the same row: `Over2.5 = Weak` beside `Over1.5 = Excellent` in 8 of 12
+# live rows. These pin the single-scale + coherence-pass replacement.
+
+
+def _chem_fixture(chem):
+    """Minimal danger card for the aggregator."""
+    def side(net, verdict="ROTATION"):
+        return {"id": 1, "team_name": "T", "status": "OK",
+                "data_available": True, "breach": False,
+                "style": {"label": "Attacking", "score": 4.0, "da": 40.0,
+                          "available": True},
+                "formation": "4-3-3", "net_impact": net, "verdict": verdict}
+    return {"fixture": "A vs B", "fixture_id": "1",
+            "style_alignment": "🔥 OPEN",
+            "home_team": side(0.0), "away_team": side(0.0),
+            "_chem_override": chem}
+
+
+class AggregatorCoherenceTests(unittest.TestCase):
+    """Nested markets must stay ordered after the repairs run."""
+
+    def _run(self, home_net, away_net, align="🔥 OPEN", picks=None):
+        report = []
+        card = {
+            "fixture": "A vs B", "fixture_id": "1",
+            "style_alignment": align,
+            "home_team": {"id": 1, "team_name": "A", "danger_level": "OK",
+                          "data_available": True, "breach": False,
+                          "style": {"label": "Attacking", "score": 4.0,
+                                    "da": 40.0, "available": True},
+                          "formation": "4-3-3", "net_impact": home_net,
+                          "verdict": "ROTATION"},
+            "away_team": {"id": 2, "team_name": "B", "danger_level": "OK",
+                          "data_available": True, "breach": False,
+                          "style": {"label": "Attacking", "score": 4.0,
+                                    "da": 40.0, "available": True},
+                          "formation": "4-3-3", "net_impact": away_net,
+                          "verdict": "ROTATION"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            inc = os.path.join(tmp, "incoming_predictions.json")
+            drg = os.path.join(tmp, "danger_audit.json")
+            out = os.path.join(tmp, "aggregator_report.json")
+            with open(inc, "w", encoding="utf-8") as f:
+                json.dump({"1": picks or []}, f)
+            with open(drg, "w", encoding="utf-8") as f:
+                json.dump([card], f)
+            with patch.object(stage5, "DATA_DIR", tmp), \
+                 patch.object(stage5, "INCOMING_PREDICTIONS_FILE", inc), \
+                 patch.object(stage5, "DANGER_AUDIT_FILE", drg), \
+                 patch.object(stage5, "AGGREGATOR_REPORT_FILE", out):
+                report = stage5.run_master_aggregator()
+        return report[0]
+
+    def test_over_15_is_never_stronger_than_over_25(self):
+        """2 goals cannot be a harder read than 3 goals."""
+        for h, a in ((0.0, 0.0), (18.0, 18.0), (-20.0, -20.0),
+                     (12.0, -14.0), (25.0, 25.0)):
+            c = self._run(h, a)["match_chemistry_list"]
+            self.assertLessEqual(
+                _rank_of(c["Over1.5"]), _rank_of(c["Over2.5"]),
+                f"Over1.5={c['Over1.5']} > Over2.5={c['Over2.5']} at ({h},{a})")
+
+    def test_a_strong_btts_read_cannot_sit_beside_a_weak_goal_read(self):
+        c = self._run(18.0, 18.0)["match_chemistry_list"]
+        if _rank_of(c["Gg"]) >= _rank_of("Very Strong"):
+            self.assertGreater(_rank_of(c["Over1.5"]), _rank_of("Weak"),
+                               f"Gg={c['Gg']} but Over1.5={c['Over1.5']}")
+
+    def test_over_25_and_under_35_are_not_both_excellent(self):
+        c = self._run(18.0, 18.0)["match_chemistry_list"]
+        self.assertFalse(
+            _rank_of(c["Over2.5"]) >= _rank_of("Excellent")
+            and _rank_of(c["Under3.5"]) >= _rank_of("Excellent"))
+
+    def test_a_real_score_is_never_rendered_as_unavailable(self):
+        """Regression: a negative Under score clamped to index 0, which is
+        the literal label "Unavailable", so a real read displayed as a
+        missing one."""
+        c = self._run(25.0, 25.0)["match_chemistry_list"]
+        for market, grade in c.items():
+            self.assertNotEqual(grade, "Unavailable",
+                                f"{market} showed as Unavailable despite a "
+                                f"computed score")
+
+    def test_the_handshake_actually_reconciles_the_two_inputs(self):
+        """It used to copy the picks through and read none of them."""
+        row = self._run(20.0, -20.0, picks=[{
+            "type": "TO_SCORE", "target_loc": "home",
+            "target_name": "A", "reason": "r"}])
+        hs = row["handshake"]
+        self.assertIsNotNone(hs)
+        self.assertIn(hs["status"], ("AGREES", "CORROBORATED",
+                                     "CONFLICT", "NO_OVERLAP"))
+        # A pick naming the home side must be mapped onto the Home Win market.
+        self.assertTrue(any(d["market"] == "Home Win" for d in hs["detail"]))
+
+    def test_hyphenated_club_names_do_not_collide(self):
+        """`Al-Hilal vs Al-Ittihad` and `Al Hilal vs Al Ittihad` are the same
+        fixture, but they must not collide with a THIRD pairing."""
+        a = stage5.get_match_key("Al-Hilal vs Al-Ittihad")
+        b = stage5.get_match_key("Al Hilal vs Al Ittihad")
+        c = stage5.get_match_key("Al-Ahli vs Al-Hilal")
+        self.assertEqual(a, b, "the two spellings should agree")
+        self.assertNotEqual(a, c, "a different pairing must stay different")
+
+
+def _rank_of(grade):
+    return {"Unavailable": 0, "Very Weak": 1, "Weak": 2, "Balanced": 3,
+            "Strong": 4, "Very Strong": 5, "Excellent": 6, "Elite": 7}.get(
+        grade, 0)
+
 
 
 if __name__ == "__main__":

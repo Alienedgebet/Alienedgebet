@@ -37,7 +37,22 @@ HISTORY_CACHE_SCHEMA = 2
 # disk and ~2.5GB+ RSS on every cycle load -> the OOM-kill loop that killed the
 # scanner 5x (Sep 19/20) and an API worker. 60 teams keeps the file ~250MB and
 # the live scanner comfortably under 1GB.
-HISTORY_CACHE_MAX_TEAMS = 60    # hard bound; expired entries are pruned on save
+# 2026-09-28: the 60-team count cap was the real reason the evidence was thin.
+# Each cycle needs ~34 teams (17 fixtures x 2 sides) and the cap evicted
+# everything older than the most recent ~60 pulls, so a team's whole 150-day
+# window was thrown away roughly every two cycles and re-pulled from scratch.
+# Measured cost is ~1.49MB/team on disk, and the service sits at ~836MB of a
+# 1.7GB cgroup limit, so a count cap has to give way to a BYTE budget: it
+# self-limits no matter how fixture-heavy the teams in the window happen to be
+# (a 19-fixture team costs several times a 3-fixture one, so a fixed count is
+# not a fixed cost).
+#
+#   500MB budget ~= 9 days of teams retained instead of ~2 cycles, and keeps
+#   a comfortable margin under the 1.7GB limit even in the worst team mix.
+#
+# Entries are evicted oldest-`at`-first until the file fits. TTL expiry still
+# applies first, so a stale entry is dropped for staleness rather than for size.
+HISTORY_CACHE_MAX_BYTES = 500 * 1024 * 1024   # ~500MB
 _history_cache: Dict[str, Any] = {}
 
 # FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
@@ -48,6 +63,22 @@ except ImportError:  # running this file directly rather than via the package
     import sys as _sys
     _sys.path.insert(0, BASE_DIR)
     from live_cache import note_acquisition, acquisition_failed, write_feed
+
+# SIGNED IMPACT + CANONICAL STATE (2026-09-28). Stage 4 previously had no state
+# rule at all (it audited finished and not-yet-started fixtures) and decided
+# DANGER/SAFE from a headcount. Both now come from shared, tested modules.
+try:
+    from LIVE_SCANNER.live_state_classifier import classify_fixture
+    from LIVE_SCANNER import live_signed_impact as si
+    from LIVE_SCANNER.live_signed_impact import (
+        assess_absence, assess_goalkeeper, regime_for_odds,
+    )
+except ImportError:  # direct execution without the package on sys.path
+    from live_state_classifier import classify_fixture
+    import live_signed_impact as si
+    from live_signed_impact import (
+        assess_absence, assess_goalkeeper, regime_for_odds,
+    )
 
 # ==============================================================================
 # ⚙️ SYSTEM CONFIGURATION (WORLD STANDARD)
@@ -190,7 +221,29 @@ def _save_history_cache():
                       and (now - v.get("at", 0)) < HISTORY_TTL
                       and v.get("data"))]
         items.sort(key=lambda kv: kv[1].get("at", 0), reverse=True)
-        items = items[:HISTORY_CACHE_MAX_TEAMS]
+
+        # ── BYTE-BUDGET EVICTION (2026-09-28) ──────────────────────────────────
+        # This replaces the old `items[:HISTORY_CACHE_MAX_TEAMS]` slice. A count
+        # cap is not a cost cap: entry size varies by an order of magnitude with
+        # how many finished fixtures a team has in the window, so 60 entries can
+        # be 90MB or 600MB depending on which teams happen to be playing. Keeping
+        # the newest entries until the payload fits a byte budget makes retention
+        # self-limiting in the worst case as well as the typical one, and is what
+        # lets the cache actually accumulate the 150-day window that the signed
+        # impact metric (net_impact) needs to tell a key player from a rumour.
+        kept, total = [], 0
+        for k, v in items:
+            try:
+                size = len(json.dumps(v, ensure_ascii=False).encode("utf-8"))
+            except (TypeError, ValueError):
+                size = 0
+            if total + size > HISTORY_CACHE_MAX_BYTES:
+                break
+            kept.append((k, v))
+            total += size
+        dropped = len(items) - len(kept)
+        items = kept
+
         if not items:
             try:
                 with open(HISTORY_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -202,8 +255,15 @@ def _save_history_cache():
                 pass
         with open(HISTORY_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(dict(items), f)
+        # Report retention in MB and how many entries the budget displaced, so
+        # the evidence base can be watched growing cycle over cycle instead of
+        # assumed. A non-zero `dropped` is normal and healthy (it is the budget
+        # working); a rising `dropped` on a quiet day would mean the window is
+        # still turning over too fast.
         print(f"[HISTORY CACHE] saved {len(items)} team histories "
-              f"-> {os.path.basename(HISTORY_CACHE_FILE)}")
+              f"({total / 1e6:.1f}MB / {HISTORY_CACHE_MAX_BYTES / 1e6:.0f}MB budget"
+              + (f", {dropped} evicted by budget)" if dropped else ")")
+              + f" -> {os.path.basename(HISTORY_CACHE_FILE)}")
     except Exception as e:
         print(f"[HISTORY CACHE] save skipped: {e}")
 
@@ -324,6 +384,82 @@ def compute_style_analysis(history, team_id: int):
     return {"label": label, "score": round(avg_da/10, 2), "da": avg_da,
             "available": True}
 
+# ROTATION LEDGER (2026-09-28)
+# The rotation uplift is the only statistically significant new signal found in
+# the audit (high-churn sides scored +0.48 more goals, t=+2.58 on 220
+# team-matches), but that sample came from only 40 teams, so the observations
+# are NOT independent and the effect could still be a quirk of those clubs.
+#
+# Every verdict is therefore written here with the fixture it applied to. Once
+# those fixtures finish, the outcome can be scored against the call and the
+# effect either confirmed on live data or demoted — a decision made from
+# evidence rather than from the original 40-team sample.
+#
+# One JSON object per line, append-only, capped by rotation in save_ledger().
+ROTATION_LEDGER_FILE = os.path.join(DATA_DIR, "rotation_ledger.jsonl")
+ROTATION_LEDGER_MAX = 20000
+
+
+def save_ledger(rows):
+    """Append this cycle's verdicts to the rotation ledger.
+
+    Best-effort by design: a ledger that cannot be written must never take the
+    scanner down, and it is diagnostic data rather than a feed, so a failure is
+    reported and swallowed rather than raised.
+    """
+    if not rows:
+        return 0
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(ROTATION_LEDGER_FILE, "a", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # Keep the file bounded: drop the oldest lines once it grows past the cap.
+        try:
+            if os.path.getsize(ROTATION_LEDGER_FILE) > ROTATION_LEDGER_MAX * 220:
+                with open(ROTATION_LEDGER_FILE, encoding="utf-8") as f:
+                    lines = f.readlines()
+                with open(ROTATION_LEDGER_FILE, "w", encoding="utf-8") as f:
+                    f.writelines(lines[-ROTATION_LEDGER_MAX:])
+        except OSError:
+            pass
+        return len(rows)
+    except Exception as e:
+        print(f"[ROTATION LEDGER] write skipped: {e}")
+        return 0
+
+
+def _favourite_odds(fixture_id) -> Optional[float]:
+    """The shorter 1X2 price for a fixture, or None when the provider has none.
+
+    Deliberately the only odds this stage reads. It exists to answer one
+    question — is this a strong favourite, an even contest, or a big dog — and
+    regime_for_odds() degrades to MID_FIELD when the answer is unavailable, so
+    a fixture the provider has no price for is never given a confident regime.
+    """
+    try:
+        resp = GET(f"/odds/pre-match/fixtures/{fixture_id}",
+                   params={"market_id": 1})
+    except Exception:
+        return None
+    if acquisition_failed(resp):
+        return None
+    best: Optional[float] = None
+    for row in (resp.get("data") or []):
+        if row.get("market_id") != 1:
+            continue
+        try:
+            val = float(row.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if val > 100:            # American odds masquerading as decimal
+            continue
+        if val <= 1.0:
+            continue
+        best = val if best is None else min(best, val)
+    return best
+
+
 # ------------------------------------------------------------------------------
 # 🚀 MAIN PIPELINE (WRAPPED FOR ARCHITECTURE)
 # ------------------------------------------------------------------------------
@@ -373,9 +509,22 @@ def run_danger_forensic_aggregator():
 
     output_pool =[]
     processed_count = 0
+    ledger_rows =[]
 
     for fx in all_fixtures:
         try:
+            # ── STATE GATE (2026-09-28) ───────────────────────────────────
+            # Stage 4 had NO state filter, so it audited every fixture of the
+            # day including ones that had not kicked off and ones already
+            # finished — five of the seventeen rows in danger_audit.json were
+            # not even in the live in-play cache. A danger verdict on a match
+            # that has not started is a guess dressed as evidence.
+            _st = classify_fixture(fx)
+            if _st.get("is_finished") or _st.get("is_stale"):
+                continue
+            if not (_st.get("is_live") or _st.get("is_not_started")):
+                continue
+
             lineups = fx.get("lineups", [])
             starters_all =[l for l in lineups if int(l.get('type_id', 0)) == 11]
             if not starters_all: continue 
@@ -387,41 +536,111 @@ def run_danger_forensic_aggregator():
             # silently reverses every downstream home/away market signal.
             if h_p is None or a_p is None:
                 continue
+
+            # ── MARKET REGIME (2026-09-28) ───────────────────────────────
+            # The first time this stage sees odds. Rotation is not equally
+            # costly for a strong favourite (whose XI is the product) and a big
+            # dog (whose XI is already written off), and the signed verdict
+            # needs that context to set its bar. The regime is shared by both
+            # sides because it describes the MATCH, not either team.
+            fav_regime = regime_for_odds(_favourite_odds(fx.get("id")))
             
             def audit_side(team_id, team_name):
                 t_id = int(team_id)
                 key_monument, history = get_key_players_forensics(t_id)
                 current_starters = {int(l['player_id']) for l in starters_all if int(l.get('team_id', 0)) == t_id}
-                
-                starting_gk_leak = None
-                for pid in current_starters:
-                    if key_monument.get(pid, {}).get('pos') == "Goalkeeper":
-                        starting_gk_leak = key_monument[pid]['c_p90']
-                        break
-                
-                missing_details =[]
-                m_weight, t_weight, gk_hole = 0, 0, False
+                # A key player named on the bench (type_id 12) is NOT injured.
+                # Counting the bench as absent is how an ordinary rotation used
+                # to earn a DANGER badge.
+                current_bench = {int(l['player_id']) for l in lineups
+                                 if int(l.get('team_id', 0)) == t_id
+                                 and int(l.get('type_id', 0)) == 12}
+
+                master_gk = next(
+                    (info for info in key_monument.values()
+                     if info.get('pos') == "Goalkeeper"), None)
+                starting_gk = next(
+                    (key_monument[pid] for pid in sorted(current_starters)
+                     if key_monument.get(pid, {}).get('pos') == "Goalkeeper"), None)
+                starting_gk_leak = (starting_gk or {}).get('c_p90')
+
+                missing_details = []
+                m_weight, t_weight = 0, 0
                 for pid, info in key_monument.items():
                     w = POS_WEIGHTS.get(info['pos'], 3.0)
                     t_weight += w
-                    if pid not in current_starters:
-                        missing_details.append({"name": info['name'], "pos": info['pos']})
+                    if pid not in current_starters and pid not in current_bench:
+                        # The quality evidence travels WITH the absence. It used
+                        # to be dropped here, which is precisely what made the
+                        # verdict a headcount: the engine could see THAT a
+                        # player was gone but never HOW GOOD he was.
+                        missing_details.append({
+                            "name": info['name'], "pos": info['pos'],
+                            "rating": info.get('avg_rating'),
+                            "apps": info.get('apps'),
+                            "mins": info.get('mins'),
+                            "worth": info.get('worth'),
+                        })
                         m_weight += w
-                        if info['pos'] == "Goalkeeper": gk_hole = True
-                
-                # No historical key-player data is an unavailable audit, not a
-                # safe team and not a 0.0 goalkeeper concession rate.
+
                 data_available = bool(key_monument)
                 v_pct = (m_weight / t_weight * 100) if t_weight > 0 else None
-                breached = (None if not data_available else
-                            ((len(missing_details) >= CHAOS_THRESHOLD) or gk_hole))
+
+                # ── SIGNED VERDICT (2026-09-28) ───────────────────────────────
+                # Replaces `breached = (len(missing) >= 4) or gk_hole`, which
+                # could only ever count and so could never report an upgrade.
+                net = assess_absence(
+                    [{**info, "id": pid}
+                     for pid, info in key_monument.items()
+                     if pid not in current_starters and pid not in current_bench],
+                    [{**key_monument[pid], "id": pid}
+                     for pid in key_monument if pid in current_starters],
+                    regime=fav_regime,
+                )
+                verdict = net["verdict"]
+                gk = assess_goalkeeper(starting_gk, master_gk, fav_regime,
+                                       starting_gk_leak)
+                # A confirmed goalkeeper downgrade is real damage whatever the
+                # outfield evidence says, and it is allowed to raise DANGER —
+                # but never to manufacture one out of missing data.
+                if gk.get("liability") and verdict != si.STATE_DANGER:
+                    verdict = si.STATE_DANGER
+                    net["verdict"] = verdict
+                    net["verdict_reason"] = (
+                        f"Outfield {net['verdict_reason'].split('—')[0].strip()} — "
+                        f"but the goalkeeper alone settles it: {gk['note']}"
+                    )
+
+                breach = (None if not data_available else (verdict == si.STATE_DANGER))
                 style = compute_style_analysis(history, t_id)
 
+                # The headline label now carries the SIGN of the effect, not a
+                # count. A team whose rotation upgraded it is no longer painted
+                # with the same red badge as a team that lost its winners.
+                badge = {
+                    si.STATE_DANGER:  "🔴 DANGER",
+                    si.STATE_BLESSING: "🟢 BLESSING",
+                    si.STATE_ROTATION: "🟡 ROTATION",
+                }.get(verdict, "⚪ UNAVAILABLE")
+
                 return {
-                    "team_name": team_name, "id": t_id, "breach": breached,
+                    "team_name": team_name, "id": t_id, "breach": breach,
                     "data_available": data_available,
-                    "danger_level": ("⚪ UNAVAILABLE" if not data_available
-                                     else "🔴 DANGER" if breached else "✅ SAFE"),
+                    "danger_level": (badge if data_available
+                                     else "⚪ UNAVAILABLE"),
+                    "verdict": verdict,
+                    "verdict_reason": net["verdict_reason"],
+                    "net_impact": net["net_impact"],
+                    "impact_confidence": net["confidence"],
+                    "regime": fav_regime,
+                    "quality_lost": net["quality_lost"],
+                    "replacement_credit": net["replacement_credit"],
+                    "rotation_uplift": net["rotation_uplift"],
+                    "gk_verdict": gk["label"],
+                    "gk_note": gk["note"],
+                    # Retained for backward compatibility with the existing
+                    # consumers, but it is no longer what decides the badge —
+                    # `net_impact` is. See live_signed_impact for why.
                     "vulnerability_pct": (round(v_pct, 1) if v_pct is not None else None),
                     "gk_leak": starting_gk_leak,
                     "gk_leak_available": starting_gk_leak is not None,
@@ -484,16 +703,44 @@ def run_danger_forensic_aggregator():
             print(f"MATCH: {match_card['fixture']} (ID: {match_card['fixture_id']})")
             print(f"Handshake: [ Alignment: {match_card['style_alignment']} | GG: {gg_label} ]")
             for side, data in[("HOME", home_audit), ("AWAY", away_audit)]:
-                print(f"  [{side}] {data['team_name']} -> {data['danger_level']} ("
-                      f"{data['vulnerability_pct'] if data['vulnerability_pct'] is not None else 'N/A'}% Damage | "
-                      f"GK Leak: {data['gk_leak'] if data['gk_leak'] is not None else 'N/A'})")
+                print(f"  [{side}] {data['team_name']} -> {data['danger_level']} "
+                      f"[{data.get('regime')}] "
+                      f"(net {data['net_impact']:+.1f} | conf {data['impact_confidence']:.2f} | "
+                      f"GK {data.get('gk_verdict')})")
+                print(f"      WHY: {data.get('verdict_reason')}")
                 if data['missing_details']:
-                    missing_str = ", ".join([f"{p['name']} ({p['pos']})" for p in data['missing_details']])
-                    print(f"    MISSING: {missing_str}")
+                    missing_str = ", ".join(
+                        f"{p['name']} ({p['pos']}"
+                        + (f", rtg {p['rating']:.2f}" if p.get('rating') else ", no rating")
+                        + f", {p.get('apps') or 0} apps)"
+                        for p in data['missing_details'])
+                    print(f"    ABSENT: {missing_str}")
             print("-" * 120)
 
             output_pool.append(match_card)
             processed_count += 1
+
+            # Record the signed call so its effect can be scored once the
+            # fixture finishes. `rotation_uplift` is the number under test: it
+            # claims a rotated side scores more, and the ledger is what turns
+            # that claim into a measurement instead of an assumption.
+            ledger_rows.append({
+                "fixture_id": fx.get("id"),
+                "fixture": fx.get("name"),
+                "logged_at": datetime.now(timezone.utc).isoformat(),
+                "regime": fav_regime,
+                "sides": [{
+                    "team_id": side["id"],
+                    "team_name": side["team_name"],
+                    "verdict": side["verdict"],
+                    "net_impact": side["net_impact"],
+                    "confidence": side["impact_confidence"],
+                    "missing_count": len(side["missing_details"]),
+                    "rotation_uplift": side["rotation_uplift"],
+                    "gk_verdict": side.get("gk_verdict"),
+                    "style": side["style"].get("label"),
+                } for side in (home_audit, away_audit)],
+            })
             time.sleep(REQUEST_DELAY)
             
         except Exception as e: continue
@@ -502,7 +749,25 @@ def run_danger_forensic_aggregator():
     write_feed(OUTPUT_FILE, output_pool,
                acquisition_ok=not acq_failed, label="danger_audit.json")
     _save_history_cache()
-    
+    logged = save_ledger(ledger_rows)
+
+    # Verdict spread for this cycle. A board that is almost entirely DANGER
+    # (or almost entirely ROTATION) is the signal that the evidence base still
+    # cannot support a call — which is a fact worth seeing, not a bug to hide.
+    if output_pool:
+        from collections import Counter as _C
+        spread = _C()
+        for row in output_pool:
+            for side in ("home_team", "away_team"):
+                spread[row[side].get("verdict", "UNKNOWN")] += 1
+        print(f"[SIGNED IMPACT] verdict spread: {dict(spread)}")
+        confs = [row[s]["impact_confidence"]
+                 for row in output_pool for s in ("home_team", "away_team")]
+        if confs:
+            print(f"[SIGNED IMPACT] mean confidence {sum(confs)/len(confs):.2f} "
+                  f"(min {min(confs):.2f}) · {len(confs)} sides judged")
+    print(f"[ROTATION LEDGER] {logged} call(s) recorded for later scoring")
+
     print(f"\n[🏆] SUPREME AUDIT COMPLETE: {processed_count} PROFILES SAVED TO DATA DIR")
     
     return output_pool
