@@ -39,7 +39,16 @@ SENT_FILE = os.path.join(DATA_DIR, "push_sent.json")
 DELIVERED_FILE = os.path.join(DATA_DIR, "push_delivered.json")
 
 # Only these are ever announced. Keep this list in sync with emit_event callers.
-ALLOWED_EVENTS = {"TRIGGERED", "SETTLED"}
+#
+# USER_ALERT is the user-defined alert (Code 6 "Setup my alert"), including the
+# scoreline gate. It is a PERSONAL announcement, not a system one, so it is
+# audience-scoped in dispatch(): it goes only to the user who owns the rule.
+# TRIGGERED/SETTLED remain the system prediction events and stay broadcast.
+ALLOWED_EVENTS = {"TRIGGERED", "SETTLED", "USER_ALERT"}
+
+# Preference keys are the lowercased event names. Derived from ALLOWED_EVENTS so
+# adding an event type cannot silently ship without a toggle to switch it off.
+DEFAULT_PREFS = {e.lower(): True for e in ALLOWED_EVENTS}
 
 _write_lock = threading.Lock()
 
@@ -129,9 +138,17 @@ def emit_event(event, fixture_id, fixture, market, target, **details):
                 "at": _now(),
             }
             for name in ("minute", "trigger_minute", "score_at_trigger",
-                         "final_score", "settlement", "signal"):
+                         "final_score", "settlement", "signal", "rule_id",
+                         "rule_label", "gate", "watchlisted"):
                 if name in details and details[name] is not None:
                     record[name] = details[name]
+            # AUDIENCE. A user-defined alert belongs to exactly one account.
+            # Without this, dispatch() — which is a broadcast for the system
+            # TRIGGERED/SETTLED events — would push one user's private alert to
+            # every subscriber on the system. Recorded only when the caller
+            # supplies it, so a legacy event simply stays a broadcast.
+            if details.get("audience_user_id"):
+                record["audience_user_id"] = str(details["audience_user_id"])
             lines = []
             if os.path.exists(EVENTS_FILE):
                 try:
@@ -151,26 +168,71 @@ def emit_event(event, fixture_id, fixture, market, target, **details):
 
 
 # ── Subscription store ──────────────────────────────────────────────────────
+#
+# SHAPE: { user_id: { endpoint_url: {endpoint, keys, prefs, ...} } }
+#
+# This is a nested map, not one endpoint per user. The original store held a
+# single endpoint per user_id, so subscribing on a phone and then on a laptop
+# SILENTLY REPLACED the phone — the user would receive alerts on one device,
+# believe both were covered, and miss every alert on the other. Every read path
+# below tolerates the old flat shape and migrates it, so an existing
+# single-device subscriber keeps working untouched on first load.
+
+
+def _migrate(data):
+    """Fold any legacy single-endpoint records into the nested shape, in place."""
+    if not isinstance(data, dict):
+        return {}
+    for user_id, value in list(data.items()):
+        # Legacy: {endpoint, keys, prefs, ...} describing ONE device.
+        if isinstance(value, dict) and value.get("endpoint"):
+            data[user_id] = {value["endpoint"]: value}
+    return data
+
 
 def list_subscriptions():
     data = _read_json(SUBS_FILE, {})
-    return data if isinstance(data, dict) else {}
+    return _migrate(data) if isinstance(data, dict) else {}
+
+
+def _user_devices(data, user_id):
+    """This user's device records, as a list. Tolerates the legacy flat shape."""
+    value = (data or {}).get(user_id)
+    if not isinstance(value, dict) or not value:
+        return []
+    if value.get("endpoint"):
+        return [value]  # legacy single-device record
+    return [v for v in value.values() if isinstance(v, dict) and v.get("endpoint")]
 
 
 def save_subscription(user_id, endpoint, keys, prefs=None, user_agent=""):
-    """Register (or refresh) a browser push endpoint for a user."""
+    """Register (or refresh) a browser push endpoint for a user.
+
+    Multiple devices per user are now kept side by side. Re-subscribing the SAME
+    endpoint refreshes that device rather than creating a duplicate.
+    """
     if not user_id or not endpoint or not isinstance(keys, dict):
         raise ValueError("user_id, endpoint and keys are required")
     with _write_lock:
         data = list_subscriptions()
-        existing = data.get(user_id, {})
-        merged_prefs = {"triggered": True, "settled": True}
-        if isinstance(existing.get("prefs"), dict):
-            merged_prefs.update(existing["prefs"])
+        devices = {d["endpoint"]: d for d in _user_devices(data, user_id)}
+
+        # Prefs are a per-USER setting. Carry them across from an existing
+        # device so adding a second device does not silently reset the user's
+        # choices back to their defaults.
+        merged_prefs = dict(DEFAULT_PREFS)
+        for dev in devices.values():
+            if isinstance(dev.get("prefs"), dict):
+                merged_prefs.update(
+                    {k: v for k, v in dev["prefs"].items() if k in DEFAULT_PREFS}
+                )
         if isinstance(prefs, dict):
-            merged_prefs.update({k: v for k, v in prefs.items()
-                                 if k in merged_prefs})
-        data[user_id] = {
+            merged_prefs.update(
+                {k: bool(v) for k, v in prefs.items() if k in DEFAULT_PREFS}
+            )
+
+        existing = devices.get(endpoint, {})
+        devices[endpoint] = {
             "endpoint": endpoint,
             "keys": {"p256dh": keys.get("p256dh"), "auth": keys.get("auth")},
             "prefs": merged_prefs,
@@ -178,53 +240,82 @@ def save_subscription(user_id, endpoint, keys, prefs=None, user_agent=""):
             "created_at": existing.get("created_at") or _now(),
             "updated_at": _now(),
         }
-        if len(data) > MAX_SUBSCRIPTIONS:
-            for stale in sorted(data, key=lambda u: data[u].get("created_at", ""))[
-                    :len(data) - MAX_SUBSCRIPTIONS]:
-                data.pop(stale, None)
+        data[user_id] = devices
+
+        # Cap by DEVICE count, not user count, so one user with many devices
+        # cannot quietly evict everyone else's single phone.
+        total = sum(len(v) for v in data.values() if isinstance(v, dict))
+        if total > MAX_SUBSCRIPTIONS:
+            ordered = sorted(
+                ((d.get("created_at", ""), u, e)
+                 for u, devs in data.items() if isinstance(devs, dict)
+                 for e, d in devs.items()),
+                key=lambda t: t[0],
+            )
+            for _, u, e in ordered[: max(0, total - MAX_SUBSCRIPTIONS)]:
+                if isinstance(data.get(u), dict):
+                    data[u].pop(e, None)
         _write_json_atomic(SUBS_FILE, data)
-    return data[user_id]
+    return devices[endpoint]
 
 
 def delete_subscription(user_id, endpoint=None):
-    """Remove a user's endpoint. With no endpoint, removes all of theirs."""
+    """Remove one device, or with no endpoint, all of the user's devices."""
     with _write_lock:
         data = list_subscriptions()
-        record = data.get(user_id)
-        if not record:
+        devices = {d["endpoint"]: d for d in _user_devices(data, user_id)}
+        if not devices:
             return False
-        if endpoint and record.get("endpoint") != endpoint:
-            return False
-        data.pop(user_id, None)
+        if endpoint:
+            if endpoint not in devices:
+                return False
+            devices.pop(endpoint, None)
+        else:
+            devices = {}
+        if devices:
+            data[user_id] = devices
+        else:
+            data.pop(user_id, None)
         _write_json_atomic(SUBS_FILE, data)
     return True
 
 
 def get_prefs(user_id):
-    record = list_subscriptions().get(user_id) or {}
-    prefs = record.get("prefs") if isinstance(record.get("prefs"), dict) else {}
-    return {
-        "triggered": bool(prefs.get("triggered", True)),
-        "settled": bool(prefs.get("settled", True)),
-        "subscribed": bool(record.get("endpoint")),
-    }
+    """This user's preferences, and whether ANY of their devices is subscribed."""
+    devices = _user_devices(list_subscriptions(), user_id)
+    if not devices:
+        return {**DEFAULT_PREFS, "subscribed": False, "devices": 0}
+    # Newest device wins. Prefs are written to every device together, so this is
+    # only a defensive tie-break for a half-migrated file.
+    newest = max(devices, key=lambda d: d.get("updated_at", ""))
+    prefs = newest.get("prefs") if isinstance(newest.get("prefs"), dict) else {}
+    out = {name: bool(prefs.get(name, True)) for name in DEFAULT_PREFS}
+    out["subscribed"] = True
+    out["devices"] = len(devices)
+    return out
 
 
 def update_prefs(user_id, patch):
+    """Update preferences on EVERY device the user owns, so they cannot diverge."""
     with _write_lock:
         data = list_subscriptions()
-        record = data.get(user_id)
-        if not record:
+        devices = {d["endpoint"]: d for d in _user_devices(data, user_id)}
+        if not devices:
             raise KeyError("no push subscription for this user")
-        prefs = record.get("prefs") or {}
-        for name in ("triggered", "settled"):
-            if name in patch:
-                prefs[name] = bool(patch[name])
-        record["prefs"] = prefs
-        record["updated_at"] = _now()
-        data[user_id] = record
+        for dev in devices.values():
+            prefs = dict(DEFAULT_PREFS)
+            if isinstance(dev.get("prefs"), dict):
+                prefs.update(
+                    {k: v for k, v in dev["prefs"].items() if k in DEFAULT_PREFS}
+                )
+            for name in DEFAULT_PREFS:
+                if name in patch:
+                    prefs[name] = bool(patch[name])
+            dev["prefs"] = prefs
+            dev["updated_at"] = _now()
+        data[user_id] = devices
         _write_json_atomic(SUBS_FILE, data)
-    return prefs
+    return get_prefs(user_id)
 
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
@@ -260,7 +351,28 @@ def build_payload(event):
     market = event.get("market") or ""
     target = event.get("target") or ""
     label = market if target in (None, "", "match") else f"{market} ({target})"
-    if event.get("event") == "TRIGGERED":
+    if event.get("event") == "USER_ALERT":
+        # The user's OWN alert, fired by their rule. The scoreline is the whole
+        # point of the scoreline gate, so it leads the body — "under 2.5" is
+        # useless to act on without knowing the match is still inside it.
+        label = event.get("rule_label") or event.get("market") or "your alert"
+        title = f"🔥 {label}"
+        body = f"{fixture}"
+        minute = event.get("minute")
+        if minute is not None:
+            body += f" · {minute}'"
+        score = event.get("score_at_trigger")
+        if score:
+            body += f" · {score}"
+        gate = event.get("gate")
+        if gate:
+            body += f" · {gate}"
+        data = {
+            "fixture_id": event.get("fixture_id"),
+            "rule_id": event.get("rule_id"),
+            "url": f"/live/edges?fixture={event.get('fixture_id')}",
+        }
+    elif event.get("event") == "TRIGGERED":
         minute = event.get("trigger_minute", event.get("minute"))
         score = event.get("score_at_trigger")
         title = f"🔥 {label} armed"
@@ -329,6 +441,18 @@ def dispatch(events, subscriptions=None):
 
     Returns a summary dict. Safe to call from anywhere: any internal error is
     contained and reported as counts rather than propagated.
+
+    AUDIENCE. An event carrying `audience_user_id` is a private, user-owned
+    announcement and is sent ONLY to that account's devices. An event without
+    one is a system announcement and stays a broadcast, which is what the
+    original Code 2 TRIGGERED/SETTLED behaviour was.
+
+    The distinction is the whole reason this function was rewritten: the old
+    version looped over every subscriber for every event, so a personal alert
+    would have been pushed to every account on the system. `attempted` tracks
+    whether the intended audience was actually reached, and only then is the
+    event retired — an alert addressed to someone with no subscribed device
+    stays pending instead of being silently consumed.
     """
     summary = {"sent": 0, "failed": 0, "pruned": 0, "skipped": 0}
     vapid_private, vapid_public = _vapid_keys()
@@ -341,46 +465,79 @@ def dispatch(events, subscriptions=None):
         summary["skipped"] = len(events or [])
         return summary
 
-    prune = []
+    prune = []  # (user_id, endpoint) — a dead DEVICE, not a dead user
     delivered_now = []
     for event in events or []:
+        if not isinstance(event, dict):
+            continue
         name = event.get("event")
-        # Preference keys are stored lowercase ("triggered"/"settled") while
+        # Preference keys are stored lowercase ("user_alert"/"triggered") while
         # event names are uppercase. Comparing directly silently ignored every
         # user toggle, so normalise before looking up the preference.
         pref_name = str(name or "").lower()
+        audience = event.get("audience_user_id")
         payload = build_payload(event)
         attempted = False
-        for user_id, sub in list(subscriptions.items()):
-            prefs = sub.get("prefs") or {}
-            if not prefs.get(pref_name, True):
-                summary["skipped"] += 1
+
+        for user_id, raw in list(subscriptions.items()):
+            # Private event: only ever the named account.
+            if audience and str(user_id) != str(audience):
                 continue
-            attempted = True
-            result = _send_one(sub, payload, vapid_private, vapid_public)
-            if result == "sent":
-                summary["sent"] += 1
-            elif result == "gone":
-                summary["pruned"] += 1
-                prune.append(user_id)
-            else:
-                summary["failed"] += 1
-        # Only retire the event once every subscriber was actually attempted,
-        # so a transient failure is retried on the next cycle instead of
-        # silently dropping an alert the user never received.
+            for sub in _user_devices({user_id: raw}, user_id):
+                prefs = sub.get("prefs") or {}
+                if not prefs.get(pref_name, True):
+                    summary["skipped"] += 1
+                    continue
+                attempted = True
+                result = _send_one(sub, payload, vapid_private, vapid_public)
+                if result == "sent":
+                    summary["sent"] += 1
+                elif result == "gone":
+                    summary["pruned"] += 1
+                    prune.append((user_id, sub.get("endpoint")))
+                else:
+                    summary["failed"] += 1
+
         if attempted:
             delivered_now.append(event.get("key"))
     if prune:
         try:
             with _write_lock:
                 data = list_subscriptions()
-                for user_id in set(prune):
-                    data.pop(user_id, None)
+                for user_id, endpoint in prune:
+                    devices = data.get(user_id)
+                    # Remove only the dead DEVICE. Dropping the whole account
+                    # here would silently unsubscribe the user's phone because
+                    # their laptop was thrown away.
+                    if isinstance(devices, dict):
+                        devices.pop(endpoint, None)
+                        if not devices:
+                            data.pop(user_id, None)
                 _write_json_atomic(SUBS_FILE, data)
         except Exception:
             pass
     mark_delivered(delivered_now)
     return summary
+
+
+def dispatch_pending(limit=50):
+    """Hand every undelivered event to the push service.
+
+    The single entry point the live cycle should call. Wrapped in its own
+    try/except by the caller: a broken push must never delay or break a live
+    analysis cycle, which is this module's standing contract.
+    """
+    try:
+        pending = pending_events(limit=limit)
+        if not pending:
+            return {"sent": 0, "failed": 0, "pruned": 0, "skipped": 0, "pending": 0}
+        summary = dispatch(pending)
+        summary["pending"] = len(pending)
+        return summary
+    except Exception:
+        # Never let a push failure escape into the scanner.
+        return {"sent": 0, "failed": 0, "pruned": 0, "skipped": 0, "pending": 0, "error": True}
+
 
 
 def read_events(limit=200):

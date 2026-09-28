@@ -739,6 +739,7 @@ class UserRuleEvaluator:
                 # personally accepted this match in the setup board.
                 "watchlisted": hit.get("watchlisted", False),
                 "score":       hit.get("score"),
+                "gate":        hit.get("gate"),
             })
 
         return triggered
@@ -852,6 +853,8 @@ class SupremeOrchestrator:
                     rule_id=ua.get("rule_id"),
                     rule_label=ua.get("rule_label"),
                     score=current_score,
+                    gate=ua.get("gate"),
+                    watchlisted=ua.get("watchlisted", False),
                 )
                 ALERT_HISTORY.add(alert_id)
                 fired_this.append(ua)
@@ -936,6 +939,32 @@ class SupremeOrchestrator:
                 )
             except Exception as exc:
                 logging.warning("Alert result resolution skipped: %s", exc)
+
+            # ── DELIVER PUSH NOTIFICATIONS ────────────────────────────────
+            # Runs AFTER alerts have been fired this cycle, so a user's own
+            # alert is pushed in the same cycle it was raised.
+            #
+            # This block did not exist: the push pipeline (notifications.py,
+            # sw.js, PushToggle, pywebpush, VAPID keys) was all built and
+            # wired, but its only caller was the Code 2 validator, which was
+            # removed. "Setup my alert" could fire perfectly and still never
+            # reach a phone.
+            #
+            # Fully isolated, in its own try/except, on this module's
+            # standing contract: a push failure must never delay, raise
+            # through, or fail a live match cycle.
+            try:
+                import notifications as notify
+                summary = notify.dispatch_pending(limit=50)
+                if summary.get("sent") or summary.get("pruned"):
+                    logging.info(
+                        "Push dispatched: sent=%s failed=%s pruned=%s skipped=%s",
+                        summary.get("sent"), summary.get("failed"),
+                        summary.get("pruned"), summary.get("skipped"),
+                    )
+            except Exception as exc:
+                logging.warning("Push dispatch skipped this cycle: %s", exc)
+
             for fx in live_data:
                 if not isinstance(fx, dict):
                     continue
@@ -1567,7 +1596,7 @@ class SupremeOrchestrator:
     def fire_alert(self, f_id, fixture_name,
                    level, msg, confidence, minute,
                    user_id=None, rule_id=None, rule_label=None,
-                   storm_stage=None, score=None):
+                   storm_stage=None, score=None, gate=None, watchlisted=False):
         """
         Write one alert record.
 
@@ -1577,6 +1606,10 @@ class SupremeOrchestrator:
         `score_at_trigger` — the anchor the whole verification panel hangs
         from. Without it an alert is an opinion about a moment with no
         recorded state.
+
+        `gate` and `watchlisted` are forwarded from the rule evaluation and are
+        used only to compose the push notification. Both are optional so the
+        system's own 45' gate, which is not rule-driven, is unaffected.
         """
         now    = datetime.now()
         banner = ("🔥" if "PREMIUM" in level
@@ -1640,6 +1673,42 @@ class SupremeOrchestrator:
                     f.write(json.dumps(record) + "\n")
             except Exception as e:
                 logging.error(f"Alert Write Failed: {e}")
+
+        # ── PUSH THE USER'S OWN ALERT TO THEIR PHONE ──────────────────────
+        # Without this the alert exists ONLY as a row in ready_to_push.json,
+        # which the user has to open the app and refresh to see. The push
+        # pipeline was built and wired but had no caller since the Code 2
+        # validator was removed, so a "Setup my alert" rule was silently
+        # in-app-only.
+        #
+        # Only RULE-driven alerts are announced. The system's own 45' gate has
+        # no user_id and stays a broadcast-capable internal signal, so it is
+        # deliberately not pushed here.
+        #
+        # `gate` is the scoreline limitation in words, because "under 2.5" is
+        # not actionable from a lockscreen without knowing the match is still
+        # inside it.
+        if user_id and rule_id:
+            try:
+                from notifications import emit_event
+                emit_event(
+                    "USER_ALERT",
+                    f_id,
+                    fixture_name,
+                    market=str(record.get("market") or "ALERT"),
+                    target=rule_label or None,
+                    audience_user_id=user_id,
+                    rule_id=rule_id,
+                    rule_label=rule_label,
+                    minute=minute,
+                    score_at_trigger=record.get("score_at_trigger"),
+                    gate=gate,
+                    watchlisted=watchlisted,
+                )
+            except Exception as e:
+                # Best-effort by contract: a push failure must never stop the
+                # alert from being recorded and shown in-app.
+                logging.warning(f"User alert push failed (alert still recorded): {e}")
 
         with alert_lock:
             try:

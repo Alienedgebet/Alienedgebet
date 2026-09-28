@@ -347,7 +347,12 @@ export default function LiveAlertScannerPage() {
   const alertsQuery = useApi(
     () => liveApi.getAlerts(date),
     [date],
-    { fallback: MOCK_LIVE_ALERTS, cacheKey: `live-alerts-${date}` }
+    // Auto-refresh. This page is the fallback when push is off, and without a
+    // poller it was frozen on first paint — the user had to open the app and
+    // press refresh to see an alert that had already fired. 45s sits inside the
+    // ~90s live scanner cycle, so an alert is picked up promptly without
+    // hammering the API.
+    { fallback: MOCK_LIVE_ALERTS, cacheKey: `live-alerts-${date}`, refreshMs: 45_000 }
   );
   // The board carries how much of the live feed could actually be judged. An
   // empty alerts list is ambiguous without it: "no storms" and "the engine was

@@ -822,6 +822,24 @@ def safe_dig(d, *keys, default=None):
     return cur
 
 
+def describe_goal_gate(rule_live: dict) -> str | None:
+    """The scoreline limitation in plain words, e.g. "under 2.5".
+
+    Shown on the lockscreen notification, so it must survive being read at a
+    glance with no context. Returns None when there is no usable gate.
+    """
+    direction = rule_live.get("direction")
+    line = rule_live.get("line")
+    if direction not in VALID_GOAL_DIRECTIONS or line is None:
+        return None
+    text = int(line) if float(line) == int(line) else line
+    if direction == "under":
+        return f"under {text}"
+    if direction == "over":
+        return f"over {text}"
+    return f"exactly {text} goals"
+
+
 def evaluate_rule_for_match(
     rule: dict,
     intel: dict,
@@ -892,4 +910,10 @@ def evaluate_rule_for_match(
         # either way; this flag only lets the UI rank and mark it.
         "watchlisted": watchlisted,
         "score": list(score) if isinstance(score, (tuple, list)) else None,
+        # The scoreline limitation in words, or None when the rule has no goal
+        # gate. Carried onto the push notification because "under 2.5" is not
+        # actionable from a lockscreen without knowing the match is still
+        # inside it.
+        "gate": describe_goal_gate(rule_live) if rule_live.get("type") == "goals" else None,
     }
+

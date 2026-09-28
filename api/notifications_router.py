@@ -15,7 +15,7 @@ import os
 import sys
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,6 +34,10 @@ class SubscribePayload(BaseModel):
 class PrefsPayload(BaseModel):
     triggered: Optional[bool] = None
     settled: Optional[bool] = None
+    # The user's own "Setup my alert" notifications, including the scoreline
+    # gate. Off by default would be wrong — it is the product — so it defaults
+    # on, and the toggle exists to switch it off.
+    user_alert: Optional[bool] = None
 
 
 def _require_user(request: Request):
@@ -56,7 +60,11 @@ def get_prefs(request: Request):
         "supported": bool(notify.public_key()),
         "triggered": prefs["triggered"],
         "settled": prefs["settled"],
+        "user_alert": prefs["user_alert"],
         "subscribed": prefs["subscribed"],
+        # How many of this user's devices are registered. More than one is
+        # normal — a phone and a laptop both receive every alert.
+        "devices": prefs.get("devices", 0),
     }
 
 
@@ -76,9 +84,10 @@ def subscribe(payload: SubscribePayload, request: Request):
 
 
 @router.post("/unsubscribe")
-def unsubscribe(request: Request):
+def unsubscribe(request: Request, endpoint: Optional[str] = Query(None)):
+    """Unsubscribe this device, or every device when no endpoint is given."""
     user = _require_user(request)
-    notify.delete_subscription(user["user_id"])
+    notify.delete_subscription(user["user_id"], endpoint=endpoint)
     return {"ok": True, "subscribed": False}
 
 
@@ -90,7 +99,8 @@ def patch_prefs(payload: PrefsPayload, request: Request):
         prefs = notify.update_prefs(user["user_id"], patch)
     except KeyError:
         raise HTTPException(status_code=404, detail="No push subscription for this user")
-    return {"ok": True, "triggered": prefs["triggered"], "settled": prefs["settled"]}
+    return {"ok": True, "triggered": prefs["triggered"], "settled": prefs["settled"],
+            "user_alert": prefs["user_alert"]}
 
 
 @router.get("/recent")

@@ -6,7 +6,8 @@ import { useApi } from "@/lib/use-api";
 import { cn } from "@/lib/utils";
 
 /**
- * Web Push opt-in for Code 2 alerts.
+ * Web Push opt-in — covers both the system predictions and the user's own
+ * "Setup my alert" rules.
  *
  * Deliberately opt-in: the permission prompt is NEVER requested automatically.
  * A user who declines is not nagged, and unsupported browsers (or iOS without
@@ -19,6 +20,10 @@ type PushState = {
   vapidPublicKey: string | null;
   triggered: boolean;
   settled: boolean;
+  /** The user's own alerts, including the scoreline gate. */
+  userAlert: boolean;
+  /** How many of this user's devices are registered. */
+  devices: number;
 };
 
 function urlBase64ToUint8Array(base64String: string) {
@@ -55,6 +60,8 @@ export function usePushNotifications() {
     vapid_public_key?: string;
     triggered?: boolean;
     settled?: boolean;
+    user_alert?: boolean;
+    devices?: number;
   };
 
   const state: PushState = {
@@ -64,6 +71,8 @@ export function usePushNotifications() {
     vapidPublicKey: server.vapid_public_key ?? null,
     triggered: server.triggered !== false,
     settled: server.settled !== false,
+    userAlert: server.user_alert !== false,
+    devices: server.devices ?? (server.subscribed ? 1 : 0),
   };
 
   const refresh = useCallback(async () => {
@@ -118,7 +127,14 @@ export function usePushNotifications() {
         const registration = await navigator.serviceWorker.getRegistration("/sw.js");
         const subscription = await registration?.pushManager.getSubscription();
         if (subscription) {
-          await api.post("/api/notifications/unsubscribe");
+          // Send THIS device's endpoint so only it is removed. Without it the
+          // server clears every device the user owns, so turning push off on a
+          // laptop would silently stop alerts reaching their phone too.
+          await api.post(
+            "/api/notifications/unsubscribe",
+            undefined,
+            { params: { endpoint: subscription.endpoint } }
+          );
           await subscription.unsubscribe();
         }
       } else {
@@ -133,7 +149,10 @@ export function usePushNotifications() {
   }, [refresh]);
 
   const setPref = useCallback(
-    async (name: "triggered" | "settled", value: boolean) => {
+    async (
+      name: "triggered" | "settled" | "user_alert",
+      value: boolean
+    ) => {
       setError(null);
       try {
         await api.patch("/api/notifications/prefs", { [name]: value });
@@ -194,25 +213,34 @@ export function PushToggle({ className }: { className?: string }) {
       </div>
 
       {state.subscribed && (
-        <ul className="mt-2 space-y-1 text-slate-400">
-          {(
-            [
-              ["triggered", "Prediction armed"],
-              ["settled", "Final result"],
-            ] as const
-          ).map(([key, label]) => (
-            <li key={key} className="flex items-center justify-between gap-2">
-              <span>{label}</span>
-              <input
-                type="checkbox"
-                checked={state[key]}
-                onChange={(e) => void setPref(key, e.target.checked)}
-                className="accent-cyan-400"
-                aria-label={label}
-              />
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="mt-2 space-y-1 text-slate-400">
+            {(
+              [
+                // [preference key sent to the API, readable label, PushState field]
+                ["user_alert", "My alerts (Setup my alert)", "userAlert"],
+                ["triggered", "Prediction armed", "triggered"],
+                ["settled", "Final result", "settled"],
+              ] as const
+            ).map(([key, label, field]) => (
+              <li key={key} className="flex items-center justify-between gap-2">
+                <span>{label}</span>
+                <input
+                  type="checkbox"
+                  checked={state[field]}
+                  onChange={(e) => void setPref(key, e.target.checked)}
+                  className="accent-cyan-400"
+                  aria-label={label}
+                />
+              </li>
+            ))}
+          </ul>
+          {state.devices > 1 && (
+            <p className="mt-1.5 text-[10px] text-slate-500">
+              Sending to {state.devices} of your devices.
+            </p>
+          )}
+        </>
       )}
 
       {error && <p className="mt-2 text-[10px] text-rose-300">{error}</p>}
