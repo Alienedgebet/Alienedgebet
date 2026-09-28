@@ -3089,5 +3089,79 @@ class CandidateBoardContractTests(unittest.TestCase):
         self.assertTrue(rows[0]["name"].strip())
 
 
+class CandidatesEndpointContractTests(unittest.TestCase):
+    """
+    Regression guard for a bug that made the whole match board dead.
+
+    The handler passed `payload.model_dump()` — which is the WRAPPER,
+    {"prematch": {...}} — straight into find_candidates(), which expects the
+    condition itself. Every condition therefore arrived with no "type" key and
+    was rejected as invalid, so the board returned 422 for all of them.
+
+    The unit tests on find_candidates() could not catch this: they call it
+    correctly by definition. Only the wiring can break, so it is pinned here.
+    """
+
+    def _call(self, cond):
+        from unittest.mock import MagicMock
+        from api import user_rules_router as router
+
+        req = MagicMock()
+        req.state.user = {"user_id": "verify_probe"}
+        req.client.host = "127.0.0.1"
+        return router.post_user_rule_candidates(
+            router.CandidateRequest(prematch=cond), req
+        )
+
+    def test_a_valid_condition_is_not_treated_as_a_wrapper(self):
+        """Must return rows, not 422. This is the exact failure being pinned."""
+        rows = self._call({"type": "none"})
+        self.assertIsInstance(rows, list)
+        self.assertGreater(len(rows), 0)
+
+    def test_the_specific_parametrised_conditions_all_work(self):
+        for cond in (
+            {"type": "key_missing", "side": "any", "min_count": 2},
+            {"type": "gk_liability", "side": "any"},
+            {"type": "aggregator_breach", "side": "any"},
+            {"type": "flag", "flag": "h2h_o25_100"},
+        ):
+            rows = self._call(cond)
+            self.assertIsInstance(rows, list, f"{cond} returned {type(rows)}")
+            for r in rows:
+                self.assertIn("met", r)
+                self.assertIn("reason", r)
+
+    def test_an_invalid_condition_is_still_a_422(self):
+        """The fix must not have turned the 422 path into a 500 or a pass."""
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            self._call({"type": "key_missing", "side": "nowhere", "min_count": 2})
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_an_unauthenticated_call_is_refused(self):
+        from unittest.mock import MagicMock
+        from fastapi import HTTPException
+        from api import user_rules_router as router
+
+        req = MagicMock()
+        req.state.user = None
+        with self.assertRaises(HTTPException) as ctx:
+            router.post_user_rule_candidates(
+                router.CandidateRequest(prematch={"type": "none"}), req
+            )
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_the_live_score_index_never_invents_a_goalless_draw(self):
+        """A live fixture with no readable goals block is omitted, not zeroed."""
+        from api import user_rules_router as router
+
+        index = router._live_score_index()
+        for fid, score in index.items():
+            self.assertIsInstance(score, tuple)
+            self.assertEqual(len(score), 2)
+            self.assertTrue(all(isinstance(g, int) and g >= 0 for g in score), f"{fid}: {score}")
+
+
 if __name__ == "__main__":
     unittest.main()
