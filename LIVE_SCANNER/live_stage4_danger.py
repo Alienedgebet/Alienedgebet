@@ -47,12 +47,23 @@ HISTORY_CACHE_SCHEMA = 2
 # (a 19-fixture team costs several times a 3-fixture one, so a fixed count is
 # not a fixed cost).
 #
-#   500MB budget ~= 9 days of teams retained instead of ~2 cycles, and keeps
-#   a comfortable margin under the 1.7GB limit even in the worst team mix.
+# 2026-09-28 HOTFIX: lowered 500MB -> 120MB. The 500MB budget was sized for a
+# cold cache and was the wrong trade against a LIVE hourly quota: on the deploy
+# the scanner re-pulled years of history in one burst, hit the rate limit, and
+# the resulting 429 storm emptied the feeds. 120MB still holds ~80 team
+# histories — roughly a week of teams, so the 150-day window genuinely
+# accumulates across cycles instead of being evicted every two — while costing
+# a fraction of the burst. Raise it only once the quota headroom is measured.
+#
+#   A count cap is not a cost cap: entry size varies by an order of magnitude
+#   with the number of finished fixtures a team has in the window, so 60 entries
+#   can be 90MB or 600MB depending on which teams happen to be playing.
+#   Budgeting bytes makes retention self-limiting in the worst case as well as
+#   the typical one.
 #
 # Entries are evicted oldest-`at`-first until the file fits. TTL expiry still
 # applies first, so a stale entry is dropped for staleness rather than for size.
-HISTORY_CACHE_MAX_BYTES = 500 * 1024 * 1024   # ~500MB
+HISTORY_CACHE_MAX_BYTES = 120 * 1024 * 1024   # ~120MB
 _history_cache: Dict[str, Any] = {}
 
 # FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
@@ -460,6 +471,62 @@ def _favourite_odds(fixture_id) -> Optional[float]:
     return best
 
 
+# ── ODDS MEMO ──────────────────────────────────────────────────────────────
+# 2026-09-28 HOTFIX. `_favourite_odds` was added to implement the strong-
+# favourite / big-dog regime gate, and it was called once per fixture, every
+# cycle, unconditionally. It did not exist before, and it is a per-fixture
+# provider request, so it was the change that pushed the account into a
+# sustained 429: zero rate-limit errors before the deploy, eleven after, with
+# cycle time rising from ~40s to ~220s and all three feeds emptied (which
+# silenced the alert pipeline entirely).
+#
+# The odds are only ever used to pick a regime BAND, and the regime only moves
+# a bar by a few points. It is worth a provider call when the signed verdict
+# sits CLOSE to a bar — that is the only time the answer can change the
+# outcome. It is not worth one when the verdict is already decisive, and not
+# worth one at all when the fixture has nobody absent.
+#
+# So: memoise per fixture for the process lifetime, and let the caller ask
+# only when the regime could actually matter.
+_ODDS_MEMO: Dict[Any, Any] = {}
+
+
+def _favourite_odds_cached(fixture_id) -> Optional[float]:
+    """Memoised `_favourite_odds`, so one fixture costs at most one call.
+
+    Pre-match 1X2 prices do not move within a scan session, and the scanner
+    re-reads the same fixtures every cycle, so an unmemoised call is pure
+    waste. A miss is memoised too: re-asking a provider that just said "no
+    such market" costs the same as asking once and returns the same nothing.
+    """
+    key = fixture_id
+    if key in _ODDS_MEMO:
+        return _ODDS_MEMO[key]
+    val = _favourite_odds(fixture_id)
+    _ODDS_MEMO[key] = val
+    return val
+
+
+def _regime_needed(nets, confidences):
+    """Would the regime band plausibly change any of these verdicts?
+
+    Returns True only when a side's net impact is within the spread of the
+    three regime bars, i.e. when the verdict is genuinely undecided. Away from
+    the bars, every regime agrees on the answer, so the call cannot change it
+    and is not worth the quota.
+    """
+    bars = list(si._DANGER_BAR.values())
+    margin = (max(bars) - min(bars)) / 2.0 + 1.0   # half-spread plus a unit
+    for net, conf in zip(nets, confidences):
+        if net is None or (conf or 0) < si.MIN_CONFIDENCE_FOR_CALL:
+            continue
+        for bar in bars:
+            # Within `margin` of ANY bar means the band could tip it.
+            if abs(abs(net) - bar) <= margin:
+                return True
+    return False
+
+
 # ------------------------------------------------------------------------------
 # 🚀 MAIN PIPELINE (WRAPPED FOR ARCHITECTURE)
 # ------------------------------------------------------------------------------
@@ -538,13 +605,36 @@ def run_danger_forensic_aggregator():
                 continue
 
             # ── MARKET REGIME (2026-09-28) ───────────────────────────────
-            # The first time this stage sees odds. Rotation is not equally
-            # costly for a strong favourite (whose XI is the product) and a big
-            # dog (whose XI is already written off), and the signed verdict
-            # needs that context to set its bar. The regime is shared by both
-            # sides because it describes the MATCH, not either team.
-            fav_regime = regime_for_odds(_favourite_odds(fx.get("id")))
-            
+            # Rotation is not equally costly for a strong favourite (whose XI
+            # is the product) and a big dog (whose XI is already written off),
+            # so the signed verdict needs that context to set its bar. The
+            # regime describes the MATCH, so it is shared by both sides.
+            #
+            # It is resolved LAZILY, after the signed metrics exist, because it
+            # costs a provider call. The call used to be made here for every
+            # fixture on every cycle; that unconditional per-fixture request is
+            # what exhausted the quota and silenced the feeds. `regime_holder`
+            # starts as None and is filled in by `_ensure_regime()` only when a
+            # verdict is actually close enough to a bar for the band to matter.
+            # `None` = not yet decided. It is only resolved into a real band if
+            # some side's verdict is close enough to a bar that the band could
+            # tip it, and it stays None otherwise — meaning every regime agrees,
+            # and MID_FIELD is the honest label for that case.
+            regime_holder = {"value": None}
+
+            def _ensure_regime(nets, confidences):
+                if regime_holder["value"] is not None:
+                    return regime_holder["value"]
+                if not _regime_needed(nets, confidences):
+                    # Both sides are decisive, or too thin to call. No odds call.
+                    return "MID_FIELD"
+                band = regime_for_odds(_favourite_odds_cached(fx.get("id")))
+                # A fetched band (including a mid-field one) is now settled for
+                # the whole fixture: the odds are a property of the MATCH, so a
+                # second side must not re-decide it on its own evidence.
+                regime_holder["value"] = band
+                return band
+
             def audit_side(team_id, team_name):
                 t_id = int(team_id)
                 key_monument, history = get_key_players_forensics(t_id)
@@ -589,14 +679,27 @@ def run_danger_forensic_aggregator():
                 # ── SIGNED VERDICT (2026-09-28) ───────────────────────────────
                 # Replaces `breached = (len(missing) >= 4) or gk_hole`, which
                 # could only ever count and so could never report an upgrade.
-                net = assess_absence(
-                    [{**info, "id": pid}
-                     for pid, info in key_monument.items()
-                     if pid not in current_starters and pid not in current_bench],
-                    [{**key_monument[pid], "id": pid}
-                     for pid in key_monument if pid in current_starters],
-                    regime=fav_regime,
-                )
+                #
+                # Computed under a neutral MID_FIELD regime FIRST, purely to
+                # obtain the numbers. The regime band only selects which bar
+                # applies, so the net impact and the confidence are identical
+                # under every band — only the final label depends on it. That
+                # lets the caller decide whether the odds call is warranted
+                # (see `_regime_needed`) instead of always paying for it.
+                _absent = [{**info, "id": pid}
+                           for pid, info in key_monument.items()
+                           if pid not in current_starters and pid not in current_bench]
+                _present = [{**key_monument[pid], "id": pid}
+                            for pid in key_monument if pid in current_starters]
+                net = assess_absence(_absent, _present, regime="MID_FIELD")
+
+                # Now that the numbers exist, pay for the regime only if it can
+                # change the answer, then re-derive the label under it.
+                fav_regime = _ensure_regime([net["net_impact"]],
+                                            [net["confidence"]])
+                if fav_regime != "MID_FIELD":
+                    net = assess_absence(_absent, _present, regime=fav_regime)
+
                 verdict = net["verdict"]
                 gk = assess_goalkeeper(starting_gk, master_gk, fav_regime,
                                        starting_gk_leak)
