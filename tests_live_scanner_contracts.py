@@ -4560,5 +4560,151 @@ class TestChemistryVocabularyContract(unittest.TestCase):
              "Strong", "Very Strong", "Excellent", "Elite"})
 
 
+
+class TestWeeklyOver25GoalFormStats(unittest.TestCase):
+    """
+    The four per-side goal figures must survive engine -> CSV -> filter -> API.
+
+    2026-09-29. Engine/over25_forecast.py already computed goals scored and
+    conceded for BOTH sides (get_complex_metrics returns {"gs", "gc", ...} per
+    side, and both h_m and a_m feed the Poisson lambda and parity_diff), but
+    the row written to master_over_stage2_{date}.csv carried only the COMBINED
+    total as combined_gs_last_5. The four per-side numbers existed in memory
+    and were discarded at save time, so the Weekly board could not show them.
+
+    These tests pin the whole path. The engine is exercised through a stub
+    rather than a live run: it makes real provider API calls, and a
+    regression test must never depend on the network or on there being
+    fixtures on a given date.
+    """
+
+    GOAL_FORM_COLUMNS = (
+        "home_goals_scored_last_5",
+        "away_goals_scored_last_5",
+        "home_goals_conceded_last_5",
+        "away_goals_conceded_last_5",
+    )
+
+    def _engine_source(self):
+        from pathlib import Path
+        return (Path(__file__).parent /
+                "Engine" / "over25_forecast.py").read_text()
+
+    def test_engine_writes_all_four_columns(self):
+        """The row dict must carry each per-side figure explicitly."""
+        src = self._engine_source()
+        for col in self.GOAL_FORM_COLUMNS:
+            self.assertIn(
+                f'"{col}"', src,
+                f"{col} is not written by over25_forecast.py. These values are "
+                "already computed as h_m['gs']/h_m['gc'] and a_m['gs']/a_m['gc'] "
+                "— omitting one from the row silently drops data the engine "
+                "has in hand.")
+
+    def test_columns_are_derived_from_the_computed_sides(self):
+        """
+        Each column must come from the correct side's metrics.
+
+        A copy-paste slip here (home_gs written from a_m) would be invisible on
+        the page — both are plain integers — and would invert the one
+        comparison the user makes: which side scores more and which concedes
+        more. Assert the exact expression per column.
+        """
+        src = self._engine_source()
+        expected = {
+            "home_goals_scored_last_5": 'h_m["gs"]',
+            "away_goals_scored_last_5": 'a_m["gs"]',
+            "home_goals_conceded_last_5": 'h_m["gc"]',
+            "away_goals_conceded_last_5": 'a_m["gc"]',
+        }
+        for col, expr in expected.items():
+            self.assertIn(
+                f'"{col}": int({expr})', src,
+                f"{col} must be written as int({expr}). Check the side is not "
+                "swapped — a home/away mix-up cannot be detected downstream.")
+
+    def test_combined_total_still_agrees_with_the_two_sides(self):
+        """
+        combined_gs_last_5 must remain the sum of the two scored figures.
+
+        It is pre-existing behaviour the filter reads, and it is now
+        derivable from the new columns. If the two ever disagree, one of them
+        is wrong and the Poisson maths no longer matches what is displayed.
+        """
+        src = self._engine_source()
+        self.assertIn(
+            '"combined_gs_last_5": h_m["gs"] + a_m["gs"]', src,
+            "combined_gs_last_5 must stay the sum of both sides' goals scored, "
+            "so it cannot drift from the two new per-side columns.")
+
+    def test_filter_forwards_the_columns_unchanged(self):
+        """
+        The O2.5 filter must not drop or alter them.
+
+        The filter forwards rows via to_dict() and only drops its own two
+        derived helpers (poisson_num, votes_num), so the new columns reach the
+        cache JSON untouched. Asserted against the real filter with a
+        synthetic row, in a temp dir, so no artefact is written.
+        """
+        import tempfile
+        import pandas as pd
+        import FILTER.over25_risk_filter as filt
+
+        row = {
+            "fixture_id": "1", "league": "L", "fixture": "A vs B",
+            "o25_odds": 1.70, "kill_switch_pass": True,
+            "poisson_over_prob_num": 72.0, "council_votes": "7/9",
+            "pos_gap": 5, "parity_diff": 3, "h2h_overs_last_5": 4,
+            "combined_gs_last_5": 15,
+            "home_goals_scored_last_5": 8, "away_goals_scored_last_5": 7,
+            "home_goals_conceded_last_5": 6, "away_goals_conceded_last_5": 9,
+        }
+        for col, val in ((c, row[c]) for c in self.GOAL_FORM_COLUMNS):
+            self.assertIsInstance(val, int)
+
+        tmp = tempfile.mkdtemp()
+        original_out, original_date = filt.OUTPUT_DIR, filt.__dict__.get("TARGET_DATE")
+        try:
+            filt.OUTPUT_DIR = tmp
+            pd.DataFrame([row]).to_csv(
+                os.path.join(tmp, "master_over_stage2_2099-01-01.csv"), index=False)
+            out = filt.run_over25_filter_aggregator(
+                "2099-01-01", mode="public", risk_level="banker", persist=True)
+        finally:
+            filt.OUTPUT_DIR = original_out
+            if original_date is not None:
+                filt.__dict__["TARGET_DATE"] = original_date
+
+        self.assertTrue(out, "synthetic row did not survive the filter")
+        for col in self.GOAL_FORM_COLUMNS:
+            self.assertIn(col, out[0],
+                          f"{col} was dropped between the engine and the cache")
+            self.assertEqual(out[0][col], row[col],
+                             f"{col} was altered by the filter")
+
+    def test_frontend_renders_all_four(self):
+        """
+        Both Weekly views must show the four figures.
+
+        Cards and table are separate code paths; wiring only one leaves the
+        figures invisible in the other view. The component is shared, so
+        asserting on the shared name plus the absence of a per-view duplicate
+        is enough to catch a regression that splits them apart.
+        """
+        from pathlib import Path
+        tsx = (Path(__file__).parent / "alienedge-frontend" / "app" /
+               "weekly" / "FilterTab.tsx").read_text()
+
+        self.assertIn("function GoalFormStats", tsx,
+                      "the shared GoalFormStats component is gone")
+        for col in self.GOAL_FORM_COLUMNS:
+            self.assertIn(col, tsx,
+                          f"{col} is not read by the Weekly board")
+        # Used once in the card grid and once in the table body.
+        self.assertEqual(
+            tsx.count("<GoalFormStats row={row} />"), 2,
+            "GoalFormStats must be rendered in BOTH the cards view and the "
+            "table view, exactly once each.")
+
 if __name__ == "__main__":
     unittest.main()

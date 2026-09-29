@@ -272,7 +272,29 @@ def run_over25_forecast_engine(target_date):
                 "pos_gap": pos_gap,
                 "parity_diff": parity_diff,
                 "h2h_overs_last_5": h2h_overs_total,
-                "combined_gs_last_5": h_m["gs"] + a_m["gs"]
+                "combined_gs_last_5": h_m["gs"] + a_m["gs"],
+                # 2026-09-29. Per-side goals scored/conceded over the window.
+                #
+                # These were ALREADY computed above — get_complex_metrics
+                # returns {"gs": scored, "gc": conceded, ...} per side, and
+                # both h_m and a_m are used for the Poisson lambda and for
+                # parity_diff. They were simply never written, so the four
+                # numbers the Weekly board needs existed only in memory and
+                # were discarded at save time.
+                #
+                # gs = goals scored, gc = goals conceded, each summed over that
+                # side's venue-specific window. They are NOT the raw team
+                # totals: get_complex_metrics builds ov_5 from `history[:5]`
+                # (overall form) and v_5 from the venue-matched slice, and gs/gc
+                # are summed from ov_5. The column names therefore say
+                # "last_5" because that is the window that produced them.
+                #
+                # Written as plain ints so the CSV stays numeric and the
+                # frontend can compare sides without parsing a string.
+                "home_goals_scored_last_5": int(h_m["gs"]),
+                "away_goals_scored_last_5": int(a_m["gs"]),
+                "home_goals_conceded_last_5": int(h_m["gc"]),
+                "away_goals_conceded_last_5": int(a_m["gc"]),
             })
         except: continue
 

@@ -30,6 +30,58 @@ interface FilterTabProps {
   fetchWeekly: (params: Record<string, unknown>) => Promise<AxiosResponse<unknown>>;
 }
 
+/**
+ * Per-side goals scored and conceded over the engine's last-5 window.
+ *
+ * 2026-09-29. These four figures were already computed by
+ * Engine/over25_forecast.py (get_complex_metrics returns gs/gc per side and
+ * both sides feed the Poisson lambda and parity_diff) but were never written
+ * to the CSV, so they could not be shown. The engine now emits them; this
+ * renders them.
+ *
+ * Renders NOTHING when the fields are absent, so a fixture graded before this
+ * change — or from any other producer of O2.5 rows — degrades to exactly the
+ * old card rather than showing a row of zeros or "—". That matters because the
+ * Weekly cache keeps dated artefacts: yesterday's files legitimately have no
+ * such column until the next pipeline run rewrites them.
+ */
+function GoalFormStats({ row }: { row: Record<string, unknown> }) {
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+
+  const homeScored = num(row.home_goals_scored_last_5);
+  const awayScored = num(row.away_goals_scored_last_5);
+  const homeConceded = num(row.home_goals_conceded_last_5);
+  const awayConceded = num(row.away_goals_conceded_last_5);
+
+  // All four travel together. If any is missing the set is not trustworthy,
+  // so show nothing rather than a partial row that implies completeness.
+  if (
+    homeScored === null ||
+    awayScored === null ||
+    homeConceded === null ||
+    awayConceded === null
+  ) {
+    return null;
+  }
+
+  const cell = (label: string, value: number, tone: string) => (
+    <div className="flex items-center gap-1 whitespace-nowrap">
+      <span className="text-slate-500">{label}</span>
+      <span className={cn("font-semibold", tone)}>{value}</span>
+    </div>
+  );
+
+  return (
+    <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-white/5 pt-1.5 text-[11px]">
+      {cell("Home scored", homeScored, "text-emerald-400")}
+      {cell("Away scored", awayScored, "text-emerald-400")}
+      {cell("Home conceded", homeConceded, "text-rose-400")}
+      {cell("Away conceded", awayConceded, "text-rose-400")}
+    </div>
+  );
+}
+
 export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) {
   // Navigation & Scope
   const [scope, setScope] = useState<"single" | "weekly">("weekly");
@@ -462,6 +514,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                       {row.pos_gap !== undefined && (
                         <div>Pos Gap: {row.pos_gap}</div>
                       )}
+                      <GoalFormStats row={row} />
                     </div>
                   </div>
 
@@ -487,6 +540,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                   <th className="p-3">Odds</th>
                   <th className="p-3">Prob / Math</th>
                   <th className="p-3">Forensic Highlights</th>
+                  <th className="p-3">Goal Form (L5)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 text-slate-200">
@@ -508,6 +562,9 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                     </td>
                     <td className="p-3 text-slate-400">
                       {row.parity_score ? `Parity +${row.parity_score}` : row.verification_days ? `${row.verification_days}/7 Days` : row.council_votes ? `Votes: ${row.council_votes}` : "Kill-Switch Passed"}
+                    </td>
+                    <td className="p-3">
+                      <GoalFormStats row={row} />
                     </td>
                   </tr>
                 ))}
