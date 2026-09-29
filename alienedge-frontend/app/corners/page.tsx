@@ -30,6 +30,20 @@ import { cn } from "@/lib/utils";
 
 const aggregatorColumns: PredictionColumn<CornerAggregatorPick>[] = [
   {
+    key: "king",
+    header: "Corner consistency",
+    render: (r) => (
+      <div className="flex flex-col gap-0.5 text-2xs">
+        <span title="Home corner consistency">
+          H <KingBadge icon={r.H_King} />
+        </span>
+        <span title="Away corner consistency">
+          A <KingBadge icon={r.A_King} />
+        </span>
+      </div>
+    ),
+  },
+  {
     key: "fixture",
     header: "Fixture",
     render: (r) => <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />,
@@ -160,6 +174,45 @@ const stage2Columns: PredictionColumn<CornerStage2Pick>[] = [
 ];
 
 /**
+ * The aggregator's consistency badge, icon only.
+ *
+ * The aggregator emits 👑 (consistent at this venue), ⭐ (consistent overall)
+ * and ❌ (no consistency) as H_King/A_King. It has written these on every run
+ * for a long time and the corners page never referenced them, so a home team
+ * carrying a 👑 was invisible — the same class of bug as the over-4 flag, but
+ * with the data already sitting in the payload.
+ *
+ * Icon only by decision: the checkable "4/5" count lives on the stage-2 table,
+ * and the aggregator CSV does not carry it. An unlabelled icon is still better
+ * than data nobody can see, and the tooltip says which side it is.
+ */
+function KingBadge({ icon }: { icon?: string }) {
+  if (!icon || icon === "❌") {
+    return (
+      <span className="text-text-dim" title="No corner consistency">
+        —
+      </span>
+    );
+  }
+  const venue = icon === "👑";
+  return (
+    <span
+      className={cn(
+        "font-semibold",
+        venue ? "text-emerald-300" : "text-accent-green"
+      )}
+      title={
+        venue
+          ? "Consistently generates corners at this venue"
+          : "Consistently generates corners overall"
+      }
+    >
+      {icon}
+    </span>
+  );
+}
+
+/**
  * "4/5" beats a tick in a column, because a tick cannot be checked.
  *
  * The count is the number of the team's last 5 matches in which it took more
@@ -203,132 +256,106 @@ function ConsistencyChip({
   );
 }
 
+/* ── the persistent corner kings, as a real engine stage ──────────── */
+
 /**
- * THE PERSISTENT CORNER KINGS, in the app.
+ * The Kings row shape, mirroring the engine's own dict.
  *
- * This table was already being built by the corner miner on every run and
- * printed to the server console — ranked, with each team's actual corner list —
- * and then discarded by the qualification filter. It was the most visible piece
- * of the engine and the least visible in the product, which is why the feature
- * read as missing rather than as broken.
+ * This used to be a hand-rolled <div> with its own <table>. That was a
+ * mistake: bypassing ChainStage meant bypassing createVerifyColumn(), so the
+ * panel had no WON/LOST/PENDING and no actual corner score, AND it had none of
+ * the collapse behaviour every other stage on this page has. It was the only
+ * thing on the screen you could neither collapse nor verify.
  *
- * It is here now, and it shows the underlying last-N corner list rather than a
- * bare flag, so the claim can be checked instead of trusted.
+ * As a normal stage it gets both, from the shared components, with no bespoke
+ * markup.
  */
-function PersistentKingsPanel({ report }: { report: CornerConsistencyReport }) {
-  if (!report.available) {
-    return (
-      <div className="rounded-lg border border-dashed border-border-bright bg-bg-elevated/30 px-3.5 py-4">
-        <p className="text-xs font-semibold text-text-secondary">
-          Corner consistency not yet available
-        </p>
-        <p className="mt-1 text-2xs leading-relaxed text-text-dim">
-          {report.reason ??
-            "The corner miner has not written a consistency run yet. It will appear here after the next run."}
-        </p>
-      </div>
-    );
-  }
-
-  const only = report.qualified_via_consistency_only ?? [];
-
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="text-2xs leading-relaxed text-text-dim">
-        {report.rule}{" "}
-        {report.date && (
-          <span className="text-text-secondary">Run for {report.date}.</span>
-        )}
-      </p>
-
-      {report.kings.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border-bright bg-bg-elevated/30 px-3.5 py-4">
-          <p className="text-xs font-semibold text-text-secondary">
-            No team is corner-consistent today
-          </p>
-          <p className="mt-1 text-2xs leading-relaxed text-text-dim">
-            No side hit more than 4 corners in at least 4 of its last 5 matches,
-            so nothing is flagged. That is a real answer, not a missing one.
-          </p>
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-2xs">
-            <thead>
-              <tr className="border-b border-border/60 text-text-dim">
-                <th className="py-1.5 pr-2 font-medium">fixture</th>
-                <th className="py-1.5 pr-2 font-medium">both?</th>
-                <th className="py-1.5 pr-2 text-right font-medium">exp total</th>
-                <th className="py-1.5 pr-2 font-medium">home last 5</th>
-                <th className="py-1.5 font-medium">away last 5</th>
-              </tr>
-            </thead>
-            <tbody>
-              {report.kings.map((k, i) => (
-                <tr key={`${k.fixture}-${i}`} className="border-b border-border/30">
-                  <td className="py-1.5 pr-2 font-medium text-text-primary">
-                    {k.fixture}
-                  </td>
-                  <td className="py-1.5 pr-2">
-                    <span
-                      className={cn(
-                        "rounded border px-1.5 py-px font-semibold",
-                        k.score === 2
-                          ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
-                          : "border-accent-green/40 bg-accent-green/10 text-accent-green"
-                      )}
-                    >
-                      {k.score === 2 ? "BOTH" : "ONE"}
-                    </span>
-                  </td>
-                  <td className="py-1.5 pr-2 text-right font-mono text-text-secondary">
-                    {typeof k.total === "number" ? k.total.toFixed(1) : "—"}
-                  </td>
-                  <td className="py-1.5 pr-2 font-mono text-text-secondary">
-                    {cornerList(k.h_count, k.h_list)}
-                  </td>
-                  <td className="py-1.5 font-mono text-text-secondary">
-                    {cornerList(k.a_count, k.a_list)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {only.length > 0 && (
-        <div className="rounded-lg border border-accent-indigo/40 bg-accent-indigo/5 px-3 py-2">
-          <p className="text-2xs font-semibold uppercase tracking-wide text-accent-indigo">
-            Qualified on consistency alone ({only.length})
-          </p>
-          <p className="mt-1 text-2xs leading-relaxed text-text-secondary">
-            These would have been dropped by the tier/confidence filter before
-            2026-09-28. They are here only because a side is genuinely
-            corner-consistent.
-          </p>
-          <ul className="mt-1.5 flex flex-col gap-0.5">
-            {only.map((f, i) => (
-              <li key={`${f.fixture}-${i}`} className="text-2xs text-text-dim">
-                · {f.fixture} — {f.tier} tier, confidence {f.avg_confidence};
-                corners H {f.home_lastN?.join(", ")} · A {f.away_lastN?.join(", ")}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
+interface CornerKingRow {
+  fixture: string;
+  /** 2 = both teams persistent, 1 = one side. */
+  score: number;
+  total: number;
+  h_count: number;
+  a_count: number;
+  h_list: number[];
+  a_list: number[];
+  verification?: Record<string, unknown>;
 }
 
-/** "4/5 · 8, 7, 6, 5, 4" — the count, then the evidence. */
-function cornerList(count: number, list: number[]) {
+const kingColumns: PredictionColumn<CornerKingRow>[] = [
+  createVerifyColumn<CornerKingRow>(),
+  {
+    key: "fixture",
+    header: "Fixture",
+    render: (r) => (
+      <span className="font-medium text-text-primary">{r.fixture}</span>
+    ),
+  },
+  {
+    key: "both",
+    header: "Both?",
+    align: "center",
+    render: (r) => (
+      <span
+        className={cn(
+          "rounded border px-1.5 py-px text-2xs font-bold",
+          r.score === 2
+            ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
+            : "border-accent-green/40 bg-accent-green/10 text-accent-green"
+        )}
+      >
+        {r.score === 2 ? "BOTH" : "ONE"}
+      </span>
+    ),
+  },
+  {
+    key: "total",
+    header: "Exp total",
+    align: "right",
+    render: (r) => (
+      <span className="font-mono text-2xs">
+        {typeof r.total === "number" ? r.total.toFixed(1) : "—"}
+      </span>
+    ),
+  },
+  {
+    key: "home",
+    header: "Home last 5",
+    render: (r) => <CornerList count={r.h_count} list={r.h_list} side="H" />,
+  },
+  {
+    key: "away",
+    header: "Away last 5",
+    render: (r) => <CornerList count={r.a_count} list={r.a_list} side="A" />,
+  },
+];
+
+/**
+ * "4/5 · 8, 7, 6, 5, 4" — the count, then the evidence.
+ *
+ * A king badge that cannot be checked is not worth much, so the raw list sits
+ * beside the flag rather than behind it.
+ */
+function CornerList({
+  count,
+  list,
+  side,
+}: {
+  count: number;
+  list: number[];
+  side: string;
+}) {
   if (!Array.isArray(list) || list.length === 0) {
-    return <span className="text-text-dim">no history</span>;
+    return <span className="text-2xs text-text-dim">{side} no history</span>;
   }
   return (
-    <span title={`${count} of the last ${list.length} above 4 corners`}>
-      <span className="text-text-primary">{count}/{list.length}</span>{" "}
+    <span
+      className="font-mono text-2xs"
+      title={`${side}: ${count} of the last ${list.length} matches above 4 corners`}
+    >
+      <span className="text-text-primary">
+        {count}/{list.length}
+      </span>{" "}
       <span className="text-text-dim">· {list.join(", ")}</span>
     </span>
   );
@@ -342,30 +369,41 @@ export default function CornersPage() {
   // 10 of 11 leave-one-day-out days). See lib/signal-ranking.ts.
   const [smartRank, setSmartRank] = useState(true);
 
-  // The Persistent Corner Kings, served from the miner\'s own run (2026-09-28).
-  // Fetched directly rather than through ChainStage because it is a single
-  // panel, not a table of picks, and it is deliberately NOT date-scoped — it
-  // carries its own date so the panel can state which run it is showing.
-  const [consistency, setConsistency] = useState<CornerConsistencyReport | null>(null);
-  const [consistencyError, setConsistencyError] = useState<string | null>(null);
+  // The Persistent Corner Kings, served from the miner's own run.
+  //
+  // Fetched as a normal engine stage rather than a bespoke panel, so it gets the
+  // shared verify column (WON / LOST / PENDING with the actual corner score) and
+  // the same collapse behaviour as every other stage on this page. The first
+  // version hand-rolled its own <div> + <table>, which bypassed both — it was
+  // the only thing on screen you could neither collapse nor verify.
+  //
+  // Deliberately NOT date-scoped: the payload carries its own date and that is
+  // stated in the stage description, rather than implying a freshness it may
+  // not have.
+  const fetchConsistency = useMemo(
+    () => async (): Promise<AxiosResponse<CornerKingRow[]>> => {
+      const res = await cornersApi.getConsistency();
+      return { ...res, data: (res.data?.kings ?? []) as CornerKingRow[] };
+    },
+    []
+  );
+
+  // The run's own date, read once for the stage caption.
+  const [consistencyDate, setConsistencyDate] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     cornersApi
       .getConsistency()
       .then((res) => {
-        if (!cancelled) setConsistency(res.data);
+        if (!cancelled) setConsistencyDate(res.data?.date ?? null);
       })
-      .catch((e) => {
-        if (!cancelled) {
-          setConsistencyError(
-            e?.response?.data?.detail ?? "Could not load corner consistency."
-          );
-        }
+      .catch(() => {
+        /* the stage renders its own error; this is caption only */
       });
     return () => {
       cancelled = true;
     };
-  }, [date]);
+  }, []);
 
   const fetchAggregator = useMemo(
     () => async (): Promise<AxiosResponse<CornerAggregatorPick[]>> => {
@@ -473,34 +511,20 @@ export default function CornersPage() {
       </div>
 
       {/* ── 5b. Persistent Corner Kings ──────────────────────────────── */}
-      <div className="rounded-xl border border-border/70 bg-bg-elevated/30 p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-cyan/15 text-accent-cyan">
-              <CornerUpRight className="h-3.5 w-3.5" />
-            </div>
-            <div>
-              <h2 className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
-                Persistent corner kings
-              </h2>
-              <p className="text-2xs text-text-dim">
-                Teams that reliably generate corners
-              </p>
-            </div>
-          </div>
-          {consistency?.count ? (
-            <span className="text-2xs text-text-dim">
-              {consistency.count} flagged
-            </span>
-          ) : null}
-        </div>
-        {consistencyError ? (
-          <p className="text-2xs text-amber-300">{consistencyError}</p>
-        ) : consistency ? (
-          <PersistentKingsPanel report={consistency} />
-        ) : (
-          <p className="text-2xs text-text-dim">Loading corner consistency…</p>
-        )}
+      <div>
+        <ChainStage<CornerKingRow>
+          title="Persistent corner kings"
+          description={`Teams that reliably generate corners — more than 4 in at least 4 of their last 5, venue-filtered.${
+            consistencyDate ? ` Run for ${consistencyDate}.` : ""
+          }`}
+          fetcher={fetchConsistency}
+          deps={[]}
+          columns={kingColumns}
+          rowKey={(r, i) => `${r.fixture}-${i}`}
+          emptyMessage="No team is corner-consistent right now — nothing hit more than 4 corners in 4 of its last 5."
+          fallbackData={[]}
+          refreshMs={VERIFY_REFRESH_MS}
+        />
       </div>
 
       {/* ── 6. Corner ────────────────────────────────────────────────── */}

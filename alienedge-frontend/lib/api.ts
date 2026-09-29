@@ -828,6 +828,19 @@ export interface CornerCatalystPick extends FixtureRisk {
 }
 
 export interface CornerAggregatorPick extends FixtureRisk {
+  /**
+   * Corner-consistency badge per side, emitted by the aggregator as an icon:
+   * 👑 consistent at this venue, ⭐ consistent overall, ❌ no consistency.
+   *
+   * Present in the payload since long before this column existed — the
+   * aggregator has been writing H_King/A_King on every run while the corners
+   * page never referenced them, so a home team with a 👑 was invisible.
+   *
+   * Icon only, by decision: the 4/5 count is available on the stage-2 table,
+   * and the aggregator CSV does not carry it.
+   */
+  H_King?: string;
+  A_King?: string;
   Fixture: string;
   Master_Score: number;
   Chaos_Rating: number;
