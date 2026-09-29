@@ -290,6 +290,19 @@ def assess_absence(
         c = confidence(p.get("apps"), p.get("mins"))
         gained += w * (rating - baseline) * c
 
+    # A full-strength XI has no absence to offset, so the replacement credit is
+    # only ever subtracted from a real loss. Without this guard a side with
+    # NOTHING missing still returned net = lost - gained = -gained, i.e. the
+    # replacement group's own deviation from the baseline was published as
+    # signed impact. That is what made a zero-absence side score -9.43..+14.22
+    # and read as BLESSING or DANGER purely on squad quality, while the engine
+    # reported "Full-strength spine" in the verdict_reason and moved on.
+    #
+    # The number is documented as the damage done by absences, so with no
+    # absences the honest value is exactly zero.
+    if not missing:
+        gained = 0.0
+
     net = lost - gained
     mean_conf = (sum(confs) / len(confs)) if confs else 0.0
     verdict, why = _verdict_for(net, mean_conf, regime, len(missing), bool(starters))
