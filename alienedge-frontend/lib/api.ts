@@ -1069,6 +1069,14 @@ export interface LivePrematchAudit {
   odds_away_win: number | null;
   odds_o25: number | null;
   /**
+   * Seconds since the scanner last rewrote this board (2026-09-29).
+   *
+   * The page polled every 20s while the scanner wrote every ~72s, so most
+   * polls returned identical bytes. The age lets the UI state the real
+   * freshness instead of implying a live refresh it never had.
+   */
+  data_age_seconds?: number | null;
+  /**
    * Optional live-odds mirror of the three pre-match markets above. No live
    * odds feed is produced by the engines today, so these are normally
    * undefined and the UI shows an explicit "not available" state. They are

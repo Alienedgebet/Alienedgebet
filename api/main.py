@@ -1658,10 +1658,43 @@ def get_live_incoming_detail(fixture_id: str):
     }
 
 
+def _data_age_seconds(path: str):
+    """How old a data file is, in seconds. None when it does not exist.
+
+    2026-09-29. The live pages poll /api/live/prematch every 20s, but the
+    scanner rewrites that file only once per ~72s cycle. Every poll between
+    writes returned byte-identical data, so the page looked like it was
+    refreshing constantly while the underlying numbers moved once a minute —
+    which is precisely the "lagging / not refreshing" impression.
+
+    The page cannot be honest about freshness unless the API tells it how old
+    the data actually is, so the age travels with the payload rather than being
+    left for the client to guess from a spinner.
+    """
+    try:
+        return max(0, int(time.time() - os.path.getmtime(path)))
+    except OSError:
+        return None
+
+
 @app.get("/api/live/prematch", tags=["Live"])
 def get_live_prematch():
-    raw = _read_json(os.path.join(DATA_DIR, "prematch_team_audit.json"), {})
-    return list(raw.values()) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+    """Stage 1's strategic audit board, plus the age of the data behind it.
+
+    `data_age_seconds` is how long ago the scanner last wrote this file. The
+    client should show it rather than implying a freshness it does not have:
+    a poll frequency above the write interval buys nothing and costs a request
+    per tick.
+    """
+    path = os.path.join(DATA_DIR, "prematch_team_audit.json")
+    raw = _read_json(path, {})
+    rows = list(raw.values()) if isinstance(raw, dict) else (
+        raw if isinstance(raw, list) else [])
+    age = _data_age_seconds(path)
+    for row in rows:
+        if isinstance(row, dict):
+            row["data_age_seconds"] = age
+    return rows
 
 
 VALIDATED_ALERTS_MAX_AGE_HOURS = 24

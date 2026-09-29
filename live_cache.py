@@ -20,7 +20,17 @@ PREMATCH_CACHE_FILE = os.path.join(DATA_DIR, "live_prematch_cache.json")
 
 API_KEY = os.getenv("SPORTMONKS_API_KEY")
 
-LIVE_TTL = 45       # 45s: scanner-cycle freshness for prompt FT detection
+# 2026-09-29: LIVE_TTL was 45s, which is SHORTER than the scanner's own write
+# interval (~26s of work + 45s sleep = ~72s). A fetch landing in the gap
+# therefore always saw the file as expired and re-pulled from the provider —
+# a wasted call on a regular cadence, against the exact quota that caused the
+# 429 outage. The TTL has to cover at least one full cycle, otherwise the cache
+# can never do its job.
+#
+# 150s comfortably spans a ~72s cycle (with margin for a slow one) while still
+# expiring fast enough for prompt full-time detection, which is what this TTL
+# actually exists for.
+LIVE_TTL = 150      # > one scanner cycle (~72s), so the cache is actually reused
 PREMATCH_TTL = 900  # 900 seconds (15 minutes) for lineups & formations
 
 
