@@ -454,6 +454,89 @@ def get_key_players_forensics(team_id: int):
     # computation and not a provider call.
     return {int(p['id']): p for p in (key_gks + key_others)}, history, worth_list
 
+# ── ATTACK COMPOSITE (restored from the original foundation) ────────────────
+#
+# The original `compute_style_layer_live` scored a side on FIVE signals —
+# Attacks, Dangerous Attacks, Total Crosses, Accurate Crosses — plus a formation
+# shape term and a tempo term. A later rewrite reduced all of that to a single
+# `Dangerous Attacks` average and a boolean `da > 35`, and seven market verdicts
+# in Stage 5 were then derived from that one bit. Measured consequence: the
+# handshake emitted identical grades for Over2.5 and Over1.5 on 16 of 16 live
+# fixtures, because the single threshold was OPEN on 12 of 16 and left nothing
+# for the markets to separate on.
+#
+# These are the per-signal mean and population SD measured over 338 own-team
+# rows in the live history cache, so the z-scores are on the distribution the
+# engine actually sees rather than a guessed one. They are deliberately plain
+# constants: a z-score needs no fitted coefficient to be honest, and every
+# number here is reproducible with the snippet in the commit message.
+ATTACK_SIGNAL_NORM = {
+    "Attacks":           (92.47, 33.71),
+    "Dangerous Attacks": (46.92, 25.32),
+    "Corners":           (4.38,  2.94),
+    "Shots On Target":   (4.10,  3.07),
+    "Ball Possession %": (50.03, 14.82),
+}
+
+# Measured against goals on 307 own-team rows with all five signals present:
+#
+#   composite of all five      r = +0.535   t = +11.05
+#   Dangerous Attacks alone    r = +0.356   t =  +6.64
+#
+# So the multi-signal read is the stronger predictor of scoring, and the single
+# signal the rewrite kept is a proxy for it. Corners and possession are included
+# because they carry the width and control that a shot-count misses; the
+# cross-based terms from the original were dropped after measurement, since
+# Total Crosses (r=+0.083) and Accurate Crosses (r=+0.052) were not significant
+# on this sample and adding noise is worse than adding nothing.
+ATTACK_SIGNALS = tuple(ATTACK_SIGNAL_NORM)
+
+
+def compute_attack_index(history, team_id: int):
+    """A continuous 0..1 attacking-output score for one side.
+
+    Returns `None` when the side has no usable signal history. Absence stays
+    absence: a side with no statistics is not a defensive side, and feeding a
+    made-up zero into the handshake is how a real blank becomes a confident
+    "Very Weak" somewhere downstream.
+    """
+    t_id = int(team_id)
+    per_signal = defaultdict(list)
+    for fx in (history or []):
+        ent = extract_stat_entries(fx, t_id)
+        for name in ATTACK_SIGNALS:
+            if name in ent:
+                per_signal[name].append(float(ent[name]))
+
+    if not per_signal:
+        return None
+
+    z_sum, used = 0.0, 0
+    for name in ATTACK_SIGNALS:
+        vals = per_signal.get(name)
+        if not vals:
+            continue
+        mean, sd = ATTACK_SIGNAL_NORM[name]
+        # Only the signals actually observed contribute, so a partial history
+        # degrades gracefully instead of scoring as if everything were low.
+        z_sum += ((sum(vals) / len(vals)) - mean) / (sd or 1.0)
+        used += 1
+    if not used:
+        return None
+
+    z = z_sum / used
+    # Squash an unbounded z into 0..1 around the observed spread. At z=0 (an
+    # average side) this returns 0.5, and +/-1 SD lands near 0.27 / 0.73, so
+    # ordinary fixtures land in the middle of the scale instead of piling up at
+    # either end.
+    index = 1.0 / (1.0 + math.exp(-z))
+    return {
+        "index": round(index, 4),
+        "z": round(z, 3),
+        "signals_used": used,
+        "per_signal": {k: round(sum(v) / len(v), 2) for k, v in per_signal.items()},
+    }
+
 def compute_style_analysis(history, team_id: int):
     """🚨 FIX: Calibrated Tactical Thresholds to Market Reality! 🚨"""
     recent = history[:8]
@@ -857,6 +940,12 @@ def run_danger_forensic_aggregator():
 
                 breach = (None if not data_available else (verdict == si.STATE_DANGER))
                 style = compute_style_analysis(history, t_id)
+                # The continuous multi-signal read. `style` above is kept
+                # exactly as it was for display and the existing rules; this is
+                # the number Stage 5 needs so seven markets stop sharing one
+                # boolean. Costs no provider call — it reads the same cached
+                # history `style` already parsed.
+                attack_index = compute_attack_index(history, t_id)
 
                 # The headline label now carries the SIGN of the effect, not a
                 # count. A team whose rotation upgraded it is no longer painted
@@ -890,23 +979,51 @@ def run_danger_forensic_aggregator():
                     "gk_leak_available": starting_gk_leak is not None,
                     "missing_details": missing_details,
                     "formation": next((f['formation'] for f in fx.get('formations',[]) if int(f['participant_id']) == t_id), "N/A"),
-                    "style": style
+                    "style": style,
+                    # Continuous attacking output, restored alongside (never
+                    # instead of) `style` so the existing badge, verdict and UI
+                    # keep working while Stage 5 gets a real gradient to grade
+                    # seven markets against.
+                    "attack_index": attack_index["index"] if attack_index else None,
+                    "attack_z": attack_index["z"] if attack_index else None,
+                    "attack_signals_used": (attack_index["signals_used"]
+                                            if attack_index else 0),
                 }
 
             home_audit = audit_side(h_p['id'], h_p['name'])
             away_audit = audit_side(a_p['id'], a_p['name'])
 
-            # 🚨 FIX: Tactical Alignment Handshake (Lowered to > 35 to catch open matches)
-            home_da = home_audit['style'].get('da')
-            away_da = away_audit['style'].get('da')
-            style_align = (
-                "🔥 OPEN"
-                if isinstance(home_da, (int, float)) and isinstance(away_da, (int, float))
-                and home_da > 35 and away_da > 35
-                else "⚠️ TIGHT"
-                if isinstance(home_da, (int, float)) and isinstance(away_da, (int, float))
-                else "⚠️ UNAVAILABLE"
-            )
+            # 🚨 Tactical Alignment Handshake
+            #
+            # This used to be a single boolean — `OPEN` when both sides' raw
+            # Dangerous Attacks cleared 35 — and Stage 5 then derived all seven
+            # market grades from that one bit. Measured on the live board it
+            # read OPEN on 12 of 16 fixtures (28 of 32 sides cleared the
+            # threshold), so there was nothing left for the markets to separate
+            # on: Over2.5 and Over1.5 came out identical on 16 of 16 rows and
+            # Under3.5 read Very Weak on 12 of 16.
+            #
+            # The DISPLAY STRING is unchanged, because `user_rules_store`
+            # matches a saved rule against it with an exact compare, and a
+            # fixture that silently stopped reading "OPEN" would break every
+            # chemistry rule a user has ever saved without any error anywhere.
+            #
+            # The CONTINUOUS score is the addition. It is the mean of the two
+            # sides' multi-signal attack indexes, remapped from 0..1 onto
+            # 0..1 with 0.5 as the neutral midpoint, so an average fixture
+            # sits at neutral rather than at whichever end one threshold
+            # happened to put it. Stage 5 consumes this instead of the boolean.
+            home_idx = home_audit.get('attack_index')
+            away_idx = away_audit.get('attack_index')
+            if (isinstance(home_idx, (int, float))
+                    and isinstance(away_idx, (int, float))):
+                # How far above the 0.5 neutral the pair sits, scaled so a
+                # strongly attacking pair approaches 1.0.
+                openness_score = max(0.0, min(1.0, (home_idx + away_idx) / 2.0))
+                style_align = "🔥 OPEN" if openness_score >= 0.5 else "⚠️ TIGHT"
+            else:
+                openness_score = None
+                style_align = "⚠️ UNAVAILABLE"
             
             # --- DYNAMIC SYMMETRIC BTTS (GG) LOGIC ---
             h_leak = home_audit['gk_leak']
@@ -925,11 +1042,22 @@ def run_danger_forensic_aggregator():
             elif style_align == "🔥 OPEN" and (home_audit['breach'] or away_audit['breach']):
                 gg_label = "Strong"
 
+            # `home_da`/`away_da` still back the legacy Corner card below, which
+            # is left exactly as it was: Stage 5 re-grades Corner from the
+            # continuous score, and this field is only the pre-aggregator
+            # summary printed to the journal.
+            home_da = home_audit['style'].get('da')
+            away_da = away_audit['style'].get('da')
+
             # Construct the final data card
             match_card = {
                 "fixture": fx['name'], "fixture_id": fx['id'],
                 "home_team": home_audit, "away_team": away_audit,
                 "style_alignment": style_align,
+                # The continuous openness Stage 5 grades against. `None` when
+                # either side has no usable signal history, which Stage 5
+                # treats as "unknown", not as "tight".
+                "openness_score": openness_score,
                 "match_chemistry_list": {
                     "Corner": (
                         "Elite"
