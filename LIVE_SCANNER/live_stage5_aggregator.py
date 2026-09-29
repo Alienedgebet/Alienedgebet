@@ -269,41 +269,65 @@ def run_master_aggregator():
         #                          instead of merely to zero)
         _open = (openness - 0.5) * 2.0
 
+        # The openness coefficient is sized against the DISTRIBUTION the live
+        # board actually produces, not picked and hoped for.
+        #
+        # Measured across the live fixtures: `openness_score` spans 0.363..0.678,
+        # so `_open` spans -0.274..+0.356. At the old coefficient of 2.0 that
+        # produced only 1.26 of score range — the entire board fitted inside a
+        # single rounding bucket, so Over2.5 moved by at most one grade across
+        # every fixture and the market looked frozen. A coefficient that cannot
+        # cross a bucket is indistinguishable from a constant.
+        #
+        # 6.0 gives ~3.8 of range, which lets the real spread of attacking
+        # quality cross two to three buckets without ever letting openness
+        # dominate: the signed damage term still contributes up to 2.0, and
+        # every score is still clamped by `_grade`. Openness was measured at
+        # r=+0.535 against goals across 307 own-team rows, so weighting it
+        # heavily is warranted; the earlier 2.0 was an untested carry-over from
+        # when openness was a bit.
+        OPENNESS_WEIGHT = 6.0
+
         chemistry = {}
         scores = {}
         # BTTS needs goals from BOTH sides, so damage on either side is
         # doubly negative for it, not doubly positive (as the old ladder had it).
-        scores["Gg"] = (3.0 + 2.0 * _open - 1.5 * abs(total_damage)
+        scores["Gg"] = (3.0 + OPENNESS_WEIGHT * _open - 1.5 * abs(total_damage)
                         + (0.75 if (h_breach or a_breach) else 0.0))
         # Corners read width and tempo, which the style axis captures.
-        scores["Corner"] = 3.0 + 2.0 * _open - 1.0 * tight
+        scores["Corner"] = 3.0 + OPENNESS_WEIGHT * _open - 1.0 * tight
         scores["Home Win"] = (3.0 - 3.0 * h_eff + 0.75 * a_eff
                               - (0.75 if h_sync == "CONFLICT" else 0.0)
                               + (0.75 if h_sync == "ELITE" else 0.0))
         scores["Away Win"] = (3.0 - 3.0 * a_eff + 0.75 * h_eff
                               - (0.75 if a_sync == "CONFLICT" else 0.0)
                               + (0.75 if a_sync == "ELITE" else 0.0))
+
         # Over 2.5 needs 3 goals; Over 1.5 needs 2. They MUST stay monotone.
         # Note the sign: a match where BOTH sides were upgraded (total_damage
         # negative) is correctly read as LESS likely to produce goals.
-        goal_pressure = (2.0 * _open
+        goal_pressure = (OPENNESS_WEIGHT * _open
                          + 2.0 * max(0.0, total_damage)
                          - 2.0 * max(0.0, -total_damage))
         scores["Over2.5"] = 2.0 + goal_pressure
-        # Over 1.5 and Over 2.5 are the SAME event read at two thresholds, and
-        # the engine treats Over 2.5 as the binding (harder) market: 3 goals is
-        # a harder read than 2, so Over 1.5 is clamped to never outrank it. The
-        # scores are therefore written with Over 2.5 at or above Over 1.5, and
-        # the difference is a real gradient that grows with goal pressure.
+        # Over 1.5 is the EASIER of the two thresholds — 2 goals rather than 3 —
+        # so it is inherently the weaker read and must never outrank Over 2.5.
+        # It is given a real gradient below Over 2.5 rather than being set equal
+        # to it.
         #
-        # An earlier attempt gave Over 1.5 a full bucket of headroom, which the
-        # coherence pass correctly clamped straight back down — producing
-        # identical grades and, worse, breaking the invariant that Over 1.5 can
-        # never be the stronger read. The separation between these two markets
-        # is real information about goal VOLUME, not about the harder/easier
-        # ordering, so it is expressed through Under 3.5 (the mirror) and
-        # through Over 2.5's own movement instead.
-        scores["Over1.5"] = scores["Over2.5"]
+        # It used to be `scores["Over1.5"] = scores["Over2.5"]`, which locked
+        # the pair together by construction. Because Under 3.5 is the mirror of
+        # Over 1.5 (`6.0 - Over1.5`), that single line collapsed all THREE goal
+        # markets onto one value: the live board showed Over2.5, Over1.5 AND
+        # Under3.5 identical on 25 of 25 fixtures, and the coherence pass logged
+        # 12 repairs pulling Under3.5 back onto the same grade. Three markets
+        # reading one number is the same defect as the original single boolean,
+        # just moved one layer down.
+        #
+        # The gap is a half bucket: enough to let the mirror produce a different
+        # grade, small enough that Over 1.5 can never be graded stronger than
+        # Over 2.5. The coherence pass still clamps any inversion.
+        scores["Over1.5"] = scores["Over2.5"] - 0.5
         # Under 3.5 is the mirror of Over 1.5 by construction: both are
         # satisfied by a 2-goal match, so the two cannot disagree.
         #
