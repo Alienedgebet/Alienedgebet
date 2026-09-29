@@ -602,6 +602,11 @@ def run_danger_forensic_aggregator():
     output_pool =[]
     processed_count = 0
     ledger_rows =[]
+    # A failure here used to be a bare `continue`, so a provider shape change
+    # emptied the whole feed with nothing in the log but "0 PROFILES SAVED" —
+    # which reads exactly like "no matches today". Counting the reason means the
+    # next occurrence is diagnosable from the journal in one cycle.
+    error_skips = {}
 
     for fx in all_fixtures:
         try:
@@ -663,13 +668,29 @@ def run_danger_forensic_aggregator():
             def audit_side(team_id, team_name):
                 t_id = int(team_id)
                 key_monument, history = get_key_players_forensics(t_id)
-                current_starters = {int(l['player_id']) for l in starters_all if int(l.get('team_id', 0)) == t_id}
+                # A lineup row with `player_id: null` is a real provider shape,
+                # not a broken payload: the player exists (Stage 1 and Stage 3
+                # both read these fixtures) but the provider did not resolve an
+                # id for them. Casting it unguarded raised TypeError, and because
+                # the raise happened INSIDE the per-fixture `except: continue`,
+                # it silently emptied danger_audit.json for the whole cycle —
+                # 12 of 484 starter rows on 2026-09-29 were null, which is every
+                # live fixture on the board. Code 5 then had no danger profile to
+                # bind to and reported "chemistry not available" everywhere.
+                #
+                # The row is skipped, not fatal: a named player with no id cannot
+                # be matched against the key eleven either way, so dropping it
+                # costs one line of the table and nothing else.
+                current_starters = {int(l['player_id']) for l in starters_all
+                                    if int(l.get('team_id', 0)) == t_id
+                                    and l.get('player_id') is not None}
                 # A key player named on the bench (type_id 12) is NOT injured.
                 # Counting the bench as absent is how an ordinary rotation used
                 # to earn a DANGER badge.
                 current_bench = {int(l['player_id']) for l in lineups
                                  if int(l.get('team_id', 0)) == t_id
-                                 and int(l.get('type_id', 0)) == 12}
+                                 and int(l.get('type_id', 0)) == 12
+                                 and l.get('player_id') is not None}
 
                 master_gk = next(
                     (info for info in key_monument.values()
@@ -852,11 +873,21 @@ def run_danger_forensic_aggregator():
             # fixture finishes. `rotation_uplift` is the number under test: it
             # claims a rotated side scores more, and the ledger is what turns
             # that claim into a measurement instead of an assumption.
+            #
+            # 2026-09-29 FIX. This read `fav_regime`, which is a local inside
+            # `audit_side` and does not exist in this scope, so the append raised
+            # NameError on every fixture. The bare `except: continue` hid it, and
+            # because it fired AFTER `output_pool.append` the danger cards were
+            # still written — so the only visible symptom was
+            # "[ROTATION LEDGER] 0 call(s) recorded" on every cycle, forever: the
+            # rotation-uplift claim was never once recorded against a result.
+            # The regime is a property of the MATCH, and `audit_side` already
+            # returns it on each side, so read it from there.
             ledger_rows.append({
                 "fixture_id": fx.get("id"),
                 "fixture": fx.get("name"),
                 "logged_at": datetime.now(timezone.utc).isoformat(),
-                "regime": fav_regime,
+                "regime": home_audit.get("regime"),
                 "sides": [{
                     "team_id": side["id"],
                     "team_name": side["team_name"],
@@ -871,7 +902,15 @@ def run_danger_forensic_aggregator():
             })
             time.sleep(REQUEST_DELAY)
             
-        except Exception as e: continue
+        except Exception as e:
+            # Never let one bad fixture abort the cycle, but never swallow the
+            # reason either. The first few are named in full because an
+            # unexpected type is the signal worth reading; the rest are counted.
+            key = f"{type(e).__name__}: {e}"[:160]
+            error_skips[key] = error_skips.get(key, 0) + 1
+            if len(error_skips) <= 3:
+                print(f"[AUDIT SKIP] {fx.get('name', 'unknown')} "
+                      f"(ID {fx.get('id')}) — {key}")
 
     # 💾 SAVE TO JSON FOR THE MASTER AGGREGATOR (never emptied by a FAILED pull)
     write_feed(OUTPUT_FILE, output_pool,
@@ -896,6 +935,14 @@ def run_danger_forensic_aggregator():
                   f"(min {min(confs):.2f}) · {len(confs)} sides judged")
     print(f"[ROTATION LEDGER] {logged} call(s) recorded for later scoring")
 
+    if error_skips:
+        # A non-zero count here with `processed_count == 0` is the exact shape of
+        # the 2026-09-29 outage, so it is stated plainly rather than left for
+        # someone to infer from two numbers that look like a quiet day.
+        total_skipped = sum(error_skips.values())
+        print(f"[AUDIT SKIP] {total_skipped} fixture(s) raised and were skipped: "
+              + "; ".join(f"{v}x {k}" for k, v in
+                          sorted(error_skips.items(), key=lambda kv: -kv[1])[:5]))
     print(f"\n[🏆] SUPREME AUDIT COMPLETE: {processed_count} PROFILES SAVED TO DATA DIR")
     
     return output_pool
