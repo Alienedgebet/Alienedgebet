@@ -31,7 +31,7 @@ interface FilterTabProps {
 }
 
 /**
- * Per-side goals scored and conceded over the engine's last-5 window.
+ * Per-side goals scored and conceded over the engine's form window.
  *
  * 2026-09-29. These four figures were already computed by
  * Engine/over25_forecast.py (get_complex_metrics returns gs/gc per side and
@@ -39,20 +39,36 @@ interface FilterTabProps {
  * to the CSV, so they could not be shown. The engine now emits them; this
  * renders them.
  *
- * Renders NOTHING when the fields are absent, so a fixture graded before this
- * change — or from any other producer of O2.5 rows — degrades to exactly the
- * old card rather than showing a row of zeros or "—". That matters because the
- * Weekly cache keeps dated artefacts: yesterday's files legitimately have no
- * such column until the next pipeline run rewrites them.
+ * WINDOW TOGGLE
+ * The engine writes BOTH a 5-match and a 3-match set, from the same history
+ * slice in the same provider call. `window` picks which pair is displayed.
+ * Both sets are display-only: no filter gate, vote or Poisson term reads
+ * either of them, so switching the toggle never changes WHICH fixtures are
+ * recommended — only how their recent form is described.
+ *
+ * A 3-match window is a noisier read than a 5-match one, not a better one.
+ * That is why the window size is stated in the label rather than left
+ * implicit: the same number means different confidence at each setting.
+ *
+ * Renders NOTHING when the selected window's fields are absent, so a fixture
+ * graded before this change degrades to exactly the old card rather than
+ * showing a row of zeros or "—". The Weekly cache keeps dated artefacts, so
+ * rows graded by an earlier pipeline run legitimately lack these columns.
  */
-function GoalFormStats({ row }: { row: Record<string, unknown> }) {
+function GoalFormStats({
+  row,
+  window,
+}: {
+  row: Record<string, unknown>;
+  window: 3 | 5;
+}) {
   const num = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) ? v : null;
 
-  const homeScored = num(row.home_goals_scored_last_5);
-  const awayScored = num(row.away_goals_scored_last_5);
-  const homeConceded = num(row.home_goals_conceded_last_5);
-  const awayConceded = num(row.away_goals_conceded_last_5);
+  const homeScored = num(row[`home_goals_scored_last_${window}`]);
+  const awayScored = num(row[`away_goals_scored_last_${window}`]);
+  const homeConceded = num(row[`home_goals_conceded_last_${window}`]);
+  const awayConceded = num(row[`away_goals_conceded_last_${window}`]);
 
   // All four travel together. If any is missing the set is not trustworthy,
   // so show nothing rather than a partial row that implies completeness.
@@ -78,6 +94,9 @@ function GoalFormStats({ row }: { row: Record<string, unknown> }) {
       {cell("Away scored", awayScored, "text-emerald-400")}
       {cell("Home conceded", homeConceded, "text-rose-400")}
       {cell("Away conceded", awayConceded, "text-rose-400")}
+      <div className="col-span-2 text-[9px] uppercase tracking-wider text-slate-600">
+        last {window} matches
+      </div>
     </div>
   );
 }
@@ -94,6 +113,12 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
     return d.toISOString().split("T")[0];
   });
   const [endDate, setEndDate] = useState(getTodayDate());
+
+  // Form window for the per-side goal stats (O2.5 cards + table). 5 is the
+  // engine's own window and the default; 3 is the noisier "recent form" read.
+  // Display-only: no gate, vote or Poisson term depends on this, so switching
+  // it re-labels the form figures without re-fetching or re-filtering.
+  const [formWindow, setFormWindow] = useState<3 | 5>(5);
 
   // Mode & Risk State
   const [mode, setMode] = useState<"public" | "tipster" | "advanced">("public");
@@ -419,6 +444,34 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
             <span className="rounded-full bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.5 font-mono text-[10px] font-bold text-cyan-300">
               {rows.length} SURVIVED
             </span>
+            {/* Form window toggle — display-only. Sits with the results because
+                it re-labels the goal-form figures on them, and deliberately
+                NOT up in the filter bar: it changes no gate, so putting it
+                beside the real filters would imply it narrows the pick set.
+                It does not — the same rows survive either way. */}
+            <span
+              className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 pl-2 pr-1 py-0.5"
+              title="How many recent matches the goal-form figures cover. Display only — it does not change which picks survive."
+            >
+              <span className="font-mono text-[9px] uppercase tracking-wider text-slate-500">
+                Form
+              </span>
+              {([5, 3] as const).map((w) => (
+                <button
+                  key={w}
+                  onClick={() => setFormWindow(w)}
+                  aria-pressed={formWindow === w}
+                  className={cn(
+                    "rounded-full px-2 py-0.5 font-mono text-[10px] font-bold transition-colors",
+                    formWindow === w
+                      ? "bg-cyan-500/20 text-cyan-300"
+                      : "text-slate-500 hover:text-slate-300"
+                  )}
+                >
+                  L{w}
+                </button>
+              ))}
+            </span>
           </div>
 
           <div className="flex items-center gap-1 rounded-lg bg-black/40 p-1 border border-white/10">
@@ -514,7 +567,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                       {row.pos_gap !== undefined && (
                         <div>Pos Gap: {row.pos_gap}</div>
                       )}
-                      <GoalFormStats row={row} />
+                      <GoalFormStats row={row} window={formWindow} />
                     </div>
                   </div>
 
@@ -540,7 +593,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                   <th className="p-3">Odds</th>
                   <th className="p-3">Prob / Math</th>
                   <th className="p-3">Forensic Highlights</th>
-                  <th className="p-3">Goal Form (L5)</th>
+                  <th className="p-3">Goal Form (L{formWindow})</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 text-slate-200">
@@ -564,7 +617,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                       {row.parity_score ? `Parity +${row.parity_score}` : row.verification_days ? `${row.verification_days}/7 Days` : row.council_votes ? `Votes: ${row.council_votes}` : "Kill-Switch Passed"}
                     </td>
                     <td className="p-3">
-                      <GoalFormStats row={row} />
+                      <GoalFormStats row={row} window={formWindow} />
                     </td>
                   </tr>
                 ))}

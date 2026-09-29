@@ -224,21 +224,51 @@ def run_over25_forecast_engine(target_date):
             if len(h2h_matches) < 3: h2h_last_3_all_over = False
 
             # 4. FORM METRICS
-            def get_complex_metrics(tid, history, venue):
-                ov_5 = history[:5]
-                v_5 = []
+            #
+            # 2026-09-29. `window` is now a parameter (default 5, which is
+            # EXACTLY the previous behaviour) so the same history can be
+            # summarised over a shorter window without a second provider
+            # round-trip. The engine evaluates the window twice per side --
+            # once at 5, which feeds every existing number unchanged, and once
+            # at 3, which is written alongside it for the board's 5/3 toggle.
+            #
+            # Nothing downstream reads the 3-window: poisson_over, council
+            # votes, parity_diff and the O2.5 filter gates all still come from
+            # the 5-window figures. The toggle changes what the BOARD SHOWS,
+            # never which fixtures are recommended.
+            #
+            # get_match_stats is pure but was being re-evaluated two-to-three
+            # times per match inside the sum() generators below. Each call
+            # re-walks scores and participants, so the redundant calls are
+            # now hoisted: compute once per match, reuse. Same values, less
+            # work -- and with two windows evaluated the saving doubles.
+            def get_complex_metrics(tid, history, venue, window=5):
+                ov_n = history[:window]
+                v_n = []
                 for m in history:
                     if any(p['id'] == tid and (p.get('meta') or {}).get('location') == venue for p in m.get('participants', [])):
-                        v_5.append(m)
-                    if len(v_5) == 5: break
-                ov_gs = sum(get_match_stats(m, tid)["s"] for m in ov_5 if get_match_stats(m, tid))
-                ov_gc = sum(get_match_stats(m, tid)["c"] for m in ov_5 if get_match_stats(m, tid))
-                v_sum = sum(get_match_stats(m, tid)["t"] for m in v_5 if get_match_stats(m, tid))
-                ov_overs = sum(1 for m in ov_5 if get_match_stats(m, tid) and get_match_stats(m, tid)["over"])
-                return {"gs": ov_gs, "gc": ov_gc, "overs": ov_overs, "v_sum": v_sum, "ov_sum": (ov_gs + ov_gc)}
+                        v_n.append(m)
+                    if len(v_n) == window: break
+                ov_gs = ov_gc = 0
+                v_sum = 0
+                ov_overs = 0
+                for m in ov_n:
+                    st = get_match_stats(m, tid)
+                    if not st: continue
+                    ov_gs += st["s"]
+                    ov_gc += st["c"]
+                    if st["over"]: ov_overs += 1
+                for m in v_n:
+                    st = get_match_stats(m, tid)
+                    if st: v_sum += st["t"]
+                return {"gs": ov_gs, "gc": ov_gc, "overs": ov_overs,
+                        "v_sum": v_sum, "ov_sum": (ov_gs + ov_gc)}
 
             h_m = get_complex_metrics(hid, team_histories.get(hid, []), "home")
             a_m = get_complex_metrics(aid, team_histories.get(aid, []), "away")
+            # Same history, shorter window. Display-only -- see above.
+            h_m3 = get_complex_metrics(hid, team_histories.get(hid, []), "home", window=3)
+            a_m3 = get_complex_metrics(aid, team_histories.get(aid, []), "away", window=3)
 
             # 5. PARITY DIFFERENCE
             h_total_parity = h_m["v_sum"] + h_m["ov_sum"] + h2h_h_sum
@@ -295,6 +325,22 @@ def run_over25_forecast_engine(target_date):
                 "away_goals_scored_last_5": int(a_m["gs"]),
                 "home_goals_conceded_last_5": int(h_m["gc"]),
                 "away_goals_conceded_last_5": int(a_m["gc"]),
+                # 2026-09-29. The same four figures over a 3-match window,
+                # from the SAME history slice in the SAME provider call.
+                #
+                # Display-only. No filter gate, vote, Poisson term or parity
+                # figure reads these columns -- every one of those still uses
+                # the 5-window values above. They exist so the board can offer
+                # a 5/3 toggle without a second engine run or a second set of
+                # provider calls.
+                #
+                # A 3-window is inherently noisier than a 5-window, so these
+                # are NOT a drop-in "more accurate" alternative: they are the
+                # recent read, and the board labels which one is showing.
+                "home_goals_scored_last_3": int(h_m3["gs"]),
+                "away_goals_scored_last_3": int(a_m3["gs"]),
+                "home_goals_conceded_last_3": int(h_m3["gc"]),
+                "away_goals_conceded_last_3": int(a_m3["gc"]),
             })
         except: continue
 
