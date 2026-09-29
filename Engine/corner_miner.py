@@ -1183,14 +1183,81 @@ def run_corner_engine_stage1(target_date=None):
             print(f"      Home Corners: {p['h_list']} | Away Corners: {p['a_list']}\n")
 
     # ---------- FILTER & SAVE FOR CODE 2 ----------
-    qualified_matches =[]
+    #
+    # 2026-09-28 FIX. The filter below used to be:
+    #
+    #     if item["corner_tier"] in ["Moderate","Strong","High"] and
+    #        item["avg_confidence"] > 0.45:
+    #
+    # which never consulted `is_persistent_over_4`. The engine had spent the
+    # previous forty lines COMPUTING persistence, printed a full ranked
+    # "PERSISTENT CORNER KINGS" table for the operator, and then filtered it
+    # out of existence — a team that produced 5+ corners in four of its last
+    # five matches counted for exactly as much as one that never crossed 4.
+    # The table was theatre: built, displayed, discarded.
+    #
+    # Persistence is now a real qualification path. A match qualifies on EITHER
+    # the existing tier/confidence rule OR a genuine consistency signal, because
+    # those are different questions: "is this match expected to be busy?" and
+    # "does one of these teams reliably generate corners?".
+    #
+    # Both inputs are already computed earlier in this same function, so this
+    # costs no extra provider call and no extra math.
+    qualified_matches = []
+    persistence_rescues = []
     for item in output:
-        if item["corner_tier"] in ["Moderate", "Strong", "High"] and item["avg_confidence"] > 0.45:
+        tier_ok = (item["corner_tier"] in ["Moderate", "Strong", "High"]
+                   and item["avg_confidence"] > 0.45)
+        h_pers = item.get("home_team", {}).get("is_persistent_over_4", False)
+        a_pers = item.get("away_team", {}).get("is_persistent_over_4", False)
+        # BOTH teams persistent is the strongest form; ONE side still carries
+        # real information (a 5+ corner generator is on one side of this
+        # fixture either way), so either qualifies, and the difference is
+        # recorded so the aggregator can weight it.
+        persistence_ok = bool(h_pers or a_pers)
+
+        if tier_ok or persistence_ok:
             qualified_matches.append(item)
+            if persistence_ok and not tier_ok:
+                persistence_rescues.append({
+                    "fixture": item.get("fixture"),
+                    "tier": item.get("corner_tier"),
+                    "avg_confidence": item.get("avg_confidence"),
+                    "home_persistent": bool(h_pers),
+                    "away_persistent": bool(a_pers),
+                    "home_over4": item.get("home_team", {}).get("over_4_corners_count", 0),
+                    "away_over4": item.get("away_team", {}).get("over_4_corners_count", 0),
+                    "home_lastN": item.get("home_team", {}).get("lastN_corners_list", []),
+                    "away_lastN": item.get("away_team", {}).get("lastN_corners_list", []),
+                })
+
+    if persistence_rescues:
+        log_info(
+            f"[CONSISTENCY] {len(persistence_rescues)} fixture(s) qualified on corner "
+            f"consistency alone (tier/confidence would have dropped them): "
+            + ", ".join(p["fixture"] for p in persistence_rescues)
+        )
 
     output_path = os.path.join(OUTPUT_DIR, "corner3_qualified.json")
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(qualified_matches, f, ensure_ascii=False, indent=2)
+
+    # The Kings table is written to disk, not just to the console. It was
+    # previously console-only, which is why the operator could see a ranked
+    # consistency list in the logs and then find nothing resembling it in the
+    # app. The API and the corners page read this file.
+    kings_path = os.path.join(OUTPUT_DIR, "corner_persistent_kings.json")
+    with open(kings_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "date": target_date,
+            "rule": ("A team is persistent when it produced more than 4 corners in "
+                     f"at least 4 of its last {LAST_N_GAMES} matches (venue-filtered)."),
+            "count": len(persistent_matches),
+            "kings": persistent_matches,
+            "qualified_via_consistency_only": persistence_rescues,
+        }, f, ensure_ascii=False, indent=2)
+    log_info(f"Saved {len(persistent_matches)} persistent corner kings to {kings_path}")
 
     log_info(f"Saved {len(qualified_matches)} qualified matches to {output_path} for processing by Code 2.")
     log_info(f"Stage 1 complete. Processed {len(output)}/{total_fixtures} fixtures successfully.")
