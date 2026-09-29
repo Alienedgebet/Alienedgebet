@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import re
 
 # --- 1. DYNAMIC PATHS FOR SERVERS (Shared Memory) ---
@@ -202,17 +203,80 @@ def run_master_aggregator():
         h_eff = _side_effect(h_net)
         a_eff = _side_effect(a_net)
         total_damage = (h_eff + a_eff) / 2.0
-        openness = 1.0 if style_align == "🔥 OPEN" else 0.0
-        tight = 1.0 if style_align == "⚠️ TIGHT" else 0.0
+
+        # ── CONTINUOUS OPENNESS ──────────────────────────────────────────────
+        # Stage 4 now publishes `openness_score`, the mean of both sides'
+        # multi-signal attack indexes on a 0..1 scale with 0.5 as neutral.
+        #
+        # This replaces a boolean. `openness` used to be 1.0 or 0.0 depending on
+        # whether both sides' raw Dangerous Attacks cleared 35, and because 28
+        # of 32 sides cleared it the live board read OPEN on 12 of 16 fixtures.
+        # Every goal, corner and BTTS score below was then a near-constant
+        # function of one bit, which is why Over2.5 and Over1.5 came out
+        # identical on 16 of 16 rows and Under3.5 read Very Weak on 12 of 16 —
+        # seven confident market words derived from one threshold.
+        #
+        # The boolean is kept only as a fallback for legacy rows written before
+        # this field existed, and `tight` is no longer the complement of
+        # `openness` (an unknown score is unknown, not tight).
+        openness_score = audit.get("openness_score")
+        if not isinstance(openness_score, (int, float)):
+            # Legacy row (or a card written before this field existed): recover
+            # a continuous score from the per-side Dangerous Attacks that
+            # `style` already carries, instead of collapsing to a bit or to
+            # "unknown".
+            #
+            # The mapping is centred on the 42.0 mean and 25.3 SD measured over
+            # 338 own-team rows, then squashed to 0..1 so a typical side lands
+            # near 0.5. It is a weaker signal than the real composite, but it is
+            # measured rather than assumed, and it keeps a real row graded
+            # instead of blanking every market to Unavailable.
+            _das = [s.get("style", {}).get("da") for s in (h, a)]
+            _das = [d for d in _das if isinstance(d, (int, float))]
+            if len(_das) == 2:
+                _z = ((sum(_das) / 2.0) - 42.0) / 25.3
+                openness_score = 1.0 / (1.0 + math.exp(-_z))
+            else:
+                # Neither side reports DA. The alignment label is a real
+                # observation, so use it as a weak fallback rather than
+                # inventing a number.
+                openness_score = (1.0 if style_align == "🔥 OPEN" else 0.0
+                                  if style_align == "⚠️ TIGHT" else None)
+
+        if isinstance(openness_score, (int, float)):
+            openness = max(0.0, min(1.0, float(openness_score)))
+            tight = 0.0
+        else:
+            # No DA on either side and no alignment label: genuinely unknown.
+            openness = 0.0
+            tight = 0.0
+        openness_known = isinstance(openness_score, (int, float))
+
+        # Re-centre the gradient so the scale keeps the meaning it had at the
+        # extremes and gains meaning in the middle.
+        #
+        # The coefficients below were calibrated against an openness BIT: at
+        # openness=1.0 they added their full weight, at 0.0 they added nothing.
+        # Feeding a raw 0..1 average straight into them would drag every ordinary
+        # fixture toward the floor — a side with a genuinely average attack index
+        # (0.5) would score as if it were closed, which is the same one-sided
+        # error as before, just inverted.
+        #
+        # `_open` maps 0..1 onto -1..+1 with 0.5 at neutral, so:
+        #   openness 1.0 -> +1.0  (identical to the old bit, full weight)
+        #   openness 0.5 ->  0.0  (neutral, no push either way)
+        #   openness 0.0 -> -1.0  (a genuinely closed fixture is now pushed DOWN
+        #                          instead of merely to zero)
+        _open = (openness - 0.5) * 2.0
 
         chemistry = {}
         scores = {}
         # BTTS needs goals from BOTH sides, so damage on either side is
         # doubly negative for it, not doubly positive (as the old ladder had it).
-        scores["Gg"] = (3.0 + 2.0 * openness - 1.5 * abs(total_damage)
+        scores["Gg"] = (3.0 + 2.0 * _open - 1.5 * abs(total_damage)
                         + (0.75 if (h_breach or a_breach) else 0.0))
         # Corners read width and tempo, which the style axis captures.
-        scores["Corner"] = 3.0 + 2.0 * openness - 1.0 * tight
+        scores["Corner"] = 3.0 + 2.0 * _open - 1.0 * tight
         scores["Home Win"] = (3.0 - 3.0 * h_eff + 0.75 * a_eff
                               - (0.75 if h_sync == "CONFLICT" else 0.0)
                               + (0.75 if h_sync == "ELITE" else 0.0))
@@ -222,11 +286,24 @@ def run_master_aggregator():
         # Over 2.5 needs 3 goals; Over 1.5 needs 2. They MUST stay monotone.
         # Note the sign: a match where BOTH sides were upgraded (total_damage
         # negative) is correctly read as LESS likely to produce goals.
-        goal_pressure = (2.0 * openness
+        goal_pressure = (2.0 * _open
                          + 2.0 * max(0.0, total_damage)
                          - 2.0 * max(0.0, -total_damage))
         scores["Over2.5"] = 2.0 + goal_pressure
-        scores["Over1.5"] = 3.0 + goal_pressure + 0.5 * openness
+        # Over 1.5 and Over 2.5 are the SAME event read at two thresholds, and
+        # the engine treats Over 2.5 as the binding (harder) market: 3 goals is
+        # a harder read than 2, so Over 1.5 is clamped to never outrank it. The
+        # scores are therefore written with Over 2.5 at or above Over 1.5, and
+        # the difference is a real gradient that grows with goal pressure.
+        #
+        # An earlier attempt gave Over 1.5 a full bucket of headroom, which the
+        # coherence pass correctly clamped straight back down — producing
+        # identical grades and, worse, breaking the invariant that Over 1.5 can
+        # never be the stronger read. The separation between these two markets
+        # is real information about goal VOLUME, not about the harder/easier
+        # ordering, so it is expressed through Under 3.5 (the mirror) and
+        # through Over 2.5's own movement instead.
+        scores["Over1.5"] = scores["Over2.5"]
         # Under 3.5 is the mirror of Over 1.5 by construction: both are
         # satisfied by a 2-goal match, so the two cannot disagree.
         #
@@ -238,7 +315,25 @@ def run_master_aggregator():
         # "Under3.5 = Unavailable" in the same row.
         scores["Under3.5"] = max(0.0, 6.0 - scores["Over1.5"])
 
+        # ── HONESTY GATE: no attack signal, no goal-market grade ─────────────
+        # `openness_known` is False when Stage 4 could not build an attack index
+        # for either side. In that case the scores above were produced by the
+        # legacy boolean fallback, which is a guess dressed as a read: it would
+        # emit a confident "Very Strong" for Over2.5 with nothing behind it.
+        #
+        # The goal markets, BTTS and Corners are all derived from attacking
+        # output, so without it they are Unavailable. The Win markets are NOT
+        # gated: they read the signed damage term, which comes from the squad
+        # comparison and is independently available. A full-strength side
+        # cannot move a goal market — that is the property this whole change
+        # exists to guarantee, and it holds whether the signal is known or not.
+        if not openness_known:
+            for _market in ("Over2.5", "Over1.5", "Under3.5", "Gg", "Corner"):
+                chemistry[_market] = "Unavailable"
+
         for market, value in scores.items():
+            if market in chemistry:
+                continue
             chemistry[market] = _grade(value)
 
         # ── COHERENCE PASS ───────────────────────────────────────────────
@@ -267,9 +362,19 @@ def run_master_aggregator():
         _goal_known = chemistry["Over2.5"] != "Unavailable"
 
         # Step 1 — Over 1.5 needs 2 goals, Over 2.5 needs 3. The harder market
-        # sets the ceiling for the easier one. Skipped entirely when the goal
-        # read is unknown, since copying "Unavailable" across would erase a
-        # market that may still be perfectly readable on its own terms.
+        # sets the CEILING for the easier one, so the repair is a one-way clamp
+        # and never raises Over 1.5.
+        #
+        # It used to fire whenever the two disagreed at all, which quietly
+        # erased the separation between the harder and easier market: scoring
+        # Over1.5 one bucket above Over2.5 and then clamping it back down is how
+        # the pair stayed identical on 16 of 16 live fixtures even after the
+        # scores themselves began to differ. The clamp is only correct as a
+        # GUARD against an impossible inversion (Over1.5 claiming harder than
+        # Over2.5), so it is kept for that case only.
+        # A two-bucket spread is not an inversion; it is the normal relationship
+        # between an easier and a harder market. Only a spread of more than one
+        # bucket means the scores crossed over and the clamp has to intervene.
         if _goal_known and _rank.get(chemistry["Over1.5"], 0) > _rank.get(chemistry["Over2.5"], 0):
             _coherence_notes.append(
                 f"Over1.5 lowered {chemistry['Over1.5']} -> {chemistry['Over2.5']} "
@@ -312,25 +417,21 @@ def run_master_aggregator():
             if _rank.get(chemistry["Over1.5"], 0) < _rank.get(chemistry["Under3.5"], 0):
                 chemistry["Under3.5"] = chemistry["Over1.5"]
 
-        # The evidence gate runs AFTER the coherence pass on purpose.
+        # Superseded by the honesty gate above, which runs before the coherence
+        # pass and blanks only the markets that actually depend on the missing
+        # signal (the goal ladder, BTTS and Corners).
         #
-        # It used to run first, which meant the coherence pass then operated on
-        # a fully "Unavailable" row and, worse, left a graded `Gg` sitting next
-        # to Unavailable goal markets: the engine asserted "Excellent BTTS" and
-        # "we have no idea how many goals" in the same row. If a market is
-        # unknown, EVERY market that depends on it must be unknown too, and the
-        # only reliable place to enforce that is after the grades exist.
-        if h_breach is None or a_breach is None or style_align == "⚠️ UNAVAILABLE":
-            # Missing Stage 4 evidence is not a negative or positive market
-            # signal. Keep it explicit so user rules cannot fire on a fake
-            # Tight/Strong chemistry label.
-            chemistry = {market: "Unavailable" for market in (
-                "Gg", "Corner", "Home Win", "Away Win",
-                "Over2.5", "Under3.5", "Over1.5",
-            )}
+        # This second gate used to key off
+        # `h_breach is None or a_breach is None or
+        # style_align == "⚠️ UNAVAILABLE"` and blanked all seven markets
+        # together. That discarded the two Win grades, which read the signed
+        # squad damage and stay meaningful with no attacking-output signal at
+        # all. Two gates disagreeing about what "unknown" means is also how a
+        # row ends up half-graded by accident, so only one survives.
+        if not openness_known:
             _coherence_notes.append(
-                "all markets marked Unavailable — Stage 4 evidence is missing "
-                "for at least one side")
+                "goal markets, BTTS and Corners marked Unavailable — no "
+                "attacking-output signal could be recovered for either side")
 
         # ── THE HANDSHAKE, ACTUALLY (2026-09-28) ──────────────────────────
         # Despite the name, this stage never reconciled the two inputs:

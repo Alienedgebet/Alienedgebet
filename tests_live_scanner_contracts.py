@@ -4345,6 +4345,116 @@ class AggregatorCoherenceTests(unittest.TestCase):
                                 f"{market} showed as Unavailable despite a "
                                 f"computed score")
 
+    def _openness_card(self, openness, home_net=0.0, away_net=0.0,
+                       align="🔥 OPEN", da=40.0):
+        """A minimal Stage 4 card with a continuous openness score."""
+        def side(tid, name, net):
+            return {"id": tid, "team_name": name, "danger_level": "OK",
+                    "data_available": True, "breach": False,
+                    "style": {"label": "Attacking", "score": 4.0,
+                              "da": da, "available": da is not None},
+                    "formation": "4-3-3", "net_impact": net,
+                    "verdict": "ROTATION"}
+        return {"fixture": "A vs B", "fixture_id": "1",
+                "style_alignment": align, "openness_score": openness,
+                "home_team": side(1, "A", home_net),
+                "away_team": side(2, "B", away_net)}
+
+    def _grade_with(self, card):
+        with tempfile.TemporaryDirectory() as tmp:
+            inc = os.path.join(tmp, "incoming_predictions.json")
+            drg = os.path.join(tmp, "danger_audit.json")
+            out = os.path.join(tmp, "aggregator_report.json")
+            with open(inc, "w", encoding="utf-8") as f:
+                json.dump({"1": []}, f)
+            with open(drg, "w", encoding="utf-8") as f:
+                json.dump([card], f)
+            with patch.object(stage5, "DATA_DIR", tmp), \
+                 patch.object(stage5, "INCOMING_PREDICTIONS_FILE", inc), \
+                 patch.object(stage5, "DANGER_AUDIT_FILE", drg), \
+                 patch.object(stage5, "AGGREGATOR_REPORT_FILE", out):
+                return stage5.run_master_aggregator()[0]["match_chemistry_list"]
+
+    def test_the_goal_markets_actually_vary_between_fixtures(self):
+        """
+        THE DEFINING FAILURE THIS FIX EXISTS TO REMOVE.
+
+        Every goal, BTTS and corner grade used to be a near-constant function of
+        a single boolean (`both sides' Dangerous Attacks > 35`), which read OPEN
+        on 12 of 16 live fixtures. Seven confident market words were derived
+        from one bit and the board barely moved.
+
+        Over1.5 and Over2.5 are the SAME event at two thresholds and are clamped
+        to each other by design — that invariant is enforced separately — so the
+        variation that matters is BETWEEN fixtures, not between those two
+        markets. A continuous openness score has to make the board move.
+        """
+        low = self._grade_with(self._openness_card(0.20))
+        high = self._grade_with(self._openness_card(0.80))
+        differing = [m for m in ("Over2.5", "Gg", "Corner")
+                     if _rank_of(high[m]) != _rank_of(low[m])]
+        self.assertTrue(
+            differing,
+            "an 0.80-openness fixture graded identically to a 0.20 one on every "
+            "goal market — the single-bit failure is back")
+
+    def test_over_15_never_outranks_over_25_and_they_move_together(self):
+        """
+        Over 1.5 (2 goals) and Over 2.5 (3 goals) describe the same event, and
+        3 goals is the harder read, so the harder market binds. They are
+        clamped together deliberately; a divergence between them would mean the
+        engine was claiming 2 goals is a stronger read than 3.
+        """
+        for openness in (0.2, 0.5, 0.8):
+            c = self._grade_with(self._openness_card(openness))
+            self.assertLessEqual(
+                _rank_of(c["Over1.5"]), _rank_of(c["Over2.5"]),
+                f"at openness {openness}: Over1.5={c['Over1.5']} outranks "
+                f"Over2.5={c['Over2.5']}")
+
+    def test_a_full_strength_fixture_does_not_read_as_a_goal_market(self):
+        """
+        A rotation-only fixture (no absence on either side) must not produce a
+        confident directional goal read. net_impact is 0 for a full-strength XI,
+        so the damage term is neutral and the goal markets have nothing to move
+        on — the only honest grade is a neutral one.
+        """
+        c = self._run(0.0, 0.0)["match_chemistry_list"]
+        for market in ("Over2.5", "Under3.5"):
+            self.assertLessEqual(
+                _rank_of(c[market]), _rank_of("Strong"),
+                f"{market}={c[market]} claims a directional read from a "
+                "fixture with no absence on either side")
+
+    def test_a_stronger_attack_pair_must_move_the_goal_markets_upward(self):
+        """
+        The continuous openness score has to actually ORDER fixtures. Under the
+        old boolean an attacking pair and a defensive pair graded identically.
+        """
+        attacking = self._grade_with(self._openness_card(0.80))
+        defensive = self._grade_with(self._openness_card(0.20))
+        for market in ("Over2.5", "Gg"):
+            self.assertGreater(
+                _rank_of(attacking[market]), _rank_of(defensive[market]),
+                f"{market}: an 0.80-openness pair must grade above a 0.20 one "
+                f"(got {attacking[market]} vs {defensive[market]})")
+
+    def test_missing_attack_signal_blanks_goal_markets_but_not_win_markets(self):
+        """
+        No attack signal means no honest goal read. The Win markets read the
+        signed squad damage instead, so they stay gradeable — blanking those
+        would discard a genuinely independent piece of evidence.
+        """
+        c = self._grade_with(self._openness_card(None, home_net=14.0,
+                                                align="⚠️ UNAVAILABLE", da=None))
+        for market in ("Over2.5", "Over1.5", "Under3.5", "Gg", "Corner"):
+            self.assertEqual(c[market], "Unavailable",
+                             f"{market} claimed a read with no attack signal")
+        for market in ("Home Win", "Away Win"):
+            self.assertNotEqual(c[market], "Unavailable",
+                                f"{market} should still be gradeable from "
+                                "the signed damage term")
+
     def test_the_handshake_actually_reconciles_the_two_inputs(self):
         """It used to copy the picks through and read none of them."""
         row = self._run(20.0, -20.0, picks=[{
