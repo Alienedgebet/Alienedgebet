@@ -92,17 +92,17 @@ def _quota_pressure():
     except Exception:
         pass
 
-    # 2. A recent acquisition failure, judged by the marker's mtime rather
-    #    than by scanning the journal (which we cannot read from here).
-    marker = os.path.join(ROOT, "data", "api_429_cooldown.lock")
-    try:
-        age = now - os.path.getmtime(marker)
-        # A lock file touched in the last 2 minutes means the stages were just
-        # fighting a limit, even if the cooldown has since been cleared.
-        if age < 120:
-            return True, f"quota lock touched {int(age)}s ago"
-    except OSError:
-        pass
+    # The lock's MTIME is deliberately NOT used as a signal. The stages rewrite
+    # it on every SUCCESSFUL batch too (`{"until": 0, "by": "cleared:stage3"}`),
+    # so "touched recently" is true on a perfectly healthy scanner — and using
+    # it reproduced the exact false positive this function exists to remove
+    # (observed on the first run: "quota lock touched 0s ago" on a cycle with
+    # zero 429 errors and a cleared cooldown).
+    #
+    # The lock's CONTENT is the only trustworthy part of it: `until` in the
+    # future is a live cooldown (covered above) and `until: 0` is an explicit
+    # clear. There is no third state, so there is nothing further to test, and
+    # inventing one from a timestamp is what caused the bug.
 
     return False, "no rate-limit pressure detected"
 
