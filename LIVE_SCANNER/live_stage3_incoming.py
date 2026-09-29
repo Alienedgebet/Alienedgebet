@@ -93,12 +93,16 @@ try:
     from LIVE_SCANNER.live_state_classifier import (
         classify_fixture, official_lineup_players, has_official_lineup, team_ids,
     )
-    from LIVE_SCANNER.live_signed_impact import assess_absence, regime_for_odds
+    from LIVE_SCANNER.live_signed_impact import (
+        assess_absence, regime_for_odds, MIN_CONFIDENCE_FOR_CALL,
+    )
 except ImportError:  # direct execution without the package on sys.path
     from live_state_classifier import (
         classify_fixture, official_lineup_players, has_official_lineup, team_ids,
     )
-    from live_signed_impact import assess_absence, regime_for_odds
+    from live_signed_impact import (
+        assess_absence, regime_for_odds, MIN_CONFIDENCE_FOR_CALL,
+    )
 
 # ==============================================================================
 # SYSTEM CONFIGURATION
@@ -325,6 +329,75 @@ def calculate_gk_vulnerability_pro(master_gk, today_ids, all_lineup_data,
 # ==============================================================================
 # SQUAD DATA (150-DAY MONUMENT ENGINE)
 # ==============================================================================
+def _describe_rotation(side):
+    """Write the reason sentence for a rotation/blessing pick.
+
+    2026-09-29. The reason used to be one hardcoded literal — "the players who
+    left were no better than the ones now starting" — printed for every pick
+    regardless of the sign of the number beside it. It therefore contradicted
+    the measurement on the majority of rows. Measured on the live board
+    (31 rotation picks):
+
+        ROTATION, net +15.3  ->  "the players who left were no better..."
+        ROTATION, net  -2.0  ->  "the players who left were no better..."
+
+    `live_signed_impact` defines the sign convention explicitly:
+
+        net > 0  -> DANGER    quality LOST; the players who left were BETTER
+        net < 0  -> BLESSING  the XI was UPGRADED; those who left were WORSE
+
+    So a +15.3 is a 15-point quality LOSS and the old text described its exact
+    opposite. This is a pure reporting defect — it changes no arithmetic, fires
+    no pick and grades nothing — but it is the sentence a user reads next to
+    the number, and it was making a measured loss look like a non-event.
+
+    The wording is now derived from the sign, and it says so plainly when the
+    evidence is too thin to call a direction at all, which is the common case
+    on this board: the confidence below the call floor is stated rather than
+    dressed up as a verdict.
+    """
+    verdict = str(side.get("verdict") or "ROTATION").upper()
+    net = side.get("net_impact")
+    try:
+        net = float(net)
+    except (TypeError, ValueError):
+        net = 0.0
+    try:
+        conf = float(side.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+
+    head = (f"{verdict} - signed net {net:+.1f} "
+            f"at {conf:.2f} confidence")
+
+    # Below this the signed verdict itself declines to call a direction, and
+    # `ROTATION` is what it returns. Saying "churn, no direction" is the
+    # truthful description; asserting a quality comparison is not.
+    if conf < MIN_CONFIDENCE_FOR_CALL:
+        return (
+            f"{head}: churn rather than damage - the evidence is too thin to "
+            f"say whether the players who left were better or worse than the "
+            f"ones now starting, so this is a low-confidence volatility read "
+            f"on this side's own scoring only."
+        )
+
+    if net > 0:
+        return (
+            f"{head}: the players who left were BETTER than the ones now "
+            f"starting - this side lost quality and is expected to score less."
+        )
+    if net < 0:
+        return (
+            f"{head}: the players who left were WORSE than the ones now "
+            f"starting - the rotation upgraded this side and is expected to "
+            f"score more."
+        )
+    return (
+        f"{head}: net effect is zero - the players who left were of the same "
+        f"quality as the ones now starting."
+    )
+
+
 def get_squad_data_standardized(team_id):
     t_id     = safe_int(team_id)
     t_id_str = str(t_id)
@@ -762,11 +835,7 @@ def run_incoming_forensic_engine():
                         "type":        "TO_SCORE",
                         "target_loc":  _side['loc'],
                         "target_name": _side['name'],
-                        "reason":      (
-                            f"{_side['verdict']} — signed net {_side['net_impact']:+.1f} "
-                            f"at {_side['confidence']:.2f} confidence: the players who "
-                            f"left were no better than the ones now starting"
-                        ),
+                        "reason":      _describe_rotation(_side),
                     })
                     print(f"  ✅ ROTATION UPLIFT — TO_SCORE: {_side['name']} "
                           f"({_side['verdict']}, net {_side['net_impact']:+.1f})")
