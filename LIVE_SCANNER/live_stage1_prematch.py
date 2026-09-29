@@ -174,12 +174,38 @@ def _cache_odds(fixture_id, odds_data):
 # PERSISTENT CACHE MANAGERS
 # ==============================================================================
 def load_cache():
+    """Restore the persisted squad cache, DISCARDING poisoned empty entries.
+
+    2026-09-29. An empty `{}` entry can only be written by an older build that
+    cached a FAILED provider pull as "this team has no history" (the guard now
+    lives in get_squad_data_standardized). Those entries are worse than absent:
+    `if tid_str in SQUAD_CACHE: return SQUAD_CACHE[tid_str]` serves them without
+    refetching, so the team stays FULL STRENGTH / 0 missing / KMV 0.0% with no XI
+    table indefinitely — a missed call rendered as a finding.
+
+    73 entries were poisoned this way and 6 sides of the live board were still
+    reading from them after the write guard was fixed, because the guard stops
+    NEW poisoning but cannot un-poison what is already on disk.
+
+    Dropping them on load is the only place that clears it: the entries are then
+    simply absent, so the next cycle refetches those teams properly. A team that
+    genuinely has no history is re-fetched once and cached as `{}` again, which
+    is correct — the cost is one call per such team per restart, not per cycle.
+    """
     global SQUAD_CACHE
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'r') as f:
-                SQUAD_CACHE = json.load(f)
-            print(f"--- MEMORY RESTORED: {len(SQUAD_CACHE)} teams loaded from squad_cache.json ---")
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                SQUAD_CACHE = {k: v for k, v in loaded.items() if v}
+                purged = len(loaded) - len(SQUAD_CACHE)
+                if purged:
+                    print(f"[SQUAD] purged {purged} poisoned empty entr(ies) "
+                          f"from squad cache — those teams will be refetched.")
+                print(f"--- MEMORY RESTORED: {len(SQUAD_CACHE)} teams loaded from squad_cache.json ---")
+            else:
+                SQUAD_CACHE = {}
         except:
             SQUAD_CACHE = {}
     else:
@@ -393,6 +419,24 @@ def get_squad_data_standardized(team_id):
         "include": "lineups.details.type;lineups.player.position;lineups.player.detailedPosition;scores;participants",
         "filter": "fixtureStates:5", "per_page": 25
     })
+
+    # A FAILED pull must never be cached as an empty squad. This function is the
+    # only source of the key eleven, so caching `{}` on a 429 makes the team read
+    # as FULL STRENGTH with 0 missing, KMV 0.0% and no XI table — presented as a
+    # finding when it is really a missed call. Burundi (18834) was cached empty
+    # this way: 73 of the cache's entries were empty, and Burundi's 150-day
+    # window demonstrably holds 19 usable lineup rows.
+    #
+    # `{}` is still cached when the pull genuinely succeeded with no usable rows,
+    # because that is a real answer and refetching it every cycle would spend
+    # quota to learn the same thing.
+    if acquisition_failed(resp):
+        cached = SQUAD_CACHE.get(tid_str)
+        if cached:
+            return cached
+        print(f"[SQUAD] team {tid_str}: acquisition FAILED "
+              f"({resp.get('_failure')}) — NOT cached as an empty squad.")
+        return {}
 
     squad_stats = {}
     for fx in resp.get("data",[]):

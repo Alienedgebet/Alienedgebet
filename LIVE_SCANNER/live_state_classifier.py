@@ -168,10 +168,22 @@ def _not_started_result(kickoff, mins_to_kickoff, label):
 
 
 def _result(state, is_live, is_finished, is_upcoming, is_stale, kickoff, reason):
+    # `is_not_started` is derived here rather than at each call site because two
+    # consumers already ask for it by that name (Stage 3 line ~512 and Stage 4
+    # line ~617, both written as `_state.get("is_not_started")`). The key did not
+    # exist, so `.get()` returned None, and the guard
+    #
+    #     if not (info.get("is_live") or info.get("is_not_started")): continue
+    #
+    # silently dropped EVERY not-yet-started fixture from both feeds — a third
+    # of the day's board — with no error anywhere. Deriving it once from the
+    # state string is the single source of truth those call sites were written
+    # against.
     return {
         "state": state,
         "is_live": is_live,
         "is_finished": is_finished,
+        "is_not_started": state == "NOT_STARTED",
         "is_upcoming": is_upcoming,
         "is_stale": is_stale,
         "kickoff_utc": kickoff,

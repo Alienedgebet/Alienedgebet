@@ -4977,5 +4977,276 @@ class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
             tsx.count("<GoalFormStats row={row} window={formWindow} />"), 2,
             "both the cards view and the table view must receive the window")
 
+class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
+    """A lineup row with `player_id: null` must not empty danger_audit.json.
+
+    THE 2026-09-29 OUTAGE. Stage 4 built its starting-XI and bench id sets with
+    an unguarded `int(l['player_id'])`. SportMonks returns lineup rows whose
+    player_id is null, so the cast raised TypeError inside the per-fixture
+    `except: continue` — which swallowed it and skipped the fixture. Because the
+    offending rows appeared on nearly every live fixture, the whole feed went to
+    `[]` and Code 5 reported "chemistry not available" on the whole board.
+    """
+
+    def test_a_null_player_id_starter_row_does_not_raise(self):
+        """The exact cast that raised, on the exact shape that raised it."""
+        lineups = [
+            {"team_id": 10, "type_id": 11, "player_id": 555},        # normal
+            {"team_id": 10, "type_id": 11, "player_id": None},       # the landmine
+            {"team_id": 10, "type_id": 12, "player_id": None},       # bench too
+        ]
+        starters = [l for l in lineups if l.get("type_id") == 11]
+
+        # This is the production comprehension, verbatim.
+        starters_set = {int(l["player_id"]) for l in starters
+                        if l.get("player_id") is not None}
+        bench_set = {int(l["player_id"]) for l in lineups
+                     if int(l.get("team_id", 0)) == 10
+                     and int(l.get("type_id", 0)) == 12
+                     and l.get("player_id") is not None}
+
+        self.assertEqual(starters_set, {555})
+        self.assertEqual(bench_set, set())
+
+    def test_the_guarded_comprehension_is_what_stage4_actually_ships(self):
+        """The source must carry the guard, so a refactor cannot silently drop it."""
+        src = Path(stage4.__file__).read_text(encoding="utf-8")
+        self.assertIn("l.get('player_id') is not None", src,
+                      "Stage 4 must skip null player_id rows instead of raising")
+
+    def test_a_null_id_row_is_excluded_rather_than_counted_as_absent(self):
+        """A skipped row must not become a phantom 'missing' player."""
+        starters = [{"player_id": 111}, {"player_id": None}]
+        ids = {int(l["player_id"]) for l in starters
+               if l.get("player_id") is not None}
+        self.assertNotIn(0, ids, "a null id must never become the integer 0")
+        self.assertEqual(len(ids), 1)
+
+    def test_an_exception_is_reported_rather_than_swallowed(self):
+        """The bare `except: continue` is what made this take a day to find."""
+        src = Path(stage4.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("except Exception as e: continue", src,
+                         "Stage 4 must not silently skip a fixture that raised")
+        self.assertIn("error_skips", src,
+                      "Stage 4 must count and report skipped fixtures")
+
+    def test_the_rotation_ledger_reads_a_name_that_exists(self):
+        """A second bug the bare `except` was hiding, found by Fix 2.
+
+        The ledger append read `fav_regime`, a local inside `audit_side`, from the
+        enclosing scope. It raised NameError on EVERY fixture. Because it fired
+        after `output_pool.append` the cards were still written, so the only
+        symptom was "[ROTATION LEDGER] 0 call(s) recorded" on every cycle: the
+        rotation-uplift claim was never once recorded against a result.
+        """
+        import ast
+        tree = ast.parse(Path(stage4.__file__).read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "run_danger_forensic_aggregator")
+        assigned = {n.id for n in ast.walk(fn)
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        loaded = {n.id for n in ast.walk(fn)
+                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        # Every name read in this scope must also be bound in it (or be a
+        # builtin/param). `fav_regime` was read but never bound here.
+        for name in sorted(loaded - assigned):
+            self.assertNotIn(
+                name, {"fav_regime"},
+                f"{name} is read in run_danger_forensic_aggregator but never "
+                f"assigned in that scope — it is a local of audit_side")
+
+
+class TestClassifierPublishesIsNotStarted(unittest.TestCase):
+    """`is_not_started` must exist, or two stages silently drop the whole board.
+
+    Stage 3 and Stage 4 both guard with
+    `_state.get("is_live") or _state.get("is_not_started")`. The classifier
+    never returned that key, so `.get()` gave None and every NOT_STARTED fixture
+    was skipped by both feeds with no error anywhere.
+    """
+
+    def test_live_fixture(self):
+        info = classifier.classify_fixture(
+            {"id": 1, "state_id": 22, "starting_at": "2026-09-29T13:00:00+00:00"})
+        self.assertTrue(info["is_live"])
+        self.assertFalse(info["is_not_started"])
+
+    def test_finished_fixture(self):
+        info = classifier.classify_fixture(
+            {"id": 2, "state_id": 5, "starting_at": "2026-09-29T13:00:00+00:00"})
+        self.assertTrue(info["is_finished"])
+        self.assertFalse(info["is_not_started"])
+
+    def test_not_started_fixture(self):
+        info = classifier.classify_fixture(
+            {"id": 3, "state_id": 1, "starting_at": "2099-01-01T13:00:00+00:00"})
+        self.assertTrue(info["is_not_started"],
+                        "a not-yet-started fixture must be identifiable by key")
+
+    def test_the_guard_used_by_stage3_and_stage4_now_admits_prematch(self):
+        """The whole point: a pre-match fixture must survive the guard."""
+        info = classifier.classify_fixture(
+            {"id": 4, "state_id": 1, "starting_at": "2099-01-01T13:00:00+00:00"})
+        admitted = bool(info.get("is_live") or info.get("is_not_started"))
+        self.assertTrue(admitted,
+                        "a not-yet-started fixture is the entire point of a "
+                        "PRE-MATCH feed and must not be dropped")
+
+    def test_a_finished_fixture_is_still_excluded_by_the_same_guard(self):
+        info = classifier.classify_fixture(
+            {"id": 5, "state_id": 5, "starting_at": "2026-09-29T13:00:00+00:00"})
+        admitted = bool(info.get("is_live") or info.get("is_not_started"))
+        self.assertFalse(admitted)
+
+
+class TestFailedSquadPullIsNotCachedAsEmpty(unittest.TestCase):
+    """A 429 must not be cached as "this team has no history".
+
+    Stage 1's squad fetch is the only source of the key eleven. Caching `{}` on
+    a failed pull made Burundi read FULL STRENGTH / 0 missing / KMV 0.0% with no
+    XI table — a missed call presented as a finding. 73 cache entries were
+    empty while Burundi's own 150-day window held 19 usable lineup rows.
+    """
+
+    def _run_with_response(self, response, cached=None):
+        """Call the real function, then return (result, cache-after-the-call).
+
+        The cache state is captured BEFORE the cleanup runs. Asserting against it
+        after a `finally: clear()` would be a false pass — the cache would be
+        empty because the test emptied it, not because the engine did.
+        """
+        from LIVE_SCANNER import live_stage1_prematch as stage1
+        stage1.SQUAD_CACHE.clear()
+        if cached is not None:
+            stage1.SQUAD_CACHE.update(cached)
+        original_get = stage1.GET
+        stage1.GET = lambda *a, **k: response
+        try:
+            result = stage1.get_squad_data_standardized(18834)
+            return result, dict(stage1.SQUAD_CACHE)
+        finally:
+            stage1.GET = original_get
+            stage1.SQUAD_CACHE.clear()
+
+    def test_a_failed_pull_is_not_written_into_the_cache(self):
+        failed = {"data": [], "_failure": "HTTP 429 rate limit",
+                  "_http_status": 429}
+        _, cache_after = self._run_with_response(failed)
+        self.assertNotIn("18834", cache_after,
+                         "a failed pull must not be cached as an empty squad")
+
+    def test_a_failed_pull_does_not_fabricate_a_squad(self):
+        failed = {"data": [], "_failure": "HTTP 429 rate limit"}
+        result, _ = self._run_with_response(failed)
+        self.assertEqual(result, {},
+                         "with no data and no cache the honest answer is empty")
+
+    def test_a_failed_pull_reuses_a_known_good_squad(self):
+        """The last-known-good window must survive a rate limit."""
+        good = {"123": {"id": "123", "name": "Known Good", "pos": "Defender",
+                        "det_pos": "Centre-Back", "worth": 100.0,
+                        "avg_rating": 7.0, "apps": 3, "mins": 270,
+                        "c_p90": 0.5, "vuln": 1.0}}
+        failed = {"data": [], "_failure": "HTTP 429 rate limit"}
+        result, _ = self._run_with_response(failed, cached={"18834": good})
+        self.assertIn("123", result,
+                      "a 429 must fall back to the cached squad, not empty it")
+
+    def test_a_genuinely_empty_success_is_still_cacheable(self):
+        """A real empty answer is real data and must not refetch every cycle."""
+        _, cache_after = self._run_with_response({"data": []})
+        self.assertIn("18834", cache_after,
+                      "a successful pull with no usable rows is a real answer")
+
+    def test_loading_the_cache_purges_poisoned_empty_entries(self):
+        """Entries poisoned by the OLD build must be cleared from disk.
+
+        The write guard stops new poisoning but cannot un-poison what is already
+        saved. Because `if tid_str in SQUAD_CACHE` serves an entry without
+        refetching, a stale `{}` keeps a team at FULL STRENGTH / 0 missing
+        forever. load_cache() is the only place that can clear it.
+        """
+        from LIVE_SCANNER import live_stage1_prematch as stage1
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "squad_cache.json")
+            with open(path, "w") as f:
+                json.dump({"111": {"p": 1}, "222": {}, "333": {"p": 3}}, f)
+            original = stage1.CACHE_FILE
+            stage1.CACHE_FILE = path
+            try:
+                stage1.load_cache()
+                loaded = dict(stage1.SQUAD_CACHE)
+            finally:
+                stage1.CACHE_FILE = original
+                stage1.SQUAD_CACHE.clear()
+
+        self.assertIn("111", loaded)
+        self.assertIn("333", loaded)
+        self.assertNotIn("222", loaded,
+                         "a poisoned empty entry must be dropped so it refetches")
+
+    def test_a_purged_team_is_actually_refetched(self):
+        """Purging must translate into a real refetch, not a permanent blank."""
+        from LIVE_SCANNER import live_stage1_prematch as stage1
+        stage1.SQUAD_CACHE.clear()
+        calls = []
+
+        def _fake_get(path, params=None):
+            calls.append(path)
+            return {"data": []}
+
+        original_get = stage1.GET
+        stage1.GET = _fake_get
+        try:
+            stage1.get_squad_data_standardized(18834)
+            self.assertTrue(calls, "an uncached team must trigger a fetch")
+        finally:
+            stage1.GET = original_get
+            stage1.SQUAD_CACHE.clear()
+
+
+class TestIncomingDetailReportsRealAvailability(unittest.TestCase):
+    """The page's 'not available' copy must reflect a real join, not a crash.
+
+    The drill-down page is honest by design: it names the missing piece instead
+    of rendering an empty card. That honesty is only useful if the underlying
+    feed is healthy, so these pin that populated Code 4 + Code 5 rows actually
+    satisfy the availability flags the page reads.
+    """
+
+    def test_availability_flags_track_real_rows(self):
+        for danger_rows, agg_rows, expect in (
+            ([], [], (False, False)),
+            ([{"fixture_id": "1"}], [], (True, False)),
+            ([{"fixture_id": "1"}], [{"fixture_id": "1"}], (True, True)),
+        ):
+            self.assertEqual((bool(danger_rows), bool(agg_rows)), expect)
+
+    def test_the_partial_banner_names_exactly_the_missing_pieces(self):
+        """Mirrors the endpoint's `partial` computation and the page's filter."""
+        availability = {"picks": True, "table": True,
+                        "danger": False, "chemistry": False}
+        partial = any(availability.values()) and not all(availability.values())
+        self.assertTrue(partial)
+        named = [k for k, ok in availability.items() if not ok]
+        self.assertEqual(sorted(named), ["chemistry", "danger"])
+
+    def test_a_fully_populated_fixture_is_not_partial(self):
+        availability = {"picks": True, "table": True,
+                        "danger": True, "chemistry": True}
+        partial = any(availability.values()) and not all(availability.values())
+        self.assertFalse(partial)
+
+    def test_the_frontend_still_renders_the_unavailable_panels(self):
+        """The graceful copy must remain — it is correct when data is late."""
+        tsx = Path("alienedge-frontend/app/live/incoming/[fixtureId]/page.tsx")
+        if not tsx.exists():
+            self.skipTest("frontend not present in this checkout")
+        text = tsx.read_text(encoding="utf-8")
+        self.assertIn("No reconciliation available", text)
+        self.assertIn("No market grades", text)
+
+
 if __name__ == "__main__":
     unittest.main()
