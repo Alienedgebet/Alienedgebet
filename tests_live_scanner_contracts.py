@@ -4706,5 +4706,105 @@ class TestWeeklyOver25GoalFormStats(unittest.TestCase):
             "GoalFormStats must be rendered in BOTH the cards view and the "
             "table view, exactly once each.")
 
+
+class TestSecondChanceFilterExemption(unittest.TestCase):
+    """
+    A filter returning zero rows is a correct answer, not a starved engine.
+
+    2026-09-29. The 06:00 second-chance pass re-ran
+    `filter_over25__banker` for 2026-09-29 every morning, forever. The reason
+    was _needs_second_chance treating `status == "ok" and row_count == 0` as
+    stale for EVERY key -- but a filter's purpose is to remove rows, so []
+    means "no fixture met the conjunction", which is a complete answer.
+
+    Verified against the real data: master_over_stage2_2026-09-29.csv holds 54
+    fixtures, and banker (kill_switch AND pos_gap<=6 AND votes>=7 AND
+    poisson>=70) legitimately keeps none. Only 2 of 54 reach poisson>=70 and
+    neither has kill_switch_pass set. The empty result was right; the retry
+    loop was the bug.
+    """
+
+    def _needs(self, key, status, row_count):
+        import main as main_mod
+        with patch.object(main_mod.store, "load_status",
+                          return_value={"status": status, "row_count": row_count}):
+            return main_mod._needs_second_chance(key, "2026-09-29")
+
+    def test_empty_filter_is_not_retried(self):
+        """The regression: a correct empty filter must not be re-run daily."""
+        for key in ("filter_over25__banker", "filter_over25__balanced",
+                    "filter_over25__aggressive", "filter_win__safe",
+                    "filter_win__balanced", "filter_win__aggressive"):
+            self.assertFalse(
+                self._needs(key, "ok", 0),
+                f"{key} returned a legitimate empty result but is still "
+                "treated as stale, so the 06:00 pass re-runs it every day "
+                "for every date with no qualifying picks.")
+
+    def test_empty_fhvi_is_not_retried(self):
+        """fhvi is a filter and is exempt for the same reason."""
+        self.assertFalse(self._needs("fhvi", "ok", 0))
+
+    def test_populated_filter_is_not_retried(self):
+        """A filter that DID produce rows was never stale either."""
+        self.assertFalse(self._needs("filter_over25__banker", "ok", 12))
+
+    def test_empty_ENGINE_is_still_retried(self):
+        """
+        The exemption must not weaken the safety net for real engines.
+
+        An engine producing zero rows IS starved -- it means the provider
+        returned nothing -- and must be re-run. This is the guard against the
+        fix being too broad.
+        """
+        for key in ("over25_forecast", "over25_stage2", "gg_o15",
+                    "sh_gg_winner", "dna_v2"):
+            self.assertTrue(
+                self._needs(key, "ok", 0),
+                f"{key} produced 0 rows and must be retried -- an engine "
+                "returning nothing is starvation, not a verdict.")
+
+    def test_failed_filter_is_still_retried(self):
+        """
+        The exemption applies ONLY to a healthy-but-empty filter.
+
+        A filter that failed or degraded has a real problem and must be
+        re-run, exactly as before. Otherwise the fix would permanently
+        suppress recovery from a genuine filter failure.
+        """
+        for status in ("failed", "degraded", "missing", "unreadable"):
+            self.assertTrue(
+                self._needs("filter_over25__banker", status, 0),
+                f"a '{status}' filter must still be retried; the exemption "
+                "is only for a healthy empty result.")
+            self.assertTrue(
+                self._needs("filter_over25__banker", status, 8),
+                f"a '{status}' filter must still be retried regardless of "
+                "row count.")
+
+    def test_a_starved_filter_is_still_caught_at_the_engine_layer(self):
+        """
+        A filter whose DATED INPUT is missing returns [] too -- so the
+        exemption must not hide that case.
+
+        The recovery still happens, one layer up: the engine that writes the
+        filter's input (over25_forecast) is its own key in the second-chance
+        list and is ordered BEFORE the filter, so a starved engine is retried
+        first and the filter then runs against real input on the same pass.
+        Assert that ordering, because it is the whole basis of the exemption.
+        """
+        import main as main_mod
+        keys = [k for k, *_ in main_mod._second_chance_runners("2026-09-29")]
+        self.assertIn("over25_forecast", keys,
+                      "the engine feeding the O2.5 filter must be a "
+                      "second-chance key, or a starved filter can never heal")
+        self.assertIn("filter_over25__banker", keys)
+        self.assertLess(
+            keys.index("over25_forecast"), keys.index("filter_over25__banker"),
+            "over25_forecast must run BEFORE filter_over25__banker so the "
+            "filter sees the engine's fresh output on the same pass. With "
+            "the filter first it would run against a missing input, return "
+            "[] , and the exemption would then leave it empty for good.")
+
 if __name__ == "__main__":
     unittest.main()
