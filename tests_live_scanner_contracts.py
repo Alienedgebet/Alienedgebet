@@ -4457,5 +4457,108 @@ class StormAttributionTests(unittest.TestCase):
         self.assertIn("NEVER alertable", tracker.__doc__ or "")
 
 
+class TestChemistryVocabularyContract(unittest.TestCase):
+    """
+    The engine's chemistry scale and the rules' accepted levels must be the
+    same set, or alerts die silently.
+
+    A user rule matches chemistry with an exact, case-insensitive string
+    compare in user_rules_store:
+
+        actual = str(chem.get(market, "")).strip().lower()
+        met = actual == level
+
+    So a level the engine emits that is absent from
+    VALID_CHEMISTRY_LEVELS can never be matched by any rule. Nothing raises:
+    the matcher returns False, the rule reports a red cross, and the alert
+    simply never fires while the page still shows the fixture normally.
+
+    This is not hypothetical. The 2026-09-28 coherence rewrite added a
+    "Balanced" tier to the engine's STRENGTH scale. It was never added to
+    VALID_CHEMISTRY_LEVELS, and because it sat in the middle of the scale it
+    became the grade most likely to land on an ordinary match -- silently
+    muting chemistry rules for a full day before it was noticed.
+
+    These tests assert the two sets agree in BOTH directions, so neither side
+    can be changed alone. Removing a level from one file now fails here rather
+    than in production.
+    """
+
+    def _emitted_levels(self):
+        """
+        Pull the live STRENGTH scale out of the aggregator source.
+
+        Read from source rather than importing-and-calling: the scale is a
+        local inside the chemistry routine, so the source text is the only
+        non-invasive way to see it. Asserting on the literal list would let the
+        two drift apart again the moment a real fixture is built.
+        """
+        import re
+        from pathlib import Path
+
+        src = (Path(stage5.__file__).parent /
+               "live_stage5_aggregator.py").read_text()
+        match = re.search(r"STRENGTH\s*=\s*\[(.*?)\]", src, re.S)
+        self.assertIsNotNone(
+            match, "STRENGTH scale not found in live_stage5_aggregator.py")
+        body = match.group(1)
+        return {s.strip().strip("\"'") for s in body.split(",")
+                if s.strip().strip("\"'")}
+
+    def test_every_emitted_level_is_matchable_by_a_rule(self):
+        """No engine output may fall outside the rules vocabulary."""
+        emitted = self._emitted_levels()
+        accepted = rules.VALID_CHEMISTRY_LEVELS
+        orphans = {lv for lv in emitted if lv.lower() not in accepted}
+        self.assertEqual(
+            orphans, set(),
+            "Engine emits chemistry level(s) no rule can match: "
+            f"{sorted(orphans)}. Rules accept {sorted(accepted)}. "
+            "Add the level to VALID_CHEMISTRY_LEVELS, or remove it from "
+            "the engine's STRENGTH scale.")
+
+    def test_every_accepted_level_is_actually_emittable(self):
+        """No selectable level may be dead on arrival."""
+        emitted = self._emitted_levels()
+        dead = {lv for lv in rules.VALID_CHEMISTRY_LEVELS
+                if lv not in {e.lower() for e in emitted}}
+        self.assertEqual(
+            dead, set(),
+            f"Rules accept level(s) the engine can never produce: {sorted(dead)}. "
+            "These would be selectable in the UI but could never match, which "
+            "reads to the user as a rule that silently does nothing.")
+
+    def test_balanced_is_not_reintroduced_without_the_rules(self):
+        """
+        Pin the specific regression.
+
+        Named explicitly so that re-adding a middle tier is a deliberate act
+        that trips a test with the full explanation attached, rather than a
+        plausible-looking edit that quietly breaks alerts.
+        """
+        self.assertNotIn(
+            "Balanced", self._emitted_levels(),
+            "STRENGTH must not contain 'Balanced'. It sat mid-scale, so it "
+            "was the most likely grade on a normal match and it muted every "
+            "chemistry rule that expected 'Weak', 'Strong' or 'Excellent'.")
+        self.assertNotIn(
+            "balanced", rules.VALID_CHEMISTRY_LEVELS,
+            "'balanced' must stay out of the rules vocabulary until the "
+            "engine is deliberately changed to emit it.")
+
+    def test_full_vocabulary_is_preserved(self):
+        """
+        The pre-rewrite vocabulary, restored verbatim.
+
+        Removing 'Balanced' fixes the contract; this guards against a future
+        edit quietly narrowing the range a user can select, which would be a
+        regression just as silent as adding one.
+        """
+        self.assertEqual(
+            self._emitted_levels(),
+            {"Unavailable", "Very Weak", "Weak",
+             "Strong", "Very Strong", "Excellent", "Elite"})
+
+
 if __name__ == "__main__":
     unittest.main()

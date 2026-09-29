@@ -143,7 +143,32 @@ def run_master_aggregator():
         # market, graded from ONE ordered scale, plus a coherence pass that
         # enforces the monotone relations between nested markets. Contradiction
         # becomes structurally impossible rather than merely unlikely.
-        STRENGTH = ["Unavailable", "Very Weak", "Weak", "Balanced",
+        # 2026-09-29: "Balanced" REMOVED from this scale.
+        #
+        # This scale is a CONTRACT, not an internal detail. `user_rules_store`
+        # matches a saved rule against these strings with an EXACT compare
+        # (`actual == level`, case-insensitive) against
+        # VALID_CHEMISTRY_LEVELS = {elite, excellent, very strong, strong,
+        # weak, very weak, unavailable}. Emitting a level outside that set
+        # makes every chemistry rule silently return False — the alert just
+        # never fires, with no error anywhere.
+        #
+        # "Balanced" was introduced by the coherence rewrite on 2026-09-28 and
+        # was never in VALID_CHEMISTRY_LEVELS. Because it sat in the MIDDLE of
+        # the scale it was the grade most likely to land on an ordinary match,
+        # so it broke exactly the rules a user would most expect to fire: a
+        # "Over2.5 = Excellent" or "= Weak" rule went quiet on every match
+        # graded Balanced, while the page still displayed the fixture normally.
+        #
+        # The list below is the pre-rewrite vocabulary, restored verbatim. The
+        # single-score grading and the coherence pass are unchanged — only the
+        # emitted labels differ. A "Balanced" tier should only ever be added by
+        # ALSO adding it to VALID_CHEMISTRY_LEVELS, so the engine and the
+        # rules can never drift apart again.
+        #
+        # `_grade` rounds to the NEAREST bucket, so removing one widens its
+        # neighbours rather than leaving a gap in the vocabulary.
+        STRENGTH = ["Unavailable", "Very Weak", "Weak",
                     "Strong", "Very Strong", "Excellent", "Elite"]
         _rank = {label: i for i, label in enumerate(STRENGTH)}
 
