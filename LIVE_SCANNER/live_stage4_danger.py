@@ -32,7 +32,14 @@ HISTORY_TTL = 6 * 3600      # 6h: a team is refetched at most 4x/day, not ~1900x
 # Bump this whenever the history payload needs fields that older entries lack.
 # Without a schema marker, a cache entry created before statistics were
 # requested would keep manufacturing zero dangerous-attack averages for hours.
-HISTORY_CACHE_SCHEMA = 2
+#
+# 2026-09-29: 2 -> 3, because HISTORICAL_RECALL_DAYS went 150 -> 400. The
+# cached windows were built with a 150-day request, so every one of them holds
+# ~3 finished fixtures. Widening the request alone would change nothing for up
+# to HISTORY_TTL (6h) because the stale entry is still fresh, and the board
+# would keep reading 3-match windows while the code claimed a 400-day recall.
+# The schema marker is the only thing that forces the refetch.
+HISTORY_CACHE_SCHEMA = 3
 # 2026-09-20: 400 teams x full raw payloads (lineups incl.) reached 932MB on
 # disk and ~2.5GB+ RSS on every cycle load -> the OOM-kill loop that killed the
 # scanner 5x (Sep 19/20) and an API worker. 60 teams keeps the file ~250MB and
@@ -115,7 +122,35 @@ REQUEST_TIMEOUT = 30
 REQUEST_DELAY = 0.2
 MAX_RETRIES = 5
 
-HISTORICAL_RECALL_DAYS = 150 
+# 2026-09-29: 150 -> 400 days. The recall window was sized for a CLUB season,
+# but this board is almost entirely INTERNATIONAL fixtures, and international
+# teams play roughly 3-6 times in 150 days. Measured on the live board, the
+# window was therefore not thin by chance, it was thin by construction:
+#
+#   team 18828 (Madagascar):  150d -> 2 finished fixtures, 400d -> 10
+#   median across 46 teams:    150d -> 3 finished fixtures
+#   5,191 player records:      median 1 observed appearance, 1,705 of them zero
+#
+# `confidence()` needs FULL_CONFIDENCE_APPS = 8 appearances for a player's
+# rating to count at full weight, so a 3-match window cannot produce a single
+# qualified player, let alone a confident verdict. That is why 26 of 32 sides
+# sat below MIN_CONFIDENCE_FOR_CALL and the board read ROTATION almost
+# everywhere: the evidence was never collected, not merely judged weak.
+#
+# 400 days is the compromise, not the ideal. It is deep enough to cover a full
+# international cycle (World Cup/Euro qualifying plus tournament games) and
+# still bounded, and it is sized against the byte budget below rather than
+# against a guess:
+#
+#   measured cost at 400d: ~1.2-2.4 MB per team (vs ~0.95 MB at 150d)
+#   HISTORY_CACHE_MAX_BYTES evicts oldest-`at`-first, so the file is bounded
+#   at 120MB regardless of how many teams are in play, and the service is
+#   currently at 345MB of a 1.7GB cgroup limit.
+#
+# Widening this is safe precisely because the budget is a byte budget: the
+# earlier 60-team COUNT cap was what made evidence thin, since it evicted
+# whole windows every two cycles. See the note on HISTORY_CACHE_MAX_BYTES.
+HISTORICAL_RECALL_DAYS = 400
 CHAOS_THRESHOLD = 4  # 4+ Star players missing = Red Danger
 
 _session = requests.Session()

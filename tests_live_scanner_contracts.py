@@ -161,6 +161,52 @@ class LiveScannerContractTests(unittest.TestCase):
         self.assertEqual(result["replacement_credit"], 0.0)
         self.assertEqual(result["quality_lost"], result["net_impact"])
 
+    def test_the_recall_window_can_actually_produce_a_qualified_player(self):
+        """
+        The window must be deep enough for `confidence()` to reach a verdict.
+
+        `confidence()` needs FULL_CONFIDENCE_APPS = 8 appearances before a
+        player's rating counts at full weight, and MIN_CONFIDENCE_FOR_CALL =
+        0.45 gates the call. The window was 150 days, which is roughly a CLUB
+        season, but this board is almost entirely international fixtures and
+        those teams play 3-6 times in 150 days. Measured: team 18828 returned 2
+        finished fixtures at 150d and 10 at 400d, and across 46 cached teams the
+        median was 3 fixtures with 1,705 of 5,191 player records at zero
+        appearances. A 3-match window cannot produce one qualified player, so
+        the board could never call anything and read ROTATION everywhere.
+        """
+        self.assertGreaterEqual(
+            stage4.HISTORICAL_RECALL_DAYS, 300,
+            "150 days cannot yield 8 appearances for an international side",
+        )
+        # The schema marker is what forces the refetch of the stale 150d
+        # windows; without the bump the board would keep reading 3-match
+        # windows for up to HISTORY_TTL while claiming a deeper recall.
+        self.assertEqual(stage4.HISTORY_CACHE_SCHEMA, 3)
+
+    def test_a_confident_verdict_is_reachable_on_international_evidence(self):
+        """
+        With a realistic international sample the engine must be able to speak.
+
+        This is the end-to-end consequence of the recall change: 8 observed
+        appearances at 720 minutes has to clear MIN_CONFIDENCE_FOR_CALL and
+        produce a DANGER, otherwise the threshold is unreachable no matter how
+        much history is collected.
+        """
+        self.assertEqual(si.confidence(8, 720), 1.0)
+        self.assertGreaterEqual(si.confidence(8, 720), si.MIN_CONFIDENCE_FOR_CALL)
+
+        missing = [{"name": "Star", "pos": "Midfielder",
+                    "avg_rating": 7.6, "apps": 8, "mins": 720}]
+        # A real XI is 11, so replacing one absentee means 10 others stay on.
+        # Scoring the swap against an empty bench would make the credit side
+        # vanish and overstate the damage.
+        replacements = [{"name": f"R{i}", "pos": "Midfielder",
+                         "avg_rating": 6.4, "apps": 8, "mins": 720}
+                        for i in range(10)]
+        out = si.assess_absence(missing, replacements, regime="MID_FIELD")
+        self.assertEqual(out["verdict"], si.STATE_DANGER)
+
     def test_the_replacement_pool_is_joined_by_id_not_by_record(self):
         """
         Regression: the replacement group came back EMPTY in production.
