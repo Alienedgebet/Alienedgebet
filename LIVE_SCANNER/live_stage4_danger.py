@@ -395,8 +395,29 @@ def get_key_players_forensics(team_id: int):
 
     key_gks = sorted([p for p in worth_list if p['pos'] == "Goalkeeper"], key=lambda x: x['worth'], reverse=True)[:1]
     key_others = sorted([p for p in worth_list if p['pos'] != "Goalkeeper"], key=lambda x: x['worth'], reverse=True)[:10]
-    
-    return {int(p['id']): p for p in (key_gks + key_others)}, history
+
+    # 2026-09-29 FIX. The key eleven is the BENCHMARK the absence is measured
+    # against, but it is NOT the group that replaces anybody. The players who
+    # actually come on — the academy debutant, the journeyman signed last week —
+    # are by definition outside the key eleven, so the truncation above threw
+    # away the exact rating/apps/mins evidence the signed verdict needs to
+    # measure them.
+    #
+    # The caller was working around that by passing the SURVIVORS (the key
+    # eleven minus whoever is absent) as the replacement group. That is not a
+    # replacement group; it is the same key eleven with one player removed, so
+    # its offset measures how good this team's starting XI is relative to the
+    # 6.8 baseline rather than who is stepping in. Measured on the live board,
+    # the resulting net_impact correlated 0.085 with the absentee term and
+    # -0.93 with the survivor term: the metric was ranking squad quality and
+    # calling it rotation. A full-strength XI (zero absent) scored -13.50 to
+    # +27.00 instead of 0, which is arithmetically impossible for a number that
+    # claims to measure an absence.
+    #
+    # Returning the full pool costs nothing: worth_list is already built for
+    # every player in the 150-day window, so this is a return value, not a new
+    # computation and not a provider call.
+    return {int(p['id']): p for p in (key_gks + key_others)}, history, worth_list
 
 def compute_style_analysis(history, team_id: int):
     """🚨 FIX: Calibrated Tactical Thresholds to Market Reality! 🚨"""
@@ -667,7 +688,7 @@ def run_danger_forensic_aggregator():
 
             def audit_side(team_id, team_name):
                 t_id = int(team_id)
-                key_monument, history = get_key_players_forensics(t_id)
+                key_monument, history, player_pool = get_key_players_forensics(t_id)
                 # A lineup row with `player_id: null` is a real provider shape,
                 # not a broken payload: the player exists (Stage 1 and Stage 3
                 # both read these fixtures) but the provider did not resolve an
@@ -735,16 +756,55 @@ def run_danger_forensic_aggregator():
                 _absent = [{**info, "id": pid}
                            for pid, info in key_monument.items()
                            if pid not in current_starters and pid not in current_bench]
-                _present = [{**key_monument[pid], "id": pid}
-                            for pid in key_monument if pid in current_starters]
-                net = assess_absence(_absent, _present, regime="MID_FIELD")
+
+                # THE REPLACEMENT GROUP IS THE PLAYERS WHO ACTUALLY CAME ON.
+                #
+                # It used to be built as `key_monument ∩ current_starters` —
+                # the key eleven minus whoever is absent. That is the SURVIVORS,
+                # not the replacements, and it made net_impact a measure of how
+                # good this team's starting XI is versus the 6.8 baseline rather
+                # than of who replaced the absentee. Consequences measured on the
+                # 2026-09-29 board (32 sides):
+                #
+                #   * correlation(net, absentee term)   =  0.085
+                #   * correlation(net, survivor term)   = -0.93
+                #   * a full-strength XI (zero absent)  = -13.50 .. +27.00
+                #   * 13 of 32 sides carried a survivor term larger than the
+                #     MID_FIELD DANGER bar of 6.0
+                #
+                # So a strong squad was labelled BLESSING and a weak one DANGER
+                # regardless of who was actually out. The subtraction now runs
+                # absentee-minus-replacement, which is the comparison the label
+                # claims to make and the only one that zeroes out on a full XI.
+                #
+                # `player_pool` carries rating/apps/mins for every player seen
+                # in the window, so the replacement is scored on the same
+                # confidence curve as the absentee. A replacement with no
+                # observed rating keeps the module's existing honest behaviour:
+                # avg_rating is None -> zero contribution, no invented 6.0.
+                # `player_pool` is returned as a LIST of player records (the full
+                # worth_list), not a dict keyed by id, so it has to be indexed by
+                # id before it can be joined to the XI. Joining the raw list
+                # made `pid in player_pool` a membership test over whole records,
+                # which never matches, so the replacement group silently came
+                # back EMPTY and every side fell through to UNKNOWN with zero
+                # replacement credit.
+                _pool_by_id = {int(p["id"]): p for p in (player_pool or [])
+                               if isinstance(p, dict) and p.get("id") is not None}
+                _replacements = [
+                    {**_pool_by_id[pid], "id": pid}
+                    for pid in current_starters
+                    if pid not in key_monument and pid in _pool_by_id
+                ]
+
+                net = assess_absence(_absent, _replacements, regime="MID_FIELD")
 
                 # Now that the numbers exist, pay for the regime only if it can
                 # change the answer, then re-derive the label under it.
                 fav_regime = _ensure_regime([net["net_impact"]],
                                             [net["confidence"]])
                 if fav_regime != "MID_FIELD":
-                    net = assess_absence(_absent, _present, regime=fav_regime)
+                    net = assess_absence(_absent, _replacements, regime=fav_regime)
 
                 verdict = net["verdict"]
                 gk = assess_goalkeeper(starting_gk, master_gk, fav_regime,

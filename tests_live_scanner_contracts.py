@@ -95,6 +95,105 @@ class LiveScannerContractTests(unittest.TestCase):
         self.assertIn("statistics", include)
         self.assertIn("statistics.type", include)
 
+    def test_a_full_strength_xi_scores_zero_net_impact(self):
+        """
+        THE DEFINING PROPERTY OF THE SIGNED VERDICT.
+
+        `net_impact` is documented as the damage done by ABSENCES. If nobody is
+        absent, the damage is zero, so the number must be zero. It was not: the
+        replacement group was built as the survivors (the key eleven minus the
+        absentee), whose offset measures how good the whole starting XI is
+        against the 6.8 baseline. On the 2026-09-29 board that made a
+        zero-absence side score -9.43..+14.22 and drove corr(net, absentee) to
+        -0.131, i.e. the metric was ranking squad quality and calling it
+        rotation.
+        """
+        good_squad = [{"name": f"P{i}", "pos": "Midfielder",
+                       "avg_rating": 7.1, "apps": 9, "mins": 800}
+                      for i in range(10)]
+        weak_squad = [{"name": f"W{i}", "pos": "Midfielder",
+                       "avg_rating": 6.2, "apps": 9, "mins": 800}
+                      for i in range(10)]
+
+        for squad in (good_squad, weak_squad):
+            with self.subTest(squad=squad[0]["avg_rating"]):
+                result = si.assess_absence([], squad, regime="MID_FIELD")
+                self.assertEqual(result["net_impact"], 0.0)
+                self.assertEqual(result["verdict"], si.STATE_UNKNOWN)
+
+    def test_the_replacement_group_is_not_the_survivors(self):
+        """
+        Losing one good player and replacing him with a worse one is DAMAGE.
+        Scoring the survivors instead of the replacements made the sign depend
+        on the quality of the remaining XI instead of the swap, which is how a
+        strong squad was labelled BLESSING while Oyarzabal, Porro and Pedri
+        were the absentees (Spain, 2026-09-29).
+        """
+        absent = [{"name": "Star", "pos": "Midfielder",
+                   "avg_rating": 7.5, "apps": 9, "mins": 800}]
+        survivors = [{"name": f"S{i}", "pos": "Midfielder",
+                      "avg_rating": 6.8, "apps": 9, "mins": 800}
+                     for i in range(10)]
+        replacements = [{"name": "Academy", "pos": "Midfielder",
+                         "avg_rating": 6.3, "apps": 9, "mins": 800}]
+
+        honest = si.assess_absence(absent, replacements, regime="MID_FIELD")
+        survivors_only = si.assess_absence(absent, survivors, regime="MID_FIELD")
+
+        # A drop from 7.5 to 6.3 is real damage, so the sign must be positive
+        # (DANGER side) under the honest comparison.
+        self.assertGreater(honest["net_impact"], 0.0)
+        # The survivor group dilutes it, and can even flip the sign.
+        self.assertLess(survivors_only["net_impact"], honest["net_impact"])
+
+    def test_an_unrated_replacement_contributes_nothing_rather_than_being_guessed(self):
+        """
+        Absence of evidence is not evidence of quality. A replacement with no
+        observed rating must score zero, not a fabricated 6.0 that would read as
+        exactly average and drag the verdict toward zero.
+        """
+        absent = [{"name": "Star", "pos": "Midfielder",
+                   "avg_rating": 7.5, "apps": 9, "mins": 800}]
+        unrated = [{"name": "New signing", "pos": "Midfielder",
+                    "avg_rating": None, "apps": 0, "mins": 0}]
+
+        result = si.assess_absence(absent, unrated, regime="MID_FIELD")
+        self.assertEqual(result["replacement_credit"], 0.0)
+        self.assertEqual(result["quality_lost"], result["net_impact"])
+
+    def test_the_replacement_pool_is_joined_by_id_not_by_record(self):
+        """
+        Regression: the replacement group came back EMPTY in production.
+
+        `get_key_players_forensics()` returns the full player pool as a LIST of
+        records. Joining that list with `pid in player_pool` is a membership test
+        over whole dicts, which never matches an int id, so the replacement group
+        silently came back empty for every side. The artifact was gone and the
+        numbers looked plausible, but every fixture fell through to UNKNOWN with
+        zero replacement credit — the engine had stopped measuring the swap
+        entirely, which is a different lie rather than an honest one.
+
+        The join must therefore be done on an id-indexed dict.
+        """
+        pool_list = [
+            {"id": 10, "name": "Survivor", "pos": "Midfielder",
+             "avg_rating": 6.8, "apps": 9, "mins": 800},
+            {"id": 11, "name": "Replacement", "pos": "Midfielder",
+             "avg_rating": 6.3, "apps": 9, "mins": 800},
+        ]
+        by_id = {int(p["id"]): p for p in pool_list
+                 if isinstance(p, dict) and p.get("id") is not None}
+
+        self.assertIn(11, by_id)
+        self.assertNotIn(11, pool_list, "the raw list is what caused the bug")
+
+        absent = [{"name": "Star", "pos": "Midfielder",
+                   "avg_rating": 7.5, "apps": 9, "mins": 800}]
+        replacements = [{**by_id[11], "id": 11}]
+        result = si.assess_absence(absent, replacements, regime="MID_FIELD")
+        self.assertNotEqual(result["replacement_credit"], 0.0)
+        self.assertGreater(result["net_impact"], 0.0)
+
     def test_stage2_keeps_scheduled_fixtures_without_picks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             predictions = Path(temp_dir) / "live_predictions.json"
