@@ -4377,5 +4377,85 @@ def _extract_tmp_expr(target: str) -> str:
     return str(os.getpid())
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════
+# STORM ATTRIBUTION (2026-09-29)
+# ══════════════════════════════════════════════════════════════════════
+# The storm gates have always computed h_triple / a_triple (one squad's
+# average pre-match doom rating at least double the other's) and used them only
+# as a bare boolean. An alert therefore said a storm was happening and gave
+# both xG figures, but never named the side responsible — the reader had to
+# eyeball which xG was higher to learn the one thing that makes the alert
+# actionable.
+#
+# These pin the naming. The gates' structural test, confidence bars and
+# one-shot keys are deliberately untouched, so nothing here may relax them.
+
+
+class StormAttributionTests(unittest.TestCase):
+    """`storm_side` must name a driver only when one is identifiable."""
+
+    def test_home_side_is_named_by_its_actual_team_name(self):
+        label, short = stage6.storm_side(
+            {"h_triple": True, "a_triple": False},
+            "Georgia", "Ukraine")
+        self.assertEqual(short, "home")
+        self.assertEqual(label, "Georgia")
+
+    def test_away_side_is_named_by_its_actual_team_name(self):
+        label, short = stage6.storm_side(
+            {"h_triple": False, "a_triple": True},
+            "Georgia", "Ukraine")
+        self.assertEqual(short, "away")
+        self.assertEqual(label, "Ukraine")
+
+    def test_both_sides_is_reported_as_both_not_arbitrarily_picked(self):
+        """A storm is real but the driver is not identifiable."""
+        label, short = stage6.storm_side(
+            {"h_triple": True, "a_triple": True}, "A", "B")
+        self.assertEqual(short, "both")
+        self.assertIn("both", label.lower())
+
+    def test_neither_side_never_invents_a_culprit(self):
+        """Silence is correct. Naming a driver with no evidence is not."""
+        for struct in ({"h_triple": False, "a_triple": False}, {}, None):
+            label, short = stage6.storm_side(struct, "A", "B")
+            self.assertIsNone(label)
+            self.assertIsNone(short)
+
+    def test_missing_names_fall_back_to_home_and_away_labels(self):
+        """A name that will not split must still yield WHICH SIDE."""
+        label, short = stage6.storm_side(
+            {"h_triple": True, "a_triple": False}, None, None)
+        self.assertEqual(short, "home")
+        self.assertEqual(label, "Home")
+
+    def test_fixture_name_splitting(self):
+        self.assertEqual(
+            stage6._split_fixture_name("Georgia vs Ukraine"),
+            ("Georgia", "Ukraine"))
+        # Unparseable input must degrade, never raise — this runs inside the
+        # alert path where a format assumption must not become a crash.
+        self.assertEqual(stage6._split_fixture_name("Something Odd"), (None, None))
+        self.assertEqual(stage6._split_fixture_name(None), (None, None))
+        self.assertEqual(stage6._split_fixture_name(""), (None, None))
+
+    def test_the_storm_gates_are_not_loosened_by_this_change(self):
+        """The naming is additive. A storm still needs the same conditions."""
+        # Same windows and same escalating confidence bar as before.
+        self.assertEqual(
+            [g[0] for g in stage6.STORM_GATES],
+            ["SUPREME_45", "SUPREME_60", "SUPREME_75"])
+        # The late gate still demands MORE confidence than the early ones, so
+        # precision rises as the window widens rather than falling.
+        self.assertGreaterEqual(
+            stage6.STORM_GATES[2][3], stage6.STORM_GATES[0][3])
+        # A storm is still NOT alertable through STORM_STATE alone. The
+        # guarantee lives on the tracker METHOD, not at module level.
+        tracker = stage6.SupremeOrchestrator.update_storm_state
+        self.assertIn("NEVER alertable", tracker.__doc__ or "")
+
+
 if __name__ == "__main__":
     unittest.main()
