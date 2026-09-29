@@ -4697,14 +4697,24 @@ class TestWeeklyOver25GoalFormStats(unittest.TestCase):
 
         self.assertIn("function GoalFormStats", tsx,
                       "the shared GoalFormStats component is gone")
-        for col in self.GOAL_FORM_COLUMNS:
-            self.assertIn(col, tsx,
-                          f"{col} is not read by the Weekly board")
+        # 2026-09-29: the columns are read through a template literal keyed on
+        # the active window (`row[`home_goals_scored_last_${window}`]`), so the
+        # literal name no longer appears in the source. Assert the STEM is read
+        # for each of the four, and that the access is window-keyed -- a
+        # hardcoded `last_5` here would silently ignore the toggle.
+        for stem in ("home_goals_scored_last_",
+                     "away_goals_scored_last_",
+                     "home_goals_conceded_last_",
+                     "away_goals_conceded_last_"):
+            self.assertIn(
+                f"row[`{stem}${{window}}`]", tsx,
+                f"the board must read {stem}<window> so the 5/3 toggle can "
+                "select between them")
         # Used once in the card grid and once in the table body.
         self.assertEqual(
-            tsx.count("<GoalFormStats row={row} />"), 2,
+            tsx.count("<GoalFormStats row={row} window={formWindow} />"), 2,
             "GoalFormStats must be rendered in BOTH the cards view and the "
-            "table view, exactly once each.")
+            "table view, exactly once each, and both must receive the window.")
 
 
 class TestSecondChanceFilterExemption(unittest.TestCase):
@@ -4805,6 +4815,167 @@ class TestSecondChanceFilterExemption(unittest.TestCase):
             "filter sees the engine's fresh output on the same pass. With "
             "the filter first it would run against a missing input, return "
             "[] , and the exemption would then leave it empty for good.")
+
+
+class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
+    """
+    The 5/3 form toggle must be display-only and must not move any number.
+
+    2026-09-29. get_complex_metrics had its window hardcoded in three places
+    (history[:5], len(v_5) == 5, and the Poisson divisor /5). It is now a
+    parameter defaulting to 5, and the engine evaluates the 3-window alongside
+    it from the SAME history slice in the SAME provider call.
+
+    The risk this guards is the obvious one: parameterising a window that
+    feeds live maths is how a "display tweak" quietly becomes a change of
+    recommendation. The 3-window figures must never reach the Poisson lambda,
+    the council votes, parity_diff, or any filter gate.
+    """
+
+    WINDOW_3_COLUMNS = (
+        "home_goals_scored_last_3",
+        "away_goals_scored_last_3",
+        "home_goals_conceded_last_3",
+        "away_goals_conceded_last_3",
+    )
+
+    def _engine_source(self):
+        from pathlib import Path
+        return (Path(__file__).parent /
+                "Engine" / "over25_forecast.py").read_text()
+
+    def test_window_defaults_to_five(self):
+        """
+        The default must remain 5, so every existing call site is unchanged.
+
+        If the default drifted, the whole engine would silently start grading
+        on 3 matches and every Poisson probability and vote would move.
+        """
+        src = self._engine_source()
+        self.assertIn(
+            "def get_complex_metrics(tid, history, venue, window=5):", src,
+            "get_complex_metrics must keep window=5 as its default. The "
+            "5-window is what every existing number was computed from.")
+
+    def test_all_existing_call_sites_use_the_default(self):
+        """
+        The maths-feeding calls must NOT pass a window.
+
+        h_m/a_m drive the Poisson lambda, parity_diff and all nine council
+        votes. If either were given an explicit window, the toggle would
+        start changing recommendations.
+        """
+        src = self._engine_source()
+        for call in ('h_m = get_complex_metrics(hid, team_histories.get(hid, []), "home")',
+                     'a_m = get_complex_metrics(aid, team_histories.get(aid, []), "away")'):
+            self.assertIn(call, src, f"expected call site changed: {call}")
+        # The 3-window gets its own variables and nothing else may consume them.
+        for bad in ("h_m3[", "a_m3["):
+            for line in src.splitlines():
+                if bad in line and "int(" not in line and "get_complex_metrics" not in line:
+                    self.fail(
+                        f"{bad} is consumed outside the CSV write: {line.strip()}. "
+                        "The 3-window is display-only and must not reach the "
+                        "Poisson lambda, parity_diff or the council votes.")
+
+    def test_poisson_divisor_is_still_five(self):
+        """
+        The Poisson lambda divides the window totals by the window size.
+
+        It is a per-match average, so a 3-window total divided by 5 would
+        understate the rate. Assert the divisor is still literally 5.
+        """
+        src = self._engine_source()
+        self.assertIn(
+            'lamb = ((h_m["gs"] + h_m["gc"]) / 5 + (a_m["gs"] + a_m["gc"]) / 5) / 2',
+            src,
+            "the Poisson lambda must still divide by 5 against the 5-window "
+            "totals. Changing the divisor with the window would change every "
+            "probability on the board.")
+
+    def test_engine_writes_both_windows(self):
+        src = self._engine_source()
+        for col in self.WINDOW_3_COLUMNS:
+            self.assertIn(f'"{col}"', src,
+                          f"{col} is missing from the CSV write")
+        self.assertIn('window=3', src,
+                      "the engine must evaluate the 3-window explicitly")
+
+    def test_3_window_is_bounded_by_the_5_window(self):
+        """
+        A 3-match total can never exceed the 5-match total it is a subset of.
+
+        This is the arithmetic that makes the toggle trustworthy: if the two
+        disagree in that direction, the "shorter" window is reading a
+        different history than the longer one, which would mean the slices
+        are not nested.
+        """
+        import pandas as pd
+        from pathlib import Path
+        csv = (Path(__file__).parent / "output" /
+               "master_over_stage2_2026-10-05.csv")
+        if not csv.exists():
+            self.skipTest("dated O2.5 artefact not present")
+        df = pd.read_csv(csv)
+        for side in ("home_goals_scored", "away_goals_scored",
+                     "home_goals_conceded", "away_goals_conceded"):
+            long_, short = df[f"{side}_last_5"], df[f"{side}_last_3"]
+            self.assertTrue(
+                (short <= long_).all(),
+                f"{side}: the 3-window total exceeds the 5-window total it is "
+                "a subset of, so the two windows are not reading the same "
+                "history.")
+
+    def test_combined_total_still_uses_the_five_window(self):
+        """
+        combined_gs_last_5 is read by the aggressive filter gate, so it must
+        remain the 5-window sum and must NOT be redefined as a 3-window total.
+        """
+        src = self._engine_source()
+        self.assertIn('"combined_gs_last_5": h_m["gs"] + a_m["gs"]', src,
+                      "combined_gs_last_5 must stay the 5-window sum; the "
+                      "aggressive filter gate reads this exact column.")
+
+    def test_no_filter_reads_the_3_window(self):
+        """
+        The O2.5 filter must not gate on any 3-window column.
+
+        If it did, the toggle would stop being cosmetic and the "SURVIVED"
+        count would change when the user flips it — the exact confusion the
+        control's placement next to the results (not the filters) avoids.
+        """
+        from pathlib import Path
+        filt = (Path(__file__).parent / "FILTER" /
+                "over25_risk_filter.py").read_text()
+        for col in self.WINDOW_3_COLUMNS:
+            self.assertNotIn(col, filt,
+                             f"{col} is read by the O2.5 filter, which would "
+                             "make the form toggle change the pick set")
+
+    def test_frontend_toggle_offers_both_and_labels_the_window(self):
+        """
+        Both windows must be selectable, and the active one must be stated.
+
+        A 3-match read is noisier than a 5-match one, so showing the number
+        without saying which window produced it invites over-reading a single
+        result. The component states "last N matches" for that reason.
+        """
+        from pathlib import Path
+        tsx = (Path(__file__).parent / "alienedge-frontend" / "app" /
+               "weekly" / "FilterTab.tsx").read_text()
+
+        self.assertIn("useState<3 | 5>(5)", tsx,
+                      "the form window must be state defaulting to 5")
+        self.assertIn("last {window} matches", tsx,
+                      "the board must state which window the figures cover")
+        # Read dynamically by window, so both column sets are reachable.
+        self.assertIn("row[`home_goals_scored_last_${window}`]", tsx,
+                      "GoalFormStats must read the column for the ACTIVE "
+                      "window, not a hardcoded 5")
+        # Both views receive the window.
+        self.assertEqual(
+            tsx.count("<GoalFormStats row={row} window={formWindow} />"), 2,
+            "both the cards view and the table view must receive the window")
 
 if __name__ == "__main__":
     unittest.main()
