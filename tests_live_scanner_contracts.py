@@ -35,6 +35,7 @@ def _patch_notify_paths(tmp):
     notify.SENT_FILE = os.path.join(tmp, "push_sent.json")
     notify.DELIVERED_FILE = os.path.join(tmp, "push_delivered.json")
 from LIVE_SCANNER import live_stage4_danger as stage4
+from LIVE_SCANNER import live_stage3_incoming as stage3
 from LIVE_SCANNER import live_signed_impact as si
 from LIVE_SCANNER import live_stage5_aggregator as stage5
 from LIVE_SCANNER import live_stage6_alerts as stage6
@@ -57,6 +58,64 @@ _INTEL = {
     "away": {"live_xg": 0.8, "sot": 2, "corn": 1, "da": 20},
 }
 _KEY_LOSS = {"h_lost": 0, "a_lost": 0}
+
+
+class IncomingReasonContractTests(unittest.TestCase):
+    """The reason text a user reads must agree with the number beside it."""
+
+    def test_a_positive_net_is_described_as_quality_lost(self):
+        """
+        REGRESSION: one hardcoded literal for every rotation pick.
+
+        The reason used to read "the players who left were no better than the
+        ones now starting" regardless of sign. `live_signed_impact` defines
+        net > 0 as quality LOST, so a +15.3 row was asserting a large loss in
+        the same sentence that denied one.
+        """
+        text = stage3._describe_rotation(
+            {"verdict": "DANGER", "net_impact": 15.3, "confidence": 0.80})
+        self.assertIn("BETTER", text,
+                      "a positive net means the players who left were better")
+        self.assertNotIn("no better", text)
+        self.assertIn("lost quality", text)
+
+    def test_a_negative_net_is_described_as_an_upgrade(self):
+        text = stage3._describe_rotation(
+            {"verdict": "BLESSING", "net_impact": -8.6, "confidence": 0.65})
+        self.assertIn("WORSE", text,
+                      "a negative net means the players who left were worse")
+        self.assertIn("upgraded", text)
+
+    def test_thin_evidence_says_so_instead_of_claiming_a_direction(self):
+        """
+        Most rotation picks on the live board sit below the call floor, where
+        the signed verdict itself declines to call a direction. The sentence
+        must not assert a quality comparison the engine did not make.
+        """
+        text = stage3._describe_rotation(
+            {"verdict": "ROTATION", "net_impact": 11.4, "confidence": 0.00})
+        self.assertIn("too thin", text)
+        self.assertNotIn("BETTER", text)
+        self.assertNotIn("WORSE", text)
+
+    def test_the_stated_number_and_confidence_match_the_side(self):
+        for net, conf in ((15.3, 0.39), (-2.0, 0.68), (0.0, 0.50)):
+            text = stage3._describe_rotation(
+                {"verdict": "ROTATION", "net_impact": net,
+                 "confidence": conf})
+            self.assertIn(f"{net:+.1f}", text)
+            self.assertIn(f"{conf:.2f}", text)
+
+    def test_junk_inputs_never_raise(self):
+        """A malformed side must still render a sentence, not crash the feed."""
+        for side in ({"verdict": None, "net_impact": None, "confidence": None},
+                     {"verdict": "ROTATION"},
+                     {"verdict": "BLESSING", "net_impact": "x",
+                      "confidence": "y"},
+                     {"verdict": "ROTATION", "net_impact": float("nan"),
+                      "confidence": 0.5}):
+            with self.subTest(side=side):
+                self.assertTrue(stage3._describe_rotation(side).strip())
 
 
 class LiveScannerContractTests(unittest.TestCase):
