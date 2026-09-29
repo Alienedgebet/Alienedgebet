@@ -1244,6 +1244,55 @@ def get_corners_aggregator(date: str):
         read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners"), date)
 
 
+@app.get("/api/corners/consistency", tags=["Corners"])
+def get_corners_consistency():
+    """The PERSISTENT CORNER KINGS — the consistency table, actually served.
+
+    2026-09-28. The miner has computed corner consistency for a long time and
+    printed a ranked "PERSISTENT CORNER KINGS" table to the console on every
+    run, but that table existed ONLY in the server log and was then discarded by
+    the qualification filter. An operator could see a full consistency ranking
+    in the logs and find no trace of it in the app, which is exactly why the
+    feature looked missing.
+
+    Now the same data is written to output/corner_persistent_kings.json and
+    served here. It carries each persistent team's ACTUAL last-N corner list
+    alongside the flag, so the claim is checkable rather than something to take
+    on trust, plus the fixtures that qualified on consistency alone — i.e. the
+    matches the old tier/confidence filter would have dropped.
+
+    Deliberately NOT date-scoped: the underlying file is the miner's latest run
+    and carries its own `date`/`generated_at`, so the page can show the truth
+    about which run it is reading rather than implying freshness it may not have.
+    """
+    path = os.path.join(OUTPUT_DIR, "corner_persistent_kings.json")
+    payload = _read_json(path, None)
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "date": None,
+            "generated_at": None,
+            "rule": (
+                "A team is persistent when it produced more than 4 corners in at "
+                "least 4 of its last 5 matches (venue-filtered)."
+            ),
+            "count": 0,
+            "kings": [],
+            "qualified_via_consistency_only": [],
+            "reason": "No corner consistency run has been recorded yet.",
+        }
+    return {
+        "available": True,
+        "date": payload.get("date"),
+        "generated_at": payload.get("generated_at"),
+        "rule": payload.get("rule"),
+        "count": payload.get("count", 0),
+        "kings": payload.get("kings", []),
+        "qualified_via_consistency_only": payload.get(
+            "qualified_via_consistency_only", []),
+    }
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # DRAW / UNDERS (composite files: (draws, parity, amateurs) and (u25, u35))
 # ════════════════════════════════════════════════════════════════════════════

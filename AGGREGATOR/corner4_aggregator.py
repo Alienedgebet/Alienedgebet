@@ -481,7 +481,8 @@ class CornerAggregator:
         self, intel, dna_label, match_flow, ud_prob, u25_prob,
         is_pers_v, is_pers_o, is_home,
         is_wounded, wound_intensity,
-        monte_prob, table_friction
+        monte_prob, table_friction,
+        pers_over_4=False,
     ):
         """
         100-Point Syndicate Trust Index Engine.
@@ -528,6 +529,21 @@ class CornerAggregator:
             score += 15
         elif is_pers_o:
             score += 5
+
+        # 2026-09-28: the over-4 corner-consistency flag now scores too.
+        #
+        # The miner computed it every run and (until now) discarded it, so a
+        # team that produced 5+ corners in four of its last five matches was
+        # invisible to the score. It is a genuinely different signal from venue
+        # persistence: `is_pers_v` is about WHERE a team earns corners, this is
+        # about WHETHER it reliably produces them at all. A team can be
+        # persistent overall but volatile at a specific ground, and vice versa.
+        #
+        # Scored BELOW the venue flag (+8 vs +15) so it adds evidence without
+        # ever outweighing the stronger, venue-specific read, and never stacks
+        # with it — the two branches are exclusive by construction.
+        if pers_over_4 and not is_pers_v:
+            score += 8
 
         if is_home:
             score += 10
@@ -582,8 +598,27 @@ class CornerAggregator:
                 h_pers_o = match.get("home_is_persistent_overall", False)
                 a_pers_o = match.get("away_is_persistent_overall", False)
 
+                # 2026-09-28: the over-4 venue persistence flag is read here too.
+                # The miner computes it (`is_persistent_over_4`, with the raw
+                # `over_4_corners_count`) and now qualifies matches on it, but it
+                # never reached the score — so a fixture could survive the filter
+                # BECAUSE a team was corner-consistent and still gain no points
+                # for it. Both flavours of the same idea now count.
+                h_pers_4 = match.get("home_is_persistent_over_4", False)
+                a_pers_4 = match.get("away_is_persistent_over_4", False)
+                h_over4 = match.get("home_over_4_corners_count", 0) or 0
+                a_over4 = match.get("away_over_4_corners_count", 0) or 0
+
                 h_king = "👑" if h_pers_v else ("⭐" if h_pers_o else "❌")
                 a_king = "👑" if a_pers_v else ("⭐" if a_pers_o else "❌")
+                if h_pers_4 and h_pers_v:
+                    h_king = "👑👑"
+                elif h_pers_4:
+                    h_king = "👑" if h_pers_v else "⭐"
+                if a_pers_4 and a_pers_v:
+                    a_king = "👑👑"
+                elif a_pers_4:
+                    a_king = "👑" if a_pers_v else "⭐"
 
                 # --- WOUND DATA (BOTH TEAMS) ---
                 home_is_wounded   = match.get("home_is_wounded_beast", False)
@@ -660,6 +695,7 @@ class CornerAggregator:
                     wound_intensity=home_wound_int,
                     monte_prob=h_monte_prob,
                     table_friction=table_friction,
+                    pers_over_4=h_pers_4,
                 )
                 a_score = self.calculate_syndicate_score(
                     a_intel, a_dna_label, match_flow, ud_prob, u25_prob,
@@ -669,6 +705,7 @@ class CornerAggregator:
                     wound_intensity=away_wound_int,
                     monte_prob=a_monte_prob,
                     table_friction=table_friction,
+                    pers_over_4=a_pers_4,
                 )
 
                 # --- TRUE FAVOURITE RESOLUTION ---

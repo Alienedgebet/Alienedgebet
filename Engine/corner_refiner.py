@@ -813,6 +813,21 @@ def run_corner_engine_stage2(target_date=None):
                     "over_4_count_overall": overall_over4,
                     "is_persistent_overall": is_overall_pers,
 
+                    # 2026-09-28: the refiner derived persistence from its own
+                    # venue-filtered corner list but only ever emitted the
+                    # boolean under its own name. The MINER has always computed
+                    # the same idea as `is_persistent_over_4`, and the aggregator
+                    # now scores that flag — so it has to be present here too, or
+                    # a stage-2 row would always read False no matter how
+                    # consistent the team actually is.
+                    #
+                    # Emitted as an explicit alias of the venue read, plus the
+                    # raw count, so downstream can ask the question without
+                    # re-deriving it. The condition is the same one the miner
+                    # uses: more than 4 corners in at least 4 of the last N.
+                    "is_persistent_over_4": is_venue_pers,
+                    "over_4_corners_count": venue_over4,
+
                     "today_starters_count": len(today_starters),
                     "missing_key_players":  missing_keys,
                     "rotation_count":       rotation_count,
@@ -911,6 +926,20 @@ def run_corner_engine_stage2(target_date=None):
             "away_count_venue":    item["away_team"].get("over_4_count_venue",   0),
             "home_count_overall":  item["home_team"].get("over_4_count_overall", 0),
             "away_count_overall":  item["away_team"].get("over_4_count_overall", 0),
+
+            # 2026-09-28: the miner's over-4 persistence BOOLEAN was never carried
+            # across this boundary. The counts above came through, but not the
+            # verdict derived from them, so nothing downstream could ask "is
+            # this team actually persistent?" — only "how many times did it
+            # cross 4?", which every consumer had to re-derive (or, as in the
+            # aggregator, simply not use). The flag and its count now travel
+            # together so the score can read them directly.
+            "home_is_persistent_over_4": item["home_team"].get("is_persistent_over_4", False),
+            "away_is_persistent_over_4": item["away_team"].get("is_persistent_over_4", False),
+            "home_over_4_corners_count": item["home_team"].get("over_4_corners_count", 0),
+            "away_over_4_corners_count": item["away_team"].get("over_4_corners_count", 0),
+            "home_lastN_corners": item["home_team"].get("lastN_corners_list", []),
+            "away_lastN_corners": item["away_team"].get("lastN_corners_list", []),
 
             "home_team_id": safe_int(item["home_team"].get("team_id")),
             "away_team_id": safe_int(item["away_team"].get("team_id")),

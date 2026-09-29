@@ -703,6 +703,45 @@ export interface CornerStage1Pick extends FixtureRisk {
   };
 }
 
+  /** One team flagged as corner-consistent, with the evidence behind the flag. */
+export interface CornerConsistencyKing {
+  fixture: string;
+  /** 2 = both teams persistent, 1 = one side. */
+  score: number;
+  total: number;
+  h_count: number;
+  a_count: number;
+  /** The ACTUAL last-N corner list, so the claim is checkable. */
+  h_list: number[];
+  a_list: number[];
+}
+
+/** A fixture that qualified on consistency alone (tier/confidence would not). */
+export interface CornerConsistencyOnly {
+  fixture: string;
+  tier: string;
+  avg_confidence: number;
+  home_persistent: boolean;
+  away_persistent: boolean;
+  home_over4: number;
+  away_over4: number;
+  home_lastN: number[];
+  away_lastN: number[];
+}
+
+/** GET /api/corners/consistency */
+export interface CornerConsistencyReport {
+  available: boolean;
+  date: string | null;
+  generated_at: string | null;
+  /** Plain-English statement of what "persistent" means. */
+  rule: string | null;
+  count: number;
+  kings: CornerConsistencyKing[];
+  qualified_via_consistency_only: CornerConsistencyOnly[];
+  reason?: string;
+}
+
 export interface CornerStage2Pick extends FixtureRisk {
   fixture_id: string;
   fixture_name: string;
@@ -717,6 +756,16 @@ export interface CornerStage2Pick extends FixtureRisk {
   away_is_persistent_venue: boolean;
   home_is_persistent_overall: boolean;
   away_is_persistent_overall: boolean;
+  /**
+   * Corner consistency, added 2026-09-28. The miner always computed this
+   * ("more than 4 corners in at least 4 of the last 5") and then filtered it
+   * out of existence, so it was never visible on this screen even though the
+   * engine was printing it to the log every run.
+   */
+  home_is_persistent_over_4?: boolean;
+  away_is_persistent_over_4?: boolean;
+  home_over_4_corners_count?: number;
+  away_over_4_corners_count?: number;
   verification?: {
     status: "SCHEDULED" | "LIVE" | "FINISHED";
     score?: string;
@@ -2313,6 +2362,17 @@ export const cornersApi = {
 
   getAggregator: (date: string): Promise<AxiosResponse<CornerAggregatorPick[]>> =>
     cachedGet(`/api/corners/aggregator/${date}`),
+
+  /**
+   * The PERSISTENT CORNER KINGS table, now actually served.
+   *
+   * Until 2026-09-28 this existed only as a console print in the miner, which
+   * built the ranking, displayed it, and then filtered it out of the results.
+   * Not date-scoped on purpose: the payload carries its own `date` and
+   * `generated_at` so the page can state which run it is showing.
+   */
+  getConsistency: (): Promise<AxiosResponse<CornerConsistencyReport>> =>
+    api.get("/api/corners/consistency"),
 };
 
 export const specialsApi = {
