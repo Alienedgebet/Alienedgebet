@@ -169,6 +169,84 @@ STORM_GATES = (
 # It exists so the UI can show a storm building before any alert has fired.
 STORM_STATE = {}
 
+
+# ==============================================================================
+# WHO IS DRIVING THE STORM
+# ==============================================================================
+# WHY THIS EXISTS
+# The engine has always known WHICH side is structurally broken: `h_triple` /
+# `a_triple` mean one squad's average pre-match "doom" rating is at least twice
+# the other's, and they are computed on every cycle from the squad cache. They
+# were then used only as a bare boolean.
+#
+# The consequence is that a storm alert said a storm was happening and gave both
+# xG figures, but never said which team was causing it:
+#
+#     Georgia vs Ukraine — Storm sustained. Chaos:6.4 | H-xG:2.68 A-xG:0.62
+#
+# The reader had to eyeball which xG was higher to learn the one thing that
+# makes the alert actionable — who to back. The information was one attribute
+# away at the moment the message was built.
+#
+# So this names the side, and nothing else. It adds no new signal, no new
+# notification path, no new condition type, and it does not loosen a single
+# gate. The gates' confidence bars and one-shot dedup keys are untouched.
+#
+# Attribution is STRUCTURAL by design (the user asked for structural, not
+# live): it reflects which squad is more damaged, which is exactly what the
+# gates already test. It is NOT "who is winning right now" — that would be a
+# different question, and conflating the two would make a side look
+# "driving a storm" while it is actually being dominated.
+def _split_fixture_name(fixture_name):
+    """Split "Home vs Away" into its two team names.
+
+    Best-effort and never raises. The gate is not the place for a name-format
+    assumption to become a crash: if the provider ever returns a name without
+    "vs", we fall back to generic Home/Away labels so the alert still says
+    WHICH SIDE is driving the storm, which is the whole point of the change.
+    """
+    try:
+        text = str(fixture_name or "")
+    except Exception:
+        text = ""
+    for sep in (" vs ", " v ", " - ", " – "):
+        if sep in text:
+            home, _, away = text.partition(sep)
+            home, away = home.strip(), away.strip()
+            if home and away:
+                return home, away
+    return None, None
+
+
+def storm_side(struct, home_name=None, away_name=None):
+    """Name the structurally-broken side, or None when it is not attributable.
+
+    Returns (side_label, short_label) where side_label is a human name for the
+    message and short_label is the board's compact form.
+
+    Two guards matter here:
+      * BOTH sides flagged is possible (each >= 2x the other is impossible
+        arithmetically, but a near-zero denominator makes both false, and a
+        degenerate struct dict can carry either). When both are set the storm
+        is real but the driver is not identifiable, so it is reported as
+        "both" rather than arbitrarily picking one.
+      * NEITHER side, or a missing struct, must never produce a name. Silence
+        is correct; inventing a culprit is not.
+    """
+    if not isinstance(struct, dict):
+        return None, None
+    h = bool(struct.get("h_triple"))
+    a = bool(struct.get("a_triple"))
+    home = home_name or "Home"
+    away = away_name or "Away"
+    if h and a:
+        return f"{home} & {away} (both)", "both"
+    if h:
+        return home, "home"
+    if a:
+        return away, "away"
+    return None, None
+
 # GLOBAL STATE
 SQUAD_VAULT        = {}
 LIVE_METRICS_VAULT = {}
@@ -905,6 +983,10 @@ class SupremeOrchestrator:
                 "last_seen": storm.get("last_seen"),
                 "confidence": storm.get("confidence"),
                 "chaos": storm.get("chaos"),
+                # "home" / "away" / "both", or absent when the storm is tracked
+                # but not attributable. The UI labels it; the engine sends the
+                # side, not a pre-rendered string.
+                "side": storm.get("side"),
             } if storm else None),
             "conf": intel["match"]["confidence_score"],
             "h_pressure": intel["match"]["h_pressure_share"],
@@ -1260,6 +1342,15 @@ class SupremeOrchestrator:
         """
         conf = intel['match']['confidence_score']
 
+        # ── WHO IS DRIVING IT (2026-09-29) ────────────────────────────────
+        # Computed once, used by every gate below. Purely additive: the
+        # structural test, the confidence bar and the one-shot keys are all
+        # untouched. This only changes what the message SAYS.
+        _h_name, _a_name = _split_fixture_name(fixture_name)
+        _side_label, _side_short = storm_side(
+            struct, home_name=_h_name or "Home", away_name=_a_name or "Away")
+        _driver = f" | { _side_label } driving" if _side_label else ""
+
         # ── THE ORIGINAL HANDSHAKE, UNTOUCHED ──────────────────────────
         if 30 <= minute < 45 and f_id not in VALIDATION_STATE:
             if ((struct.get('h_triple') and
@@ -1282,7 +1373,7 @@ class SupremeOrchestrator:
                         if conf >= CONFIDENCE_PREMIUM_THRESHOLD
                         else "✅ STANDARD")
                 msg  = (
-                    f"{fixture_name} — 45' Verified. "
+                    f"{fixture_name} — 45' Verified{_driver}. "
                     f"Chaos:{intel['match']['chaos_index']:.1f} | "
                     f"H-xG:{intel['home']['live_xg']} "
                     f"A-xG:{intel['away']['live_xg']}"
@@ -1334,7 +1425,7 @@ class SupremeOrchestrator:
                     else "✅ STANDARD")
             label = f"{win_start}'-{win_end}'"
             msg = (
-                f"{fixture_name} — Storm {stage}. "
+                f"{fixture_name} — Storm {stage}{_driver}. "
                 f"Chaos:{intel['match']['chaos_index']:.1f} | "
                 f"H-xG:{intel['home']['live_xg']} "
                 f"A-xG:{intel['away']['live_xg']} | "
@@ -1381,6 +1472,19 @@ class SupremeOrchestrator:
         entry["last_seen"] = minute
         entry["confidence"] = intel["match"]["confidence_score"]
         entry["chaos"] = intel["match"]["chaos_index"]
+        # 2026-09-29: record WHICH side is structurally driving the storm so
+        # the board can name it, not just say that one exists. Display-only,
+        # exactly like the rest of STORM_STATE — it can never raise an alert.
+        # Written every cycle rather than once, because a side can be resolved
+        # later than the first sighting (the structural read depends on the
+        # squad cache being populated).
+        _label, _short = storm_side(struct)
+        if _short:
+            entry["side"] = _short
+        else:
+            # A storm is tracked but not attributable. Say so rather than
+            # leaving a stale name from a previous cycle.
+            entry.pop("side", None)
 
     # ── ALERT RESULT RESOLVER ─────────────────────────────────────────────
     @staticmethod
