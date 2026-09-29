@@ -798,7 +798,25 @@ def _needs_second_chance(key: str, date_str: str) -> bool:
     """True when a critical engine key for this date is missing, failed,
     degraded, or a list-key that ran 'ok' but produced zero rows. Composite
     dict payloads always carry a non-zero row_count (their dict length), so a
-    starved composite is caught by its 'degraded' status instead."""
+    starved composite is caught by its 'degraded' status instead.
+
+    FILTERS ARE EXEMPT from the zero-row rule.
+    ------------------------------------------
+    A filter's job is to REMOVE rows. `filter_over25__banker` returning []
+    means "no fixture on this date met the conjunction", which is a complete,
+    correct and useful answer -- not a starved engine. Treating it as stale
+    made the 06:00 safety net re-run every filter, every day, forever, for any
+    date with no qualifying picks: wasted provider calls, and a cache
+    rewritten with the same empty result each morning.
+
+    The distinction that matters is WHERE the emptiness came from:
+      * an ENGINE that produced 0 rows  -> starved, must be retried
+      * a FILTER that produced 0 rows   -> correct, must be left alone
+
+    A starved engine is still caught, because the filter reads its dated input
+    and raises/empties when that input is absent, which surfaces as
+    'failed'/'degraded' on the filter's own status.
+    """
     try:
         st = store.load_status(key, date_str)
     except Exception:
@@ -806,6 +824,8 @@ def _needs_second_chance(key: str, date_str: str) -> bool:
     status = st.get("status", "missing")
     if status in ("missing", "failed", "degraded", "unreadable"):
         return True
+    if key.startswith("filter_") or key.startswith("fhvi"):
+        return False
     if status == "ok" and int(st.get("row_count", 0) or 0) == 0:
         return True
     return False
