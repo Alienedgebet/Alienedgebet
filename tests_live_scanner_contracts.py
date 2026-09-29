@@ -4412,6 +4412,47 @@ class AggregatorCoherenceTests(unittest.TestCase):
                 f"at openness {openness}: Over1.5={c['Over1.5']} outranks "
                 f"Over2.5={c['Over2.5']}")
 
+    def test_the_goal_ladder_is_not_one_number_in_three_disguises(self):
+        """
+        REGRESSION GUARD for the collapse that shipped briefly.
+
+        `Over1.5` was written as `Over2.5 - 0.0`, and Under 3.5 is its mirror
+        (`6.0 - Over1.5`), so all three goal markets were locked to a single
+        value. The live board showed Over2.5, Over1.5 and Under3.5 identical on
+        25 of 25 fixtures — the same "one number, seven labels" defect as the
+        original single boolean, moved one layer down where the tests above
+        could not see it.
+
+        The root cause was the openness COEFFICIENT, not the gap between the
+        markets. `openness_score` spans only 0.363..0.678 on the live board, so
+        at a coefficient of 2.0 the entire distribution fitted inside one
+        rounding bucket and the board could not move a grade at all.
+
+        The property to hold is that the goal ladder RESPONDS to a real change
+        in attacking quality across the range the engine actually produces.
+        """
+        grades = []
+        for openness in (0.363, 0.45, 0.55, 0.678):
+            c = self._grade_with(self._openness_card(openness))
+            grades.append(c["Over2.5"])
+        self.assertGreater(
+            len(set(grades)), 1,
+            f"Over2.5 was {grades[0]} at every openness across the real range "
+            "— the goal ladder is frozen again")
+
+    def test_over_15_never_reads_stronger_than_over_25(self):
+        """
+        2 goals is an easier read than 3 goals, so Over 1.5 must never be graded
+        stronger than Over 2.5. This holds at every openness, including where the
+        BTTS cross-check legitimately separates the 0-3 goal event.
+        """
+        for openness in (0.25, 0.363, 0.45, 0.55, 0.678, 0.80):
+            c = self._grade_with(self._openness_card(openness))
+            self.assertLessEqual(
+                _rank_of(c["Over1.5"]), _rank_of(c["Over2.5"]),
+                f"at openness {openness}: Over1.5={c['Over1.5']} outranks "
+                f"Over2.5={c['Over2.5']}")
+
     def test_a_full_strength_fixture_does_not_read_as_a_goal_market(self):
         """
         A rotation-only fixture (no absence on either side) must not produce a
