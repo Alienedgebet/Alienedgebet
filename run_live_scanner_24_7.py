@@ -27,15 +27,30 @@ except ImportError as e:
 
 
 def _feed_health():
-    """Are the live feeds populated right now?
+    """DEPRECATED as a fault signal — kept only to describe what is on screen.
 
-    An empty feed is the visible symptom of a starved scanner: when
-    acquisition is rate-limited the engines see no fixtures, so they write
-    nothing, so the board goes blank and Stage 6 has no picks to turn into
-    alerts. Checking the feed is a far more reliable tripwire than trusting any
-    individual stage's return value, because the blankness is what actually
-    breaks the product.
+    This used to be the circuit breaker's tripwire, and that was wrong. An empty
+    feed has two completely different meanings, and the function could only see
+    one of them:
+
+        1. the scanner is starved (acquisition rate-limited, nothing fetched)
+        2. there is genuinely nothing to analyse (no matches are live)
+
+    At 04:47 on 2026-09-29 there was exactly ONE fixture in play, so both feeds
+    were legitimately empty. The tripwire read that as a fault and backed the
+    loop off to 1080s — turning a ~72s refresh into ~19 minutes for the whole
+    night, on ZERO actual 429 errors. The breaker solved a failure that was not
+    happening, and caused a delay that was.
+
+    The breaker now uses `_quota_pressure()` instead, which checks the premise
+    (are we actually being rate-limited?) rather than a symptom that is also a
+    normal state.
     """
+    return bool(_feeds_populated())
+
+
+def _feeds_populated() -> bool:
+    """Do the live feeds hold any rows? Purely descriptive, never a fault signal."""
     try:
         import json as _json
         for name in ("incoming_predictions.json", "danger_audit.json"):
@@ -43,15 +58,53 @@ def _feed_health():
             if not os.path.exists(path):
                 continue
             with open(path, "r", encoding="utf-8") as f:
-                payload = _json.load(f)
-            # A dict feed is keyed by fixture id; a list feed is a row list.
-            if not payload:
-                continue
-            return True
+                if _json.load(f):
+                    return True
     except Exception:
-        # Never let the tripwire itself take the loop down.
+        # Never let a diagnostic take the loop down.
         pass
     return False
+
+
+def _quota_pressure():
+    """Is the account ACTUALLY being rate-limited right now?
+
+    This is the breaker's real premise, and it is checked rather than assumed.
+    Two independent signals, either of which is sufficient:
+
+      * the shared 429 cooldown lock the stages publish, and
+      * how recently the scanner itself logged an acquisition failure.
+
+    A breaker that never checks its own premise is worse than no breaker, so
+    when this returns False the streak is reset rather than merely not
+    incremented — that is what stops tonight's failure from recurring.
+    """
+    import time as _time
+    now = _time.time()
+
+    # 1. The shared cooldown lock.
+    lock = os.path.join(ROOT, "data", "api_429_cooldown.lock")
+    try:
+        with open(lock, "r", encoding="utf-8") as f:
+            until = float(json.load(f).get("until", 0) or 0)
+        if until > now:
+            return True, f"shared 429 cooldown active for {int(until - now)}s"
+    except Exception:
+        pass
+
+    # 2. A recent acquisition failure, judged by the marker's mtime rather
+    #    than by scanning the journal (which we cannot read from here).
+    marker = os.path.join(ROOT, "data", "api_429_cooldown.lock")
+    try:
+        age = now - os.path.getmtime(marker)
+        # A lock file touched in the last 2 minutes means the stages were just
+        # fighting a limit, even if the cooldown has since been cleared.
+        if age < 120:
+            return True, f"quota lock touched {int(age)}s ago"
+    except OSError:
+        pass
+
+    return False, "no rate-limit pressure detected"
 
 
 def live_scanner_master_loop():
@@ -64,15 +117,26 @@ def live_scanner_master_loop():
     orchestrator = SupremeOrchestrator()
 
     cycle_count = 0
-    # 2026-09-28 HOTFIX: quota circuit breaker. A rate-limit storm used to be
-    # answered by retrying on the very next cycle, which kept the account over
-    # its limit and turned a temporary throttle into a blank board (and a dead
-    # push pipeline) lasting far longer than the storm itself. After
-    # STARVE_AFTER consecutive empty cycles we back off hard and re-probe
-    # slowly, so the quota gets a real chance to recover.
+    # ── QUOTA CIRCUIT BREAKER (2026-09-28, corrected 2026-09-29) ──────────
+    #
+    # The breaker's job is real: when the account is genuinely rate-limited,
+    # retrying every cycle keeps it over its limit and turns a brief throttle
+    # into a long outage. That happened, and it is worth protecting against.
+    #
+    # The first version fired on EMPTY FEEDS, which was wrong. An empty feed
+    # also just means "no matches are live" — at 04:47 on 2026-09-29 there was
+    # one fixture in play, both feeds were legitimately empty, and the breaker
+    # backed the loop off to 1080s on ZERO actual 429 errors. It held a ~72s
+    # refresh to ~19 minutes for the whole night.
+    #
+    # It now fires only on CONFIRMED rate-limit pressure (`_quota_pressure`),
+    # resets the moment pressure clears, and is hard-capped so it can never
+    # again hold the loop beyond STARVE_MAX_SLEEP. A breaker that cannot be
+    # argued out of a false positive is worse than no breaker.
     STARVED_STREAK = 0
-    STARVE_AFTER = 2
+    STARVE_AFTER = 2          # consecutive CONFIRMED pressure events
     STARVE_SLEEP = 180
+    STARVE_MAX_SLEEP = 600    # hard ceiling — never back off beyond 10 minutes
 
     while True:
         cycle_count += 1
@@ -80,20 +144,26 @@ def live_scanner_master_loop():
         logging.info(f"--- Starting Live Scan Cycle #{cycle_count} ---")
 
         if STARVED_STREAK >= STARVE_AFTER:
-            # Quota is still exhausted. Do not spend a cycle proving it again.
-            wait = STARVE_SLEEP * min(6, STARVED_STREAK - STARVE_AFTER + 1)
+            # Only reachable behind a confirmed pressure check.
+            wait = min(STARVE_SLEEP * (STARVED_STREAK - STARVE_AFTER + 1),
+                       STARVE_MAX_SLEEP)
             logging.warning(
-                f"[QUOTA BREAKER] feeds have been empty for {STARVED_STREAK} "
-                f"consecutive cycles — backing off {wait}s and re-probing. "
-                f"Skipping provider work so the rate limit can recover."
+                f"[QUOTA BREAKER] confirmed rate-limit pressure for "
+                f"{STARVED_STREAK} cycle(s) — backing off {wait}s (cap "
+                f"{STARVE_MAX_SLEEP}s) and re-probing."
             )
             time.sleep(wait)
-            if _feed_health():
-                logging.info("[QUOTA BREAKER] feeds have repopulated — resuming.")
+            still_pressured, why = _quota_pressure()
+            if not still_pressured:
+                logging.info(
+                    f"[QUOTA BREAKER] pressure cleared ({why}) — resuming at "
+                    f"the normal interval."
+                )
                 STARVED_STREAK = 0
                 continue
             STARVED_STREAK += 1
             continue
+
 
         # ── 1. STAGE 1: SCAN ACTIVE MATCH CONTEXT ─────────────────────────────
         try:
@@ -141,20 +211,39 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.error(f"[Stage 6 Orchestrator] Error: {e}")
 
-        if _feed_health():
+        # ── 7. BACK-OFF DECISION, ON THE CORRECT SIGNAL ────────────────────
+        # Decided on CONFIRMED rate-limit pressure, never on whether the feeds
+        # happen to be empty. "No matches are live" is a normal state, not a
+        # fault, and treating it as one is what throttled this loop to 19-minute
+        # intervals overnight on zero actual 429s.
+        pressured, why = _quota_pressure()
+        if not pressured:
             if STARVED_STREAK:
-                logging.info(f"[QUOTA BREAKER] feeds healthy again after "
-                             f"{STARVED_STREAK} starved cycle(s).")
+                logging.info(
+                    f"[QUOTA BREAKER] rate-limit pressure cleared ({why}) after "
+                    f"{STARVED_STREAK} backed-off cycle(s) — normal cadence restored."
+                )
             STARVED_STREAK = 0
             sleep_s = 45
         else:
             STARVED_STREAK += 1
             logging.warning(
-                f"[QUOTA BREAKER] no populated feed after cycle #{cycle_count} "
-                f"(streak {STARVED_STREAK}) — likely rate-limited. Alerts may be "
-                f"delayed until acquisition recovers."
+                f"[QUOTA BREAKER] rate-limit pressure confirmed after cycle "
+                f"#{cycle_count} (streak {STARVED_STREAK}): {why}. Extending the "
+                f"interval to let the quota recover."
             )
-            sleep_s = 45 if STARVED_STREAK < STARVE_AFTER else STARVE_SLEEP
+            # Capped, and never applied on the first event — one slow cycle is
+            # not a storm.
+            sleep_s = 45 if STARVED_STREAK < STARVE_AFTER else min(
+                STARVE_SLEEP, STARVE_MAX_SLEEP)
+
+        # A quiet night is worth saying out loud, because it used to be
+        # indistinguishable from a broken scanner.
+        if not _feeds_populated():
+            logging.info(
+                "[QUOTA BREAKER] feeds are empty but the quota is healthy — "
+                "this means no matches are live, not that acquisition failed."
+            )
 
         duration = round(time.time() - cycle_start, 2)
         # 2026-09-20 OOM guard: free per-cycle garbage (payload dicts, cache

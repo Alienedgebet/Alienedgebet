@@ -721,6 +721,67 @@ function PrematchAuditCard({
   );
 }
 
+/**
+ * How old the data on screen actually is.
+ *
+ * 2026-09-29. This page polled every 20s while the scanner rewrites the board
+ * once per ~72s, so roughly 9 of every 10 polls returned identical bytes. The
+ * page therefore LOOKED like it was constantly refreshing while the numbers
+ * moved once a minute — which is indistinguishable from "lagging", and was
+ * reported as exactly that.
+ *
+ * The API now reports the file's real age, and this says so out loud. It turns
+ * an invisible mismatch between "how often we ask" and "how often there is
+ * anything new" into a fact the user can see, which is the only honest version
+ * of a refresh indicator.
+ */
+function DataFreshness({ rows }: { rows: unknown }) {
+  const age = useMemo(() => {
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const first = rows[0] as { data_age_seconds?: number | null } | undefined;
+    return first?.data_age_seconds ?? null;
+  }, [rows]);
+
+  if (age === null) return null;
+
+  // The scanner's cycle is ~72s. One cycle is normal, two is worth noticing,
+  // three or more means the writer is genuinely stuck and the page should not
+  // pretend otherwise.
+  const STALE_AT = 140;   // ~2 cycles
+  const STUCK_AT = 240;  // ~3+ cycles
+  const tone =
+    age > STUCK_AT
+      ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
+      : age > STALE_AT
+      ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+      : "border-emerald-500/30 bg-emerald-500/10 text-emerald-400";
+  const label =
+    age < 10
+      ? "just updated"
+      : age < 90
+      ? `updated ${Math.round(age)}s ago`
+      : `updated ${Math.round(age / 60)}m ago`;
+  const explain =
+    age > STUCK_AT
+      ? " — the scanner is not writing; this board is not updating"
+      : age > STALE_AT
+      ? " — the scanner is behind its normal cycle"
+      : "";
+
+  return (
+    <p
+      className={cn(
+        "mt-1 inline-flex w-fit items-center rounded-full border px-2 py-0.5 font-mono text-[9px] font-bold",
+        tone
+      )}
+      title={`The live scanner rewrites this board about once every 72 seconds. Polling faster than that cannot make the data newer.${explain}`}
+    >
+      {label}
+      {explain}
+    </p>
+  );
+}
+
 export default function LivePage() {
   const [selectedAudit, setSelectedAudit] = useState<LivePrematchAudit | null>(null);
 
@@ -728,10 +789,23 @@ export default function LivePage() {
   // fetched exactly once on mount, so the board FREEZES on first paint — the
   // other half of "it stops". A live match's audit can change every cycle
   // (~2.5-3.5 min), so a 20s poll is well inside the useful window.
+  //
+  // 2026-09-29: the poll was 20s, but the scanner rewrites this file only once
+  // per cycle (~26s of work + 45s sleep = ~72s). Measured over 02:00-04:47:
+  // 523 polls against 45 actual updates. Roughly 9 of every 10 requests
+  // returned byte-identical data, so the page looked like it was refreshing
+  // constantly while the numbers moved once a minute — which reads as "lagging"
+  // rather than as "polling".
+  //
+  // Polling faster than the writer buys nothing at all. This is now 60s, which
+  // is close to the write interval, and the page shows the REAL data age (the
+  // API returns `data_age_seconds`) instead of implying a freshness it does not
+  // have. Cutting 20s -> 60s removes ~2 of every 3 requests with no loss of
+  // freshness, because those requests were duplicates anyway.
   const prematch = useApi(() => liveApi.getPrematch(), [], {
     fallback: MOCK_LIVE_PREMATCH_AUDIT,
     cacheKey: "live-edges-prematch",
-    refreshMs: 20_000,
+    refreshMs: 60_000,
   });
   // The Code 2 validator no longer runs, so its board is retired as the
   // source for this page. Live team statistics now come from the Code 6
@@ -843,6 +917,7 @@ export default function LivePage() {
                 liability and market odds. It does not show predictions. Open a
                 fixture to reach the Code 2 live validator.
               </p>
+              <DataFreshness rows={prematch.data} />
           </div>
         </div>
       </div>
