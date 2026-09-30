@@ -274,6 +274,7 @@ def run_over15_stage3(target_date):
         else: score += 1
             
         results.append({
+            "Date": target_date,
             "Match": match_name,
             "Odds": odds_val,
             "Poisson%": poisson_pct,
