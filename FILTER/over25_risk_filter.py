@@ -140,7 +140,9 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
     def apply_over_tipster_filter(df, 
                                   min_odds=1.40, max_odds=2.20, 
                                   min_poisson=60, min_votes=6, 
-                                  max_pos_gap=10, min_h2h_overs=3):
+                                  max_pos_gap=10, min_h2h_overs=3,
+                                  min_home_goals=0, min_away_goals=0,
+                                  max_home_conceded=0, max_away_conceded=0):
         df_filtered = df.copy()
         if df_filtered.empty: return df_filtered
 
@@ -159,6 +161,28 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
 
         if "o25_odds" in df_filtered.columns:
             cond = cond & (df_filtered["o25_odds"] >= min_odds) & (df_filtered["o25_odds"] <= max_odds)
+
+        # ── RECENT GOAL FORM, PER SIDE ──────────────────────────────────────
+        # 2026-09-30. Four real gates replacing the display-only L5/L3 toggle.
+        # A toggle that changed no gate was not a filter, and it sat down by
+        # the results rather than among the controls that decide what survives.
+        #
+        # A 0 threshold means OFF — the column is skipped entirely, so the
+        # shipped result set is unchanged until a value is actually typed.
+        #
+        # Missing values PASS rather than fail: a dated artefact graded before
+        # the engine wrote these columns must not be silently filtered down to
+        # nothing, and absence of evidence is not evidence against a pick.
+        for col, thr, op in (("home_goals_scored_last_5", min_home_goals, "ge"),
+                             ("away_goals_scored_last_5", min_away_goals, "ge"),
+                             ("home_goals_conceded_last_5", max_home_conceded, "le"),
+                             ("away_goals_conceded_last_5", max_away_conceded, "le")):
+            if not thr or col not in df_filtered.columns:
+                continue
+            vals = pd.to_numeric(df_filtered[col], errors="coerce")
+            known = vals.notna()
+            ok = (vals >= thr) if op == "ge" else (vals <= thr)
+            cond = cond & (~known | ok)
 
         df_filtered = df_filtered[cond]
 

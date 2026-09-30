@@ -5052,24 +5052,26 @@ class TestWeeklyOver25GoalFormStats(unittest.TestCase):
 
         self.assertIn("function GoalFormStats", tsx,
                       "the shared GoalFormStats component is gone")
-        # 2026-09-29: the columns are read through a template literal keyed on
-        # the active window (`row[`home_goals_scored_last_${window}`]`), so the
-        # literal name no longer appears in the source. Assert the STEM is read
-        # for each of the four, and that the access is window-keyed -- a
-        # hardcoded `last_5` here would silently ignore the toggle.
-        for stem in ("home_goals_scored_last_",
-                     "away_goals_scored_last_",
-                     "home_goals_conceded_last_",
-                     "away_goals_conceded_last_"):
+        # 2026-09-30: the L5/L3 toggle is GONE. Recent goal form is now four
+        # real gates in the thresholds drawer, so the board no longer reads a
+        # window-keyed column. The card readout is retained and pinned to the
+        # 5-window, which is the window the engine's lambda and the gates use.
+        for stem in ("home_goals_scored_last_", "away_goals_scored_last_",
+                     "home_goals_conceded_last_", "away_goals_conceded_last_"):
             self.assertIn(
                 f"row[`{stem}${{window}}`]", tsx,
-                f"the board must read {stem}<window> so the 5/3 toggle can "
-                "select between them")
-        # Used once in the card grid and once in the table body.
+                f"the board must still read {stem}<window>")
+        self.assertNotIn(
+            "setFormWindow", tsx,
+            "the display-only L5/L3 toggle must not come back: no gate read "
+            "the 3-window, so it was not a filter. Recent form is expressed "
+            "as min_home_goals / min_away_goals / max_home_conceded / "
+            "max_away_conceded in the thresholds drawer instead.")
+        # The readout is pinned to the 5-window in both views.
         self.assertEqual(
-            tsx.count("<GoalFormStats row={row} window={formWindow} />"), 2,
+            tsx.count("<GoalFormStats row={row} window={FORM_WINDOW} />"), 2,
             "GoalFormStats must be rendered in BOTH the cards view and the "
-            "table view, exactly once each, and both must receive the window.")
+            "table view, exactly once each, both pinned to the 5-window.")
 
 
 class TestSecondChanceFilterExemption(unittest.TestCase):
@@ -5309,28 +5311,99 @@ class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
 
     def test_frontend_toggle_offers_both_and_labels_the_window(self):
         """
-        Both windows must be selectable, and the active one must be stated.
+        The L5/L3 toggle is GONE. It was display-only, and a control sitting
+        among the thresholds that changes nothing is worse than no control at
+        all — it reads as a filter and is not one.
 
-        A 3-match read is noisier than a 5-match one, so showing the number
-        without saying which window produced it invites over-reading a single
-        result. The component states "last N matches" for that reason.
+        What replaces it: four REAL gates in the drawer, and one odds box
+        with no ceiling. Both are asserted here, because "boxes that reflect
+        what the user wants as an active filter" is only true if the backend
+        actually gates on them.
         """
         from pathlib import Path
-        tsx = (Path(__file__).parent / "alienedge-frontend" / "app" /
-               "weekly" / "FilterTab.tsx").read_text()
+        root = Path(__file__).parent
+        tsx = (root / "alienedge-frontend" / "app" / "weekly" /
+               "FilterTab.tsx").read_text()
+        cfg = (root / "alienedge-frontend" / "app" / "weekly" /
+               "filter-config.ts").read_text()
+        filt = (root / "FILTER" / "over25_risk_filter.py").read_text()
 
-        self.assertIn("useState<3 | 5>(5)", tsx,
-                      "the form window must be state defaulting to 5")
-        self.assertIn("last {window} matches", tsx,
-                      "the board must state which window the figures cover")
-        # Read dynamically by window, so both column sets are reachable.
-        self.assertIn("row[`home_goals_scored_last_${window}`]", tsx,
-                      "GoalFormStats must read the column for the ACTIVE "
-                      "window, not a hardcoded 5")
-        # Both views receive the window.
-        self.assertEqual(
-            tsx.count("<GoalFormStats row={row} window={formWindow} />"), 2,
-            "both the cards view and the table view must receive the window")
+        # The toggle is gone from the component.
+        self.assertNotIn("useState<3 | 5>(5)", tsx,
+                         "the L5/L3 form-window state must not come back")
+        self.assertNotIn("setFormWindow", tsx,
+                         "no control may reappear that changes no gate")
+
+        # The four real gates are offered AND applied.
+        for key in ("min_home_goals", "min_away_goals",
+                    "max_home_conceded", "max_away_conceded"):
+            self.assertIn(key, cfg,
+                          f"{key} must be offered in the O2.5 drawer")
+            self.assertIn(key, filt,
+                          f"{key} must actually gate in the filter, not just "
+                          "be offered")
+
+        # ONE odds box: a floor with no ceiling.
+        self.assertNotIn('{ key: "max_odds", label: "Max Odds"', cfg,
+                         "the Max Odds box is gone — the drawer has one odds "
+                         "box, a floor, and no ceiling")
+
+    def test_new_gates_default_to_off(self):
+        """
+        Adding four gates must not move the shipped result set.
+
+        The drawer defaults them to 0 and the filter SKIPS a 0 threshold
+        entirely. If 0 were compared against instead, a team with no recorded
+        goals would read as 0 and the result set would shift on a change that
+        is meant to be inert until the user types.
+        """
+        from pathlib import Path
+        filt = (Path(__file__).parent / "FILTER" /
+                "over25_risk_filter.py").read_text()
+        for key in ("min_home_goals", "min_away_goals",
+                    "max_home_conceded", "max_away_conceded"):
+            self.assertIn(f"{key}=0", filt,
+                          f"{key} must default to 0, meaning OFF")
+        self.assertIn("if not thr or col not in df_filtered.columns:", filt,
+                      "a 0 threshold must SKIP the column, not compare it")
+
+    def test_missing_goal_column_passes_rather_than_fails(self):
+        """
+        A dated artefact graded before the engine wrote these columns must
+        not be filtered to nothing. Absence of evidence is not evidence
+        against the pick, so an unknown value passes the gate.
+        """
+        from pathlib import Path
+        filt = (Path(__file__).parent / "FILTER" /
+                "over25_risk_filter.py").read_text()
+        self.assertIn("cond = cond & (~known | ok)", filt,
+                      "rows whose goal value is unknown must PASS the gate")
+        self.assertIn("if not thr or col not in df_filtered.columns:", filt,
+                      "an absent column must skip the gate entirely")
+
+    def test_band_supplies_the_odds_ceiling_when_the_drawer_sets_none(self):
+        """
+        The drawer sends min_odds but no max_odds. The old guard required
+        BOTH to be absent before the corridor applied, so the band's ceiling
+        was never used and the filter's own 2.20 default silently won —
+        which is why @1.30-1.60 did nothing.
+        """
+        from pathlib import Path
+        live = (Path(__file__).parent / "api" /
+                "weekly_filter_live.py").read_text()
+        self.assertIn('if band_max is not None and "max_odds" not in overrides:',
+                      live,
+                      "the corridor's ceiling must apply whenever the drawer "
+                      "set none, or @1.30-1.60 admits picks up to 2.20")
+        # Scoped to the O2.5 block only. The WIN path legitimately keeps the
+        # both-or-neither guard, because the WIN drawer still ships BOTH odds
+        # boxes — only the O2.5 drawer became single-box.
+        _o25 = live[live.index("def _live_o25("):live.index("def _live_o25(") + 2000]
+        self.assertNotIn(
+            'if "min_odds" not in overrides and "max_odds" not in overrides',
+            _o25,
+            "requiring BOTH to be absent is what made the corridor "
+            "unreachable — the O2.5 drawer always sends min_odds")
 
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
     """A lineup row with `player_id: null` must not empty danger_audit.json.
