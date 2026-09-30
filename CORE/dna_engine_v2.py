@@ -121,6 +121,21 @@ def run_dna_engine_v2(target_date):
     # pipeline runs, while still catching newly-played matches within a day.
     DNA_FRESHNESS_HOURS = 20
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # PROFILE SCHEMA VERSION
+    # ─────────────────────────────────────────────────────────────────────────
+    # Bump this whenever calculate_comprehensive_dna() starts emitting fields
+    # that older cached profiles do not contain. A profile whose `schema` is
+    # missing or lower is treated as stale by _is_profile_fresh(), so it gets
+    # recomputed on the next run instead of being silently reused.
+    #
+    # v2 (2026-09-30): added Raw_Audit_Metrics.Goal_Volume — goals scored /
+    # conceded, clean sheets, halftime scoring rates and recent W/L, all
+    # derived from the `scores` payload these fixtures have always carried.
+    # Before this, six of the Over 1.5 rules could not be evaluated from DNA
+    # because the engine fetched the score data and never read it.
+    DNA_SCHEMA_VERSION = 2
+
     if not API_KEY:
         print("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
         return {}
@@ -251,7 +266,15 @@ def run_dna_engine_v2(target_date):
         this fix, with no `computed_at`) are treated as NOT fresh so they
         get exactly one freshness-check call the first time they're seen —
         never deleted, never mass-rebuilt.
+
+        SCHEMA CHECK: a profile built before the current DNA_SCHEMA_VERSION is
+        also treated as stale even if its timestamp is recent, because it is
+        missing fields this version emits. Without this, every profile cached
+        before the Goal_Volume fields existed would be reused with zero API
+        calls and would never gain them.
         """
+        if int(profile.get("schema", 1)) < DNA_SCHEMA_VERSION:
+            return False
         computed_at = profile.get("computed_at")
         if not computed_at:
             return False
@@ -262,6 +285,169 @@ def run_dna_engine_v2(target_date):
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         return (datetime.now(timezone.utc) - ts) < timedelta(hours=DNA_FRESHNESS_HOURS)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SCORE EXTRACTION — goals, halftime, results
+    # ─────────────────────────────────────────────────────────────────────────
+    # LIFTED VERBATIM from PSYCHOLOGY/over15_psychology.py (L113-168) so the
+    # two engines cannot disagree about what a scoreline means. Duplicated
+    # rather than imported on purpose: that engine is a standalone script
+    # with its own main(), and importing across engines couples their API
+    # call behaviour. What must NOT be duplicated is the LOGIC — a second
+    # hand-typed variant is how Over 1.5 ended up with two byte-identical
+    # engines that silently overwrote each other.
+    #
+    # No new API call: `scores` has been in the `include` list of
+    # get_team_history_stats() since v1. It was simply never read.
+    def extract_goals_by_period(fx, period="FT"):
+        home_g, away_g = None, None
+        for entry in fx.get("scores", []):
+            if not isinstance(entry, dict):
+                continue
+            s_obj = entry.get("score") or entry
+            desc = str(entry.get("description", s_obj.get("description", ""))).upper()
+
+            # A penalty shootout is not a goal scored in open play. Exclude
+            # it, or shootout totals get read as a 4-goal win.
+            if any(w in desc for w in ["PENALTY", "EXTRA", "AGG"]):
+                continue
+
+            p = s_obj.get("participant") or entry.get("participant")
+            g = s_obj.get("goals") if isinstance(s_obj, dict) else entry.get("goals")
+
+            if g is not None:
+                try:
+                    val = int(g)
+                    if period == "FT":
+                        # `CURRENT` is the authoritative full-time row — it
+                        # matched the recorded result on 40/40 sampled
+                        # fixtures. 1ST_HALF / 2ND_HALF / 2ND_HALF_ONLY are
+                        # period splits, and 2ND_HALF_ONLY in particular can
+                        # disagree with the true final (observed 3-1 vs 1-1),
+                        # so FT is read from CURRENT alone rather than by
+                        # max() across every row.
+                        if desc == "CURRENT":
+                            if p == "home":
+                                home_g = max(home_g or 0, val)
+                            elif p == "away":
+                                away_g = max(away_g or 0, val)
+                    elif period == "HT":
+                        # SportMonks returns FOUR period rows: 1ST_HALF,
+                        # 2ND_HALF, 2ND_HALF_ONLY and CURRENT. A naive
+                        # "HALF" in desc test matches all three *_HALF*
+                        # names, and the max() below then collapses them
+                        # into the full-time score — which would make every
+                        # halftime rule measure full-time results instead.
+                        # Anchor on 1ST_HALF explicitly.
+                        if desc.startswith("1ST_HALF") or "1ST HALF" in desc:
+                            if p == "home":
+                                home_g = max(home_g or 0, val)
+                            elif p == "away":
+                                away_g = max(away_g or 0, val)
+                except Exception:
+                    pass
+
+        return home_g, away_g
+
+    def get_team_and_opp_goals(fx, team_id, period="FT"):
+        hg, ag = extract_goals_by_period(fx, period)
+        if hg is None or ag is None:
+            return None, None
+
+        for p in fx.get("participants", []):
+            if str(p.get("id")) == str(team_id):
+                loc = (p.get("meta") or {}).get("location")
+                if loc == "home":
+                    return hg, ag
+                if loc == "away":
+                    return ag, hg
+
+        local = fx.get("localteam_id")
+        visitor = fx.get("visitorteam_id")
+        if str(local) == str(team_id):
+            return hg, ag
+        if str(visitor) == str(team_id):
+            return ag, hg
+
+        parts = fx.get("participants", [])
+        if len(parts) >= 2:
+            if str(parts[0].get("id")) == str(team_id):
+                return hg, ag
+            if str(parts[1].get("id")) == str(team_id):
+                return ag, hg
+
+        return None, None
+
+    def get_match_outcome_bulletproof(fx, team_id, period="FT"):
+        tg, og = get_team_and_opp_goals(fx, team_id, period)
+        if tg is None or og is None:
+            return None
+        if tg > og:
+            return "W"
+        if tg < og:
+            return "L"
+        return "D"
+
+    def compute_goal_volume(team_id, fixtures):
+        """
+        Goal-volume facts for a team, derived only from the `scores` payload
+        the history fixtures already carry.
+
+        Every rate is computed over the matches where that data actually
+        existed — `scored` for full-time, `ht_matches` for halftime — never
+        over len(fixtures). A team whose provider omits halftime scores must
+        not be recorded as "scored at halftime in 0 of 8 matches"; it must be
+        recorded as halftime-unknown, or a data gap reads as a playing trait.
+
+        Returns None when not even full-time scores are present, so callers
+        can distinguish "no goals data" from "this team concedes nothing".
+        """
+        scored = []          # own FT goals per match
+        conceded = []        # opponent FT goals per match
+        ht_scored = 0        # matches where team scored before HT
+        ht_conceded = 0      # matches where team conceded before HT
+        ht_leading = 0       # matches where team led at HT
+        ht_matches = 0       # matches carrying a usable HT scoreline
+        results = []         # W/D/L, newest first (fixtures are sorted desc)
+
+        for fx in fixtures:
+            tg, og = get_team_and_opp_goals(fx, team_id, "FT")
+            if tg is not None and og is not None:
+                scored.append(tg)
+                conceded.append(og)
+                results.append("W" if tg > og else ("L" if tg < og else "D"))
+
+            h_tg, h_og = get_team_and_opp_goals(fx, team_id, "HT")
+            if h_tg is not None and h_og is not None:
+                ht_matches += 1
+                if h_tg > 0:
+                    ht_scored += 1
+                if h_og > 0:
+                    ht_conceded += 1
+                if h_tg > h_og:
+                    ht_leading += 1
+
+        if not scored:
+            return None
+
+        n = len(scored)
+        rate = lambda num, den: (round(num / den, 3) if den else None)
+
+        return {
+            "Matches_With_Scores":  n,
+            "Goals_Scored_Avg":     round(sum(scored) / n, 3),
+            "Goals_Conceded_Avg":   round(sum(conceded) / n, 3),
+            "Goals_Scored_Total":   sum(scored),
+            "Goals_Conceded_Total": sum(conceded),
+            "Clean_Sheet_Rate":     rate(conceded.count(0), n),
+            "Scored_At_HT_Rate":    rate(ht_scored, ht_matches),
+            "Conceded_At_HT_Rate":  rate(ht_conceded, ht_matches),
+            "Leading_At_HT_Rate":   rate(ht_leading, ht_matches),
+            "HT_Matches_Known":     ht_matches,
+            "HT_Coverage":          rate(ht_matches, n),
+            "Last_Result":          results[0] if results else None,
+            "Scored_In_Last2":      ("W" not in results[:2]) if len(results) >= 2 else None,
+        }
 
     # ─────────────────────────────────────────────────────────────────────────
     # THE TACTICAL BRAIN — UPGRADED HEURISTIC ENGINE (v2)
@@ -527,6 +713,14 @@ def run_dna_engine_v2(target_date):
             archetype = "Box Predator (OVER/GG)"   # new archetype, only reachable in v2
 
         # ══════════════════════════════════════════════════════════════════════
+        # GOAL VOLUME (schema v2) — from the `scores` payload already fetched
+        # ══════════════════════════════════════════════════════════════════════
+        # Additive only: nothing above this line reads it, so no pillar, tier,
+        # archetype or downstream score can change because of it. Consumers
+        # read it explicitly when they want goal-volume facts.
+        goal_volume = compute_goal_volume(team_id, fixtures)
+
+        # ══════════════════════════════════════════════════════════════════════
         # ASSEMBLED PROFILE — returned to main loop and saved to JSON
         # ══════════════════════════════════════════════════════════════════════
         return {
@@ -572,7 +766,15 @@ def run_dna_engine_v2(target_date):
                 "Opp_Pass_Acc_Allowed":    round(opp_pass_acc,                              1),
                 "Opp_Dangerous_Attacks":   round(opp_dangerous_attacks,                     1),
                 "Resistance_Score":        round(resistance_score,                          1),
+                # NEW in schema v2 — goal volume, from the `scores` payload
+                # these fixtures have always carried. Empty when the provider
+                # gave us no scorelines for this team, which is a data gap and
+                # must not be rendered as a row of zeros.
+                "Goal_Volume":             (goal_volume if goal_volume else {}),
             },
+            # Stamped so _is_profile_fresh() can tell a profile that predates
+            # the Goal_Volume fields from one that actually has them.
+            "schema":                   DNA_SCHEMA_VERSION,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
