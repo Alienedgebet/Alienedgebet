@@ -1,0 +1,264 @@
+"""
+tests_gg_o15_tiers.py — the GG / Over 1.5 tier contract must not drift.
+
+Run:  ./venv/bin/python3 tests_gg_o15_tiers.py
+
+WHAT THIS PROVES
+----------------
+The tier LABELS are a cross-module contract, not display text. Three consumers
+regex-match them to decide what survives:
+
+  Engine/over15_stage3.py:167   df["o15_tier"].str.contains("TIER 1|TIER 2")
+  AGGREGATOR/gg_forensics_audit.py:224  df["gg_tier"].str.contains("TIER 1")
+  FILTER/gg_precision_filter.py  _last3_from_tier() — regex TIER\\s*([1-9]),
+                                 mapping TIER 1 -> 3 and TIER 2 -> 2
+
+Renaming a tier, renumbering it, or dropping the "TIER n" substring silently
+empties those filters: the file still parses, the pipeline still runs, and the
+downstream board just quietly returns nothing.
+
+This suite pins:
+  1. every tier label string, byte for byte
+  2. that each label survives the three consumers' own regex/substring logic
+  3. that the threshold ladders are monotone (a higher score never scores worse)
+  4. that the scorers return a bounded 0-100 score and a populated breakdown
+  5. that the artifact filenames main.py depends on are still registered
+
+SAFETY (deliberate, enforced): fully offline — the scorers under test take only
+already-computed scalars, so the suite makes zero network calls and writes
+nothing. Import is guarded so a missing dependency reports SKIP, never a false
+PASS.
+"""
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
+
+RESULTS = []
+
+
+def check(label, cond):
+    RESULTS.append((label, bool(cond)))
+    print(("PASS  " if cond else "FAIL  ") + label)
+
+
+def skip(label, why):
+    RESULTS.append((label, None))
+    print("SKIP  " + label + "  (" + why + ")")
+
+
+try:
+    from Engine.gg_precision_engine import (
+        get_gg_tier,
+        get_o15_tier,
+        calculate_gg_score,
+        calculate_o15_score,
+    )
+except Exception as exc:  # pragma: no cover - reported as SKIP, never PASS
+    skip("engine import", f"{type(exc).__name__}: {exc}")
+    print("\nRESULT: engine could not be imported; nothing was verified")
+    sys.exit(2)
+
+# ── 1. THE LABEL CONTRACT (byte-for-byte) ─────────────────────────────────────
+GG_T1_LOCK = "\U0001f48e GG TIER 1 — LOCK"
+GG_T1_HIGH = "\U0001f525 GG TIER 1 — HIGH CONFIDENCE"
+GG_T2 = "✅ GG TIER 2 — SOLID"
+GG_T3 = "\U0001f4ca GG TIER 3 — LEAN"
+GG_OUT = "⚪ GG BELOW THRESHOLD"
+O15_T1 = "\U0001f48e O1.5 TIER 1 — LOCK"
+O15_T2 = "✅ O1.5 TIER 2 — SOLID"
+O15_T3 = "\U0001f4ca O1.5 TIER 3 — LEAN"
+O15_OUT = "⚪ O1.5 BELOW THRESHOLD"
+
+check("GG Tier 1 lock label is byte-exact", get_gg_tier(70.0, 4) == GG_T1_LOCK)
+check("GG Tier 1 high-confidence label is byte-exact",
+      get_gg_tier(70.0, 3) == GG_T1_HIGH)
+check("GG Tier 2 label is byte-exact", get_gg_tier(55.0, 2) == GG_T2)
+check("GG Tier 3 label is byte-exact", get_gg_tier(40.0, 1) == GG_T3)
+check("GG below-threshold label is byte-exact", get_gg_tier(10.0, 0) == GG_OUT)
+check("O1.5 Tier 1 label is byte-exact", get_o15_tier(75.0) == O15_T1)
+check("O1.5 Tier 2 label is byte-exact", get_o15_tier(55.0) == O15_T2)
+check("O1.5 Tier 3 label is byte-exact", get_o15_tier(40.0) == O15_T3)
+check("O1.5 below-threshold label is byte-exact", get_o15_tier(10.0) == O15_OUT)
+
+# ── 2. THE THREE CONSUMERS STILL MATCH THE LABELS ────────────────────────────
+# Engine/over15_stage3.py:167 — keeps "TIER 1|TIER 2" on the O1.5 column.
+o15_kept = [o for o in (O15_T1, O15_T2, O15_T3, O15_OUT)
+            if re.search("TIER 1|TIER 2", o, re.IGNORECASE)]
+check("over15_stage3 keeps exactly the O1.5 Tier 1 and Tier 2 rows",
+      o15_kept == [O15_T1, O15_T2])
+
+# AGGREGATOR/gg_forensics_audit.py:224 — keeps "TIER 1" on the GG column.
+gg_kept = [g for g in (GG_T1_LOCK, GG_T1_HIGH, GG_T2, GG_T3, GG_OUT)
+           if re.search("TIER 1", g, re.IGNORECASE)]
+check("gg_forensics_audit keeps both GG Tier 1 variants and nothing else",
+      gg_kept == [GG_T1_LOCK, GG_T1_HIGH])
+
+# FILTER/gg_precision_filter.py — _last3_from_tier(): TIER 1 -> 3, TIER 2 -> 2.
+def _last3_from_tier(tier):
+    """Copy of gg_precision_filter._last3_from_tier (regex-identical)."""
+    t = str(tier or "").upper()
+    m = re.search(r"TIER\s*([1-9])", t)
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n == 1:
+        return 3
+    if n == 2:
+        return 2
+    return None
+
+
+check("gg_precision_filter reads TIER 1 as last-3 form",
+      _last3_from_tier(GG_T1_LOCK) == 3)
+check("gg_precision_filter reads TIER 2 as partial form",
+      _last3_from_tier(GG_T2) == 2)
+check("gg_precision_filter returns None for a non-tier label",
+      _last3_from_tier(GG_OUT) is None)
+
+# ── 3. THE LADDERS ARE MONOTONE AND BOUNDED ──────────────────────────────────
+check("GG tier never downgrades as the score rises",
+      [get_gg_tier(s, 4) for s in (0, 35, 50, 68, 100)] ==
+      [GG_OUT, GG_T3, GG_T2, GG_T1_LOCK, GG_T1_LOCK])
+check("O1.5 tier never downgrades as the score rises",
+      [get_o15_tier(s) for s in (0, 38, 51, 69, 100)] ==
+      [O15_OUT, O15_T3, O15_T3, O15_T2, O15_T1])
+check("GG Tier 1 requires the signals gate, not the score alone",
+      get_gg_tier(90.0, 1) != GG_T1_LOCK)
+
+# ── 4. THE SCORERS STAY PURE AND BOUNDED ─────────────────────────────────────
+gg_args = dict(btts_prob=0.55, venue_btts_home=0.6, venue_btts_away=0.5,
+               home_gk_is_liability=False, away_gk_is_liability=False,
+               home_gk_cpg=1.2, away_gk_cpg=1.1, h2h_btts_rate=0.6,
+               lambda_home=1.4, lambda_away=1.3)
+gg_score, gg_fired, gg_bd = calculate_gg_score(**gg_args)
+check("calculate_gg_score returns a 0-100 score", 0.0 <= gg_score <= 100.0)
+check("calculate_gg_score returns an integer signal count 0-5",
+      isinstance(gg_fired, int) and 0 <= gg_fired <= 5)
+check("calculate_gg_score returns a populated breakdown",
+      isinstance(gg_bd, dict) and len(gg_bd) >= 8)
+check("calculate_gg_score is deterministic (no RNG, no clock)",
+      calculate_gg_score(**gg_args)[0] == gg_score)
+
+o15_args = dict(lambda_home=1.4, lambda_away=1.3, mc_over15_prob=0.78,
+                venue_goals_avg_home=2.6, venue_goals_avg_away=2.4,
+                league_weight=0.24, fatigue_home=0.3, fatigue_away=0.2,
+                home_scored_total=7.0, away_scored_total=6.0,
+                home_conceded_total=5.0, away_conceded_total=4.0,
+                home_gk_cpg=1.2, away_gk_cpg=1.1,
+                home_gk_liable=False, away_gk_liable=False,
+                h2h_o15_rate=0.6)
+try:
+    o15_score, o15_bd = calculate_o15_score(**o15_args)
+    check("calculate_o15_score returns a 0-100 score", 0.0 <= o15_score <= 100.0)
+    check("calculate_o15_score returns a populated breakdown",
+          isinstance(o15_bd, dict) and len(o15_bd) >= 5)
+    check("calculate_o15_score is deterministic (no RNG, no clock)",
+          calculate_o15_score(**o15_args)[0] == o15_score)
+except TypeError as exc:
+    # A signature change is itself a contract break for callers that build the
+    # argument set by name; report it rather than crashing the suite.
+    check(f"calculate_o15_score accepts its documented signature ({exc})", False)
+
+# ── 4b. PHASE 1: the retired terms must have ZERO influence ─────────────────
+# Measured as noise on 1,461 settled matches and removed 2026-09-30. This
+# pins that fact so nobody re-adds them, and so a future change that starts
+# using them again fails loudly rather than silently restoring dead weight.
+try:
+    from Engine.gg_precision_engine import O15_REMOVED_TERMS
+except Exception:
+    O15_REMOVED_TERMS = ("sig4_league_weight", "sig5_fatigue_penalty",
+                         "gk_leak_bonus", "user_form_scoring",
+                         "user_form_conceding")
+
+noisy = dict(o15_args)
+noisy.update(home_scored_total=99.0, away_scored_total=99.0,
+             home_conceded_total=99.0, away_conceded_total=99.0,
+             home_gk_cpg=9.0, away_gk_cpg=9.0,
+             home_gk_liable=True, away_gk_liable=True,
+             fatigue_home=1.0, fatigue_away=1.0, league_weight=0.95)
+try:
+    check("retired O1.5 terms have zero influence on the score",
+          calculate_o15_score(**noisy)[0] == calculate_o15_score(**o15_args)[0])
+    _bd = calculate_o15_score(**o15_args)[1]
+    check("retired O1.5 columns are still emitted, pinned at 0.0",
+          all(k in _bd and _bd[k] == 0.0 for k in O15_REMOVED_TERMS))
+except TypeError:
+    check("retired-term invariance check could not run", False)
+
+# ── 4c. PHASE 1: the new draw-odds term is monotone and safe ───────────────
+# A SHORT draw price (market does not expect a stalemate) must be the strong
+# Over 1.5 case. This caught a real inverted-scale bug during Phase 1, where
+# the term normalised implied PROBABILITY against a 0.50 floor and therefore
+# scored ZERO for exactly the fixtures it was meant to reward.
+try:
+    bonuses = []
+    for price in (1.10, 1.40, 1.80, 2.20, None, "not-a-number"):
+        try:
+            bonuses.append(calculate_o15_score(**o15_args,
+                                               draw_odds=price)[1]["sig6_draw_odds_bonus"])
+        except Exception:
+            bonuses.append(None)
+            check("calculate_o15_score never raises on a bad draw price", False)
+    numeric = [b for b in bonuses[:4] if b is not None]
+    check("short draw price scores higher than a long draw price",
+          len(numeric) == 4 and numeric[0] > numeric[-1])
+    # Endpoints must be pinned, not merely ordered. A mere monotonicity check
+    # is too weak here: normalising implied PROBABILITY against a 0.50 floor
+    # ALSO decreases as price rises (20 / 12.2 / 3.2 / 0.0) and would sail
+    # through an ordering-only assertion while being the wrong transform.
+    # The correct transform saturates at the ceiling: a very short draw price
+    # must earn the FULL weight, and a price at/above the floor must earn 0.
+    check("a very short draw price earns the FULL draw-odds weight",
+          numeric and numeric[0] >= 20.0)
+    check("a long draw price earns exactly zero",
+          len(numeric) == 4 and numeric[-1] == 0.0)
+    # Midpoint value, pinned EXACTLY. Ordering alone cannot catch the wrong
+    # transform: normalising implied PROBABILITY against a 0.50 floor produces
+    # the SAME endpoints (20.0 short, 0.0 long) and is likewise monotone, so an
+    # ordering check sails straight through it. The two transforms only diverge
+    # in the middle, which is where the discrimination actually lives:
+    #     price 1.60 -> correct 9.76  |  probability-scale 7.14
+    try:
+        from Engine.gg_precision_engine import (
+            O15_DRAW_PRICE_CEIL, O15_DRAW_PRICE_FLOOR, O15_DRAW_WEIGHT)
+        mid = 1.60
+        span = O15_DRAW_PRICE_FLOOR - O15_DRAW_PRICE_CEIL
+        expected = max(0.0, min(1.0, (O15_DRAW_PRICE_FLOOR - mid) / span)) \
+            * O15_DRAW_WEIGHT
+        got = calculate_o15_score(**o15_args, draw_odds=mid)[1]["sig6_draw_odds_bonus"]
+        # The breakdown is published at 1 decimal (round(x, 1)), so the
+        # tolerance is the half-ulp of that scale (0.05) plus a hair — not 1e-6.
+        # A wrong transform differs by ~2.6 points here, far outside this band.
+        check("draw-odds term matches the price-space transform at the midpoint",
+              abs(got - expected) <= 0.05)
+    except Exception as exc:
+        check(f"draw-odds midpoint transform check could not run ({exc})", False)
+
+    check("missing / unparseable draw odds is neutral (0.0), never a penalty",
+          bonuses[4] == 0.0 and bonuses[5] == 0.0)
+except (KeyError, TypeError):
+    check("sig6_draw_odds_bonus is present in the breakdown", False)
+
+# ── 5. ARTIFACT COLUMN CONTRACT ──────────────────────────────────────────────
+# main.py:164 registers these three filenames under save_key "gg_o15".
+with open(os.path.join(ROOT, "main.py"), "r", encoding="utf-8") as fh:
+    main_src = fh.read()
+for fname in ("gg_o15_feed_{date}.json",
+              "ALIENEDGE_GG_PICKS_{date}.csv",
+              "ALIENEDGE_O15_PICKS_{date}.csv"):
+    check(f"main.py still registers {fname}", fname in main_src)
+
+failed = [label for label, ok in RESULTS if ok is False]
+skipped = [label for label, ok in RESULTS if ok is None]
+print("\n" + "=" * 78)
+print(f"RESULT: {len(RESULTS) - len(failed) - len(skipped)} passed, "
+      f"{len(failed)} failed, {len(skipped)} skipped")
+if failed:
+    for label in failed:
+        print("  FAILED: " + label)
+print("=" * 78)
+sys.exit(1 if failed else 0)
+
