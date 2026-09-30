@@ -734,6 +734,48 @@ def calculate_gk_vulnerability(team_id, today_fixture, check_date_str):
 # ==============================================================================
 # GG COMPOSITE SCORER
 # ==============================================================================
+# PHASE 2 (2026-09-30) — the 20 points spent on goalkeeper vulnerability were
+# moved to the head-to-head term, on measured evidence from 1,461 settled
+# matches:
+#
+#   sig3_gk_vuln   20 pts   AUC 0.5110   <- a coin flip
+#   sig4_h2h_btts  15 pts   AUC 0.6261   <- the strongest signal in the engine
+#
+# The GK hypothesis does not hold for BTTS: a leaky keeper raises the chance
+# one side is shut out, not the chance both score.
+#     home_gk_liable TRUE 55.8% vs FALSE 54.0%   (no separation)
+#     the 213 "proxy risk" rows, where no goalkeeper could be identified at all,
+#     settled at 46.0% — 9 points BELOW the 55.0% base rate.
+#
+# So sig3 keeps only a residual 5 points (it is still weakly informative, and
+# gg_forensics_audit builds a "double keeper liability" shortlist from it), and
+# sig4 rises 15 -> 30 to become the primary driver.
+#
+# The GK fields themselves are still computed and still exported; only their
+# weight in the score changed.
+#
+# NOT done here, deliberately: draw_odds is NOT added to GG. It measured AUC
+# 0.4672 on this market — genuinely counter-predictive for BTTS even though it
+# is the best Over 1.5 signal available (0.5673). A long draw price means the
+# market sees a decisive match: more total goals, but a likelier shutout.
+#
+# Measured effect (paired walk-forward, equal coverage, cut fixed on past dates):
+#   improved on 15 of 15 folds, mean +15.9pp, worst fold still +1.5pp
+#   exact two-sided sign test p = 0.0001
+# ==============================================================================
+GG_W_MC_BTTS   = 30   # sig1 — simulation BTTS probability (AUC 0.5529)
+GG_W_VENUE_BTTS = 25  # sig2 — venue-specific BTTS rate      (AUC 0.5728)
+GG_W_GK_VULN   = 5    # sig3 — keeper vulnerability, RESIDUAL (AUC 0.5110)
+GG_W_H2H_BTTS  = 30   # sig4 — head-to-head BTTS rate         (AUC 0.6261)
+GG_W_DIRECTIONAL = 10  # sig5 — both sides expected to score (AUC 0.5264)
+
+# The GK term keeps its original internal shape: both keepers leaky scores
+# full marks, one leaky scores 60% of that, and otherwise it scales off the
+# average goals-conceded-per-90 relative to the liability threshold.
+GG_ONE_LIABLE_FRACTION = 0.6
+GG_NEITHER_CPG_FRACTION = 0.4
+
+
 def calculate_gg_score(
     btts_prob,             # float 0-1, from Monte Carlo
     venue_btts_home,       # float 0-1, home BTTS rate at home venue
@@ -746,35 +788,35 @@ def calculate_gg_score(
     lambda_home,           # float, expected home goals
     lambda_away,           # float, expected away goals
 ):
-    sig1_raw   = min(1.0, btts_prob / 0.60)   
-    sig1_score = sig1_raw * 30
+    sig1_raw   = min(1.0, btts_prob / 0.60)
+    sig1_score = sig1_raw * GG_W_MC_BTTS
     sig1_fired = btts_prob >= 0.40
 
     venue_btts_combined = (venue_btts_home + venue_btts_away) / 2.0
-    sig2_raw   = min(1.0, venue_btts_combined / 0.60)  
-    sig2_score = sig2_raw * 25
+    sig2_raw   = min(1.0, venue_btts_combined / 0.60)
+    sig2_score = sig2_raw * GG_W_VENUE_BTTS
     sig2_fired = venue_btts_combined >= 0.40
 
     if home_gk_is_liability and away_gk_is_liability:
-        sig3_score = 20.0
+        sig3_score = GG_W_GK_VULN
         sig3_fired = True
     elif home_gk_is_liability or away_gk_is_liability:
-        sig3_score = 12.0
+        sig3_score = GG_W_GK_VULN * GG_ONE_LIABLE_FRACTION
         sig3_fired = True
     else:
         avg_cpg    = (home_gk_cpg + away_gk_cpg) / 2.0
         sig3_raw   = min(1.0, avg_cpg / GK_LIABILITY_CPG)
-        sig3_score = sig3_raw * 8.0   
+        sig3_score = sig3_raw * (GG_W_GK_VULN * GG_NEITHER_CPG_FRACTION)
         sig3_fired = avg_cpg >= 1.0
 
-    sig4_raw   = min(1.0, h2h_btts_rate / 0.60)  
-    sig4_score = sig4_raw * 15
+    sig4_raw   = min(1.0, h2h_btts_rate / 0.60)
+    sig4_score = sig4_raw * GG_W_H2H_BTTS
     sig4_fired = h2h_btts_rate >= 0.40
 
     home_gap  = max(0.0, lambda_home - 1.0)
     away_gap  = max(0.0, lambda_away - 1.0)
-    dir_score = min(1.0, (home_gap + away_gap) / 1.5)  
-    sig5_score = dir_score * 10
+    dir_score = min(1.0, (home_gap + away_gap) / 1.5)
+    sig5_score = dir_score * GG_W_DIRECTIONAL
     sig5_fired = lambda_home >= 1.0 and lambda_away >= 1.0
 
     total_score  = sig1_score + sig2_score + sig3_score + sig4_score + sig5_score
