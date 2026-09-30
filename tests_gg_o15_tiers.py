@@ -23,6 +23,8 @@ This suite pins:
   3. that the threshold ladders are monotone (a higher score never scores worse)
   4. that the scorers return a bounded 0-100 score and a populated breakdown
   5. that the artifact filenames main.py depends on are still registered
+  6. that the Phase 1 / Phase 2 weights stay where the measurements put them
+  7. the PROXY suppression that Phase 3 proposed and the data refused
 
 SAFETY (deliberate, enforced): fully offline — the scorers under test take only
 already-computed scalars, so the suite makes zero network calls and writes
@@ -303,6 +305,46 @@ check("GG score is bounded above by the sum of the weights",
                          away_gk_is_liability=True, home_gk_cpg=9.0,
                          away_gk_cpg=9.0, h2h_btts_rate=1.0,
                          lambda_home=9.0, lambda_away=9.0)[0] <= 100.0)
+
+# ── 6. PHASE 3 WAS PROPOSED, MEASURED, AND REJECTED — keep it rejected ──────
+# Phase 3 planned to cap "proxy risk" rows out of GG Tier 1. The headline that
+# motivated it was real but the conclusion drawn from it was wrong:
+#
+#   213 rows where no goalkeeper could be identified settled at 46.0% BTTS,
+#   9 points BELOW the 55.0% base rate — which reads like a defect.
+#
+# It is not a defect in the scoring. Conditioning on the score band, the gap
+# vanishes and even reverses:
+#
+#   band      all rows   PROXY rows   delta
+#   0-40        39.3%       39.3%     -0.0
+#   40-55       42.3%       38.7%     -3.6
+#   55-65       51.1%       55.0%     +3.9
+#   65-75       52.6%       63.2%    +10.6
+#   75-101      65.4%       61.3%     -4.1
+#
+# Capping PROXY out of Tier 1 therefore changes nothing (score>=68: 62.4% ->
+# 62.3%). "proxy risk" describes the FIXTURE (no keeper identified pre-match),
+# not a property of the model, and the model already prices it correctly.
+# Phase 2 shrank the GK weight 20 -> 5, which was the real fix: proxy rows
+# entering Tier 1 fell 120 -> 103 without needing a special case.
+#
+# These assertions exist so the idea is not silently re-introduced on the
+# strength of the misleading 46% headline alone.
+try:
+    from Engine.gg_precision_engine import (
+        calculate_gk_vulnerability, GG_W_GK_VULN)
+    _proxy_note = "Unlisted GK (proxy risk)"
+    # No proxy-related suppression hook exists in the tier path: get_gg_tier()
+    # takes only a score and a signal count, so it CANNOT special-case a row.
+    import inspect
+    _tier_params = list(inspect.signature(get_gg_tier).parameters)
+    check("GG tier gate takes only score + signals (no proxy special-case)",
+          _tier_params == ["gg_score", "signals_fired"])
+    check("the GK weight small enough that proxy rows cannot be propped up",
+          GG_W_GK_VULN <= 5)
+except Exception as exc:
+    check(f"PROXY-regression guard could not run ({exc})", False)
 
 failed = [label for label, ok in RESULTS if ok is False]
 skipped = [label for label, ok in RESULTS if ok is None]
