@@ -114,11 +114,16 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
   });
   const [endDate, setEndDate] = useState(getTodayDate());
 
-  // Form window for the per-side goal stats (O2.5 cards + table). 5 is the
-  // engine's own window and the default; 3 is the noisier "recent form" read.
-  // Display-only: no gate, vote or Poisson term depends on this, so switching
-  // it re-labels the form figures without re-fetching or re-filtering.
-  const [formWindow, setFormWindow] = useState<3 | 5>(5);
+  // 2026-09-30. The L5/L3 form-window toggle is GONE. It was display-only —
+  // no gate read the 3-window — so it was not a filter, and it sat down by
+  // the results implying it was one. Recent goal form is now expressed as
+  // four real gates in the Mathematical Precision Thresholds drawer
+  // (min_home_goals / min_away_goals / max_home_conceded / max_away_conceded),
+  // all defaulting to 0 = off.
+  //
+  // The per-card goal-form READOUT is retained and always shows the 5-window,
+  // which is the window the engine's own lambda and the gates use.
+  const FORM_WINDOW = 5 as const;
 
   // Mode & Risk State
   const [mode, setMode] = useState<"public" | "tipster" | "advanced">("public");
@@ -444,34 +449,6 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
             <span className="rounded-full bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.5 font-mono text-[10px] font-bold text-cyan-300">
               {rows.length} SURVIVED
             </span>
-            {/* Form window toggle — display-only. Sits with the results because
-                it re-labels the goal-form figures on them, and deliberately
-                NOT up in the filter bar: it changes no gate, so putting it
-                beside the real filters would imply it narrows the pick set.
-                It does not — the same rows survive either way. */}
-            <span
-              className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 pl-2 pr-1 py-0.5"
-              title="How many recent matches the goal-form figures cover. Display only — it does not change which picks survive."
-            >
-              <span className="font-mono text-[9px] uppercase tracking-wider text-slate-500">
-                Form
-              </span>
-              {([5, 3] as const).map((w) => (
-                <button
-                  key={w}
-                  onClick={() => setFormWindow(w)}
-                  aria-pressed={formWindow === w}
-                  className={cn(
-                    "rounded-full px-2 py-0.5 font-mono text-[10px] font-bold transition-colors",
-                    formWindow === w
-                      ? "bg-cyan-500/20 text-cyan-300"
-                      : "text-slate-500 hover:text-slate-300"
-                  )}
-                >
-                  L{w}
-                </button>
-              ))}
-            </span>
           </div>
 
           <div className="flex items-center gap-1 rounded-lg bg-black/40 p-1 border border-white/10">
@@ -567,7 +544,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                       {row.pos_gap !== undefined && (
                         <div>Pos Gap: {row.pos_gap}</div>
                       )}
-                      <GoalFormStats row={row} window={formWindow} />
+                      <GoalFormStats row={row} window={FORM_WINDOW} />
                     </div>
                   </div>
 
@@ -593,7 +570,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                   <th className="p-3">Odds</th>
                   <th className="p-3">Prob / Math</th>
                   <th className="p-3">Forensic Highlights</th>
-                  <th className="p-3">Goal Form (L{formWindow})</th>
+                  <th className="p-3">Goal Form (L{FORM_WINDOW})</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 text-slate-200">
@@ -617,7 +594,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                       {row.parity_score ? `Parity +${row.parity_score}` : row.verification_days ? `${row.verification_days}/7 Days` : row.council_votes ? `Votes: ${row.council_votes}` : "Kill-Switch Passed"}
                     </td>
                     <td className="p-3">
-                      <GoalFormStats row={row} window={formWindow} />
+                      <GoalFormStats row={row} window={FORM_WINDOW} />
                     </td>
                   </tr>
                 ))}

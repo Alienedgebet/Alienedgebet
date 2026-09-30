@@ -211,7 +211,15 @@ def o25_filter_params(
     max_pos_gap: Optional[float] = None,
     min_h2h_overs: Optional[float] = None,
     min_odds: Optional[float] = None,
+    # Retained so an older client sending max_odds still works. The Weekly
+    # drawer no longer exposes it — there is one odds box, a floor with no
+    # ceiling — but a stale bookmarked request must not silently lose its
+    # upper bound.
     max_odds: Optional[float] = None,
+    min_home_goals: Optional[float] = None,
+    min_away_goals: Optional[float] = None,
+    max_home_conceded: Optional[float] = None,
+    max_away_conceded: Optional[float] = None,
 ) -> dict:
     p = _normalise(mode, "o25")
     p["risk_level"] = risk_level if risk_level in O25_RISKS else "balanced"
@@ -221,7 +229,15 @@ def o25_filter_params(
                                 ("max_pos_gap", _GAP, _clamp_num),
                                 ("min_h2h_overs", _COUNT, _clamp_num),
                                 ("min_odds", _ODDS, _clamp_num),
-                                ("max_odds", _ODDS, _clamp_num)):
+                                ("max_odds", _ODDS, _clamp_num),
+                                # Recent goal form, per side. Bounded by
+                                # _COUNT (0-50); 0 or blank means the gate is
+                                # off, so the shipped result set is unchanged
+                                # until a value is actually typed.
+                                ("min_home_goals", _COUNT, _clamp_num),
+                                ("min_away_goals", _COUNT, _clamp_num),
+                                ("max_home_conceded", _COUNT, _clamp_num),
+                                ("max_away_conceded", _COUNT, _clamp_num)):
         clamped = caster(locals()[key], bounds)
         if clamped is not None:
             p["overrides"][key] = clamped
@@ -274,6 +290,11 @@ O25_TIPSTER_KWARGS = {
     "min_h2h_overs": "min_h2h_overs",
     "min_odds": "min_odds",
     "max_odds": "max_odds",
+    # Recent goal form, per side — real gates, not a display toggle.
+    "min_home_goals": "min_home_goals",
+    "min_away_goals": "min_away_goals",
+    "max_home_conceded": "max_home_conceded",
+    "max_away_conceded": "max_away_conceded",
 }
 
 GG_CFG_KEYS = {
@@ -482,13 +503,24 @@ def _live_o25(dates, params, risk_default="balanced"):
         kwargs = {engine_key: overrides[canonical]
                   for canonical, engine_key in O25_TIPSTER_KWARGS.items()
                   if canonical in overrides}
-        # Same corridor rule as WIN: a band with untouched drawer odds still
-        # narrows the tipster result; explicit drawer odds win.
-        if "min_odds" not in overrides and "max_odds" not in overrides and params.get("odds_band"):
+        # 2026-09-30. The drawer now has ONE odds box — a floor, no ceiling.
+        # The old guard required BOTH min_odds and max_odds to be absent
+        # before the corridor applied, but the drawer always sent min_odds
+        # (default 1.50), so the band block was never reached: the stale 1.50
+        # floor plus the filter's own 2.20 ceiling silently replaced whatever
+        # corridor the user had clicked, and @1.30-1.60 did nothing.
+        #
+        # Now: the band supplies the CEILING whenever the drawer did not set
+        # one, and the drawer's min_odds overrides the band floor only if the
+        # user actually typed it. So one box means "this price and above",
+        # exactly as labelled, and the corridor still caps the top when the
+        # floor is left at its default.
+        if params.get("odds_band"):
             band_min, band_max = parse_band(params["odds_band"])
-            if band_min is not None and band_max is not None:
-                kwargs.setdefault("min_odds", band_min)
+            if band_max is not None and "max_odds" not in overrides:
                 kwargs.setdefault("max_odds", band_max)
+            if band_min is not None and "min_odds" not in overrides:
+                kwargs.setdefault("min_odds", band_min)
         rows = []
         for date in dates:
             produced = run_over25_filter_aggregator(date, mode="tipster",

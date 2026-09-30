@@ -60,8 +60,20 @@ export const OVER25_FILTER_CONFIG: MarketFilterConfig = {
     { key: "min_votes", label: "Min Council Votes (/10)", type: "number", defaultValue: 6 },
     { key: "max_pos_gap", label: "Max Table Position Gap", type: "number", defaultValue: 6 },
     { key: "min_h2h_overs", label: "Min H2H Over 2.5 Matches", type: "number", defaultValue: 3 },
-    { key: "min_odds", label: "Min Odds", type: "number", step: 0.01, defaultValue: 1.50 },
-    { key: "max_odds", label: "Max Odds", type: "number", step: 0.01, defaultValue: 1.85 },
+    // Recent goal form, per side. These are REAL gates, not a display toggle.
+    // They default to 0, which is a no-op: an empty box means "do not gate on
+    // this", so the shipped result set is unchanged until a value is typed.
+    //  - min_*_goals     : each side must have scored at least this often
+    //  - max_*_conceded  : neither side may have conceded this often
+    { key: "min_home_goals", label: "Min Home Goals (Last 5)", type: "number", defaultValue: 0 },
+    { key: "min_away_goals", label: "Min Away Goals (Last 5)", type: "number", defaultValue: 0 },
+    { key: "max_home_conceded", label: "Max Home Conceded (Last 5)", type: "number", defaultValue: 0 },
+    { key: "max_away_conceded", label: "Max Away Conceded (Last 5)", type: "number", defaultValue: 0 },
+    // ONE odds box: a floor with no ceiling. Set 1.60 and you get every pick
+    // at 1.60 and above. The Max Odds box is gone — it shadowed the Target
+    // Odds Corridor, because the drawer's 1.85 was always sent as an override
+    // and therefore suppressed the preset the user had actually clicked.
+    { key: "min_odds", label: "Min Odds (no upper limit)", type: "number", step: 0.01, defaultValue: 1.50 },
   ],
   priorityKeys: [
     "match_date", "fixture", "poisson_over_prob_num", "o25_odds",
