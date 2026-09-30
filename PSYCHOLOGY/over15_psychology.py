@@ -126,10 +126,23 @@ def run_o15_psychology_engine(target_date=None):
                 try:
                     val = int(g)
                     if period == "FT":
-                        if p == "home": home_g = max(home_g or 0, val)
-                        elif p == "away": away_g = max(away_g or 0, val)
+                        # `CURRENT` is the authoritative full-time row.
+                        # SportMonks also returns 1ST_HALF / 2ND_HALF /
+                        # 2ND_HALF_ONLY, and 2ND_HALF_ONLY can disagree with
+                        # the true final (observed 3-1 where the result was
+                        # 1-1), so a max() across every row can read the
+                        # wrong score.
+                        if desc == "CURRENT":
+                            if p == "home": home_g = max(home_g or 0, val)
+                            elif p == "away": away_g = max(away_g or 0, val)
                     elif period == "HT":
-                        if "1ST" in desc or "HT" in desc or "HALF" in desc:
+                        # Anchor on 1ST_HALF. "2ND_HALF" contains the
+                        # substring "HALF", so the old
+                        # `"HALF" in desc` test matched both halves and the
+                        # max() collapsed them into the full-time score —
+                        # which made every halftime rule silently measure
+                        # full-time results instead.
+                        if desc.startswith("1ST_HALF") or "1ST HALF" in desc:
                             if p == "home": home_g = max(home_g or 0, val)
                             elif p == "away": away_g = max(away_g or 0, val)
                 except: pass
