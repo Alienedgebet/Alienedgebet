@@ -251,6 +251,59 @@ for fname in ("gg_o15_feed_{date}.json",
               "ALIENEDGE_O15_PICKS_{date}.csv"):
     check(f"main.py still registers {fname}", fname in main_src)
 
+# ── 5. PHASE 2: the GG weights must match the measured evidence ─────────────
+# The 20 points on keeper vulnerability were moved to head-to-head on measured
+# AUC (sig3 0.5110, sig4 0.6261). These pin the weights so a later "harmonising"
+# edit cannot silently rebalance the GG score back toward the dead signal.
+try:
+    from Engine.gg_precision_engine import (
+        GG_W_MC_BTTS, GG_W_VENUE_BTTS, GG_W_GK_VULN, GG_W_H2H_BTTS,
+        GG_W_DIRECTIONAL, GK_LIABILITY_CPG)
+except Exception as exc:
+    skip("GG weight constants", str(exc))
+    GG_W_MC_BTTS = GG_W_VENUE_BTTS = GG_W_GK_VULN = 0
+    GG_W_H2H_BTTS = GG_W_DIRECTIONAL = 0
+    GK_LIABILITY_CPG = 1.5
+
+check("GG weights still sum to 100",
+      GG_W_MC_BTTS + GG_W_VENUE_BTTS + GG_W_GK_VULN
+      + GG_W_H2H_BTTS + GG_W_DIRECTIONAL == 100)
+check("head-to-head outranks keeper vulnerability",
+      GG_W_H2H_BTTS > GG_W_GK_VULN)
+check("goalkeeper vulnerability is now a residual term (<= 5 pts)",
+      0 < GG_W_GK_VULN <= 5)
+
+# The GK term must remain strictly ordered: both leaky >= one leaky >= neither,
+# preserving the shortlist gg_forensics_audit builds from the liability flags.
+_gk_args = dict(btts_prob=0.55, venue_btts_home=0.6, venue_btts_away=0.5,
+                home_gk_cpg=1.2, away_gk_cpg=1.1, h2h_btts_rate=0.6,
+                lambda_home=1.4, lambda_away=1.3)
+_both = calculate_gg_score(home_gk_is_liability=True,
+                           away_gk_is_liability=True, **_gk_args)[0]
+_one = calculate_gg_score(home_gk_is_liability=True,
+                          away_gk_is_liability=False, **_gk_args)[0]
+_neither = calculate_gg_score(home_gk_is_liability=False,
+                              away_gk_is_liability=False, **_gk_args)[0]
+check("GG keeper term stays ordered: both >= one >= neither",
+      _both > _one > _neither)
+check("GG score reaches its ceiling only when every term saturates",
+      # sig5 measures the gap ABOVE lambda 1.0, so lambda 1.0/1.0 gives 0 there.
+      # Saturating it needs lambda 2.5 each (gap 1.5 / 1.5 = 1.0 -> full 10).
+      # sig3's "neither liable" branch is capped at 5 * 0.4 = 2, so the ceiling
+      # is 30 + 25 + 2 + 30 + 10 = 97, not 100. Two leaky keepers would score
+      # 5 there but would contradict the rest of the scenario.
+      calculate_gg_score(btts_prob=0.60, venue_btts_home=0.60,
+                         venue_btts_away=0.60, home_gk_is_liability=False,
+                         away_gk_is_liability=False, home_gk_cpg=1.5,
+                         away_gk_cpg=1.5, h2h_btts_rate=0.60,
+                         lambda_home=2.5, lambda_away=2.5)[0] == 97.0)
+check("GG score is bounded above by the sum of the weights",
+      calculate_gg_score(btts_prob=1.0, venue_btts_home=1.0,
+                         venue_btts_away=1.0, home_gk_is_liability=True,
+                         away_gk_is_liability=True, home_gk_cpg=9.0,
+                         away_gk_cpg=9.0, h2h_btts_rate=1.0,
+                         lambda_home=9.0, lambda_away=9.0)[0] <= 100.0)
+
 failed = [label for label, ok in RESULTS if ok is False]
 skipped = [label for label, ok in RESULTS if ok is None]
 print("\n" + "=" * 78)
