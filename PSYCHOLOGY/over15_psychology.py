@@ -184,11 +184,17 @@ def run_o15_psychology_engine(target_date=None):
     # 🧠 OVER 1.5 TACTICS ENGINE (The Chaos Profiler)
     # ==============================================================================
     def analyze_o15_tactics(team_id, current_match_id):
-        end_dt = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        start_dt = (datetime.now(timezone.utc) - timedelta(days=180)).strftime("%Y-%m-%d")
+        # Look-back window must END the day BEFORE the target fixture.
+        # Previously this used datetime.now(), which meant that for any
+        # backtest of a past date the window included the very match being
+        # predicted (and, for a future target, silently ran on today instead).
+        # Same convention as CORE/dna_engine_v2.py L234-235.
+        _t = datetime.strptime(TODAY_STR, "%Y-%m-%d")
+        end_dt = (_t - timedelta(days=1)).strftime("%Y-%m-%d")
+        start_dt = (_t - timedelta(days=180)).strftime("%Y-%m-%d")
         
         resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{team_id}", 
-                   params={"include": "statistics.type;participants;scores", "per_page": 15, "order":"desc", "filter": "fixtureStates:5"})
+                   params={"include": "statistics.type;participants;scores", "per_page": 15, "order":"desc", "filters": "fixtureStates:5"})
         
         fixtures = [f for f in resp.get("data", []) if str(f.get('id')) != str(current_match_id)]
         last_5 = fixtures[:5]
@@ -354,6 +360,29 @@ def run_o15_psychology_engine(target_date=None):
     if os.path.exists(HANDSHAKE_FILE):
         try:
             df_in = pd.read_csv(HANDSHAKE_FILE)
+            # ── STALE-FILE GUARD ────────────────────────────────────────────
+            # over15_stage3_final.csv is a single undated file. It used to be
+            # read whole, so a stale run silently fed today's fixtures. If it
+            # carries a Date column we filter on TODAY_STR; if it does not, we
+            # say so loudly rather than quietly scoring against a frozen list.
+            _date_col = next((c for c in df_in.columns
+                              if str(c).strip().lower() in ("date", "matchdate", "match_date", "fixture_date")), None)
+            if _date_col is None:
+                print(f"⚠️  [WARNING] {os.path.basename(HANDSHAKE_FILE)} has NO Date column "
+                      f"({len(df_in)} rows, mtime {datetime.fromtimestamp(os.path.getmtime(HANDSHAKE_FILE), timezone.utc):%Y-%m-%d %H:%M}Z). "
+                      f"Cannot confirm it belongs to {TODAY_STR} — scoring may be against a stale handshake.")
+            else:
+                _df_dates = pd.to_datetime(df_in[_date_col], errors="coerce").dt.strftime("%Y-%m-%d")
+                _keep = _df_dates == TODAY_STR
+                _dropped = int((~_keep).sum())
+                if _dropped:
+                    print(f"🧹 Stale-handshake guard: {os.path.basename(HANDSHAKE_FILE)} — "
+                          f"keeping {int(_keep.sum())} row(s) for {TODAY_STR}, dropped {_dropped} from other dates.")
+                df_in = df_in[_keep]
+            if df_in.empty:
+                print(f"🛑 FATAL: {os.path.basename(HANDSHAKE_FILE)} contained no rows for {TODAY_STR} "
+                      f"after the stale-handshake date filter. Refusing to score against another date's matches.")
+                return []
             match_col = next((c for c in df_in.columns if "match" in c.lower() or "fixture" in c.lower()), df_in.columns[0])
             poisson_col = next((c for c in df_in.columns if "poisson" in c.lower()), None)
             grade_col = next((c for c in df_in.columns if ("grade" in c.lower() and "num" not in c.lower()) or "votes" in c.lower()), None)
