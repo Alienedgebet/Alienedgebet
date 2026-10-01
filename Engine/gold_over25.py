@@ -35,7 +35,11 @@ def run_gold_over_25_engine(target_date):
     CHECK_DATE = target_date
     MIN_H2H_GAMES = 2
     REQ_DELAY = 0.2
-    OUTPUT_FILE = os.path.join(OUTPUT_DIR, "gold_over_25_feed.json")
+    # 2026-10-01 FIX — date-scope the artifact. This feed is read by the Apex
+    # aggregator as its VIP list; an undated file means a run that matched
+    # nothing kept yesterday's VIP list alive.
+    OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"gold_over_25_feed_{CHECK_DATE}.json")
+    LEGACY_OUTPUT_FILE = os.path.join(OUTPUT_DIR, "gold_over_25_feed.json")
 
     if not API_TOKEN:
         print("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
@@ -265,9 +269,18 @@ def run_gold_over_25_engine(target_date):
         results.append(match_payload)
 
     # Save cleanly for the aggregator to pull
+    #
+    # 2026-10-01 FIX — written unconditionally, on BOTH the dated and legacy
+    # paths. This engine is extremely selective (H2H must be 100% over 1.5
+    # AND both sides 8+ goals in 5), so it returns [] on almost every day.
+    # When an engine returns nothing but skips its write, the previous day's
+    # feed survives and gets republished as today's VIP list. An empty list is
+    # a real, meaningful result here and must overwrite.
     with open(OUTPUT_FILE, "w") as f:
         json.dump(results, f, indent=4)
-        
+    with open(LEGACY_OUTPUT_FILE, "w") as f:
+        json.dump(results, f, indent=4)
+
     print(f"Exported {len(results)} payload objects to {OUTPUT_FILE}.")
     
     # Return directly for the Master API to consume

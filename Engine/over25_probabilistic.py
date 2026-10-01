@@ -436,11 +436,19 @@ def run_over25_stage1(target_date):
             df_export = df_export.sort_values("Confidence", ascending=False)
             
             # --- SAVE SAFELY TO THE DYNAMIC OUTPUT FOLDER ---
-            csv_fn = os.path.join(OUTPUT_DIR, "over25_stage1_picks.csv")
-            json_fn = os.path.join(OUTPUT_DIR, "over25_stage1_picks.json")
+            # 2026-10-01 FIX — date-scope the artifact. See over25_council.py
+            # for why the undated name caused yesterday's picks to be served
+            # as today's whenever a run produced nothing.
+            csv_fn = os.path.join(OUTPUT_DIR, f"over25_stage1_picks_{target_date}.csv")
+            json_fn = os.path.join(OUTPUT_DIR, f"over25_stage1_picks_{target_date}.json")
+            legacy_csv = os.path.join(OUTPUT_DIR, "over25_stage1_picks.csv")
+            legacy_json = os.path.join(OUTPUT_DIR, "over25_stage1_picks.json")
             
             df_export.to_csv(csv_fn, index=False)
             df_export.to_json(json_fn, orient="records", indent=2)
+            # Legacy mirror — see over25_council.py for why.
+            df_export.to_csv(legacy_csv, index=False)
+            df_export.to_json(legacy_json, orient="records", indent=2)
             
             print(f"\n[CODE 2 / O2.5 Stage 1] Saved {len(df_filtered)} picks (> 60%) to {csv_fn}")
             print(df_export.to_string(index=False))

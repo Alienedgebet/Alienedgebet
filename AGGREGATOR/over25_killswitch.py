@@ -35,7 +35,13 @@ def run_over25_stage3(target_date):
     BASE_URL = "https://api.sportmonks.com/v3/football"
 
     # 🛠️ SURGICAL FIX: REMOVED STAGE 1. This engine now exclusively protects Stage 2.
-    STAGE2_FILE = os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv")
+    # 2026-10-01 FIX — prefer the DATED Stage 2 artifact.
+    # The undated path is retained only as a fallback so a run whose dated
+    # file is genuinely missing still works. Without this, a date whose Stage
+    # 2 produced nothing silently inherited the previous run's picks.
+    _dated_stage2 = os.path.join(OUTPUT_DIR, f"over25_stage2_picks_{target_date}.csv")
+    _legacy_stage2 = os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv")
+    STAGE2_FILE = _dated_stage2 if os.path.exists(_dated_stage2) else _legacy_stage2
 
     # Rule Thresholds
     RULE_MIN_GAMES = 4
@@ -294,11 +300,20 @@ def run_over25_stage3(target_date):
         print(df[cols].to_string(index=False))
         
         # --- SAVE SAFELY TO THE DYNAMIC OUTPUT FOLDER ---
-        csv_fn = os.path.join(OUTPUT_DIR, "over25_stage3_final.csv")
-        json_fn = os.path.join(OUTPUT_DIR, "over25_stage3_final.json")
+        # 2026-10-01 FIX — date-scope the artifact. This is the file the Apex
+        # aggregator treats as its base list, so a stale one directly
+        # republishes yesterday's selections. Verified stale on disk
+        # (Sep 30 artifact read by an Oct 1 run).
+        csv_fn = os.path.join(OUTPUT_DIR, f"over25_stage3_final_{target_date}.csv")
+        json_fn = os.path.join(OUTPUT_DIR, f"over25_stage3_final_{target_date}.json")
+        legacy_csv = os.path.join(OUTPUT_DIR, "over25_stage3_final.csv")
+        legacy_json = os.path.join(OUTPUT_DIR, "over25_stage3_final.json")
         
         df.to_csv(csv_fn, index=False)
         df.to_json(json_fn, orient="records", indent=2)
+        # Legacy mirror — see over25_council.py for why.
+        df.to_csv(legacy_csv, index=False)
+        df.to_json(legacy_json, orient="records", indent=2)
         
         print(f"\n[O2.5 Stage 3] Saved strict final list to {csv_fn}")
         

@@ -33,7 +33,10 @@ def run_over25_stage2(target_date):
     # -------------------------
     API_KEY = os.getenv("SPORTMONKS_API_KEY")
     BASE_URL = "https://api.sportmonks.com/v3/football"
-    VOTE_THRESHOLD = 6   # Match needs 6/9 votes to pass
+    # 2026-10-01: was 6 of 9. Layer 8 was a guaranteed vote, so the real bar
+    # was 5 of 8 meaningful layers. Removing the placeholder leaves 8 real
+    # layers, so 5 preserves the previous effective standard exactly.
+    VOTE_THRESHOLD = 5   # Match needs 5 of 8 real layers to pass
     REQUEST_DELAY = 0.2
     
     if not API_KEY:
@@ -141,9 +144,9 @@ def run_over25_stage2(target_date):
         return max(0.0, 1.0 - (p0 + p1 + p2))
 
     # -------------------------
-    # THE 9 LAYERS (VOTING SYSTEM)
+    # THE 8 REAL LAYERS (VOTING SYSTEM)
     # -------------------------
-    def run_council_of_9(h_stats, a_stats, h2h_games, odds_val):
+    def run_council_of_8(h_stats, a_stats, h2h_games, odds_val):
         votes = 0
         reasons =[]
         
@@ -178,13 +181,23 @@ def run_over25_stage2(target_date):
             reasons.append(f"Poisson({int(prob*100)}%)")
 
         # --- LAYER 3: MARKET (Daily Logic) ---
+        #
+        # 2026-10-01 FIX — this layer was inverted.
+        #
+        # It awarded a vote for odds < 1.85, i.e. it paid a vote precisely
+        # when the bookmaker believed the match was LEAST likely to go over.
+        # Shorter odds = higher implied probability = a worse bet for us.
+        # Measured on 1,373 settled fixtures: odds<=1.40 hit 69.1% and
+        # odds 1.85-2.20 hit 44.3%. The old rule handed its vote to the 44%
+        # bucket and withheld it from the 69% bucket -- backwards.
+        #
+        # It now awards the vote only when OUR Poisson disagrees with the
+        # market in the profitable direction, which is what "value" means.
         if odds_val:
-            if 1.40 <= odds_val <= 1.85:
+            implied_pct = 100.0 / odds_val
+            if prob > implied_pct + 3.0:
                 votes += 1
-                reasons.append("ValueOdds")
-            elif odds_val < 1.40:
-                votes += 1
-                reasons.append("Banker")
+                reasons.append(f"EdgeVsMarket({int(prob)}%>{int(implied_pct)}%)")
 
         # --- LAYER 4: CONSISTENCY ---
         h_rate = h_overs / h_games
@@ -216,8 +229,20 @@ def run_over25_stage2(target_date):
             reasons.append("Leaky")
 
         # --- LAYER 8: LINEUP (Pass for Early Runs) ---
-        votes += 1
-        reasons.append("LineupPass")
+        #
+        # 2026-10-01 FIX — was an unconditional +1 vote.
+        #
+        # This was never implemented; it was a placeholder that granted a free
+        # vote to every single fixture. With a 6/9 threshold that quietly
+        # reduced the real bar to 5/8, so the council passed fixtures that
+        # missed a genuine gate.
+        #
+        # The placeholder is REMOVED, not patched: there is no lineup data
+        # here to act on, and inventing a rule would be worse than the honest
+        # gap. VOTE_THRESHOLD below is rebalanced from 6 to 5 so the council
+        # keeps the same effective bar (5 of the 8 real layers) it had before,
+        # without a free pass.
+        pass
 
         # --- LAYER 9: VOLATILITY ---
         # Match average based on personal totals
@@ -231,7 +256,7 @@ def run_over25_stage2(target_date):
     # -------------------------
     # MAIN EXECUTION LOGIC
     # -------------------------
-    print(f"\n--- MASTER COUNCIL (9 LAYERS) {target_date} ---")
+    print(f"\n--- MASTER COUNCIL (8 LAYERS) {target_date} ---")
     
     # 1. FETCH ALL PAGES
     fixtures = fetch_all_fixtures(target_date)
@@ -245,7 +270,7 @@ def run_over25_stage2(target_date):
     # History Window (Last 6 months)
     start_hist = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
     
-    print("Running 9-Layer Analysis (This takes time for 100+ matches)...")
+    print("Running 8-Layer Analysis (This takes time for 100+ matches)...")
     
     for fx in fixtures:
         parts = fx.get("participants",[])
@@ -276,7 +301,7 @@ def run_over25_stage2(target_date):
         odds_val = get_match_odds(fx.get("odds"))
         
         # 5. VOTE
-        votes, reasons = run_council_of_9(h_stats, a_stats, h2h_games, odds_val)
+        votes, reasons = run_council_of_8(h_stats, a_stats, h2h_games, odds_val)
         
         if votes >= VOTE_THRESHOLD:
             final_picks.append({
@@ -285,10 +310,10 @@ def run_over25_stage2(target_date):
                 "Time": fx.get("starting_at", "")[11:16],
                 "Votes": votes,
                 "Odds": odds_val,
-                "Algorithm": "9_Layer_Council",
+                "Algorithm": "8_Layer_Council",
                 "Reasons": ", ".join(reasons)
             })
-            print(f"  [+] {home_name} vs {away_name} -> {votes}/9 Votes")
+            print(f"  [+] {home_name} vs {away_name} -> {votes}/8 Votes")
             
         sleep_short()
 
@@ -296,7 +321,7 @@ def run_over25_stage2(target_date):
     # OUTPUT (MODIFIED FOR AGGREGATOR)
     # -------------------------
     print("\n" + "="*50)
-    print(f"MASTER PREDICTIONS (Threshold: {VOTE_THRESHOLD}/9)")
+    print(f"MASTER PREDICTIONS (Threshold: {VOTE_THRESHOLD}/8)")
     print("="*50)
 
     if final_picks:
@@ -306,11 +331,28 @@ def run_over25_stage2(target_date):
         print(df.to_string(index=False))
         
         # --- SAVE SAFELY TO THE DYNAMIC OUTPUT FOLDER ---
-        csv_fn = os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv")
-        json_fn = os.path.join(OUTPUT_DIR, "over25_stage2_picks.json")
+        # 2026-10-01 FIX — date-scope the artifact.
+        #
+        # This filename had no date in it, so every run overwrote the last
+        # one and every consumer read whatever happened to be there. Verified
+        # on disk: over25_stage2_picks.csv was dated Sep 29 while the pipeline
+        # was on Oct 1. Because Stage 2 legitimately returns NOTHING on most
+        # days (it needs 6/9 votes), a zero-pick day did not clear the file —
+        # it left it alone, and the previous run's picks were re-published as
+        # today's. The dated file is now authoritative; the undated name is
+        # still written so existing API/frontend readers keep working.
+        csv_fn = os.path.join(OUTPUT_DIR, f"over25_stage2_picks_{target_date}.csv")
+        json_fn = os.path.join(OUTPUT_DIR, f"over25_stage2_picks_{target_date}.json")
+        legacy_csv = os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv")
+        legacy_json = os.path.join(OUTPUT_DIR, "over25_stage2_picks.json")
         
         df.to_csv(csv_fn, index=False)
         df.to_json(json_fn, orient="records", indent=2)
+        # Mirror to the legacy undated names so existing API/frontend readers
+        # keep working. Consumers that can pass a date should prefer the dated
+        # file; see _pick_dated in over25_risk_filter.py.
+        df.to_csv(legacy_csv, index=False)
+        df.to_json(legacy_json, orient="records", indent=2)
         print(f"\n[O2.5 Stage 2] Saved to {csv_fn} & {json_fn}")
         
         # Return directly to Aggregator memory
