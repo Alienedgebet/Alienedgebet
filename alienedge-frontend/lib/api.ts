@@ -2387,6 +2387,83 @@ export const over15Api = {
     cachedGet(`/api/over15/legacy/${date}`),
 };
 
+/**
+ * DANGER DERIVATION — why one team's number is what it is.
+ *
+ * The board shows `vulnerability_pct` beside a verdict, and the two are
+ * computed from different things, so a BLESSING can appear next to 87.1% and
+ * read as a contradiction. This page exists so neither number has to be
+ * believed on faith.
+ *
+ * It shows, in order:
+ *   1. what the percentage actually measures,
+ *   2. the arithmetic — numerator, denominator, per-position breakdown,
+ *   3. every absent player with the rating/apps behind the weight,
+ *   4. the signed verdict and its evidence, and
+ *   5. the goalkeeper decision and why.
+ *
+ * Nothing here is computed client-side: the figures come from
+ * /api/live/danger/{fixture_id}, which recomputes the breakdown from the
+ * published record using the engine's own weights.
+ */
+export interface DangerAbsentPlayer {
+  name: string;
+  pos: string;
+  rating: number | null;
+  apps: number | null;
+  mins: number | null;
+  worth: number | null;
+  weight: number;
+}
+
+export interface DangerSideDetail {
+  team_name: string;
+  team_id: number;
+  verdict: string | null;
+  verdict_reason: string | null;
+  net_impact: number | null;
+  impact_confidence: number | null;
+  regime: string | null;
+  quality_lost: number | null;
+  replacement_credit: number | null;
+  rotation_uplift: number | null;
+  formation: string | null;
+  vulnerability: {
+    pct: number | null;
+    missing_weight: number;
+    total_weight: number | null;
+    absent_by_position: { pos: string; count: number; weight: number }[];
+    goalkeeper_share_of_scale: number | null;
+    what_it_measures: string;
+    why_it_is_not_the_verdict: string;
+  };
+  goalkeeper: {
+    verdict: string | null;
+    note: string | null;
+    leak_per_90: number | null;
+    available: boolean | null;
+  };
+  absent_players: DangerAbsentPlayer[];
+  style: { label?: string; score?: number; da?: number } | null;
+  attack_index: number | null;
+}
+
+export interface LiveDangerDetail {
+  fixture: string;
+  fixture_id: number | string;
+  style_alignment: string | null;
+  openness_score: number | null;
+  match_chemistry: Record<string, string> | null;
+  home: DangerSideDetail | null;
+  away: DangerSideDetail | null;
+  error?: string;
+}
+
+export const liveDangerApi = {
+  getDetail: (fixtureId: string | number): Promise<AxiosResponse<LiveDangerDetail>> =>
+    api.get(`/api/live/danger/${fixtureId}`),
+};
+
 export const cornersApi = {
   getStage1: (date: string): Promise<AxiosResponse<CornerStage1Pick[]>> =>
     api.get(`/api/corners/stage1/${date}`),

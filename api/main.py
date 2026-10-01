@@ -2002,6 +2002,129 @@ def get_live_danger():
     return rows
 
 
+def _danger_side_detail(side, pos_weights):
+    """Full derivation for one side of a danger card. See the route docstring."""
+    if not isinstance(side, dict):
+        return None
+    absent = side.get("missing_details") or []
+    by_pos, missing_weight = {}, 0.0
+    for p in absent:
+        pos = (p or {}).get("pos") or "Unknown"
+        w = pos_weights.get(pos, 3.0)
+        missing_weight += w
+        slot = by_pos.setdefault(pos, {"pos": pos, "count": 0, "weight": 0.0})
+        slot["count"] += 1
+        slot["weight"] = round(slot["weight"] + w, 2)
+
+    # The denominator (the key eleven's own weight) is not published on the
+    # record, so it is recovered from the figure it produced rather than guessed:
+    # pct = missing/total, therefore total = missing / (pct/100).
+    pct = side.get("vulnerability_pct")
+    total_weight = None
+    if isinstance(pct, (int, float)) and pct > 0 and missing_weight > 0:
+        total_weight = round(missing_weight / (float(pct) / 100.0), 2)
+
+    gk_share = None
+    if total_weight:
+        gk_share = round(pos_weights.get("Goalkeeper", 50.0) / total_weight * 100, 1)
+
+    verdict, net = side.get("verdict"), side.get("net_impact")
+    has_net = isinstance(net, (int, float))
+    direction = ("BETTER than the ones now starting (damage)" if has_net and net > 0
+                 else "WORSE than the ones now starting (an upgrade)"
+                 if has_net and net < 0 else "of even quality")
+
+    return {
+        "team_name": side.get("team_name"), "team_id": side.get("id"),
+        "verdict": verdict, "verdict_reason": side.get("verdict_reason"),
+        "net_impact": net, "impact_confidence": side.get("impact_confidence"),
+        "regime": side.get("regime"),
+        "quality_lost": side.get("quality_lost"),
+        "replacement_credit": side.get("replacement_credit"),
+        "rotation_uplift": side.get("rotation_uplift"),
+        "formation": side.get("formation"),
+        "vulnerability": {
+            "pct": pct,
+            "missing_weight": round(missing_weight, 2),
+            "total_weight": total_weight,
+            "absent_by_position": sorted(by_pos.values(), key=lambda x: -x["weight"]),
+            "goalkeeper_share_of_scale": gk_share,
+            "what_it_measures": (
+                "Share of this team's expected XI positional weight that is "
+                "absent. The goalkeeper alone carries 50 of the ~83 weight "
+                "points, so this number mostly answers 'is the keeper there?'."),
+            "why_it_is_not_the_verdict": (
+                "It COUNTS absences. The verdict is SIGNED: net_impact "
+                + (f"{net:+.1f}" if has_net else "n/a")
+                + " means the players who left were " + direction
+                + ". A high percentage with a negative net is not a "
+                  "contradiction - it is a team that lost depth and gained "
+                  "quality."),
+        },
+        "goalkeeper": {
+            "verdict": side.get("gk_verdict"), "note": side.get("gk_note"),
+            "leak_per_90": side.get("gk_leak"),
+            "available": side.get("gk_leak_available"),
+        },
+        "absent_players": [
+            {"name": p.get("name"), "pos": p.get("pos"),
+             "rating": p.get("rating"), "apps": p.get("apps"),
+             "mins": p.get("mins"), "worth": p.get("worth"),
+             "weight": pos_weights.get(p.get("pos") or "Unknown", 3.0)}
+            for p in absent if isinstance(p, dict)
+        ],
+        "style": side.get("style"),
+        "attack_index": side.get("attack_index"),
+    }
+
+
+@app.get("/api/live/danger/{fixture_id}", tags=["Live"])
+def get_live_danger_detail(fixture_id: str):
+    """
+    The full derivation behind one fixture's danger card.
+
+    The list endpoint returns the numbers; this returns WHY they are those
+    numbers. It exists because `vulnerability_pct` is a black box on the card:
+    it sits beside a verdict it does not drive, so a BLESSING can appear next to
+    87.1% and read as a contradiction rather than as two different measurements.
+
+    WHAT vulnerability_pct ACTUALLY IS
+    ---------------------------------
+        missing positional weight / total positional weight * 100
+
+    It counts how much of the team's EXPECTED XI weight is absent. It is not a
+    severity score and never decided the badge. The badge is `net_impact`, a
+    SIGNED measure: whether the players who left were better or worse than the
+    ones now starting.
+
+    The weights are recomputed from the published `missing_details` using the
+    engine's own POS_WEIGHTS rather than stored, so the breakdown can never
+    drift from the figure it explains. Nothing here re-runs an engine or calls
+    the provider.
+    """
+    from LIVE_SCANNER.live_stage4_danger import POS_WEIGHTS
+
+    rows = _read_json(os.path.join(DATA_DIR, "danger_audit.json"), [])
+    if not isinstance(rows, list):
+        return {"error": "danger audit unavailable"}
+    entry = next((r for r in rows
+                  if isinstance(r, dict)
+                  and str(r.get("fixture_id")) == str(fixture_id)), None)
+    if entry is None:
+        return {"error": f"fixture {fixture_id} is not on the danger audit",
+                "available": sorted(str(r.get("fixture_id")) for r in rows
+                                    if isinstance(r, dict))}
+    return {
+        "fixture": entry.get("fixture"),
+        "fixture_id": entry.get("fixture_id"),
+        "style_alignment": entry.get("style_alignment"),
+        "openness_score": entry.get("openness_score"),
+        "match_chemistry": entry.get("match_chemistry_list"),
+        "home": _danger_side_detail(entry.get("home_team"), POS_WEIGHTS),
+        "away": _danger_side_detail(entry.get("away_team"), POS_WEIGHTS),
+    }
+
+
 @app.get("/api/live/aggregator", tags=["Live"])
 def get_live_aggregator():
     rows = _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
