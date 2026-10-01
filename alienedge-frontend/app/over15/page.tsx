@@ -8,6 +8,7 @@ import {
   ggApi,
   type GGO15Pick,
   type Over15PsychologyPick,
+  type Over15LegacyPick,
   type Over15Stage3Pick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -167,6 +168,23 @@ export default function Over15Page() {
   );
 
   /**
+   * The FROZEN PRE-FIX block.
+   *
+   * Same columns as the live psychology block on purpose — the point is to read
+   * the two verdicts against each other, and a different column set would make
+   * a difference in the data look like a difference in the rendering.
+   *
+   * Deliberately NO Intelligent Pass column here. That evaluator is the current
+   * one; running it over frozen old picks would stamp today's judgement onto
+   * yesterday's engine and the comparison would be worthless. The legacy block
+   * shows only what the old engine actually said.
+   */
+  const legacyColumns = useMemo(
+    () => psychologyColumns as PredictionColumn<Over15LegacyPick>[],
+    []
+  );
+
+  /**
    * The GG Over 1.5 twin head — the SAME payload the GG page renders, so the
    * two pages cannot drift apart. ChainStage consumes a bare row array, so the
    * endpoint's { gg, o15 } envelope is unwrapped to just the `o15` half here;
@@ -194,7 +212,9 @@ export default function Over15Page() {
             Over 1.5 Intelligence
           </h1>
           <p className="text-[11px] text-text-secondary">
-            2-stage engine chain — psychology audit &amp; base stage
+            2-stage engine chain — psychology audit &amp; base stage. The
+            psychology block is the FIXED engine; the PRE-FIX block beneath it is
+            the same engine before the 2026-09-30 fix, frozen for comparison.
           </p>
         </div>
         <SignalRankToggle
@@ -209,11 +229,11 @@ export default function Over15Page() {
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
 
-      {/* ── 3. Over 1.5 Intelligence ─────────────────────────────────── */}
+      {/* ── 3. Over 1.5 Intelligence (the FIXED engine) ───────────────── */}
       <div>
         <ChainStage
           title="Over 1.5 Intelligence"
-          description="Psychology layer"
+          description="FIXED ENGINE — psychology layer, live output"
           fetcher={() => over15Api.getPsychology(date)}
           deps={[date]}
           columns={psychologyColumnsWithVerify}
@@ -221,6 +241,24 @@ export default function Over15Page() {
           emptyMessage="No psychology audits for this date."
           fallbackData={MOCK_O15_PSYCH}
           refreshMs={VERIFY_REFRESH_MS}
+        />
+      </div>
+
+      {/* ── 3b. Over 1.5 PRE-FIX (frozen, for comparison) ────────────────
+          The engine fix landed 2026-09-30 18:11 and 19:53, but the pipeline
+          had already started at 18:00:21 and had imported every engine module
+          by then — so that run produced PRE-FIX output. This is that output,
+          frozen before the next run overwrote it. Read it against the block
+          above to see what the fix changed. */}
+      <div>
+        <ChainStage
+          title="Over 1.5 — PRE-FIX (frozen)"
+          description="OLD ENGINE output, kept only for comparison. Not a second engine and not live — the snapshot of the run that predates the fix. The live verdict is the block above."
+          fetcher={() => over15Api.getLegacy(date)}
+          deps={[date]}
+          columns={legacyColumns}
+          rowKey={(r, i) => `${r.Fixture}-legacy-${i}`}
+          emptyMessage="No pre-fix snapshot for this date."
         />
       </div>
 

@@ -666,6 +666,19 @@ export interface Over15PsychologyPick extends FixtureRisk {
   Reasons: string;
 }
 
+/**
+ * A frozen PRE-FIX Over 1.5 verdict.
+ *
+ * Identical row shape to Over15PsychologyPick on purpose — the two tables are
+ * meant to be read side by side — plus the provenance of the snapshot so the
+ * UI can say WHERE this came from rather than letting a stale verdict look
+ * like a live one.
+ */
+export interface Over15LegacyPick extends Over15PsychologyPick {
+  _legacy_note?: string;
+  _legacy_generated_at?: string | null;
+}
+
 export interface Over15ApexPick extends FixtureRisk {
   Fixture: string;
   Base_Poisson: string;
@@ -2366,6 +2379,12 @@ export const over15Api = {
 
   getApex: (date: string): Promise<AxiosResponse<Over15ApexPick[]>> =>
     cachedGet(`/api/over15/apex/${date}`),
+
+  // The FROZEN PRE-FIX verdict for this date. Same row shape as the psychology
+  // engine, so the two tables can be read against each other directly. Never
+  // regenerated — see tools/snapshot_o15_prefix.py.
+  getLegacy: (date: string): Promise<AxiosResponse<Over15LegacyPick[]>> =>
+    cachedGet(`/api/over15/legacy/${date}`),
 };
 
 export const cornersApi = {
