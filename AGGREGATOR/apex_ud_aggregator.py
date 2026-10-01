@@ -414,7 +414,16 @@ def run_apex_underdog_aggregator(target_date):
         df3 = pd.DataFrame(rank_3).sort_values(by=["Monte_UD_Prob"], ascending=[False])
         print(df3.drop(columns=['fixture_id']).to_string(index=False))
 
-    return rank_1_2
+    # 2026-10-01 FIX — return the SORTED frame, not the raw list.
+    #
+    # The sort fix above (probability before source count) was applied to
+    # df12 for display and for the CSV, but the function returned the
+    # original `rank_1_2` list. main.py persists whatever this returns into
+    # output/cache/underdog_apex__<date>.json, which is what the API serves
+    # and the frontend ranks from -- so the correction never reached the
+    # user. Verified: the 2026-10-02 cache was still in match-key order
+    # (85.84, 75.72, 78.06, 78.48, ...) while the CSV was correctly sorted.
+    return (df12.to_dict(orient="records") if rank_1_2 else [])
 
 # --- LOCAL TESTING BLOCK ---
 if __name__ == "__main__":
