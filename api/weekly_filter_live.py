@@ -615,9 +615,39 @@ def _live_win(dates, params, risk_default="balanced"):
 
 
 def _live_o25(dates, params, risk_default="balanced"):
-    from FILTER.over25_risk_filter import run_over25_filter_aggregator
+    from FILTER.over25_risk_filter import (run_over25_filter_aggregator,
+                                            over25_source_and_goal_form)
 
     overrides = params.get("overrides") or {}
+    # Is the user actually asking for a goal-form gate? A 0 means off, so only
+    # a truthy value counts.
+    goal_form_active = any(
+        overrides.get(k) for k in ("min_home_goals", "min_away_goals",
+                                   "max_home_conceded", "max_away_conceded"))
+    # Dates whose artifact predates the engine writing the goal-form columns.
+    # The engine's gate skips SILENTLY there (`col not in df_filtered.columns`),
+    # so without this the drawer shows a box as active while it evaluated
+    # nothing at all — which is precisely the "the box does nothing" report.
+    unchecked = set()
+    if goal_form_active:
+        for date in dates:
+            _src, has_cols = over25_source_and_goal_form(date)
+            if not has_cols:
+                unchecked.add(date)
+
+    def _mark(rows):
+        """Tag rows whose date could not be goal-form gated."""
+        if not unchecked:
+            return rows
+        for row in rows:
+            if isinstance(row, dict) and row.get("match_date") in unchecked:
+                row["_goal_form_unchecked"] = True
+                row["_goal_form_note"] = (
+                    "Goal-form thresholds were NOT applied to this fixture: "
+                    f"the engine recorded no recent-goal data for "
+                    f"{row.get('match_date')}.")
+        return rows
+
     if params.get("mode") in TIPSTER_MODES:
         kwargs = {engine_key: overrides[canonical]
                   for canonical, engine_key in O25_TIPSTER_KWARGS.items()
@@ -645,7 +675,7 @@ def _live_o25(dates, params, risk_default="balanced"):
             produced = run_over25_filter_aggregator(date, mode="tipster",
                                                     persist=False, **kwargs) or []
             rows.extend(_stamp(produced, date))
-        return rows
+        return _mark(rows)
 
     risk = params.get("risk_level") or risk_default
     band = params.get("odds_band") or O25_DEFAULT_BAND
@@ -654,7 +684,7 @@ def _live_o25(dates, params, risk_default="balanced"):
         produced = run_over25_filter_aggregator(date, mode="public", persist=False,
                                                  risk_level=risk, odds_band=band) or []
         rows.extend(_stamp(produced, date))
-    return narrow_rows(rows, "o25", overrides)
+    return _mark(narrow_rows(rows, "o25", overrides))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

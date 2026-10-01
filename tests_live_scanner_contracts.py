@@ -5875,6 +5875,135 @@ class TestOver25StrictTickBoxes(unittest.TestCase):
                           f"number field")
 
 
+class TestGoalFormGatesMustNeverSilentlyDoNothing(unittest.TestCase):
+    """
+    The reported failure, and the one place my earlier "it works" claim was
+    wrong.
+
+    The goal-form gates DID filter — on dates that carry the data. But
+    Engine/over25_forecast.py only began writing home/away_goals_scored_last_5
+    and the conceded pair on 2026-09-30. For any earlier dated artifact the
+    columns are absent, the engine's own guard skips the gate, and the pick set
+    comes back unchanged.
+
+    Verified on the artifacts: every master_over_stage2_*.csv up to and
+    including 2026-09-29 lacks all four columns; 2026-09-30 onward has them.
+    A 7-day Weekly range therefore contains a mix, and the gates appear to do
+    nothing on the older days while quietly working on the newer ones.
+
+    The strict ticks appeared to work on the same dates only because
+    kill_switch_pass has existed far longer than the goal-form columns.
+
+    Skipping an unevaluable gate is right; skipping it SILENTLY is not. These
+    tests require the skip to be reported.
+    """
+
+    GOAL_FORM = ("home_goals_scored_last_5", "away_goals_scored_last_5",
+                 "home_goals_conceded_last_5", "away_goals_conceded_last_5")
+
+    def _artifacts(self):
+        from pathlib import Path
+        return sorted((Path(__file__).parent / "output").glob(
+            "master_over_stage2_*.csv"))
+
+    def test_the_goal_form_columns_are_not_universally_present(self):
+        """
+        Pins the precondition of the whole bug. If this ever passes with a
+        single populated group, the engine backfilled and the warning path can
+        be reconsidered; while old artifacts exist, it must stay.
+        """
+        import pandas as pd
+        files = self._artifacts()
+        if not files:
+            self.skipTest("no dated O2.5 artifacts in this checkout")
+        with_data, without = [], []
+        for f in files:
+            cols = set(pd.read_csv(f, nrows=0).columns)
+            (with_data if set(self.GOAL_FORM) <= cols else without).append(
+                f.name)
+        self.assertTrue(without,
+                        "every artifact now carries the goal-form columns, so "
+                        "the silent-skip path would be dead code — revisit")
+        self.assertTrue(with_data,
+                        "no artifact carries the goal-form columns at all")
+
+    def test_a_date_without_the_columns_is_reported_not_silently_kept(self):
+        from api.weekly_filter_live import _live_o25, o25_filter_params
+        import pandas as pd
+        files = self._artifacts()
+        if not files:
+            self.skipTest("no dated O2.5 artifacts in this checkout")
+        legacy = [f.stem.replace("master_over_stage2_", "") for f in files
+                  if not set(self.GOAL_FORM) <= set(
+                      pd.read_csv(f, nrows=0).columns)]
+        # Walk to the first legacy date that actually yields rows. Most early
+        # dates produce none under the shipped thresholds, and skipping on the
+        # first one would leave this test silently unasserted.
+        checked = None
+        for date in legacy:
+            rows = _live_o25([date], o25_filter_params(
+                mode="tipster", odds_band="1.50-1.85", min_home_goals=25))
+            if rows:
+                checked = (date, rows)
+                break
+        if checked is None:
+            self.skipTest("no legacy date produces rows to mark")
+        date, rows = checked
+        for row in rows:
+            self.assertTrue(row.get("_goal_form_unchecked"),
+                            f"{date} has no goal-form data — a fixture from it "
+                            f"must be TAGGED when a goal-form gate was asked "
+                            f"for, or the box looks active but did nothing")
+            self.assertIn(date, row.get("_goal_form_note", ""),
+                          "the tag must name the date that could not be "
+                          "evaluated, so the user knows which range is blind")
+
+    def test_a_date_with_the_columns_is_not_warned_about(self):
+        """
+        The warning must mean something. Tagging rows that WERE gated would
+        train the user to ignore it.
+        """
+        from api.weekly_filter_live import _live_o25, o25_filter_params
+        import pandas as pd
+        files = self._artifacts()
+        modern = next((f for f in files
+                       if set(self.GOAL_FORM) <= set(
+                           pd.read_csv(f, nrows=0).columns)), None)
+        if modern is None:
+            self.skipTest("no artifact carries the goal-form columns")
+        date = modern.stem.replace("master_over_stage2_", "")
+        rows = _live_o25([date], o25_filter_params(
+            mode="tipster", odds_band="1.50-1.85", min_home_goals=25))
+        for row in rows:
+            self.assertFalse(row.get("_goal_form_unchecked"),
+                             f"{date} HAS the data — its rows must not be "
+                             f"tagged as unchecked")
+
+    def test_no_goal_form_gate_means_no_probing_and_no_tags(self):
+        """
+        The check must cost nothing on the shipped baseline: with no
+        goal-form gate set there is nothing to report, so no date is probed
+        and no row is tagged.
+        """
+        from api.weekly_filter_live import _live_o25, o25_filter_params
+        rows = _live_o25(["2026-09-26"],
+                         o25_filter_params(mode="tipster", odds_band="1.50-1.85"))
+        for row in rows:
+            self.assertIsNone(row.get("_goal_form_note"),
+                              "with no goal-form gate set there is nothing to "
+                              "report — the baseline response must be clean")
+
+    def test_the_ui_shows_the_warning(self):
+        from pathlib import Path
+        tsx = (Path(__file__).parent / "alienedge-frontend" / "app" / "weekly" /
+               "FilterTab.tsx").read_text(encoding="utf-8")
+        self.assertIn("_goal_form_note", tsx,
+                      "the Weekly page must render the unchecked-gate warning")
+        self.assertIn("2026-09-30", tsx,
+                      "the warning must state when the data began, so the "
+                      "user knows which dates are affected")
+
+
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
     """A lineup row with `player_id: null` must not empty danger_audit.json.
 
