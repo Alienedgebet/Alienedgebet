@@ -6440,6 +6440,143 @@ class TestTheGoalkeeperIsResolvedAgainstTheRealXI(unittest.TestCase):
                         "that needs it")
 
 
+class TestConvergenceCountsIndependentSourcesNotRepeatedReads(unittest.TestCase):
+    """
+    CONVERGENCE — "two or more signals that cannot lie at the same time".
+
+    Code 5 compares Code 3 against Code 4, which are two views of ONE live feed.
+    That cannot surface anything the feed did not already contain. This compares
+    sources built on different data: Code 4's live lineup verdict against DNA
+    v2's season-form factor vote.
+
+    THE CORRECTNESS TRAP
+    --------------------
+    Code 4's OWN outputs are NOT independent. A BLESSING verdict and a "keeper
+    is a liability" call both come out of the same key-monument over the same
+    window. Counting them as two agreeing sources would manufacture confidence
+    that was never earned, which is how a rule becomes a constant.
+    """
+
+    @staticmethod
+    def _side(name, **kw):
+        base = {"team_name": name, "verdict": "ROTATION", "net_impact": 0.0,
+                "gk_verdict": "ROTATION", "gk_note": "", "gk_leak": 1.0}
+        base.update(kw)
+        return base
+
+    @staticmethod
+    def _dna(winners):
+        return {"markets": {"win": {"factors": [
+            {"name": "f%d" % i, "winner": w} for i, w in enumerate(winners)]}}}
+
+    def _run(self, home, away, dna, target="home"):
+        import json
+        import tempfile
+        from pathlib import Path
+        from LIVE_SCANNER import live_convergence as conv
+        tmp = tempfile.mkdtemp()
+        dfile, nfile = Path(tmp) / "d.json", Path(tmp) / "n.json"
+        dfile.write_text(json.dumps(
+            [{"fixture_id": 1, "fixture": "A vs B", "home_team": home,
+              "away_team": away}]), encoding="utf-8")
+        nfile.write_text(json.dumps({"1": dna}), encoding="utf-8")
+        od, on = conv.DANGER_FILE, conv.DNA_FILE
+        conv.DANGER_FILE, conv.DNA_FILE = str(dfile), str(nfile)
+        try:
+            return conv.converge(1, "win", target)
+        finally:
+            conv.DANGER_FILE, conv.DNA_FILE = od, on
+
+    def test_one_source_is_a_signal_not_a_confirmation(self):
+        """A single live reading is a SIGNAL. Calling it CONFIRMED is a lie."""
+        # DNA must NOT lean here: 2 of 5 is 40%, below the 60% majority.
+        r = self._run(self._side("A", verdict="BLESSING", net_impact=-5.0),
+                      self._side("B"), self._dna(["home"] * 2 + ["away"] * 3))
+        self.assertEqual(r["label"], "SIGNAL")
+        self.assertEqual(r["source_count"], 1)
+
+    def test_two_independent_sources_are_a_confirmation(self):
+        r = self._run(self._side("A", verdict="BLESSING", net_impact=-5.0),
+                      self._side("B"), self._dna(["home"] * 6 + ["away"] * 2))
+        self.assertEqual(r["label"], "CONFIRMED")
+        self.assertEqual(sorted(r["sources_agreeing"]), ["code4", "dna_v2"])
+
+    def test_code4_reads_as_ONE_source_never_two(self):
+        """
+        THE TRAP. A blessing verdict AND a liability goalkeeper on the opponent
+        point the same way, but from the same key-monument over the same window.
+        """
+        r = self._run(self._side("A", verdict="BLESSING", net_impact=-5.0),
+                      self._side("B", gk_verdict="DANGER"),
+                      self._dna(["away"] * 8))
+        self.assertEqual(
+            len([v for v in r["votes"] if v["source"] == "code4"]), 1,
+            "Code 4 must contribute exactly one vote however many of its own "
+            "signals fire")
+        self.assertLessEqual(r["source_count"], 2,
+                             "only two independent sources exist here")
+
+    def test_dna_uses_a_vote_not_a_raw_margin(self):
+        """
+        WHY A VOTE. On an underdog a 0.1 edge is still an edge, so no large
+        margin is demanded. But DNA margins are often 0.1-0.2 apart on computed
+        indices, which is rounding noise. A majority of FACTORS is robust:
+        several small wins outweigh one, without discarding a lean for being
+        small.
+        """
+        r = self._run(self._side("A", verdict="BLESSING", net_impact=-5.0),
+                      self._side("B"), self._dna(["home"] * 5 + ["away"] * 3))
+        self.assertEqual(r["label"], "CONFIRMED")
+        lean = [v for v in r["votes"] if v["source"] == "dna_v2"][0]
+        self.assertEqual(lean["leans"], "home")
+        self.assertEqual(lean["votes_for"], 5)
+
+        # 4 of 8 is a split, not a lean — so this collapses to a SIGNAL.
+        split = self._run(self._side("A", verdict="BLESSING", net_impact=-5.0),
+                          self._side("B"), self._dna(["home"] * 4 + ["away"] * 4))
+        self.assertEqual(split["label"], "SIGNAL")
+        self.assertEqual(
+            [v for v in split["votes"] if v["source"] == "dna_v2"][0]["leans"],
+            "neutral")
+
+    def test_a_neutral_factor_is_not_a_vote_either_way(self):
+        """
+        Declining to pick a winner is not evidence for the team declined.
+        Counting 'neutral' either way would let 3-neutral + 5-away manufacture
+        a home lean.
+        """
+        r = self._run(self._side("A"), self._side("B"),
+                      self._dna(["neutral"] * 3 + ["away"] * 5))
+        lean = [v for v in r["votes"] if v["source"] == "dna_v2"][0]
+        self.assertEqual(lean["leans"], "neutral")
+        self.assertEqual(lean["total"], 5, "neutrals excluded entirely")
+
+    def test_a_missing_source_is_reported_not_counted(self):
+        """No DNA profile must read as neutral, never as agreement."""
+        import json
+        import tempfile
+        from pathlib import Path
+        from LIVE_SCANNER import live_convergence as conv
+        tmp = tempfile.mkdtemp()
+        dfile = Path(tmp) / "d.json"
+        dfile.write_text(json.dumps(
+            [{"fixture_id": 1, "fixture": "A vs B",
+              "home_team": self._side("A", verdict="BLESSING", net_impact=-5),
+              "away_team": self._side("B")}]), encoding="utf-8")
+        od, on = conv.DANGER_FILE, conv.DNA_FILE
+        conv.DANGER_FILE, conv.DNA_FILE = str(dfile), str(Path(tmp) / "none.json")
+        try:
+            r = conv.converge(1, "win", "home")
+        finally:
+            conv.DANGER_FILE, conv.DNA_FILE = od, on
+        self.assertEqual(r["source_count"], 1)
+        self.assertEqual(r["label"], "SIGNAL")
+
+    def test_an_unknown_fixture_reports_an_error_not_a_verdict(self):
+        from LIVE_SCANNER.live_convergence import converge
+        self.assertIn("error", converge(999999, "win", "home"))
+
+
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
     """A lineup row with `player_id: null` must not empty danger_audit.json.
 
