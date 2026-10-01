@@ -6577,6 +6577,166 @@ class TestConvergenceCountsIndependentSourcesNotRepeatedReads(unittest.TestCase)
         self.assertIn("error", converge(999999, "win", "home"))
 
 
+class TestShadowSettlementScoresAgainstRealResults(unittest.TestCase):
+    """
+    The settlement join is the thing that decides whether the rule gets to gate
+    anything. If it cannot score a pick correctly, it will report a confident
+    hit rate built on nonsense — so every branch is pinned here.
+
+    An unscorable pick must return None, never False. Treating "no result yet"
+    as a loss would quietly manufacture losses for every fixture still
+    running, and inflate the very gap the rule is being judged on.
+    """
+    @classmethod
+    def _module(cls):
+        import importlib.util
+        import os
+        # This test file sits at the backend root, so ONE dirname is the root.
+        # Two walked up to /var/www and found nothing.
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "tools", "convergence_shadow_settlement.py")
+        spec = importlib.util.spec_from_file_location("css", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    @classmethod
+    def _settle(cls, pick, result):
+        return cls._module().settle(pick, result)
+
+    @staticmethod
+    def _ft(h, a, finished=True):
+        return {"h_ft": h, "a_ft": a, "is_finished": finished}
+
+    def test_to_score_home_wins_when_home_found_the_net(self):
+        self.assertTrue(self._settle({"type": "TO_SCORE", "target": "home"},
+                                     self._ft(2, 0)))
+
+    def test_to_score_away_loses_when_away_did_not_score(self):
+        self.assertFalse(self._settle({"type": "TO_SCORE", "target": "away"},
+                                      self._ft(2, 0)))
+
+    def test_to_score_away_wins_when_away_scored(self):
+        self.assertTrue(self._settle({"type": "TO_SCORE", "target": "away"},
+                                     self._ft(0, 1)))
+
+    def test_gg_needs_both_sides_to_score(self):
+        self.assertTrue(self._settle({"type": "GG"}, self._ft(1, 1)))
+        self.assertFalse(self._settle({"type": "GG"}, self._ft(1, 0)))
+
+    def test_over_2_5_needs_three_goals_not_two(self):
+        """2-0 is two goals. This boundary is the single easiest thing to get
+        wrong and it silently shifts an entire market's hit rate."""
+        self.assertFalse(self._settle({"type": "GG_OVER_2.5"}, self._ft(1, 1)))
+        self.assertTrue(self._settle({"type": "GG_OVER_2.5"}, self._ft(2, 1)))
+
+    def test_an_unfinished_match_is_unscorable_not_a_loss(self):
+        self.assertIsNone(
+            self._settle({"type": "TO_SCORE", "target": "home"},
+                         self._ft(1, 0, finished=False)))
+
+    def test_a_missing_score_is_unscorable(self):
+        self.assertIsNone(
+            self._settle({"type": "TO_SCORE", "target": "home"},
+                         {"is_finished": True, "h_ft": None, "a_ft": 1}))
+
+    def test_an_unmapped_market_is_unscorable_rather_than_guessed(self):
+        self.assertIsNone(self._settle({"type": "CORNERS_OVER_9"},
+                                       self._ft(2, 2)))
+
+    def test_it_indexes_the_real_snapshot_shape_not_date_strings(self):
+        """
+        THE SHAPE TRAP, pinned.
+
+        ft_result_snapshot.json is {"fixtures": {date: {fid: result}},
+        "updated_at": ..., "date": ...}. Walking it naively reaches the DATE
+        KEY STRINGS and indexes them as matches, so every real fixture is
+        missed and the tool reports "no scored picks" forever without raising.
+        """
+        import json
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "data", "ft_result_snapshot.json")
+        if not os.path.exists(path):
+            self.skipTest("no snapshot on disk yet")
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+
+        index = self._module().index_results(snap)
+
+        if "fixtures" in snap:
+            real = [r for bucket in snap["fixtures"].values()
+                    for r in bucket.values() if isinstance(r, dict)]
+            self.assertGreaterEqual(len(index), len(real))
+        for key, res in index.items():
+            self.assertNotIsInstance(res, str,
+                                    "a date string was indexed as a match")
+            self.assertIn("h_ft", res)
+            self.assertTrue(key.isdigit(), f"{key} is not a fixture id")
+
+    def test_it_scores_against_the_real_snapshot_shape(self):
+        """
+        Not a synthetic row: the actual published snapshot, so a change in how
+        results are stored cannot quietly break scoring.
+        """
+        import json
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "data", "ft_result_snapshot.json")
+        if not os.path.exists(path):
+            self.skipTest("no settled results on disk yet")
+        with open(path, encoding="utf-8") as f:
+            snap = json.load(f)
+        index = self._module().index_results(snap)
+        finished = {k: v for k, v in index.items()
+                    if v.get("is_finished") and v.get("h_ft") is not None}
+        if not finished:
+            self.skipTest("no finished matches in snapshot yet")
+        key, sample = next(iter(finished.items()))
+        res = {"h_ft": sample["h_ft"], "a_ft": sample["a_ft"],
+               "is_finished": True}
+        self.assertIs(self._settle({"type": "GG"}, res),
+                      sample["h_ft"] > 0 and sample["a_ft"] > 0)
+        self.assertIs(self._settle({"type": "GG_OVER_2.5"}, res),
+                      (sample["h_ft"] + sample["a_ft"]) > 2)
+
+
+class TestShadowLedgerRecordsOnceAndSurvivesRoundTrip(unittest.TestCase):
+    """The ledger is the only record of what the rule said at pick time."""
+
+    def _sandbox(self, tmp):
+        from LIVE_SCANNER import live_convergence_shadow as sh
+        sh.LEDGER_FILE = str(tmp / "ledger.json")
+        return sh
+
+    def test_recording_twice_does_not_duplicate_a_pick(self):
+        """
+        The de-duplication key must survive the round trip through JSON. An
+        earlier version keyed on a `sides` field that was never persisted, so
+        every both-teams pick was re-appended on every cycle, forever.
+        """
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            sh = self._sandbox(tmp)
+            fixtures = {"1": {"fixture": "A vs B", "picks": [
+                {"type": "GG", "target": None, "would_gate": True,
+                 "source_count": 1, "label": "home=1", "sides": {"home": {}}},
+                {"type": "TO_SCORE", "target": "home", "would_gate": False,
+                 "source_count": 2, "label": "CONFIRMED",
+                 "sources_agreeing": ["code4", "dna_v2"]},
+            ]}}
+            first = sh._record_ledger(fixtures, {}, {})
+            second = sh._record_ledger(fixtures, {}, {})
+            self.assertEqual(first, 2)
+            self.assertEqual(second, 0,
+                             "ledger duplicated a pick on re-read")
+            import json
+            with open(sh.LEDGER_FILE, encoding="utf-8") as f:
+                self.assertEqual(len(json.load(f)["1"]["picks"]), 2)
+
+
 class TestConvergenceShadowChangesNothing(unittest.TestCase):
     """The shadow layer must be incapable of altering a live pick.
 

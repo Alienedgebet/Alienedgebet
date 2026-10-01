@@ -25,6 +25,7 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(
 PREDICTIONS_FILE = os.path.join(DATA_DIR, "incoming_predictions.json")
 PREMATCH_FILE = os.path.join(DATA_DIR, "prematch_team_audit.json")
 SHADOW_FILE = os.path.join(DATA_DIR, "convergence_shadow.json")
+LEDGER_FILE = os.path.join(DATA_DIR, "convergence_shadow_ledger.json")
 
 # A pick needs this many independent sources to survive under the proposed
 # rule. Mirrors live_convergence's own threshold.
@@ -125,6 +126,72 @@ def _fixture_names():
             if isinstance(r, dict) and r.get("fixture_id") is not None}
 
 
+def _kickoffs():
+    pm = _load(PREMATCH_FILE, {})
+    rows = list(pm.values()) if isinstance(pm, dict) else (
+        pm if isinstance(pm, list) else [])
+    return {str(r["fixture_id"]): r.get("kickoff_utc") for r in rows
+            if isinstance(r, dict) and r.get("fixture_id") is not None}
+
+
+def _record_ledger(fixtures, names, kickoffs):
+    """
+    Append each shadow decision to a durable ledger, once per pick.
+
+    The snapshot above is overwritten every cycle, so by the time a fixture
+    settles, the reading that actually scored it is gone. The ledger is what
+    makes settlement possible: it keeps the FIRST reading of each pick, which
+    is the one that would have gated it at the moment it was made.
+
+    De-duplicated on (fixture, type, target). Recording every cycle instead
+    would write the same decision hundreds of times and make a hit rate
+    impossible to compute from the file.
+    """
+    ledger = _load(LEDGER_FILE, {})
+    if not isinstance(ledger, dict):
+        ledger = {}
+
+    added = 0
+    for fixture_id, block in fixtures.items():
+        entry = ledger.setdefault(str(fixture_id), {
+            "fixture": block.get("fixture"), "picks": []})
+        # The key must be built ONLY from fields that are actually persisted
+        # below. An earlier version keyed on whether the record carried a
+        # `sides` block — but that field is not written to the ledger, so on
+        # every re-read the stored key said False while the incoming record said
+        # True, and every both-teams pick was appended again, forever. A
+        # de-duplication key that cannot survive the round trip is no key.
+        seen = {(p.get("type"), p.get("target"))
+                for p in entry["picks"]}
+        for rec in block["picks"]:
+            key = (rec.get("type"), rec.get("target"))
+            if key in seen:
+                continue
+            seen.add(key)
+            entry["picks"].append({
+                "recorded_at": time.time(),
+                "kickoff_utc": kickoffs.get(str(fixture_id)),
+                "type": rec.get("type"),
+                "target": rec.get("target"),
+                "team": rec.get("team"),
+                "would_gate": rec.get("would_gate"),
+                "source_count": rec.get("source_count"),
+                "label": rec.get("label"),
+                "sources_agreeing": rec.get("sources_agreeing"),
+                "market_agrees": (rec.get("market") or {}).get(
+                    "agrees_with_live"),
+                "reason_now": rec.get("reason_now"),
+            })
+            added += 1
+
+    if added:
+        tmp = LEDGER_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(ledger, f, indent=1)
+        os.replace(tmp, LEDGER_FILE)
+    return added
+
+
 def run_shadow_review():
     """
     Build the shadow report. Read-only with respect to every engine output.
@@ -165,6 +232,14 @@ def run_shadow_review():
                     "picks": reviewed,
                 }
 
+        try:
+            recorded = _record_ledger(fixtures, names, _kickoffs())
+        except Exception as exc:
+            # The snapshot is still written below; losing the ledger is bad but
+            # must not cost us the cycle's comparison.
+            recorded = 0
+            print(f"[shadow] ledger not updated: {exc}", flush=True)
+
         report = {
             "generated_at": time.time(),
             "mode": "SHADOW — nothing below changes any live pick",
@@ -173,7 +248,8 @@ def run_shadow_review():
             "totals": {"picks_reviewed": total,
                        "would_be_gated": gated,
                        "not_mappable": unmappable,
-                       "could_not_evaluate": unevaluable},
+                       "could_not_evaluate": unevaluable,
+                       "new_ledger_entries": recorded},
             "fixtures": fixtures,
         }
         tmp = SHADOW_FILE + ".tmp"
