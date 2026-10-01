@@ -776,7 +776,23 @@ def run_win_apex_aggregator(target_date=None):
         cat_priority   = 99
 
         if is_psych_veto:
-            final_category = "🚨 CATEGORY 3: THE VETO BOARD"
+            #2026-10-01 — the label was doing more work than the data supports.
+            #
+            # This board was called "THE VETO BOARD", which reads as "do not
+            # bet, these lose". Measured over 1,097 settled Apex rows it did
+            # not: the 402 rows that landed here won 39.3%, against a 31.1%
+            # base for this feed. Underlying psychology tiers on this board
+            # (🛑 CAUTION: TRAP and 🚨 OVERTURNED) score 41.8% and 39.4%
+            # respectively over 1,291 settled rows.
+            #
+            # So the routing is CORRECT -- real traps really are being caught --
+            # but the destination is a genuine longshot, not a certainty. The
+            # old wording invited someone to read a 39% line as a 0% line,
+            # which is precisely the kind of misreading that loses money.
+            #
+            # The board now states the measured base rate so nobody has to
+            # guess, and calls it what it is: avoid, but know the real number.
+            final_category = "🚨 CATEGORY 3: AVOID (low-probability, ~39% base)"
             cat_priority   = 3
 
         elif (eng and is_psych_lock and is_choked_opp and
@@ -892,8 +908,11 @@ def run_win_apex_aggregator(target_date=None):
         print("   [!] No Category 2 matches today.\n")
 
     print("\n" + "🚨"*50)
-    print(" 🚨 CATEGORY 3: THE VETO BOARD — Traps & Overturns 🚨")
+    print(" 🚨 CATEGORY 3: AVOID — Traps & Overturns 🚨")
     print("🚨"*50)
+    print("   Measured: this board's picks have won ~39% of the time (n=402).\n")
+    print("   Avoid these, but that is a longshot to avoid — not a certainty to\n")
+    print("   fade, and not the '0%' the old label implied.\n")
     if not cat3_df.empty:
         for i, (_, row) in enumerate(cat3_df.iterrows(), 1):
             print(
