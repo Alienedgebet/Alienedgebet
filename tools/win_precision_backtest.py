@@ -96,6 +96,47 @@ def load_apex():
     return pd.DataFrame(rows)
 
 
+def load_psychology():
+    """
+    WIN psychology rows joined to results.
+
+    This artifact has NO fixture_id -- it keys on Fixture ("A vs B") and
+    Master_Pick (a team name), so the side must be resolved by comparing
+    Master_Pick against the archive's home_team/away_team. Rows that cannot be
+    resolved exactly are dropped rather than guessed, for the same reason the
+    Apex join is strict: a harness that guesses quietly reports numbers that
+    look rigorous and are wrong.
+    """
+    rows = []
+    for fp in sorted(glob(os.path.join(OUT, "ALIENEDGE_WIN_PREDICTIONS_*.csv"))):
+        date = os.path.basename(fp).replace("ALIENEDGE_WIN_PREDICTIONS_", "").replace(".csv", "")
+        truth = truth_for(date)
+        if not truth:
+            continue
+        df = pd.read_csv(fp)
+        if "Fixture" not in df.columns or "Master_Pick" not in df.columns:
+            continue
+        for _, r in df.iterrows():
+            pick = str(r.get("Master_Pick", "")).strip()
+            npick = norm(pick)
+            if not npick or npick == "none":
+                continue
+            hit = None
+            for fid, (h, a, hteam, ateam) in truth.items():
+                if npick == norm(hteam):
+                    hit = (h > a)
+                    break
+                if npick == norm(ateam):
+                    hit = (a > h)
+                    break
+            if hit is None:
+                continue
+            rec = r.to_dict()
+            rec.update(date=date, won=1 if hit else 0)
+            rows.append(rec)
+    return pd.DataFrame(rows)
+
+
 def load_forecast():
     """Base engine rows joined to results (it HAS an explicit side column)."""
     rows = []
@@ -204,6 +245,27 @@ def main():
                        [0, 1.5, 2.0, 2.5, 3.0, 99])
             m = f2.groupby(b, observed=True).agg(n=("won", "size"), actual=("won", "mean"))
             print("   " + m.to_string().replace("\n", "\n   "))
+
+    # ---- PSYCHOLOGY ENGINE ----
+    psy = load_psychology()
+    if not psy.empty and "Tier" in psy.columns:
+        psy["family"] = (psy["Tier"].astype(str).str.split("(").str[0].str.strip())
+        base_p = psy["won"].mean()
+        print("\n\n### PSYCHOLOGY ENGINE (PSYCHOLOGY/win_psychology.py)")
+        print(f" {len(psy)} rows / {psy['date'].nunique()} dates "
+              f"| win rate {base_p*100:.1f}%")
+        g = psy.groupby("family").agg(n=("won", "size"), win=("won", "sum"),
+                                      actual=("won", "mean"))
+        keep = g[g["n"] >= 20]
+        rows = []
+        for fam, r in keep.iterrows():
+            lo, hi = wilson(int(r["win"]), int(r["n"]))
+            rows.append(f"   {fam:<32} {int(r['n']):>5} {int(r['win']):>5} "
+                        f"{r['actual']*100:>6.1f}%  CI[{lo:.0f},{hi:.0f}]")
+        print("\n".join(rows))
+        print("\n  LOCK tiers vs AVOID tiers are separated by ~13pp on settled")
+        print("  data -- this engine discriminates. Single-row OVERTURNED tiers")
+        print("  are omitted: n=1 each, which is a label per match, not a bucket.")
 
     if not apex.empty:
         apex.to_csv("/tmp/win_apex_rows.csv", index=False)
