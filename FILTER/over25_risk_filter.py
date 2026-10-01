@@ -51,10 +51,22 @@ def over25_source_and_goal_form(target_date):
     So the caller asks first and can say which dates were not evaluated,
     rather than letting an unevaluable gate look like a passing one.
     """
+    # 2026-10-01 FIX — dated artifacts are tried FIRST and the undated name is
+    # only a last resort.
+    #
+    # The previous order tried master_over_stage2_<date>.csv then jumped
+    # straight to the UNDATED council file, never trying the dated council
+    # file that now exists. So on any date where the forecast artifact was
+    # missing, the filter silently loaded the most recent council output --
+    # which could be days old -- and reported it as this date's picks.
+    #
+    # A missing input must be reported, not silently substituted. Callers get
+    # None (and an empty family set) so the UI can say "not evaluated" rather
+    # than showing an unevaluable gate as a passing one.
     candidate_inputs = [
         os.path.join(OUTPUT_DIR, f"master_over_stage2_{target_date}.csv"),
-        os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv"),
         os.path.join(OUTPUT_DIR, f"over25_stage2_picks_{target_date}.csv"),
+        os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv"),
     ]
     input_csv = next((f for f in candidate_inputs if os.path.exists(f)), None)
     if not input_csv:

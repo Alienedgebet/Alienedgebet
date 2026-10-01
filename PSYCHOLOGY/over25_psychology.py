@@ -49,8 +49,16 @@ def run_o25_psychology_engine(target_date=None):
         TODAY_STR = target_date
 
     # --- 🛠️ SURGICAL FIX: DUAL FILE PATHING (Reads Stage 1 and Stage 2) ---
-    STAGE1_FILE = os.path.join(OUTPUT_DIR, "over25_stage1_picks.csv")
-    STAGE2_FILE = os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv")
+    # 2026-10-01 FIX — prefer DATED Stage 1/2 artifacts.
+    # Same stale-file defect as over25_killswitch: reading the undated name
+    # meant a zero-pick day silently inherited the previous day's rows and
+    # then attached a fresh psychology score to yesterday's fixtures.
+    _d1 = os.path.join(OUTPUT_DIR, f"over25_stage1_picks_{TODAY_STR}.csv")
+    _l1 = os.path.join(OUTPUT_DIR, "over25_stage1_picks.csv")
+    _d2 = os.path.join(OUTPUT_DIR, f"over25_stage2_picks_{TODAY_STR}.csv")
+    _l2 = os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv")
+    STAGE1_FILE = _d1 if os.path.exists(_d1) else _l1
+    STAGE2_FILE = _d2 if os.path.exists(_d2) else _l2
     
     FILE_CATALYST = os.path.join(OUTPUT_DIR, f"audited_underdog_backtest_{TODAY_STR}.csv")
     OUTPUT_CSV = os.path.join(OUTPUT_DIR, f"ALIENEDGE_O25_PREDICTIONS_{TODAY_STR}.csv")

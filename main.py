@@ -151,12 +151,41 @@ _RECOVERY_SOURCES = {
                            "audited_underdog_backtest_{date}.csv"],
     "underdog_apex":      ["FINAL_APEX_UD_SCORE_{date}.csv"],        # AGGREGATOR/apex_ud_aggregator.py
     # ── OVER 2.5 / OVER 1.5 ──
-    "over25_stage1":      ["over25_stage1_picks.json",               # Engine/over25_probabilistic.py
-                           "over25_stage1_picks.csv"],
-    "over25_stage2":      ["over25_stage2_picks.json",               # Engine/over25_council.py
-                           "over25_stage2_picks.csv"],
-    "over25_stage3":      ["over25_stage3_final.json",               # AGGREGATOR/over25_killswitch.py
-                           "over25_stage3_final.csv"],
+    #
+    # 2026-10-01 FIX — dated artifact FIRST, undated name only as a fallback.
+    #
+    # This table is consulted by _recover_engine_output_from_disk whenever an
+    # engine returns None (failed or blocked). It is a SEPARATE read path from
+    # the one inside the engines themselves, so fixing the engines did not
+    # close it.
+    #
+    # The undated names were serving stale data. Verified directly in the
+    # cache: output/cache/over25_stage2__2026-09-30.json and
+    # output/cache/over25_stage2__2026-10-01.json held a BYTE-IDENTICAL
+    # payload — "Southend United vs Eastleigh" — a fixture that does not
+    # appear anywhere in the 2026-10-01 fixture list. Yesterday's picks were
+    # being published as today's.
+    #
+    # Ordering matters and is load-bearing: _recover_engine_output_from_disk
+    # returns the FIRST candidate that exists and parses, so the dated file
+    # must be attempted before the undated one. The engines now write dated
+    # files alongside the legacy names, so both resolve and the dated one
+    # wins.
+    "over25_stage1":      ["over25_stage1_picks_{date}.csv",         # Engine/over25_probabilistic.py
+                           "over25_stage1_picks_{date}.json",
+                           "over25_stage1_picks.csv"],               # legacy fallback
+    "over25_stage2":      ["over25_stage2_picks_{date}.csv",         # Engine/over25_council.py
+                           "over25_stage2_picks_{date}.json",
+                           "over25_stage2_picks.csv"],               # legacy fallback
+    "over25_stage3":      ["over25_stage3_final_{date}.csv",         # AGGREGATOR/over25_killswitch.py
+                           "over25_stage3_final_{date}.json",
+                           "over25_stage3_final.csv"],               # legacy fallback
+    # over15_stage3 is deliberately NOT dated here. Engine/over15_stage3.py
+    # writes only the undated names (over15_stage3_final.csv/.json), so a
+    # dated candidate would never resolve. Adding one would look like a fix
+    # while changing nothing. This entry is left exactly as it was, and it
+    # carries the same latent staleness risk as the Corners/Win/Underdog
+    # entries -- tracked, not fixed, in this change.
     "over15_stage3":      ["over15_stage3_final.json",               # Engine/over15_stage3.py
                            "over15_stage3_final.csv"],
     # ── GG EMPIRE ──
