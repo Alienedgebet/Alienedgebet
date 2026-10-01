@@ -35,13 +35,13 @@ const u25Columns: PredictionColumn<UndersPick>[] = [
     key: "gk_home",
     header: "Home GK Wall",
     align: "right",
-    render: (r) => r.home_gk_cpg.toFixed(2),
+    render: (r) => (r.home_gk_cpg != null ? r.home_gk_cpg.toFixed(2) : "—"),
   },
   {
     key: "gk_away",
     header: "Away GK Wall",
     align: "right",
-    render: (r) => r.away_gk_cpg.toFixed(2),
+    render: (r) => (r.away_gk_cpg != null ? r.away_gk_cpg.toFixed(2) : "—"),
   },
   {
     key: "gk_note_h",
@@ -87,13 +87,13 @@ const u35Columns: PredictionColumn<UndersPick>[] = [
     key: "gk_home",
     header: "Home GK Wall",
     align: "right",
-    render: (r) => r.home_gk_cpg.toFixed(2),
+    render: (r) => (r.home_gk_cpg != null ? r.home_gk_cpg.toFixed(2) : "—"),
   },
   {
     key: "gk_away",
     header: "Away GK Wall",
     align: "right",
-    render: (r) => r.away_gk_cpg.toFixed(2),
+    render: (r) => (r.away_gk_cpg != null ? r.away_gk_cpg.toFixed(2) : "—"),
   },
   {
     key: "fatigue_home",

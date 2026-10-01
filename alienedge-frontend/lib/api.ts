@@ -343,8 +343,10 @@ export interface GGPrecisionPick extends FixtureRisk {
   h2h_btts_rate: number;
   home_gk_liable: boolean;
   away_gk_liable: boolean;
-  home_gk_cpg: number;
-  away_gk_cpg: number;
+  // null when the keeper has no reliable sample (engine reports "no grade"
+  // rather than scoring missing data as an elite wall)
+  home_gk_cpg: number | null;
+  away_gk_cpg: number | null;
   home_gk_note: string;
   away_gk_note: string;
   fatigue_home: number;
@@ -946,8 +948,10 @@ export interface UndersPick extends FixtureRisk {
   u25_signals_fired?: number;
   u35_score?: number;
   u35_tier?: string;
-  home_gk_cpg: number;
-  away_gk_cpg: number;
+  // null when the keeper has no reliable sample (engine reports "no grade"
+  // rather than scoring missing data as an elite wall)
+  home_gk_cpg: number | null;
+  away_gk_cpg: number | null;
   home_gk_note: string;
   away_gk_note: string;
   fatigue_home: number;
