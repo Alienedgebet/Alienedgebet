@@ -831,12 +831,58 @@ def run_danger_forensic_aggregator():
                                  and int(l.get('type_id', 0)) == 12
                                  and l.get('player_id') is not None}
 
+                # ── THE GOALKEEPER LOOKUP WAS LOOKING IN THE WRONG SET ────────
+                # 2026-10-01. `starting_gk` was resolved ONLY from inside
+                # key_monument, which by construction holds the historical
+                # No.1 keeper and ten others. When that No.1 is absent, the
+                # keeper ACTUALLY PLAYING is by definition outside that set, so
+                # the lookup returned None even though a real keeper was on the
+                # pitch.
+                #
+                # The consequences were severe and ran in BOTH directions:
+                #   * None + STRONG_FAVOURITE -> DANGER ("No goalkeeper
+                #     identified in the starting XI ... unplayable at this
+                #     level") on sides where a proven keeper WAS playing.
+                #     Measured tonight: Azerbaijan, Wales, Germany, Serbia and
+                #     Gibraltar, i.e. 4 of 16 sides painted by a keeper that
+                #     does not exist as a problem.
+                #   * None + any other regime -> UNKNOWN, so the keeper check
+                #     produced NO signal at all on 8 of 16 sides.
+                #
+                # player_pool (worth_list) carries a position for every player
+                # seen in the recall window, including the substitute keeper.
+                # It is the correct set to ask "who is in the XI right now".
+                # Built here rather than at its old position ~70 lines below so
+                # the keeper lookup can use it.
+                _pool_by_id = {int(p["id"]): p for p in (player_pool or [])
+                               if isinstance(p, dict) and p.get("id") is not None}
+
+                # The keeper history EXPECTS: the monument's own No.1.
                 master_gk = next(
                     (info for info in key_monument.values()
                      if info.get('pos') == "Goalkeeper"), None)
+
+                # The keeper ACTUALLY on the pitch: resolved against the full
+                # pool first, so a replacement keeper is found, and only then
+                # against the monument as a fallback for a side with no pool
+                # record at all.
+                #
+                # Resolving against the pool ALSO un-breaks a second defect:
+                # when the old lookup succeeded it returned the very same dict
+                # as master_gk, so `starting_gk is master_gk` and the
+                # "proven keeper replaced by a weaker proven one" branch below
+                # compared a value with itself. That branch was unreachable and
+                # had never fired. master_gk is still the monument's No.1 while
+                # this is whoever starts, so the gap is now meaningful.
                 starting_gk = next(
-                    (key_monument[pid] for pid in sorted(current_starters)
-                     if key_monument.get(pid, {}).get('pos') == "Goalkeeper"), None)
+                    (_pool_by_id[pid] for pid in sorted(current_starters)
+                     if pid in _pool_by_id
+                     and _pool_by_id[pid].get('pos') == "Goalkeeper"), None)
+                if starting_gk is None:
+                    starting_gk = next(
+                        (key_monument[pid] for pid in sorted(current_starters)
+                         if key_monument.get(pid, {}).get('pos') == "Goalkeeper"),
+                        None)
                 starting_gk_leak = (starting_gk or {}).get('c_p90')
 
                 missing_details = []
@@ -907,8 +953,9 @@ def run_danger_forensic_aggregator():
                 # which never matches, so the replacement group silently came
                 # back EMPTY and every side fell through to UNKNOWN with zero
                 # replacement credit.
-                _pool_by_id = {int(p["id"]): p for p in (player_pool or [])
-                               if isinstance(p, dict) and p.get("id") is not None}
+                # `_pool_by_id` is built ABOVE, next to the goalkeeper lookup
+                # that needs it. Rebuilding it here would be redundant work on
+                # the hot path of every side of every live fixture.
                 _replacements = [
                     {**_pool_by_id[pid], "id": pid}
                     for pid in current_starters

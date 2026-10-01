@@ -6283,6 +6283,115 @@ class TestIncomingQuotesCodeFourAsTheSignedVerdictAuthority(unittest.TestCase):
                       "the lookup must cast the string fixture id to int")
 
 
+class TestTheGoalkeeperIsResolvedAgainstTheRealXI(unittest.TestCase):
+    """
+    THE KEEPER LOOKUP WAS LOOKING IN THE WRONG SET.
+
+    `starting_gk` was resolved only from inside `key_monument` — the historical
+    No.1 plus ten others. When that No.1 is absent, the keeper ACTUALLY PLAYING
+    is by definition outside that set, so the lookup returned None even though a
+    real keeper was on the pitch.
+
+    Measured on the live board that ran in BOTH directions:
+
+      * None + STRONG_FAVOURITE -> DANGER ("No goalkeeper identified in the
+        starting XI ... unplayable at this level") on Azerbaijan, Wales, Serbia
+        and Gibraltar, where a proven keeper WAS starting.
+      * None + any other regime -> UNKNOWN, so the keeper check produced no
+        signal at all on 8 of 16 sides.
+
+    It also made a second defect permanent: when the lookup DID succeed it
+    returned the same dict as master_gk, so the "proven keeper replaced by a
+    weaker proven one" branch compared a value with itself and could never fire.
+    """
+
+    def _pool_and_monument(self):
+        pool = [
+            {"id": 100, "name": "Historical No.1", "pos": "Goalkeeper",
+             "avg_rating": 6.52, "apps": 20, "mins": 1800, "c_p90": 1.10},
+            {"id": 200, "name": "Replacement", "pos": "Goalkeeper",
+             "avg_rating": 6.97, "apps": 15, "mins": 1350, "c_p90": 1.67},
+            {"id": 300, "name": "Defender", "pos": "Defender",
+             "avg_rating": 7.0, "apps": 12, "mins": 1080, "c_p90": 0.0},
+        ]
+        monument = {100: pool[0], 300: pool[2]}
+        return pool, monument
+
+    def test_a_replacement_keeper_outside_the_monument_is_found(self):
+        from LIVE_SCANNER import live_signed_impact as si
+        pool, monument = self._pool_and_monument()
+        pool_by_id = {p["id"]: p for p in pool}
+        starters = {200, 300}          # the No.1 (100) is OUT, 200 is in
+
+        # The OLD lookup: filtered starters against the monument only.
+        old = next((monument[pid] for pid in sorted(starters)
+                    if monument.get(pid, {}).get("pos") == "Goalkeeper"), None)
+        self.assertIsNone(old, "the old lookup genuinely missed this keeper")
+
+        # The NEW lookup: resolve against the full pool first.
+        starting = next((pool_by_id[pid] for pid in sorted(starters)
+                         if pid in pool_by_id
+                         and pool_by_id[pid].get("pos") == "Goalkeeper"), None)
+        self.assertIsNotNone(starting, "a real playing keeper must be found")
+        self.assertEqual(starting["name"], "Replacement")
+
+        master = next((i for i in monument.values()
+                       if i.get("pos") == "Goalkeeper"), None)
+        self.assertIsNot(starting, master,
+                         "the XI keeper and the expected No.1 must be "
+                         "different objects, or the downgrade gap is a value "
+                         "compared with itself")
+        self.assertIsNotNone(starting.get("c_p90"),
+                            "a found keeper must carry a leak figure")
+
+    def test_the_downgrade_branch_is_now_reachable(self):
+        """
+        The branch that was dead. A BETTER replacement keeper must not read as
+        a downgrade, and must now be able to produce a positive note.
+        """
+        from LIVE_SCANNER import live_signed_impact as si
+        better = {"id": 200, "name": "Replacement", "pos": "Goalkeeper",
+                  "avg_rating": 6.97, "apps": 15, "mins": 1350, "c_p90": 1.67}
+        expected = {"id": 100, "name": "Historical No.1", "pos": "Goalkeeper",
+                    "avg_rating": 6.52, "apps": 20, "mins": 1800, "c_p90": 1.10}
+        verdict = si.assess_goalkeeper(better, expected, regime="MID_FIELD", leak=1.67)
+        self.assertNotEqual(verdict["label"], si.STATE_DANGER,
+                            "a stronger replacement keeper is not a liability")
+        self.assertIn("not a downgrade", str(verdict.get("note", "")).lower(),
+                      "the healthy note must be reachable, not just the DANGER "
+                      "branch")
+
+        # And the genuinely worse replacement DOES read as a downgrade.
+        worse = dict(better, avg_rating=5.4)
+        bad = si.assess_goalkeeper(worse, expected, regime="MID_FIELD", leak=3.2)
+        self.assertEqual(bad["label"], si.STATE_DANGER,
+                         "a proven downgrade must still be caught")
+
+    def test_an_unknown_keeper_is_still_not_convicted(self):
+        """
+        The fix must not swing the other way. When no keeper can be found at
+        all, the non-favourite case must stay UNKNOWN rather than becoming a
+        liability — absence of evidence is not evidence of weakness.
+        """
+        from LIVE_SCANNER import live_signed_impact as si
+        verdict = si.assess_goalkeeper(None, {"pos": "Goalkeeper"},
+                                       regime="MID_FIELD")
+        self.assertEqual(verdict["label"], si.STATE_UNKNOWN)
+        self.assertFalse(verdict["liability"])
+
+    def test_the_source_uses_the_pool_before_the_monument(self):
+        from pathlib import Path
+        src = (Path(__file__).parent / "LIVE_SCANNER" /
+               "live_stage4_danger.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "(_pool_by_id[pid] for pid in sorted(current_starters)", src,
+            "the XI keeper must be resolved against the full player pool")
+        self.assertLess(src.index("_pool_by_id = {int(p[\"id\"]): p"),
+                        src.index("starting_gk = next("),
+                        "the pool index must be built BEFORE the keeper lookup "
+                        "that needs it")
+
+
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
     """A lineup row with `player_id: null` must not empty danger_audit.json.
 
