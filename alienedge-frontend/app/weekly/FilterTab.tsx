@@ -137,6 +137,21 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
   // Bumped by Reset so the uncontrolled number inputs (which render
   // `defaultValue`) remount and visibly return to their engine defaults.
   const [resetKey, setResetKey] = useState(0);
+
+  // 2026-10-01. A drawer box that renders live, accepts a number and then
+  // changes nothing is worse than an absent box — it reads as a working filter
+  // and it is not. Two of those existed and were reported as "the boxes do
+  // nothing": the four O2.5 goal-form gates (absent from O25_NARROW, so dropped
+  // in Public mode — now wired) and the WIN `strict_mode` checkbox (the Public
+  // WIN filter has no soft/strict branch at all — still impossible, so it is
+  // now disabled and says why).
+  //
+  // This returns a reason only in Public mode, so a control is disabled exactly
+  // when the engine genuinely cannot enforce it and never otherwise.
+  const unsupportedReason = (key: string): string | undefined =>
+    mode === "public"
+      ? config.publicUnsupported?.find((u) => u.key === key)?.reason
+      : undefined;
   
   // Data State — starts empty; real results are fetched on mount and on every
   // control change (mock only ever appears if NEXT_PUBLIC_DEMO_MODE is set).
@@ -383,17 +398,32 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
           )}
 
           {showAdvanced && (
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              {mode === "public"
+                ? "Public Presets: the engine applies its own risk profile first, then narrows the survivors with the thresholds below. Every box below is enforced. A threshold of 0 means off."
+                : "Tipster / Forensic Aggregator: every threshold below is passed straight into the engine's own gates."}
+            </p>
+          )}
+
+          {showAdvanced && (
             <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 rounded-xl bg-black/40 p-4 border border-white/5 animate-in fade-in">
-              {config.fields.map((f) => (
-                <div key={`${f.key}-${resetKey}`} className="flex flex-col gap-1">
+              {config.fields.map((f) => {
+                const blocked = unsupportedReason(f.key);
+                return (
+                <div
+                  key={`${f.key}-${resetKey}`}
+                  className={cn("flex flex-col gap-1", blocked && "opacity-50")}
+                  title={blocked}
+                >
                   <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{f.label}</label>
                   {f.type === "checkbox" ? (
-                    <label className="flex items-center gap-2 cursor-pointer mt-1">
+                    <label className={cn("flex items-center gap-2 mt-1", blocked ? "cursor-not-allowed" : "cursor-pointer")}>
                       <input
                         type="checkbox"
+                        disabled={Boolean(blocked)}
                         checked={customParams[f.key] ?? f.defaultValue ?? false}
                         onChange={(e) => setCustomParams({ ...customParams, [f.key]: e.target.checked })}
-                        className="h-4 w-4 rounded border-white/20 bg-white/5 accent-cyan-400"
+                        className="h-4 w-4 rounded border-white/20 bg-white/5 accent-cyan-400 disabled:cursor-not-allowed"
                       />
                       <span className="text-xs text-slate-300 font-medium">Enabled</span>
                     </label>
@@ -401,6 +431,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                     <input
                       type="number"
                       step={f.step || 1}
+                      disabled={Boolean(blocked)}
                       defaultValue={f.defaultValue}
                       onChange={(e) => {
                         // Empty input = "back to the engine default" — never send
@@ -413,11 +444,17 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                           return next;
                         });
                       }}
-                      className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 font-mono text-xs text-white outline-none focus:border-cyan-400"
+                      className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 font-mono text-xs text-white outline-none focus:border-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
                     />
                   )}
+                  {blocked && (
+                    <span className="text-[10px] leading-tight text-amber-400/80">
+                      Not enforced in Public mode
+                    </span>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

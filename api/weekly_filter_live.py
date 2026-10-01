@@ -32,7 +32,11 @@ WHAT THIS MODULE DOES
    repeated moves cheap.
 4. `narrow_rows()` — in Public mode the preset filter runs first (exactly as
    the pipeline did) and the drawer values then narrow the surviving rows with
-   the same >= / <= semantics, so a control is never silently ignored.
+   the same >= / <= semantics, so a control is never silently ignored. Every
+   drawer key listed in `filter-config.ts` must appear in one of the mapping
+   tables below or in PUBLIC_UNSUPPORTED; `tests_live_scanner_contracts.py`
+   asserts it, because a key that is missing from these tables renders a box
+   that accepts a number and silently does nothing.
 
 NO new prediction mathematics and NO new API calls: every gate is an existing
 gate; every value is a real dated value or is treated as unevaluable.
@@ -324,7 +328,49 @@ O25_NARROW = {
     "min_h2h_overs": ("h2h_overs_last_5", "min"),
     "min_odds": ("o25_odds", "min"),
     "max_odds": ("o25_odds", "max"),
+    # Recent goal form, per side. These four gates were added to the drawer and
+    # to the Tipster kwargs map, but O25_NARROW never listed them — so in
+    # Public mode (the DEFAULT mode) they were accepted by o25_filter_params,
+    # carried through the API, and then dropped by this lookup table. The box
+    # rendered, took a number, and changed nothing.
+    #
+    # The `_opt` comparison ops mirror the engine-side gate in
+    # FILTER/over25_risk_filter.py::apply_over_tipster_filter exactly, so one
+    # box cannot mean two different things depending on the mode toggle:
+    #   * a threshold of 0 means OFF (gate skipped, not applied) — the engine
+    #     does `if not thr: continue`, and a typed 0 must not mean "<= 0" and
+    #     delete every fixture;
+    #   * an unknown value PASSES rather than failing — a dated artifact
+    #     graded before the engine wrote these columns must not be filtered to
+    #     nothing here while surviving in Tipster mode.
+    "min_home_goals": ("home_goals_scored_last_5", "min_opt"),
+    "min_away_goals": ("away_goals_scored_last_5", "min_opt"),
+    "max_home_conceded": ("home_goals_conceded_last_5", "max_opt"),
+    "max_away_conceded": ("away_goals_conceded_last_5", "max_opt"),
 }
+
+# Drawer controls that CANNOT be honoured in Public mode.
+#
+# `strict_mode` is a parameter of apply_tipster_filter ONLY
+# (FILTER/win_filter_service.py:80). apply_public_filter() has no soft/strict
+# branch at all, so there is nothing to forward it to. It was previously in the
+# WIN config, absent from WIN_NARROW, and therefore silently ignored in Public
+# mode. Rather than fake a soft-mode verdict the public engine cannot compute,
+# the Weekly UI disables it in Public mode and states why; it works normally in
+# Tipster / Forensic mode, where the real parameter exists.
+PUBLIC_UNSUPPORTED = {
+    "win": ("strict_mode",),
+    "o25": (),
+    "gg": (),
+}
+
+# Which mapping table each market uses in each mode. `filter-config.ts` keys
+# ("gg" | "over25" | "win") are mapped to the API's market names ("gg" | "o25" |
+# "win") here, so the contract suite can assert every drawer box is reachable
+# in EVERY mode rather than in some mode. GG has no entry: _live_gg has no mode
+# branch and forwards its whole control set in all three.
+NARROW_SPEC = {"o25": "O25_NARROW", "win": "WIN_NARROW"}
+TIPSTER_SPEC = {"o25": "O25_TIPSTER_KWARGS", "win": "WIN_TIPSTER_KWARGS"}
 
 # GG risk presets. The GG engine has no risk table of its own, so the presets
 # are expressed ONLY with values/mechanisms that already exist in this repo:
@@ -395,13 +441,35 @@ def _stamp(rows, date):
 def narrow_rows(rows, market, overrides):
     """Apply the drawer's thresholds to already-preset-filtered rows.
 
-    A row whose evaluated field is missing is EXCLUDED — the same zero-
-    fabrication rule the engines use: no operand, no verdict.
+    Two comparison families exist, and they differ deliberately:
+
+    * `"min"` / `"max"` / `"split_min"` — STRICT. A row whose evaluated field
+      is missing is EXCLUDED, the zero-fabrication rule: no operand, no
+      verdict.
+    * `"min_opt"` / `"max_opt"` — LENIENT, and byte-for-byte the semantics of
+      the engine-side gate in FILTER/over25_risk_filter.py. A threshold of 0
+      turns the gate OFF, and an unknown value PASSES instead of failing.
+
+    The lenient family exists because the two modes run the same gates through
+    two different implementations. Without it, one box would mean "strict, and
+    a blank cell deletes the row" in Public mode and "0 is off, a blank cell
+    passes" in Tipster mode.
     """
     spec = WIN_NARROW if market == "win" else O25_NARROW
-    active = [(field, op, overrides[canonical])
-              for canonical, (field, op) in spec.items()
-              if canonical in overrides and overrides[canonical] is not None]
+    active = []
+    for canonical, (field, op) in spec.items():
+        if canonical not in overrides:
+            continue
+        bound = overrides[canonical]
+        if bound is None:
+            continue
+        # A 0 threshold is OFF, not "gate at zero". This is the engine's own
+        # rule (`if not thr: continue`); without it a typed 0 in
+        # "Max ... Conceded" means "<= 0" and wipes every fixture, while the
+        # identical 0 in Tipster mode means "no gate".
+        if op.endswith("_opt") and not bound:
+            continue
+        active.append((field, op, bound))
     if not active:
         return rows
     kept = []
@@ -419,12 +487,17 @@ def narrow_rows(rows, market, overrides):
                 continue
             got = _num(str(raw).split("/")[0]) if op == "split_min" else _num(raw)
             if got is None:
+                # Unknown operand. Strict gates exclude; `_opt` gates pass, so
+                # a dated artifact graded before these columns existed is not
+                # wiped out here while surviving in Tipster mode.
+                if not op.endswith("_opt"):
+                    keep = False
+                    break
+                continue
+            if op in ("min", "min_opt") and got < bound:
                 keep = False
                 break
-            if op == "min" and got < bound:
-                keep = False
-                break
-            if op == "max" and got > bound:
+            if op in ("max", "max_opt") and got > bound:
                 keep = False
                 break
         if keep:
