@@ -6215,25 +6215,73 @@ class TestIncomingQuotesCodeFourAsTheSignedVerdictAuthority(unittest.TestCase):
 
     def test_the_pick_rules_still_use_the_local_value(self):
         """
-        THE DELIBERATE SPLIT, pinned so nobody "fixes" it by accident.
+        SUPERSEDED 2026-10-01 (second pass) — the split is now CLOSED.
 
-        This change is DISPLAY ONLY. The rotation rule must keep testing the
-        LOCAL verdict and attack_boost, or the emitted pick set changes and the
-        claim that this step changed only the words becomes false.
+        The first version of this change quoted Code 4 in the sentence while the
+        rules used this module's local value, and pinned that split so nobody
+        "fixed" it by accident. It has now been closed on purpose: Code 4
+        publishes every field the rules read, so the rules are driven from the
+        authority and there is one source of truth.
+
+        The local assess_absence() call stays only because it supplies fields
+        Code 4 does not publish (gk_solid, the printed miss counts).
         """
         from pathlib import Path
         src = (Path(__file__).parent / "LIVE_SCANNER" /
                "live_stage3_incoming.py").read_text(encoding="utf-8")
-        self.assertIn(
-            'if _side.get(\'verdict\') in ("BLESSING", "ROTATION") '
-            "and _side.get('attack_boost'):",
-            src,
-            "the rotation rule must still key off the LOCAL verdict/attack_boost")
+        self.assertIn("h = _effective_side(h, _h_auth)", src,
+                      "the rules must read Code 4, not a second opinion")
+        self.assertIn("a = _effective_side(a, _a_auth)", src)
         self.assertIn(
             "_net = assess_absence(_absent, _present, regime=_regime)", src,
-            "the local assess_absence call must remain for rule logic")
-        self.assertIn("_describe_rotation(_side, _authority)", src,
-                      "the authority must be consulted for the sentence")
+            "the local call remains, but only for fields Code 4 does not publish")
+        self.assertIn("_describe_rotation(_side, _authority)", src)
+
+    def test_the_authority_drives_every_field_the_rules_read(self):
+        """
+        `_effective_side` is the join. Each of these was previously read from
+        the local re-derivation, and each disagreed with Code 4.
+        """
+        authority = {"verdict": "BLESSING", "net_impact": -8.6,
+                     "impact_confidence": 0.81, "rotation_uplift": 4.2,
+                     "gk_leak": 2.33, "breach": False}
+        local = {"verdict": "ROTATION", "net_impact": -11.4, "confidence": 0.06,
+                 "attack_boost": 9.9, "leak": 0.4, "breach": True,
+                 "loc": "away", "name": "T"}
+        merged = stage3._effective_side(local, authority)
+        for key, expected in (("verdict", "BLESSING"), ("net_impact", -8.6),
+                               ("confidence", 0.81), ("attack_boost", 4.2),
+                               ("leak", 2.33), ("breach", False)):
+            self.assertEqual(merged[key], expected,
+                             f"{key} must come from Code 4, not the local value")
+        # Fields Code 4 does not publish survive from the local side.
+        self.assertEqual(merged["loc"], "away")
+        self.assertEqual(merged["name"], "T")
+
+    def test_no_authority_falls_back_to_the_local_values(self):
+        local = {"verdict": "ROTATION", "net_impact": -1.0, "confidence": 0.2,
+                 "attack_boost": 3.0, "loc": "home"}
+        merged = stage3._effective_side(local, None)
+        self.assertEqual(merged["verdict"], "ROTATION")
+        self.assertEqual(merged["net_impact"], -1.0)
+        self.assertFalse(merged["_has_authority"])
+
+    def test_the_confidence_floor_withholds_a_thin_rotation_pick(self):
+        """
+        THE 100% RULE. The rotation pick fired on every live fixture while the
+        card beside it read "the evidence is too thin to say". Both cannot be
+        true. The floor is the signed-impact module's OWN call threshold, so the
+        rule and the engine that judges it finally agree.
+        """
+        from LIVE_SCANNER import live_signed_impact as si
+        self.assertTrue(hasattr(si, "MIN_CONFIDENCE_FOR_CALL"))
+        from pathlib import Path
+        src = (Path(__file__).parent / "LIVE_SCANNER" /
+               "live_stage3_incoming.py").read_text(encoding="utf-8")
+        self.assertIn("_conf < MIN_CONFIDENCE_FOR_CALL", src,
+                      "the rotation pick must be gated on the call floor")
+        self.assertIn("ROTATION UPLIFT WITHHELD", src,
+                      "the withheld pick must say so in the log, not vanish")
 
     def test_the_lookup_casts_the_string_fixture_id(self):
         """

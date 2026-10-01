@@ -397,6 +397,49 @@ def load_danger_authority():
     return index
 
 
+def _effective_side(side, authority):
+    """
+    ONE SOURCE OF TRUTH for the rule logic, not just the sentence.
+
+    Code 4's audit publishes every field the prediction rules read — verdict,
+    net_impact, impact_confidence, rotation_uplift, gk_leak, breach — so the
+    rules can be driven from it directly. Previously only the SENTENCE used the
+    authority while the DECISION used this module's own local assess_absence(),
+    which disagreed with Code 4 on 13 of 13 sides measured on the live board.
+
+    Falls back to the local value when Code 4 has no record for this side. The
+    fallback exists for availability, not for convenience: when there is no
+    authority the sentence already refuses to print a figure, so the two can
+    never disagree about a number the user can see.
+
+    The local `assess_absence()` call is retained because it still supplies the
+    fields Code 4 does not publish (gk_solid is derived from the local leak, and
+    the per-side miss counts feed the printed vulnerability summary).
+    """
+    if not authority:
+        merged = dict(side)
+        merged["_has_authority"] = False
+        return merged
+
+    merged = dict(side)
+    merged["_has_authority"] = True
+    for src_key, dst_key in (("verdict", "verdict"),
+                             ("net_impact", "net_impact"),
+                             ("impact_confidence", "confidence"),
+                             ("rotation_uplift", "attack_boost"),
+                             ("breach", "breach")):
+        value = authority.get(src_key)
+        if value is not None:
+            merged[dst_key] = value
+    leak = authority.get("gk_leak")
+    if leak is not None:
+        try:
+            merged["leak"] = float(leak)
+        except (TypeError, ValueError):
+            pass
+    return merged
+
+
 def _describe_rotation(side, authority=None):
     """Write the reason sentence for a rotation/blessing pick.
 
@@ -926,6 +969,17 @@ def run_incoming_forensic_engine():
             h = next((t for t in m_stats if t['loc'] == 'home'), m_stats[0])
             a = next((t for t in m_stats if t['loc'] == 'away'), m_stats[1])
 
+            # 2026-10-01. THE SPLIT IS CLOSED. The rules below now read Code 4's
+            # audit, not this module's own local assess_absence(). Previously the
+            # sentence quoted Code 4 while the DECISION used the local value, and
+            # the two disagreed on 13 of 13 sides measured on the live board.
+            # Code 4 publishes every field these rules read, so there is no
+            # excuse for a second opinion.
+            _h_auth = _danger_authority.get((safe_int(f_id), h['id']))
+            _a_auth = _danger_authority.get((safe_int(f_id), a['id']))
+            h = _effective_side(h, _h_auth)
+            a = _effective_side(a, _a_auth)
+
             fav = h if h['is_fav'] else a
             dog = a if h['is_fav'] else h
 
@@ -962,12 +1016,30 @@ def run_incoming_forensic_engine():
             # Over 2.5 would be wrong (z=1.41, not significant).
             for _side in (h, a):
                 if _side.get('verdict') in ("BLESSING", "ROTATION") and _side.get('attack_boost'):
-                    # 2026-10-01. The SENTENCE quotes Code 4's audit; the
-                    # DECISION above still used this module's own local
-                    # assess_absence(). That split is deliberate and temporary —
-                    # it keeps the emitted pick set byte-identical while making
-                    # the card stop contradicting the rest of the system.
-                    _authority = _danger_authority.get((safe_int(f_id), _side['id']))
+                    # ── CONFIDENCE FLOOR (2026-10-01) ─────────────────────────
+                    # This rule fired on 100% of live fixtures (home 8/8, away
+                    # 6/8) with NO floor at all. A rule that always fires carries
+                    # zero information, and the backtest says why that matters:
+                    # both-teams-score happens 48.1% of the time
+                    # (tools/live_signal_backtest.py, 183 internationals).
+                    # Predicting it on every match is a coin flip presented as a
+                    # model.
+                    #
+                    # The floor is the signed-impact module's OWN call threshold —
+                    # MIN_CONFIDENCE_FOR_CALL — not a number invented here. Below
+                    # it, live_signed_impact itself declines to call a direction
+                    # and returns ROTATION, so emitting a directional pick from
+                    # that state contradicts the engine that produced it. The card
+                    # already said so in words ("the evidence is too thin"); this
+                    # stops it saying one thing and doing another.
+                    _conf = float(_side.get('confidence') or 0.0)
+                    if _conf < MIN_CONFIDENCE_FOR_CALL:
+                        print(f"  ⛔ ROTATION UPLIFT WITHHELD — TO_SCORE: "
+                              f"{_side['name']} (confidence {_conf:.2f} < "
+                              f"{MIN_CONFIDENCE_FOR_CALL:.2f} — the engine "
+                              f"declines to call a direction, so no pick)")
+                        continue
+                    _authority = (_h_auth if _side['loc'] == 'home' else _a_auth)
                     match_picks.append({
                         "type":        "TO_SCORE",
                         "target_loc":  _side['loc'],
@@ -975,9 +1047,9 @@ def run_incoming_forensic_engine():
                         "reason":      _describe_rotation(_side, _authority),
                     })
                     print(f"  ✅ ROTATION UPLIFT — TO_SCORE: {_side['name']} "
-                          f"({_side['verdict']}, local net {_side['net_impact']:+.1f}; "
-                          f"card quotes Code 4"
-                          f"{'' if _authority else ' — NO AUDIT RECORD, no figure printed'})")
+                          f"({_side['verdict']}, net {_side['net_impact']:+.1f}, "
+                          f"conf {_conf:.2f}"
+                          f"{'' if _side.get('_has_authority') else ' — NO AUDIT RECORD, local values'})")
 
             # ── Rule 1: Multi-Leak Conflict (GG / Over) ──────────────────
             if (((_really_damaged(h) and h['leak'] > 1.3 and a['leak'] > 1.5) or
