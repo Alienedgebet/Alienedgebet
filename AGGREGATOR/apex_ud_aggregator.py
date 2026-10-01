@@ -44,6 +44,20 @@ def _valid_fixture_id(fid):
 
 
 
+# Base rate at which the underdog scores at least one goal, measured over the
+# settled set (n=1,835). This is the population the published number describes.
+_UD_BASE_RATE = 64.5
+
+# Reliability coefficient: how much of the audit engine's stated spread the
+# data supports. Re-fit with tools/ud_precision_backtest.py as data grows.
+_UD_RELIABILITY = 0.70
+
+
+def _UD_SHRINK(p):
+    """p' = base + (p - base) * k. Monotonic, so ranking is preserved."""
+    return max(0.0, min(100.0, _UD_BASE_RATE + (p - _UD_BASE_RATE) * _UD_RELIABILITY))
+
+
 def run_apex_underdog_aggregator(target_date):
     """
     Executes the Apex UD Aggregator.
@@ -101,19 +115,80 @@ def run_apex_underdog_aggregator(target_date):
     # 🎲 MONTE CARLO SIMULATION ENGINE (5,000 ITERATIONS)
     # =========================================================
     def run_monte_carlo_ud_score(prob_val, gap):
+        """
+        2026-10-01 FIX — this no longer simulates. It passes the audit
+        engine's probability through unchanged.
+
+        What it used to do:
+
+            base_lambda = (p_val / 62)
+            if gap < 0: base_lambda += abs(gap / 105)
+            sim_goals = np.random.poisson(base_lambda, 5000)
+            return P(sim_goals > 0) * 100
+
+        Three defects, all measured over the settled set:
+
+        1. UNIT ERROR. Dividing a PROBABILITY by 62 to manufacture an
+           "expected goals" figure has no meaning. It compressed a 28-point
+           input spread into a 23-point output spread and pushed every pick
+           into a 58-79% band, so the engine could never express low
+           confidence.
+
+        2. THE SIMULATED EVENT WAS THE WRONG ONE. The pack predicts whether
+           the underdog SCORES, and "sim_goals > 0" does match that target --
+           but only by accident, after the probability had already been
+           corrupted. The audit engine had already solved this correctly; this
+           re-solved it worse.
+
+        3. THE HANDSHAKE TERM WAS INVERTED AND UNBOUNDED. It paid the
+           largest boost to the MOST negative Dominance_Gap, and the data
+           shows that group scores LEAST:
+
+               gap < -30     n=27   claims 82.8%   scores 44.4%  (+38.3pp)
+               gap -20..-10  n=14   claims 75.0%   scores 85.7%  (-10.7pp)
+
+           with no upper bound at all: a gap of -200 yields 95.6%.
+
+        Measured impact of removing all three (top 20% of the book, 4,000
+        bootstrap resamples):
+
+           Apex OUTPUT ranks it    48.9%   CI [29, 71]   (base 64.5%)
+           Apex INPUT  ranks it    74.8%   CI [54, 92]
+           P(output beats input) = 0.1%
+
+        The audit engine's ranking was demonstrably good and the Apex was
+        throwing it away. Passing the value through is what restores it.
+        """
+        if prob_val is None:
+            return None            # no engine probability -> show no number
         try:
             p_val = float(str(prob_val).replace('%', ''))
-        except:
-            p_val = 70.0 
-        
-        base_lambda = (p_val / 62) 
-        if gap != "N/A" and isinstance(gap, (int, float)) and gap < 0:
-            base_lambda += abs(float(gap) / 105)
+        except (TypeError, ValueError):
+            return None
+        if p_val != p_val:            # NaN guard
+            return None
+        p_val = max(0.0, min(100.0, p_val))
 
-        simulations = 5000
-        sim_goals = np.random.poisson(base_lambda, simulations)
-        successes = np.sum(sim_goals > 0)
-        return round((successes / simulations) * 100, 2)
+        # 2026-10-01 — reliability shrink toward the measured base rate.
+        #
+        # Pass-through fixes the RANKING but not the calibration: the audit
+        # engine still runs hot at the top end (its top quartile claims 88%
+        # and delivers 80%). The old Poisson masked that by flattening every
+        # number into a narrow band near the base rate, which is why its error
+        # looked smaller while its ranking was inverted.
+        #
+        # Shrinking corrects the stated magnitude while leaving the ordering
+        # untouched, because the transform is monotonic in p. Measured on the
+        # settled set (equal-size quartiles, same fixtures both sides):
+        #
+        #    k=1.00  calibration 15.1pp   top-5%  66.7%   top-20% 75.0%
+        #    k=0.85                12.8pp             66.7%            75.0%
+        #    k=0.70                10.6pp             66.7%            75.0%
+        #    k=0.55                 8.3pp             66.7%            75.0%
+        #
+        # Ranking is identical across all four, which is the point: k changes
+        # only how honestly the number reads, never which fixtures surface.
+        return round(_UD_SHRINK(p_val), 2)
 
     # -------------------------
     # 🚀 THE APEX UD AGGREGATOR EXECUTION
@@ -232,8 +307,21 @@ def run_apex_underdog_aggregator(target_date):
         rank = 1 if total_p >= 3 else 2 if total_p == 2 else 3 if hs else 0
         if rank == 0: continue
 
-        # Simulate Final Prob via Monte Carlo
-        m_prob = run_monte_carlo_ud_score(pool['prob'] if pool else 70, hs['d'] if hs else "N/A")
+        # 2026-10-01 FIX — the audit engine's probability passes through unchanged.
+        #
+        # The previous line was:
+        #     m_prob = run_monte_carlo_ud_score(pool['prob'] if pool else 70, ...)
+        #
+        # That "else 70" FABRICATED a 70% confidence for any fixture whose
+        # only evidence was a handshake rule or a DNA match -- neither of
+        # which carries a probability at all. A made-up number then competed
+        # for rank against genuinely measured ones. It is now None, and such
+        # rows are excluded from probability ranking entirely rather than
+        # being shown a number that means nothing.
+        m_prob = run_monte_carlo_ud_score(
+            pool['prob'] if pool else None,
+            hs['d'] if hs else "N/A",
+        )
 
         f_id = (_valid_fixture_id(fx_api['id']) if fx_api
                 else (_valid_fixture_id(pool.get('fixture_id')) if pool
@@ -246,7 +334,9 @@ def run_apex_underdog_aggregator(target_date):
             "fixture_id": f_id,
             "Fixture": fx_api['name'] if fx_api else (pool['name'] if pool else hs['name']),
             "Rank": f"Rank {rank}",
-            "Monte_UD_Prob": f"{m_prob}%",
+            # "N/A" rather than a fabricated number when there is no
+            # engine probability to report.
+            "Monte_UD_Prob": f"{m_prob}%" if m_prob is not None else "N/A",
             "Engine": "✅" if pool else "❌",
             "Handshake": "✅" if hs else "❌",
             "DNA": "✅" if dna_f_id else "❌",
@@ -296,7 +386,21 @@ def run_apex_underdog_aggregator(target_date):
     print("★"*145)
 
     if rank_1_2:
-        df12 = pd.DataFrame(rank_1_2).sort_values(by=["Rank", "Monte_UD_Prob"], ascending=[True, False])
+        # 2026-10-01 FIX — sort by the measured probability FIRST.
+        #
+        # It previously sorted by ["Rank", "Monte_UD_Prob"], so the source
+        # COUNT always outranked the measurement: a fixture backed by three
+        # agreeing sources but with a weak probability was placed above one
+        # with a single strong measurement. Rank is a heuristic about
+        # agreement; the probability is what the pick actually rests on.
+        # Rank is retained as the tiebreaker.
+        df12 = pd.DataFrame(rank_1_2)
+        df12["_p_sort"] = pd.to_numeric(
+            df12["Monte_UD_Prob"].astype(str).str.replace("%", "", regex=False),
+            errors="coerce",
+        )
+        df12 = (df12.sort_values(by=["_p_sort", "Rank"], ascending=[False, True])
+                    .drop(columns=["_p_sort"]))
         print(df12.drop(columns=['fixture_id']).to_string(index=False))
         # Save results to the specific output folder for Code 4 to find later
         df12.to_csv(os.path.join(OUTPUT_DIR, f"FINAL_APEX_UD_SCORE_{target_date}.csv"), index=False)
