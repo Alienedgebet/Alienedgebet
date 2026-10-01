@@ -155,12 +155,12 @@ const dangerColumns: PredictionColumn<LiveDangerReport>[] = [
   {
     key: "home",
     header: "home",
-    render: (r) => <DangerSideCell side={r.home_team} />,
+    render: (r) => <DangerSideCell side={r.home_team} fixtureId={r.fixture_id} label="home" />,
   },
   {
     key: "away",
     header: "away",
-    render: (r) => <DangerSideCell side={r.away_team} />,
+    render: (r) => <DangerSideCell side={r.away_team} fixtureId={r.fixture_id} label="away" />,
   },
   {
     key: "gg",
@@ -173,13 +173,30 @@ const dangerColumns: PredictionColumn<LiveDangerReport>[] = [
   },
 ];
 
+/**
+ * The percentage beside the badge is a BLACK BOX: `vulnerability_pct` is a
+ * count of absences, not the severity the badge reports, so a BLESSING can sit
+ * next to 87.1% and read as a contradiction. Clicking the cell opens the full
+ * derivation — numerator, denominator, the per-player list and the signed
+ * verdict — so the number can be checked rather than believed.
+ */
 function DangerSideCell({
   side,
+  fixtureId,
+  label,
 }: {
   side: LiveDangerReport["home_team"];
+  fixtureId: number | string;
+  label: string;
 }) {
+  const pct = side.vulnerability_pct;
+  const gk = side.gk_leak;
   return (
-    <span className="flex flex-col gap-0.5">
+    <Link
+      href={`/live/danger/${fixtureId}?side=${label}`}
+      className="group flex flex-col gap-0.5 rounded px-1 py-0.5 -m-px transition-colors hover:bg-white/5 focus-visible:outline focus-visible:outline-1 focus-visible:outline-cyan-400"
+      title="Open the full danger derivation for this team"
+    >
       <span
         className={cn(
           "font-mono text-2xs font-semibold",
@@ -188,10 +205,14 @@ function DangerSideCell({
       >
         {side.danger_level}
       </span>
-      <span className="font-mono text-2xs text-text-dim">
-        {side.vulnerability_pct === null ? "N/A" : `${side.vulnerability_pct}%`} · GK {side.gk_leak === null ? "N/A" : side.gk_leak.toFixed(2)}
+      <span className="font-mono text-2xs text-text-dim group-hover:text-cyan-300">
+        {pct === null || pct === undefined ? "N/A" : `${pct}%`} · GK{" "}
+        {gk === null || gk === undefined ? "N/A" : gk.toFixed(2)}
+        <span className="ml-1 opacity-0 transition-opacity group-hover:opacity-100">
+          →
+        </span>
       </span>
-    </span>
+    </Link>
   );
 }
 
