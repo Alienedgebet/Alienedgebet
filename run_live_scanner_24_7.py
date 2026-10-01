@@ -201,7 +201,17 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.warning(f"[Shadow Convergence] skipped: {e}")
 
-        # ── 6. STAGE 2: REMOVED ─────────────────────────────────────────────
+        # ── 6. STAGE 8: LIVE PREDICTION (judged before it is published) ────
+        # Read-only and zero API calls: it consumes the board Stage 6 just
+        # wrote. Wrapped so a fault here can never stop a stage above.
+        try:
+            from LIVE_SCANNER.live_stage8_live_prediction import (
+                run_live_prediction_engine)
+            run_live_prediction_engine()
+        except Exception as e:
+            logging.warning(f"[Stage 8 Live Prediction] skipped: {e}")
+
+        # ── 7. STAGE 2: REMOVED ─────────────────────────────────────────────
         # The live validator (live_stage2_verification.py) no longer runs. Its
         # module is kept on disk so it stays reversible and its contract tests
         # keep executing, but nothing invokes it, so it costs nothing per cycle.
