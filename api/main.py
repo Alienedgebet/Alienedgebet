@@ -2152,6 +2152,43 @@ def get_live_convergence(fixture_id: str,
     return converge(fixture_id, market=market, target=target)
 
 
+@app.get("/api/live/predict/{fixture_id}", tags=["Live"])
+def get_live_prediction(fixture_id: str):
+    """
+    Instant live prediction for one fixture, judged before it is published.
+
+    Win / draw / away, "<team> to score" for each side, over 2.5 and under 3.5.
+    Every figure carries the trace of questions that produced it, and the five
+    judges must clear the result before any number is shown. A blocked fixture
+    returns NO predictions rather than a confident guess.
+    """
+    from LIVE_SCANNER.live_stage8_live_prediction import predict
+    return predict(fixture_id)
+
+
+@app.get("/api/live/predict", tags=["Live"])
+def search_live_prediction(q: str = "", limit: int = 6):
+    """
+    Find live fixtures from typed team names, then predict the top match.
+
+    Accepts any order and a fair amount of slop ("denmark portugal",
+    "Denmark vs Portugal"), because a strict equality test against provider
+    names fails almost every real query.
+    """
+    from LIVE_SCANNER.live_stage8_live_prediction import (find_fixtures,
+                                                         predict)
+    query = (q or "").strip()
+    if not query:
+        return {"query": query, "matches": [], "prediction": None}
+
+    hits = find_fixtures(query)[:max(1, min(int(limit or 6), 20))]
+    matches = [{"fixture_id": str(m.get("id")), "name": m.get("name"),
+                "minute": m.get("minute")} for m in hits]
+    prediction = predict(str(hits[0].get("id"))) if hits else None
+    return {"query": query, "matches": matches, "prediction": prediction}
+
+
+
 @app.get("/api/live/aggregator", tags=["Live"])
 def get_live_aggregator():
     rows = _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
