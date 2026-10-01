@@ -2125,6 +2125,33 @@ def get_live_danger_detail(fixture_id: str):
     }
 
 
+@app.get("/api/live/convergence/{fixture_id}", tags=["Live"])
+def get_live_convergence(fixture_id: str,
+                         market: str = "win",
+                         target: str = "away"):
+    """
+    Do INDEPENDENT sources favour this side, on this market?
+
+    Answers the question Code 5 cannot: Code 5 compares Code 3 against Code 4,
+    which are two views of ONE live feed. This compares sources that cannot be
+    wrong in the same way — Code 4's live lineup verdict against DNA v2's
+    season-form factor vote.
+
+    Code 4's own outputs are deliberately folded into a SINGLE vote: a BLESSING
+    verdict and a goalkeeper liability come from the same key-monument over the
+    same window, so counting them as two agreeing sources would manufacture
+    confidence. `source_count` is the number of genuinely distinct sources.
+
+    CONFIRMED means two or more. SIGNAL means one — a single live reading,
+    which is what one source honestly is.
+    """
+    from LIVE_SCANNER.live_convergence import converge
+
+    if target not in ("home", "away"):
+        return {"error": "target must be 'home' or 'away'"}
+    return converge(fixture_id, market=market, target=target)
+
+
 @app.get("/api/live/aggregator", tags=["Live"])
 def get_live_aggregator():
     rows = _read_json(os.path.join(DATA_DIR, "aggregator_report.json"), [])
