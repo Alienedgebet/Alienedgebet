@@ -48,6 +48,7 @@ interface NavSection {
 const LIVE_CHILDREN: NavItem[] = [
   { label: "Incoming Live Matches", href: "/live/incoming", icon: Inbox },
   { label: "Live Match Edges", href: "/live/edges", icon: Shield },
+  { label: "Live Prediction", href: "/live/predict", icon: Target },
   { label: "Build My Alert", href: "/live/rules", icon: SlidersHorizontal },
   { label: "Live Alert Scanner", href: "/live/alerts", icon: Bell },
 ];

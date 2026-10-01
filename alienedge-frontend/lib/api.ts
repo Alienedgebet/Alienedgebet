@@ -2520,7 +2520,80 @@ export const shMasterApi = {
     api.get(`/api/sh-8goal/${date}`),
 };
 
+export interface LivePredictionQuestion {
+  id: string;
+  question: string;
+  source: string;
+  answer: string;
+  direction: "neutral" | "for_home" | "for_away" | "against_home";
+  available: boolean;
+}
+
+export interface LivePredictionJudge {
+  judge: string;
+  verdict: "PASS" | "WARN" | "BLOCK";
+  reason: string;
+  detail: Record<string, unknown>;
+}
+
+export interface LivePrediction {
+  fixture_id: string;
+  fixture?: string | null;
+  minute?: number | null;
+  score?: string | null;
+  home_team?: string | null;
+  away_team?: string | null;
+  /** FULL = pre-match audit available; LIVE_ONLY = live state only. */
+  mode: "FULL" | "LIVE_ONLY";
+  status: "OK" | "INSUFFICIENT" | "NOT_LIVE" | "ERROR";
+  error?: string | null;
+  /** null whenever the engine refused to answer. */
+  predictions: {
+    home_win: number;
+    draw: number;
+    away_win: number;
+    home_to_score: { team: string; pct: number };
+    away_to_score: { team: string; pct: number };
+    over_2_5: number;
+    under_3_5: number;
+    exactly_3_goals: number;
+  } | null;
+  trace: LivePredictionQuestion[];
+  judges: LivePredictionJudge[] | null;
+  verdict: "PASS" | "WARN" | "BLOCK" | null;
+  model?: {
+    anchor: "market_price" | "live_observation";
+    anchor_total_goals: number;
+    minutes_remaining: number;
+    [k: string]: unknown;
+  } | null;
+}
+
+export interface LivePredictionSearch {
+  query: string;
+  matches: { fixture_id: string; name: string; minute?: number | null }[];
+  prediction: LivePrediction | null;
+}
+
 export const liveApi = {
+  /**
+   * Stage 8 — instant live prediction from typed team names.
+   *
+   * Returns the matching live fixtures plus the judged prediction for the best
+   * match. `verdict` is PASS, WARN or BLOCK; a BLOCK carries `predictions: null`
+   * because the engine refuses rather than guessing.
+   */
+  searchPrediction: (
+    q: string
+  ): Promise<AxiosResponse<LivePredictionSearch>> =>
+    api.get("/api/live/predict", { params: { q } }),
+
+  /** Stage 8 — prediction for one known fixture. */
+  getPrediction: (
+    fixtureId: string | number
+  ): Promise<AxiosResponse<LivePrediction>> =>
+    api.get(`/api/live/predict/${fixtureId}`),
+
   /** Stage 1 rich strategic audit board. */
   getPrematch: (): Promise<AxiosResponse<LivePrematchAudit[]>> =>
     api.get("/api/live/prematch"),
