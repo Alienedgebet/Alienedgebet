@@ -26,10 +26,11 @@ import { cn } from "@/lib/utils";
  * reasons from minutes remaining and live chance creation, so it is meaningful
  * from the first minute.
  *
- * Nothing here is hidden. Every probability, every question the engine asked,
- * the source field each answer came from, and all five judges' verdicts are on
- * the page by default. If the judges block the prediction, no numbers are
- * shown — the engine would rather say nothing than guess.
+ * Nothing on this page is invented, and the parts that would be are left out:
+ * the engine's question-and-answer trace stays on the backend, where the judges
+ * and the audit trail use it. What is here is the reading itself and the five
+ * independent judges that verified it. If those judges block the prediction, no
+ * numbers are shown — the engine would rather say nothing than guess.
  */
 
 function VerdictBadge({ verdict }: { verdict: LivePrediction["verdict"] }) {
@@ -144,9 +145,9 @@ export default function LivePredictPage() {
         <h1 className="text-2xl font-bold text-white">Live Match Prediction</h1>
         <p className="mt-1.5 max-w-3xl text-sm text-white/55">
           Type both team names to get an instant read of a match already in
-          progress — win, draw, who scores, and where the goal total is heading.
-          Every number below is shown with the questions the engine asked and the
-          five independent judges that verified it.
+          progress — win, draw, who scores, and where the goal total is
+          heading. Every number below was checked by five independent judges
+          before it was shown.
         </p>
       </header>
 
@@ -293,61 +294,37 @@ export default function LivePredictPage() {
             </p>
           )}
 
-          <div className="grid gap-5 lg:grid-cols-2">
-            <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
-              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/45">
-                What the engine asked
-              </h3>
-              <ul className="space-y-2.5">
-                {p.trace.map((q) => (
-                  <li
-                    key={q.id}
-                    className="border-b border-white/5 pb-2 last:border-0"
-                  >
-                    <p className="text-[11px] font-medium text-white/80">
-                      {q.question}
-                    </p>
-                    <p
-                      className={cn(
-                        "mt-0.5 text-[11px] leading-snug",
-                        q.available
-                          ? "text-white/50"
-                          : "text-white/30 italic"
-                      )}
-                    >
-                      {q.answer}
-                    </p>
-                    <p className="mt-0.5 font-mono text-[9px] text-white/25">
-                      src: {q.source}
-                    </p>
-                  </li>
+          {/*
+            The engine's question-and-answer trace is deliberately NOT rendered
+            here. It stays in the API response and in
+            data/stage8_live_prediction.json, because the Trace judge reads it
+            and because it is the only way to audit a published number against
+            what the engine actually did — the audit trail that caught six
+            inverted-comparison bugs in this codebase, none of which raised an
+            error. It is engineering detail, not something a user betting on a
+            match needs to read.
+          */}
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/45">
+              Independent judges
+            </h3>
+            {p.judges && p.judges.length ? (
+              <ul>
+                {p.judges.map((j) => (
+                  <JudgeRow key={j.judge} judge={j} />
                 ))}
               </ul>
-            </div>
-
-            <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
-              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/45">
-                Independent judges
-              </h3>
-              {p.judges && p.judges.length ? (
-                <ul>
-                  {p.judges.map((j) => (
-                    <JudgeRow key={j.judge} judge={j} />
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-[11px] text-white/40">
-                  No prediction was issued, so no panel ran.
-                </p>
-              )}
-              {p.model ? (
-                <p className="mt-3 border-t border-white/10 pt-2 font-mono text-[9px] leading-relaxed text-white/30">
-                  anchor: {p.model.anchor} · total{" "}
-                  {p.model.anchor_total_goals} · {p.model.minutes_remaining}{" "}
-                  min left
-                </p>
-              ) : null}
-            </div>
+            ) : (
+              <p className="text-[11px] text-white/40">
+                No prediction was issued, so no panel ran.
+              </p>
+            )}
+            {p.model ? (
+              <p className="mt-3 border-t border-white/10 pt-2 font-mono text-[9px] leading-relaxed text-white/30">
+                anchor: {p.model.anchor} · total {p.model.anchor_total_goals} ·{" "}
+                {p.model.minutes_remaining} min left
+              </p>
+            ) : null}
           </div>
         </section>
       ) : null}
