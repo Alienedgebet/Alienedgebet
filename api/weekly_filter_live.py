@@ -224,6 +224,12 @@ def o25_filter_params(
     min_away_goals: Optional[float] = None,
     max_home_conceded: Optional[float] = None,
     max_away_conceded: Optional[float] = None,
+    # Strict disciplines — TICK BOXES. Only sent when the user actually ticks
+    # them, so an untouched drawer keeps the shipped result set. Not clamped:
+    # these are booleans, and a False is a decision (force out everything that
+    # fails) rather than a threshold.
+    strict_h2h_last3_over: Optional[bool] = None,
+    strict_both_scored_last3: Optional[bool] = None,
 ) -> dict:
     p = _normalise(mode, "o25")
     p["risk_level"] = risk_level if risk_level in O25_RISKS else "balanced"
@@ -245,6 +251,14 @@ def o25_filter_params(
         clamped = caster(locals()[key], bounds)
         if clamped is not None:
             p["overrides"][key] = clamped
+    # Tick boxes. A tick is a decision, not a threshold, so it is recorded
+    # whenever it arrives — including False, which means "force out everything
+    # that fails this gate". Absent stays absent so an untouched drawer sends
+    # nothing at all and the shipped result set is unchanged.
+    for key in ("strict_h2h_last3_over", "strict_both_scored_last3"):
+        ticked = locals()[key]
+        if ticked is not None:
+            p["overrides"][key] = bool(ticked)
     return p
 
 
@@ -299,6 +313,10 @@ O25_TIPSTER_KWARGS = {
     "min_away_goals": "min_away_goals",
     "max_home_conceded": "max_home_conceded",
     "max_away_conceded": "max_away_conceded",
+    # Strict disciplines (tick boxes). Same names in Tipster mode, so the tick
+    # means the same thing on both sides of the mode toggle.
+    "strict_h2h_last3_over": "strict_h2h_last3_over",
+    "strict_both_scored_last3": "strict_both_scored_last3",
 }
 
 GG_CFG_KEYS = {
@@ -347,6 +365,15 @@ O25_NARROW = {
     "min_away_goals": ("away_goals_scored_last_5", "min_opt"),
     "max_home_conceded": ("home_goals_conceded_last_5", "max_opt"),
     "max_away_conceded": ("away_goals_conceded_last_5", "max_opt"),
+    # Strict disciplines — TICK BOXES, not dials. Ticking one forces out every
+    # fixture that does not clear it, rather than scoring them better on a
+    # slider. Same two keys reach the engine in Tipster mode via
+    # O25_TIPSTER_KWARGS, so a tick means the same thing in both modes.
+    "strict_h2h_last3_over": ("kill_switch_pass", "is_true"),
+    # Compound: BOTH sides must clear the bar, so this one takes a tuple of
+    # columns and the "all_min" op, not a single field.
+    "strict_both_scored_last3": (
+        ("home_goals_scored_last_3", "away_goals_scored_last_3"), "all_min"),
 }
 
 # Drawer controls that CANNOT be honoured in Public mode.
@@ -463,11 +490,17 @@ def narrow_rows(rows, market, overrides):
         bound = overrides[canonical]
         if bound is None:
             continue
-        # A 0 threshold is OFF, not "gate at zero". This is the engine's own
-        # rule (`if not thr: continue`); without it a typed 0 in
+        # A falsy bound means the gate is OFF — never "gate at zero". This is the
+        # engine's own rule (`if not thr: continue`); without it a typed 0 in
         # "Max ... Conceded" means "<= 0" and wipes every fixture, while the
         # identical 0 in Tipster mode means "no gate".
-        if op.endswith("_opt") and not bound:
+        #
+        # The same rule has to hold for the tick boxes, and it matters most
+        # there: the drawer's default is unticked, so a False reaching this
+        # loop means the user ticked the box and then unticked it. Treating
+        # that as "force out everything that fails" would invert the control:
+        # unticking it would delete fixtures instead of releasing them.
+        if not bound and (op.endswith("_opt") or op in ("is_true", "all_min")):
             continue
         active.append((field, op, bound))
     if not active:
@@ -479,6 +512,19 @@ def narrow_rows(rows, market, overrides):
             continue
         keep = True
         for field, op, bound in active:
+            if op == "all_min":
+                # Compound gate: EVERY listed column must clear the bar. A
+                # column that is absent from the row passes — no operand, no
+                # verdict — rather than silently dropping the fixture on a
+                # field the engine may not have written for that date.
+                for sub in field:
+                    got = _num(row.get(sub))
+                    if got is not None and got < bound:
+                        keep = False
+                        break
+                if not keep:
+                    break
+                continue
             raw = row.get(field)
             if op == "is_true":
                 if not _truthy(raw):
