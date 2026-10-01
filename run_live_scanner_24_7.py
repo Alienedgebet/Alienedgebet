@@ -189,7 +189,19 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.error(f"[Stage 5 Aggregator Handshake] Error: {e}")
 
-        # ── 5. STAGE 2: REMOVED ─────────────────────────────────────────────
+        # ── 5. SHADOW: what WOULD the two-source rule have dropped? ──────────
+        # Read-only. It writes convergence_shadow.json and touches no engine
+        # output. Wrapped so that a failure here can never stop a stage above
+        # from producing its picks — a broken observer must not become a fault.
+        try:
+            from LIVE_SCANNER.live_convergence_shadow import run_shadow_review
+            _shadow = run_shadow_review()
+            if isinstance(_shadow, dict) and _shadow.get("error"):
+                logging.warning(f"[Shadow Convergence] {_shadow['error']}")
+        except Exception as e:
+            logging.warning(f"[Shadow Convergence] skipped: {e}")
+
+        # ── 6. STAGE 2: REMOVED ─────────────────────────────────────────────
         # The live validator (live_stage2_verification.py) no longer runs. Its
         # module is kept on disk so it stays reversible and its contract tests
         # keep executing, but nothing invokes it, so it costs nothing per cycle.

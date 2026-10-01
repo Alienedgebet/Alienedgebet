@@ -6577,6 +6577,110 @@ class TestConvergenceCountsIndependentSourcesNotRepeatedReads(unittest.TestCase)
         self.assertIn("error", converge(999999, "win", "home"))
 
 
+class TestConvergenceShadowChangesNothing(unittest.TestCase):
+    """The shadow layer must be incapable of altering a live pick.
+
+    Its whole value is that it can be run against production traffic without
+    risk. If it could ever write to a prediction file, the one guarantee it
+    offers — "this changed nothing" — would be worth nothing, and nobody could
+    safely look at the disagreement it produces.
+    """
+
+    def _sandbox(self, tmp, predictions, prematch=None):
+        from LIVE_SCANNER import live_convergence_shadow as sh
+        sh.PREDICTIONS_FILE = str(tmp / "incoming_predictions.json")
+        sh.SHADOW_FILE = str(tmp / "convergence_shadow.json")
+        sh.PREMATCH_FILE = str(tmp / "prematch_team_audit.json")
+        (tmp / "incoming_predictions.json").write_text(json.dumps(predictions))
+        (tmp / "prematch_team_audit.json").write_text(
+            json.dumps(prematch if prematch is not None else {}))
+        return sh
+
+    def test_it_never_writes_to_the_predictions_file(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            original = {"1": [{"type": "TO_SCORE", "target_loc": "home",
+                               "reason": "GK liability"}]}
+            sh = self._sandbox(tmp, original)
+            before = (tmp / "incoming_predictions.json").read_text()
+            sh.run_shadow_review()
+            after = (tmp / "incoming_predictions.json").read_text()
+            self.assertEqual(before, after,
+                             "shadow mode MUTATED the predictions file")
+
+    def test_a_missing_predictions_file_degrades_instead_of_raising(self):
+        import tempfile
+        from pathlib import Path
+        from LIVE_SCANNER import live_convergence_shadow as sh
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            sh.PREDICTIONS_FILE = str(tmp / "nope.json")
+            sh.SHADOW_FILE = str(tmp / "out.json")
+            sh.PREMATCH_FILE = str(tmp / "pm.json")
+            report = sh.run_shadow_review()
+            self.assertTrue(report.get("changes_nothing"))
+
+    def test_a_longshot_pick_is_marked_as_ungated_support(self):
+        """Liechtenstein at 29.0 must NOT pass as two-source supported."""
+        import tempfile
+        from pathlib import Path
+        from LIVE_SCANNER import live_convergence_shadow as sh
+        from LIVE_SCANNER import live_convergence as conv
+
+        side = {"team_name": "Liechtenstein", "verdict": "BLESSING",
+                "net_impact": -5.0, "gk_verdict": "DANGER", "gk_note": "",
+                "gk_leak": 1.0}
+        other = dict(side, team_name="Azerbaijan", verdict="ROTATION",
+                     net_impact=0.0)
+        # DNA leans the AWAY side only 2 of 5 — under the 60% majority — so
+        # Code 4 is the single source and the pick cannot be two-source.
+        dna = {"1": {"markets": {"win": {"factors": [
+            {"name": f"f{i}", "winner": w} for i, w in enumerate(
+                ["away", "away", "home", "home", "home"])]}}}}
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            self._sandbox(tmp, {"1": [{"type": "TO_SCORE",
+                                       "target_loc": "away",
+                                       "target_name": "Liechtenstein"}]},
+                          {"1": {"fixture_id": "1", "fixture": "Azerbaijan vs "
+                                                        "Liechtenstein",
+                                 "odds_home_win": 1.03,
+                                 "odds_away_win": 29.0}})
+            dfile = tmp / "d.json"
+            dfile.write_text(json.dumps(
+                [{"fixture_id": 1, "fixture": "Azerbaijan vs Liechtenstein",
+                  "home_team": other, "away_team": side}]), encoding="utf-8")
+            nfile = tmp / "n.json"
+            nfile.write_text(json.dumps(dna), encoding="utf-8")
+            od, on = conv.DANGER_FILE, conv.DNA_FILE
+            conv.DANGER_FILE, conv.DNA_FILE = str(dfile), str(nfile)
+            try:
+                report = sh.run_shadow_review()
+            finally:
+                conv.DANGER_FILE, conv.DNA_FILE = od, on
+
+            rec = report["fixtures"]["1"]["picks"][0]
+            self.assertEqual(rec["source_count"], 1)
+            self.assertTrue(rec["would_gate"],
+                            "a 29.0 longshot must not read as confirmed")
+
+    def test_an_unmappable_prediction_is_reported_not_guessed(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            preds = {"1": [{"type": "CORNERS_OVER_9"}]}
+            sh = self._sandbox(tmp, preds)
+            report = sh.run_shadow_review()
+            rec = report["fixtures"]["1"]["picks"][0]
+            self.assertFalse(rec["mappable"])
+            self.assertIsNone(rec["would_gate"])
+            self.assertEqual(report["totals"]["not_mappable"], 1)
+
+
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
     """A lineup row with `player_id: null` must not empty danger_audit.json.
 
