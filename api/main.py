@@ -695,6 +695,14 @@ O15_STAGE3_DEFAULTS = dict(O25_STAGE3_DEFAULTS)
 O15_PSYCH_DEFAULTS = dict(O25_PSYCH_DEFAULTS)
 O15_APEX_DEFAULTS = dict(Fixture="", Base_Poisson="0%", Base_Grade="", Score=0, Tier="STANDARD", Reasons="")
 
+# Shown beside the frozen PRE-FIX Over 1. picks so the comparison cannot be
+# misread as two live engines disagreeing. See /api/over15/legacy/{date}.
+O15_LEGACY_NOTE = (
+    "PRE-FIX Over 1.5 — produced by the pipeline that started 18:00:21 on "
+    "2026-09-30, before the 18:11 and 19:53 fixes could load. Frozen for "
+    "comparison. The live engine output is the FIXED run."
+)
+
 CORNER_S1_DEFAULTS = dict(
     fixture_id="", fixture="", expected_total_corners=0, corner_tier="STANDARD",
     expected_difference=0, team_more_corners="", team_more_corners_probability_like=0,
@@ -1212,6 +1220,32 @@ def get_over15_psychology(date: str):
 def get_over15_apex(date: str):
     return _with_intelligent_pass(
         "over15", read("over15_apex", date, O15_APEX_DEFAULTS, "o15"), date)
+
+
+# 2026-10-01. The PRE-FIX Over 1.5 verdict, frozen by
+# tools/snapshot_o15_prefix.py.
+#
+# The pipeline that produced the live cache started at 18:00:21 on 2026-09-30
+# and had already imported every engine module, so the 18:11 (one-engine shim +
+# stage3 Date stamp) and 19:53 (halftime rules) fixes could not have run. Every
+# over15_psychology cache was pre-fix output, and the next 18:00 run overwrites
+# it. This key is written by nothing in the pipeline, so the snapshot holds.
+#
+# Deliberately NOT passed through _with_intelligent_pass: that evaluator is the
+# current one, and running it over old picks would mix a new verdict with an
+# old engine's output — exactly the comparison this endpoint exists to make
+# impossible to misread. It IS settled, so old and new are graded against the
+# same finished results and can be compared on the same footing.
+@app.get("/api/over15/legacy/{date}", tags=["Over 1.5"])
+def get_over15_legacy(date: str):
+    rows = read("over15_legacy", date, O15_PSYCH_DEFAULTS, "o15")
+    info = store.load_status("over15_legacy", date)
+    if info.get("status") == "missing":
+        return []
+    return [{**r,
+             "_legacy_note": O15_LEGACY_NOTE,
+             "_legacy_generated_at": info.get("generated_at")}
+            for r in rows]
 
 
 # ════════════════════════════════════════════════════════════════════════════
