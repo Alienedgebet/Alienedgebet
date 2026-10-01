@@ -93,7 +93,7 @@ export const OVER25_FILTER_CONFIG: MarketFilterConfig = {
     // slider. Both are OFF until ticked, so the shipped result set is
     // unchanged until you actually tick something.
     { key: "strict_h2h_last3_over", label: "STRICT — Last 3 H2H All Over 2.5", type: "checkbox", defaultValue: false },
-    { key: "strict_both_scored_last3", label: "STRICT — Both Sides Scored in Last 3", type: "checkbox", defaultValue: false },
+    { key: "strict_both_overs_last3", label: "STRICT — Both Sides' Last 3 Matches All Over 2.5", type: "checkbox", defaultValue: false },
     // ONE odds box: a floor with no ceiling. Set 1.60 and you get every pick
     // at 1.60 and above. The Max Odds box is gone — it shadowed the Target
     // Odds Corridor, because the drawer's 1.85 was always sent as an override

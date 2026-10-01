@@ -229,7 +229,7 @@ def o25_filter_params(
     # these are booleans, and a False is a decision (force out everything that
     # fails) rather than a threshold.
     strict_h2h_last3_over: Optional[bool] = None,
-    strict_both_scored_last3: Optional[bool] = None,
+    strict_both_overs_last3: Optional[bool] = None,
 ) -> dict:
     p = _normalise(mode, "o25")
     p["risk_level"] = risk_level if risk_level in O25_RISKS else "balanced"
@@ -255,7 +255,7 @@ def o25_filter_params(
     # whenever it arrives — including False, which means "force out everything
     # that fails this gate". Absent stays absent so an untouched drawer sends
     # nothing at all and the shipped result set is unchanged.
-    for key in ("strict_h2h_last3_over", "strict_both_scored_last3"):
+    for key in ("strict_h2h_last3_over", "strict_both_overs_last3"):
         ticked = locals()[key]
         if ticked is not None:
             p["overrides"][key] = bool(ticked)
@@ -316,7 +316,7 @@ O25_TIPSTER_KWARGS = {
     # Strict disciplines (tick boxes). Same names in Tipster mode, so the tick
     # means the same thing on both sides of the mode toggle.
     "strict_h2h_last3_over": "strict_h2h_last3_over",
-    "strict_both_scored_last3": "strict_both_scored_last3",
+    "strict_both_overs_last3": "strict_both_overs_last3",
 }
 
 GG_CFG_KEYS = {
@@ -371,9 +371,12 @@ O25_NARROW = {
     # O25_TIPSTER_KWARGS, so a tick means the same thing in both modes.
     "strict_h2h_last3_over": ("kill_switch_pass", "is_true"),
     # Compound: BOTH sides must clear the bar, so this one takes a tuple of
-    # columns and the "all_min" op, not a single field.
-    "strict_both_scored_last3": (
-        ("home_goals_scored_last_3", "away_goals_scored_last_3"), "all_min"),
+    # columns and the "all_min" op. The third element is a FIXED threshold of
+    # 3 — the control means "all three of the last three", so the bound comes
+    # from the window's own length, not from anything the user typed. Only the
+    # tick itself is a user choice.
+    "strict_both_overs_last3": (
+        ("home_overs_last_3", "away_overs_last_3"), "all_min", 3),
 }
 
 # Drawer controls that CANNOT be honoured in Public mode.
@@ -484,11 +487,19 @@ def narrow_rows(rows, market, overrides):
     """
     spec = WIN_NARROW if market == "win" else O25_NARROW
     active = []
-    for canonical, (field, op) in spec.items():
+    for canonical, spec_val in spec.items():
         if canonical not in overrides:
             continue
-        bound = overrides[canonical]
-        if bound is None:
+        if overrides[canonical] is None:
+            continue
+        # A 2-element spec is (fields, op); a 3-element one pins the threshold
+        # for a gate whose bar is a property of the window rather than
+        # something the user typed ("all three of the last three" is 3 by
+        # definition, and the tick is still only a tick).
+        field, op = spec_val[0], spec_val[1]
+        fixed = spec_val[2] if len(spec_val) > 2 else None
+        bound = fixed if fixed is not None else overrides[canonical]
+        if fixed is not None and not overrides[canonical]:
             continue
         # A falsy bound means the gate is OFF — never "gate at zero". This is the
         # engine's own rule (`if not thr: continue`); without it a typed 0 in
@@ -619,35 +630,51 @@ def _live_o25(dates, params, risk_default="balanced"):
                                             over25_source_and_goal_form)
 
     overrides = params.get("overrides") or {}
-    # Is the user actually asking for a goal-form gate? A 0 means off, so only
-    # a truthy value counts.
-    goal_form_active = any(
-        overrides.get(k) for k in ("min_home_goals", "min_away_goals",
-                                   "max_home_conceded", "max_away_conceded"))
-    # Dates whose artifact predates the engine writing the goal-form columns.
-    # The engine's gate skips SILENTLY there (`col not in df_filtered.columns`),
-    # so without this the drawer shows a box as active while it evaluated
+    # Which drawer gates is the user actually asking for? A 0 or an unticked
+    # box means off, so only a truthy value counts.
+    want = set()
+    if any(overrides.get(k) for k in ("min_home_goals", "min_away_goals",
+                                      "max_home_conceded",
+                                      "max_away_conceded")):
+        want.add("goal_form")
+    if overrides.get("strict_both_overs_last3"):
+        want.add("overs3")
+    # Dates whose artifact predates the engine writing a gate's columns. The
+    # engine skips SILENTLY there (`col not in df_filtered.columns`), so
+    # without this the drawer shows a box as active while it evaluated
     # nothing at all — which is precisely the "the box does nothing" report.
-    unchecked = set()
-    if goal_form_active:
+    unchecked = {}
+    if want:
         for date in dates:
-            _src, has_cols = over25_source_and_goal_form(date)
-            if not has_cols:
-                unchecked.add(date)
+            _src, have = over25_source_and_goal_form(date)
+            missing = want - set(have)
+            if missing:
+                unchecked[date] = missing
+    if not unchecked:
+        return _run(dates, params, risk_default)
 
     def _mark(rows):
-        """Tag rows whose date could not be goal-form gated."""
-        if not unchecked:
-            return rows
         for row in rows:
-            if isinstance(row, dict) and row.get("match_date") in unchecked:
-                row["_goal_form_unchecked"] = True
-                row["_goal_form_note"] = (
-                    "Goal-form thresholds were NOT applied to this fixture: "
-                    f"the engine recorded no recent-goal data for "
-                    f"{row.get('match_date')}.")
+            if not isinstance(row, dict):
+                continue
+            missing = unchecked.get(row.get("match_date"))
+            if not missing:
+                continue
+            row["_goal_form_unchecked"] = True
+            row["_goal_form_note"] = (
+                f"NOT applied to this fixture ({row.get('match_date')}): "
+                + " and ".join(sorted(missing))
+                + " — the engine recorded no data for this on that date.")
         return rows
 
+    return _mark(_run(dates, params, risk_default))
+
+
+def _run(dates, params, risk_default="balanced"):
+    """The actual O2.5 dispatch: tipster engine path, or public + narrowing."""
+    from FILTER.over25_risk_filter import run_over25_filter_aggregator
+
+    overrides = params.get("overrides") or {}
     if params.get("mode") in TIPSTER_MODES:
         kwargs = {engine_key: overrides[canonical]
                   for canonical, engine_key in O25_TIPSTER_KWARGS.items()
@@ -675,7 +702,7 @@ def _live_o25(dates, params, risk_default="balanced"):
             produced = run_over25_filter_aggregator(date, mode="tipster",
                                                     persist=False, **kwargs) or []
             rows.extend(_stamp(produced, date))
-        return _mark(rows)
+        return rows
 
     risk = params.get("risk_level") or risk_default
     band = params.get("odds_band") or O25_DEFAULT_BAND
@@ -684,7 +711,7 @@ def _live_o25(dates, params, risk_default="balanced"):
         produced = run_over25_filter_aggregator(date, mode="public", persist=False,
                                                  risk_level=risk, odds_band=band) or []
         rows.extend(_stamp(produced, date))
-    return _mark(narrow_rows(rows, "o25", overrides))
+    return narrow_rows(rows, "o25", overrides)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

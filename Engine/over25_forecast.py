@@ -341,6 +341,18 @@ def run_over25_forecast_engine(target_date):
                 "away_goals_scored_last_3": int(a_m3["gs"]),
                 "home_goals_conceded_last_3": int(h_m3["gc"]),
                 "away_goals_conceded_last_3": int(a_m3["gc"]),
+                # 2026-10-01. How many of each side's last THREE matches
+                # cleared 2.5 goals — already computed in memory as
+                # h_m3["overs"]/a_m3["overs"], because the window helper has
+                # counted st["over"] since it was written. It was simply never
+                # persisted, so the drawer's strict "both sides' last three all
+                # went over 2.5" tick had nothing to read.
+                #
+                # This cannot be reconstructed from the goal sums above: three
+                # matches totalling 9 goals could be 3-3, 2-2, or 5-1, and only
+                # the per-match over/under split distinguishes them.
+                "home_overs_last_3": int(h_m3["overs"]),
+                "away_overs_last_3": int(a_m3["overs"]),
             })
         except: continue
 
