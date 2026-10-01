@@ -71,6 +71,19 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 
 # NOTE: Code 9 (Aggregator) reads incoming_predictions.json
 PREDICTIONS_FILE = os.path.join(DATA_DIR, "incoming_predictions.json")
+# 2026-10-01. Code 4's audit is the AUTHORITY for the signed verdict this
+# module prints. Code 3 previously re-derived net_impact/confidence with its
+# own assess_absence() call against a different replacement group, so the two
+# codes published rival numbers for the same team on the same fixture. Measured
+# on the live board they disagreed on 13 of 13 sides, and on Greece the sign
+# flipped (Code 4 -1.1 vs Code 3 +2.0). The card was quoting a measurement the
+# rest of the system contradicted.
+#
+# Read-only, and one cycle old: the runner order is stage3 -> stage4 -> stage5,
+# so this is the PREVIOUS cycle's audit. Lineups do not change meaningfully
+# inside a 45-second cycle, but the figure is documented as lagging rather than
+# silently assumed fresh.
+DANGER_AUDIT_FILE = os.path.join(DATA_DIR, "danger_audit.json")
 # Stage 3's player records are {id, name, pos, worth, ...} — incompatible with
 # stage 6's {worth, doom, pos} players written to the shared squad_cache.json.
 # Sharing caused stage 3 to KeyError('id') on cached teams every cycle, which
@@ -329,7 +342,62 @@ def calculate_gk_vulnerability_pro(master_gk, today_ids, all_lineup_data,
 # ==============================================================================
 # SQUAD DATA (150-DAY MONUMENT ENGINE)
 # ==============================================================================
-def _describe_rotation(side):
+# Printed when Code 4 has no record for a side. It states an absence rather
+# than substituting a number, because the whole point of this step is that the
+# card must never show a figure the rest of the system contradicts — and a
+# fabricated fallback would be exactly that.
+_PENDING_SENTENCE = (
+    "Danger evidence pending - this module will not print a signed figure "
+    "until Code 4's audit has scored this side for this fixture."
+)
+
+
+def load_danger_authority():
+    """
+    Code 4's audit, indexed by (fixture_id, team_id) -> that side's record.
+
+    Returns an EMPTY mapping when the file is missing, unreadable, or in an
+    unexpected shape. That is deliberate: the caller then prints no numbers at
+    all rather than falling back to this module's own re-derivation, which is
+    the disagreement this exists to remove.
+
+    The file is one cycle old by construction (runner order stage3 -> stage4 ->
+    stage5). Lineups do not change meaningfully inside a 45-second cycle, but
+    the lag is stated rather than assumed away.
+    """
+    try:
+        with open(DANGER_AUDIT_FILE, "r", encoding="utf-8") as f:
+            audit = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        return {}
+    if not isinstance(audit, list):
+        return {}
+
+    # Both key components are normalised to int HERE. `f_id` in this module is a
+    # STRING (`str(fx["id"])`) while the audit file carries ints, so a lookup
+    # built without this cast silently matched nothing and every card fell back
+    # to "pending" — which reads as missing data rather than as a bug.
+    index = {}
+    for entry in audit:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            fid = int(entry.get("fixture_id"))
+        except (TypeError, ValueError):
+            continue
+        for side_key in ("home_team", "away_team"):
+            side = entry.get(side_key)
+            if not isinstance(side, dict):
+                continue
+            try:
+                tid = int(side.get("id"))
+            except (TypeError, ValueError):
+                continue
+            index[(fid, tid)] = side
+    return index
+
+
+def _describe_rotation(side, authority=None):
     """Write the reason sentence for a rotation/blessing pick.
 
     2026-09-29. The reason used to be one hardcoded literal — "the players who
@@ -355,20 +423,74 @@ def _describe_rotation(side):
     evidence is too thin to call a direction at all, which is the common case
     on this board: the confidence below the call floor is stated rather than
     dressed up as a verdict.
+
+    2026-10-01 — THE NUMBER IS NO LONGER THIS MODULE'S OWN.
+
+    `authority` is Code 4's record for this (fixture_id, team_id). When supplied
+    and carrying both figures, THOSE are what get printed.
+
+    Code 3 previously called assess_absence() itself against a different
+    replacement group than Code 4 uses, so the two codes published rival
+    numbers for the same team on the same fixture. Measured on the live board:
+    they disagreed on 13 of 13 sides, and on Greece the sign flipped (Code 4
+    -1.1 against Code 3 +2.0). The card was quoting a measurement the rest of
+    the system contradicted.
+
+    This function is DISPLAY ONLY. The `side` argument still drives the pick
+    RULES from this module's own local assess_absence() call, which is
+    deliberately unchanged so the emitted pick set is byte-identical. That
+    means the sentence can quote Code 4's figure while the pick decision used
+    the local one, until the rule logic is pointed at the same authority.
     """
-    verdict = str(side.get("verdict") or "ROTATION").upper()
-    net = side.get("net_impact")
+    verdict = str((authority or {}).get("verdict")
+                  or side.get("verdict") or "ROTATION").upper()
+
+    # 2026-10-01. THE PRINTED NUMBER IS CODE 4's, not this module's. See the
+    # docstring note below: Code 3 used to call assess_absence() itself against a
+    # different replacement group, so it published rival figures that disagreed
+    # with Code 4's on every side measured on the live board.
+    #
+    # No authority -> NO NUMBER. It does not fall back to the local figure. A
+    # missing measurement must never be rendered as a measurement, which is the
+    # same rule that removed the fabricated 75.0 corners fallback.
+    if not authority:
+        return _PENDING_SENTENCE
+    net = authority.get("net_impact")
     try:
         net = float(net)
     except (TypeError, ValueError):
-        net = 0.0
+        return _PENDING_SENTENCE
     try:
-        conf = float(side.get("confidence") or 0.0)
+        conf = float(authority.get("impact_confidence") or 0.0)
     except (TypeError, ValueError):
-        conf = 0.0
+        return _PENDING_SENTENCE
 
     head = (f"{verdict} - signed net {net:+.1f} "
             f"at {conf:.2f} confidence")
+
+    # ── THE GK OVERRIDE MUST BE STATED, NOT PAPERED OVER ──────────────────
+    # Code 4 raises DANGER on a confirmed goalkeeper finding EVEN WHEN the
+    # outfield evidence says the XI improved. Measured on tonight's board, 3 of
+    # 16 sides were DANGER with a NEGATIVE net (Azerbaijan -8.8, Wales -10.7,
+    # Serbia -12.1) because the keeper finding settles it on its own.
+    #
+    # Printing the verdict and the net side by side, then wording the sentence
+    # from the net's sign, would have produced "DANGER ... the rotation upgraded
+    # this side" — a fresh contradiction created by this very change. So where
+    # the two disagree, the disagreement is what gets said.
+    gk_override = ((verdict == "DANGER" and net < 0)
+                   or (verdict == "BLESSING" and net > 0))
+    if gk_override:
+        outfield = ("the players who left were BETTER than the ones now "
+                    "starting" if net > 0 else
+                    "the players who left were WORSE than the ones now starting")
+        direction = ("so this side lost outfield quality" if net > 0 else
+                     "so the outfield read is an upgrade")
+        return (
+            f"{head}: the OUTFIELD evidence says {outfield} ({direction}), "
+            f"but the goalkeeper finding decides this side on its own - the "
+            f"{verdict} call is the keeper's, not the outfield's."
+        )
 
     # Below this the signed verdict itself declines to call a direction, and
     # `ROTATION` is what it returns. Saying "churn, no direction" is the
@@ -525,6 +647,15 @@ def run_incoming_forensic_engine():
         return {}
 
     load_cache()
+
+    # 2026-10-01. Code 4's audit, loaded ONCE per cycle and indexed by
+    # (fixture_id, team_id). This is the previous cycle's file by construction
+    # (runner order stage3 -> stage4 -> stage5); see load_danger_authority.
+    _danger_authority = load_danger_authority()
+    print(f"Danger authority records available: {len(_danger_authority)}"
+          + ("" if _danger_authority else
+             "  (no audit file yet — signed figures will be withheld, "
+             "not fabricated)"))
 
     global FINAL_PREDICTIONS_FEED
     FINAL_PREDICTIONS_FEED = {}
@@ -831,14 +962,22 @@ def run_incoming_forensic_engine():
             # Over 2.5 would be wrong (z=1.41, not significant).
             for _side in (h, a):
                 if _side.get('verdict') in ("BLESSING", "ROTATION") and _side.get('attack_boost'):
+                    # 2026-10-01. The SENTENCE quotes Code 4's audit; the
+                    # DECISION above still used this module's own local
+                    # assess_absence(). That split is deliberate and temporary —
+                    # it keeps the emitted pick set byte-identical while making
+                    # the card stop contradicting the rest of the system.
+                    _authority = _danger_authority.get((safe_int(f_id), _side['id']))
                     match_picks.append({
                         "type":        "TO_SCORE",
                         "target_loc":  _side['loc'],
                         "target_name": _side['name'],
-                        "reason":      _describe_rotation(_side),
+                        "reason":      _describe_rotation(_side, _authority),
                     })
                     print(f"  ✅ ROTATION UPLIFT — TO_SCORE: {_side['name']} "
-                          f"({_side['verdict']}, net {_side['net_impact']:+.1f})")
+                          f"({_side['verdict']}, local net {_side['net_impact']:+.1f}; "
+                          f"card quotes Code 4"
+                          f"{'' if _authority else ' — NO AUDIT RECORD, no figure printed'})")
 
             # ── Rule 1: Multi-Leak Conflict (GG / Over) ──────────────────
             if (((_really_damaged(h) and h['leak'] > 1.3 and a['leak'] > 1.5) or

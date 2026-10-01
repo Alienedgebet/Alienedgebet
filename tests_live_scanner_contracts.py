@@ -61,7 +61,20 @@ _KEY_LOSS = {"h_lost": 0, "a_lost": 0}
 
 
 class IncomingReasonContractTests(unittest.TestCase):
-    """The reason text a user reads must agree with the number beside it."""
+    """
+    The reason text a user reads must agree with the number beside it.
+
+    2026-10-01: the number is now CODE 4's, not this module's. These contracts
+    are unchanged in substance — a sentence must still describe its own figure —
+    but the figure is supplied as a Code 4 authority record
+    (net_impact / impact_confidence) instead of the local side dict.
+    """
+
+    @staticmethod
+    def _authority(verdict, net, conf):
+        """A Code 4 audit record, which is what the sentence now quotes."""
+        return {"verdict": verdict, "net_impact": net,
+                "impact_confidence": conf}
 
     def test_a_positive_net_is_described_as_quality_lost(self):
         """
@@ -73,7 +86,7 @@ class IncomingReasonContractTests(unittest.TestCase):
         the same sentence that denied one.
         """
         text = stage3._describe_rotation(
-            {"verdict": "DANGER", "net_impact": 15.3, "confidence": 0.80})
+            {}, self._authority("DANGER", 15.3, 0.80))
         self.assertIn("BETTER", text,
                       "a positive net means the players who left were better")
         self.assertNotIn("no better", text)
@@ -81,7 +94,7 @@ class IncomingReasonContractTests(unittest.TestCase):
 
     def test_a_negative_net_is_described_as_an_upgrade(self):
         text = stage3._describe_rotation(
-            {"verdict": "BLESSING", "net_impact": -8.6, "confidence": 0.65})
+            {}, self._authority("BLESSING", -8.6, 0.65))
         self.assertIn("WORSE", text,
                       "a negative net means the players who left were worse")
         self.assertIn("upgraded", text)
@@ -93,7 +106,7 @@ class IncomingReasonContractTests(unittest.TestCase):
         must not assert a quality comparison the engine did not make.
         """
         text = stage3._describe_rotation(
-            {"verdict": "ROTATION", "net_impact": 11.4, "confidence": 0.00})
+            {}, self._authority("ROTATION", 11.4, 0.00))
         self.assertIn("too thin", text)
         self.assertNotIn("BETTER", text)
         self.assertNotIn("WORSE", text)
@@ -101,8 +114,7 @@ class IncomingReasonContractTests(unittest.TestCase):
     def test_the_stated_number_and_confidence_match_the_side(self):
         for net, conf in ((15.3, 0.39), (-2.0, 0.68), (0.0, 0.50)):
             text = stage3._describe_rotation(
-                {"verdict": "ROTATION", "net_impact": net,
-                 "confidence": conf})
+                {}, self._authority("ROTATION", net, conf))
             self.assertIn(f"{net:+.1f}", text)
             self.assertIn(f"{conf:.2f}", text)
 
@@ -6042,6 +6054,233 @@ class TestGoalFormGatesMustNeverSilentlyDoNothing(unittest.TestCase):
         self.assertIn("2026-09-30", tsx,
                       "the warning must state when the data began, so the "
                       "user knows which dates are affected")
+
+
+class TestIncomingQuotesCodeFourAsTheSignedVerdictAuthority(unittest.TestCase):
+    """
+    2026-10-01. Code 3 and Code 4 published RIVAL numbers for the same team on
+    the same fixture, because each called assess_absence() itself with a
+    different replacement group:
+
+        Code 4: assess_absence(_absent, _replacements, regime="MID_FIELD")
+        Code 3: assess_absence(_absent, _present,     regime=<odds regime>)
+
+    Measured on the live board the two disagreed on 13 of 13 sides, and on
+    Greece the SIGN flipped (Code 4 -1.1 against Code 3 +2.0). The Incoming
+    card was quoting a measurement the rest of the system contradicted.
+
+    This change makes Code 4 the authority for the PRINTED figure only. The
+    pick rules deliberately still use the local value so the emitted pick set
+    is byte-identical; that split is temporary and asserted below.
+    """
+
+    def _authority(self, verdict, net, conf):
+        return {"verdict": verdict, "net_impact": net,
+                "impact_confidence": conf}
+
+    def test_the_printed_figure_is_code_fours_not_the_local_one(self):
+        """
+        The local side and the authority deliberately disagree. The sentence
+        must quote the AUTHORITY, or the card keeps contradicting Code 4.
+        """
+        local = {"verdict": "ROTATION", "net_impact": -6.0, "confidence": 0.03}
+        auth = self._authority("DANGER", -8.84, 0.764)
+        text = stage3._describe_rotation(local, auth)
+        self.assertIn("-8.8", text, "must print Code 4's net")
+        self.assertIn("0.76", text, "must print Code 4's confidence")
+        self.assertNotIn("-6.0", text,
+                         "Code 3's own rival figure must not appear")
+        self.assertNotIn("0.03", text,
+                         "Code 3's own rival confidence must not appear")
+
+    def test_no_authority_prints_no_number_at_all(self):
+        """
+        THE FABRICATION RULE. With no Code 4 record the sentence must state the
+        absence. Falling back to the local figure would reinstate exactly the
+        disagreement this removes.
+        """
+        import re
+        local = {"verdict": "ROTATION", "net_impact": -6.0, "confidence": 0.03}
+        text = stage3._describe_rotation(local, None)
+        self.assertNotRegex(text, r"net\s*[+-]\d",
+                            "no signed net may be printed without an authority")
+        self.assertNotRegex(text, r"at\s+\d\.\d+\s*confidence",
+                            "no confidence may be printed without an authority")
+        self.assertIn("pending", text.lower())
+
+    def test_an_authority_missing_its_figures_prints_no_number(self):
+        """
+        A present-but-empty record is still no evidence. `{"verdict": "DANGER"}`
+        must not render "net +0.0 at 0.00 confidence", which would look like a
+        measurement of zero.
+        """
+        import re
+        for auth in ({"verdict": "DANGER"},
+                     {"verdict": "DANGER", "net_impact": None},
+                     {"verdict": "DANGER", "net_impact": "x"}):
+            with self.subTest(auth=auth):
+                text = stage3._describe_rotation({}, auth)
+                self.assertNotRegex(text, r"net\s*[+-]\d")
+        self.assertNotRegex(
+            stage3._describe_rotation({}, {"impact_confidence": 0.9}),
+            r"net\s*[+-]\d")
+
+    def test_the_goalkeeper_override_is_stated_not_papered_over(self):
+        """
+        A FRESH CONTRADICTION THIS CHANGE WOULD OTHERWISE INTRODUCE.
+
+        Code 4 raises DANGER on a goalkeeper finding even when the outfield
+        evidence says the XI IMPROVED. Measured tonight: 3 of 16 sides were
+        DANGER with a negative net (Azerbaijan -8.8, Wales -10.7, Serbia -12.1).
+
+        Printing the verdict, printing the net, and wording the sentence from the
+        net's sign would have produced "DANGER ... the rotation upgraded this
+        side". The disagreement has to be said out loud instead.
+        """
+        text = stage3._describe_rotation(
+            {}, self._authority("DANGER", -8.84, 0.764))
+        self.assertIn("DANGER", text)
+        self.assertIn("-8.8", text)
+        self.assertNotIn("upgraded this side and is expected to score more", text,
+                         "the outfield wording must not assert an upgrade on a "
+                         "DANGER verdict")
+        self.assertIn("goalkeeper finding decides", text)
+
+        mirror = stage3._describe_rotation(
+            {}, self._authority("BLESSING", 6.1, 0.9))
+        self.assertIn("goalkeeper finding decides", mirror)
+
+        agree = stage3._describe_rotation(
+            {}, self._authority("DANGER", 6.1, 0.9))
+        self.assertNotIn("goalkeeper finding decides", agree,
+                         "a DANGER verdict that matches the net sign is not an "
+                         "override")
+
+    def test_the_loader_indexes_code_four_by_fixture_and_team(self):
+        """
+        The join is (fixture_id, team_id). A wrong join key would silently match
+        nothing and every card would fall back to "pending", which looks like a
+        data problem rather than a bug.
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+        payload = [
+            {"fixture_id": 111,
+             "home_team": {"id": 11, "verdict": "DANGER", "net_impact": 3.0,
+                           "impact_confidence": 0.9},
+             "away_team": {"id": 22, "verdict": "BLESSING", "net_impact": -4.0,
+                           "impact_confidence": 0.8}},
+            # Malformed rows must be skipped, not raise.
+            {"fixture_id": "x", "home_team": {"id": 33}},
+            {"fixture_id": 222, "home_team": None, "away_team": {"id": 44}},
+            "not-a-dict",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "danger_audit.json"
+            target.write_text(json.dumps(payload), encoding="utf-8")
+            original = stage3.DANGER_AUDIT_FILE
+            stage3.DANGER_AUDIT_FILE = str(target)
+            try:
+                index = stage3.load_danger_authority()
+            finally:
+                stage3.DANGER_AUDIT_FILE = original
+        self.assertIn((111, 11), index)
+        self.assertIn((111, 22), index)
+        self.assertIn((222, 44), index)
+        self.assertNotIn((111, 99), index)
+        self.assertEqual(index[(111, 11)]["net_impact"], 3.0)
+
+    def test_a_missing_or_broken_audit_file_yields_no_authority(self):
+        """
+        Absent file -> empty index -> every card says "pending". It must never
+        raise, because a missing audit would otherwise empty the Incoming feed.
+        """
+        import tempfile
+        from pathlib import Path
+        original = stage3.DANGER_AUDIT_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "absent.json"
+            broken = Path(tmp) / "broken.json"
+            broken.write_text("{not json", encoding="utf-8")
+            wrong_shape = Path(tmp) / "shape.json"
+            wrong_shape.write_text('{"a": 1}', encoding="utf-8")
+            for candidate in (missing, broken, wrong_shape):
+                with self.subTest(path=candidate.name):
+                    stage3.DANGER_AUDIT_FILE = str(candidate)
+                    try:
+                        self.assertEqual(stage3.load_danger_authority(), {})
+                    finally:
+                        stage3.DANGER_AUDIT_FILE = original
+
+    def test_the_pick_rules_still_use_the_local_value(self):
+        """
+        THE DELIBERATE SPLIT, pinned so nobody "fixes" it by accident.
+
+        This change is DISPLAY ONLY. The rotation rule must keep testing the
+        LOCAL verdict and attack_boost, or the emitted pick set changes and the
+        claim that this step changed only the words becomes false.
+        """
+        from pathlib import Path
+        src = (Path(__file__).parent / "LIVE_SCANNER" /
+               "live_stage3_incoming.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'if _side.get(\'verdict\') in ("BLESSING", "ROTATION") '
+            "and _side.get('attack_boost'):",
+            src,
+            "the rotation rule must still key off the LOCAL verdict/attack_boost")
+        self.assertIn(
+            "_net = assess_absence(_absent, _present, regime=_regime)", src,
+            "the local assess_absence call must remain for rule logic")
+        self.assertIn("_describe_rotation(_side, _authority)", src,
+                      "the authority must be consulted for the sentence")
+
+    def test_the_lookup_casts_the_string_fixture_id(self):
+        """
+        A REAL BUG CAUGHT IN THIS VERY CHANGE, pinned so it cannot return.
+
+        `f_id` in this module is `str(fx["id"])` — a STRING. The audit file
+        carries ints. The first version of this join looked up `(f_id, team_id)`
+        without casting, matched nothing on every fixture, and every single card
+        rendered "danger evidence pending" while the authority index plainly held
+        16 records.
+
+        It failed SILENTLY and looked like missing data rather than a bug, which
+        is why it is asserted here rather than left to be noticed on the board.
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+        payload = [{"fixture_id": 4242,
+                    "home_team": {"id": 7, "verdict": "DANGER",
+                                  "net_impact": 5.0, "impact_confidence": 0.7},
+                    "away_team": {"id": 8, "verdict": "ROTATION",
+                                  "net_impact": 0.5, "impact_confidence": 0.2}}]
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "danger_audit.json"
+            target.write_text(json.dumps(payload), encoding="utf-8")
+            original = stage3.DANGER_AUDIT_FILE
+            stage3.DANGER_AUDIT_FILE = str(target)
+            try:
+                index = stage3.load_danger_authority()
+            finally:
+                stage3.DANGER_AUDIT_FILE = original
+
+        f_id = "4242"                      # exactly what `str(fx["id"])` produces
+        self.assertIn((stage3.safe_int(f_id), 7), index,
+                      "a STRING fixture id must still resolve against an int "
+                      "key, or every card silently reads 'pending'")
+
+    def test_the_call_site_coerces_the_fixture_id(self):
+        """
+        The cast must exist at the LOOKUP, not only inside the loader — the
+        loader normalises what it reads, the call site normalises what it holds.
+        """
+        from pathlib import Path
+        src = (Path(__file__).parent / "LIVE_SCANNER" /
+               "live_stage3_incoming.py").read_text(encoding="utf-8")
+        self.assertIn("_danger_authority.get((safe_int(f_id)", src,
+                      "the lookup must cast the string fixture id to int")
 
 
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
