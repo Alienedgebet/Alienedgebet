@@ -15,6 +15,46 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
+# The four per-side goal-form columns the Weekly drawer's min_*_goals /
+# max_*_conceded gates read. Engine/over25_forecast.py only began writing
+# these on 2026-09-30; every dated artifact before that lacks all four.
+GOAL_FORM_COLUMNS = (
+    "home_goals_scored_last_5",
+    "away_goals_scored_last_5",
+    "home_goals_conceded_last_5",
+    "away_goals_conceded_last_5",
+)
+
+
+def over25_source_and_goal_form(target_date):
+    """
+    (input_csv, has_goal_form_columns) for one date.
+
+    Exists because the drawer's goal-form gates SKIP SILENTLY when their
+    columns are absent (`if not thr or col not in df_filtered.columns`), which
+    is correct as a data rule and disastrous as a user-facing one: the box is
+    filled in, the number is sent, the engine honours nothing, and the result
+    set comes back unchanged. That is reported to the user as "the box does
+    nothing".
+
+    So the caller asks this first and can say which dates were not evaluated,
+    instead of letting an unevaluable gate look like a passing one.
+    """
+    candidate_inputs = [
+        os.path.join(OUTPUT_DIR, f"master_over_stage2_{target_date}.csv"),
+        os.path.join(OUTPUT_DIR, "over25_stage2_picks.csv"),
+        os.path.join(OUTPUT_DIR, f"over25_stage2_picks_{target_date}.csv"),
+    ]
+    input_csv = next((f for f in candidate_inputs if os.path.exists(f)), None)
+    if not input_csv:
+        return None, False
+    try:
+        header = pd.read_csv(input_csv, nrows=0)
+        has = all(c in header.columns for c in GOAL_FORM_COLUMNS)
+    except Exception:
+        has = False
+    return input_csv, has
+
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER (OVER 2.5 GOALS - STAGE 3 FILTER)
 # ==============================================================================

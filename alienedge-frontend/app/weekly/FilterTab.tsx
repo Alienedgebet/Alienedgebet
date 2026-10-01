@@ -498,6 +498,51 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
 
       </div>
 
+      {/* ── UNCHECKED-GATE WARNING ────────────────────────────────────────
+          A goal-form threshold that cannot be evaluated must never look like
+          one that passed. Engine/over25_forecast.py only began recording the
+          per-side recent-goal figures on 2026-09-30, so for any earlier date
+          the engine skips the gate silently and the pick set comes back
+          unchanged. This says so plainly, instead of leaving the user to
+          conclude the box is broken. */}
+      {(() => {
+        const unchecked = Array.from(
+          new Set(
+            rows
+              .map((r) => r?._goal_form_note)
+              .filter((n): n is string => typeof n === "string" && n.length > 0)
+          )
+        );
+        if (unchecked.length === 0) return null;
+        return (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3">
+            <div className="flex items-start gap-2">
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-amber-300">
+                  Goal-form thresholds were NOT applied to{" "}
+                  {unchecked.length} of these {rows.length} fixtures
+                </p>
+                <ul className="mt-1 space-y-0.5 text-[11px] leading-snug text-amber-200/80">
+                  {unchecked.map((n) => (
+                    <li key={n}>
+                      • {n.replace(/^Goal-form thresholds were NOT applied to this fixture: /, "")}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1.5 text-[11px] leading-snug text-slate-400">
+                  The engine only began recording recent-goal figures on{" "}
+                  <strong className="text-slate-300">2026-09-30</strong>. Earlier
+                  dates have no data to compare against, so those fixtures were
+                  left untouched. Pick a date from 2026-09-30 onward to see
+                  these gates actually filter.
+                </p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── 2. RESULTS & MATCH CARDS SECTION ─────────────────────────── */}
       <div className="flex flex-col gap-3">
         {/* Results Header + View Switcher */}
