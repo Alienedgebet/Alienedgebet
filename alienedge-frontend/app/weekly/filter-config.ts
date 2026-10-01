@@ -86,6 +86,14 @@ export const OVER25_FILTER_CONFIG: MarketFilterConfig = {
     { key: "min_away_goals", label: "Min Away Goals (Last 5)", type: "number", defaultValue: 0 },
     { key: "max_home_conceded", label: "Max Home Conceded (Last 5)", type: "number", defaultValue: 0 },
     { key: "max_away_conceded", label: "Max Away Conceded (Last 5)", type: "number", defaultValue: 0 },
+    // ── STRICT DISCIPLINES — ticks, not dials ────────────────────────────
+    // These two are yes/no disciplines rather than thresholds. Ticking one
+    // means "force out every fixture that does not clear it" — the fixture
+    // either qualifies or it is dropped, instead of scoring better on a
+    // slider. Both are OFF until ticked, so the shipped result set is
+    // unchanged until you actually tick something.
+    { key: "strict_h2h_last3_over", label: "STRICT — Last 3 H2H All Over 2.5", type: "checkbox", defaultValue: false },
+    { key: "strict_both_scored_last3", label: "STRICT — Both Sides Scored in Last 3", type: "checkbox", defaultValue: false },
     // ONE odds box: a floor with no ceiling. Set 1.60 and you get every pick
     // at 1.60 and above. The Max Odds box is gone — it shadowed the Target
     // Odds Corridor, because the drawer's 1.85 was always sent as an override

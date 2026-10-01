@@ -397,6 +397,29 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
             </button>
           )}
 
+          {showAdvanced && Object.keys(customParams).length > 0 && (
+            <div className="mt-2 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-300/80">
+                  Sending to the filter ({mode}):
+                </span>
+                {Object.entries(customParams).map(([k, v]) => (
+                  <span
+                    key={k}
+                    className="rounded bg-cyan-500/15 px-1.5 py-0.5 font-mono text-[10px] text-cyan-200"
+                  >
+                    {k}={String(v)}
+                  </span>
+                ))}
+              </div>
+              <p className="mt-1 text-[10px] leading-tight text-slate-500">
+                Every box above is sent on each request. If a value is listed
+                here and the fixture count does not change, the gate is not
+                reaching the filter — that is a bug, not a setting.
+              </p>
+            </div>
+          )}
+
           {showAdvanced && (
             <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
               {mode === "public"

@@ -142,7 +142,9 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
                                   min_poisson=60, min_votes=6, 
                                   max_pos_gap=10, min_h2h_overs=3,
                                   min_home_goals=0, min_away_goals=0,
-                                  max_home_conceded=0, max_away_conceded=0):
+                                  max_home_conceded=0, max_away_conceded=0,
+                                  strict_h2h_last3_over=False,
+                                  strict_both_scored_last3=False):
         df_filtered = df.copy()
         if df_filtered.empty: return df_filtered
 
@@ -183,6 +185,34 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
             known = vals.notna()
             ok = (vals >= thr) if op == "ge" else (vals <= thr)
             cond = cond & (~known | ok)
+
+        # ── STRICT GATES (tick boxes) ───────────────────────────────────────
+        # 2026-10-01. Requested as ticks rather than numeric thresholds: these
+        # are yes/no disciplines, not dials. Ticking one means "force out every
+        # fixture that does not qualify" — the team must clear it or it is
+        # dropped, rather than merely scoring better on a slider.
+        #
+        # OFF by default, and a missing column skips the gate entirely so an
+        # older dated artifact is never filtered to nothing by a column the
+        # engine had not yet written.
+        if strict_h2h_last3_over and "kill_switch_pass" in df_filtered.columns:
+            # kill_switch_pass is the forecast engine's own h2h_last_3_all_over
+            # verdict — the last three head-to-heads all cleared 2.5. This is
+            # that engine's existing decision, not a new rule: the O2.5 banker
+            # and balanced presets already apply it, so ticking this extends
+            # the same discipline to the aggressive preset and to Tipster mode.
+            _ks = df_filtered["kill_switch_pass"]
+            cond = cond & _ks.notna() & (_ks == True)  # noqa: E712 — engine writes a real bool
+
+        if strict_both_scored_last3:
+            _need = ["home_goals_scored_last_3", "away_goals_scored_last_3"]
+            if all(c in df_filtered.columns for c in _need):
+                # Both sides must have found the net at least once in their own
+                # last three. A side that has scored nothing in three is not
+                # an Over 2.5 side yet, whatever the Poisson number says.
+                for _c in _need:
+                    _v = pd.to_numeric(df_filtered[_c], errors="coerce")
+                    cond = cond & (_v.notna() & (_v >= 1))
 
         df_filtered = df_filtered[cond]
 

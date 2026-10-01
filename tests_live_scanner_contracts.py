@@ -5293,21 +5293,35 @@ class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
                       "combined_gs_last_5 must stay the 5-window sum; the "
                       "aggressive filter gate reads this exact column.")
 
-    def test_no_filter_reads_the_3_window(self):
+    def test_the_3_window_is_read_only_by_the_named_strict_gate(self):
         """
-        The O2.5 filter must not gate on any 3-window column.
+        CHANGED 2026-10-01 — the invariant moved, and this records why.
 
-        If it did, the toggle would stop being cosmetic and the "SURVIVED"
-        count would change when the user flips it — the exact confusion the
-        control's placement next to the results (not the filters) avoids.
+        This used to forbid the O2.5 filter from reading ANY 3-window column.
+        That was correct then: the L5/L3 display toggle existed, and a gate on
+        the 3-window would have made flipping the toggle change the "SURVIVED"
+        count — a cosmetic control quietly becoming a filter.
+
+        The toggle was removed in 9fa2de0, and a "strict last 3" tick was then
+        explicitly requested. A 3-window gate is now intended.
+
+        What must still hold is that it stays OPT-IN: only the named strict
+        gate may read those columns. Otherwise some ordinary threshold starts
+        depending on a window the page does not display, and nobody can tell
+        why the pick set moved.
         """
         from pathlib import Path
         filt = (Path(__file__).parent / "FILTER" /
                 "over25_risk_filter.py").read_text()
+        start = filt.index("if strict_both_scored_last3:")
+        end = filt.index("df_filtered = df_filtered[cond]", start)
+        outside = filt[:start] + filt[end:]
         for col in self.WINDOW_3_COLUMNS:
-            self.assertNotIn(col, filt,
-                             f"{col} is read by the O2.5 filter, which would "
-                             "make the form toggle change the pick set")
+            self.assertNotIn(
+                col, outside,
+                f"{col} may only be read by the strict_both_scored_last3 "
+                f"gate; reading it anywhere else makes an undisplayed window "
+                f"silently decide the pick set")
 
     def test_frontend_toggle_offers_both_and_labels_the_window(self):
         """
@@ -5613,8 +5627,16 @@ class TestWeeklyDrawerControlsAreAllWired(unittest.TestCase):
         # Engine side skips a falsy threshold.
         engine_src = inspect.getsource(filt)
         self.assertIn("if not thr or col not in df_filtered.columns:", engine_src)
-        # API side must skip it identically rather than compare it.
-        self.assertIn('if op.endswith("_opt") and not bound:', inspect.getsource(wfl.narrow_rows))
+        # API side must skip it identically rather than compare it. The
+        # condition was widened on 2026-10-01 to cover the tick boxes as well
+        # (a False tick must mean OFF), so assert the behaviour rather than
+        # one exact source line that any later edit would break.
+        api_src = inspect.getsource(wfl.narrow_rows)
+        self.assertIn('op.endswith("_opt")', api_src,
+                      "a 0 threshold must still be skipped, not compared")
+        self.assertIn('op in ("is_true", "all_min")', api_src,
+                      "an unticked box must mean OFF too, or unticking it "
+                      "would delete the fixtures it had taken")
 
 
 class TestOver15LegacySnapshotCannotBeClobbered(unittest.TestCase):
@@ -5731,6 +5753,126 @@ class TestOver15LegacySnapshotCannotBeClobbered(unittest.TestCase):
         self.assertIn("PRE-FIX", page,
                       "the frozen block must say what it is; a stale table "
                       "with a live-sounding title is the failure this guards")
+
+
+class TestOver25StrictTickBoxes(unittest.TestCase):
+    """
+    Two STRICT disciplines, requested as tick boxes rather than numeric
+    dials: ticking one means "force out every fixture that does not clear
+    it", not "score it better".
+
+    They are wired through BOTH dispatches — narrow_rows in Public mode and
+    the engine's own gate in Tipster mode — because the original failure this
+    whole file documents was a drawer control that worked in one mode and was
+    silently dropped in the other.
+    """
+
+    KEYS = ("strict_h2h_last3_over", "strict_both_scored_last3")
+
+    def test_both_ticks_reach_public_and_tipster(self):
+        """A tick present in the drawer must be honoured in either mode."""
+        from api import weekly_filter_live as wfl
+        narrow = set(wfl.O25_NARROW)
+        tipster = set(wfl.O25_TIPSTER_KWARGS)
+        for key in self.KEYS:
+            self.assertIn(key, narrow,
+                          f"{key} must be wired in Public mode or it is a "
+                          f"dead box in the DEFAULT mode")
+            self.assertIn(key, tipster,
+                          f"{key} must reach the engine in Tipster mode")
+
+    def test_ticking_h2h_forces_out_the_rows_that_fail_it(self):
+        """
+        kill_switch_pass is the forecast engine's own "last three
+        head-to-heads all cleared 2.5" verdict. A row whose value is False
+        must be dropped when the tick is on.
+        """
+        from api.weekly_filter_live import narrow_rows
+        rows = [
+            {"fixture": "A", "kill_switch_pass": True},
+            {"fixture": "B", "kill_switch_pass": False},
+            {"fixture": "C", "kill_switch_pass": "False"},
+        ]
+        kept = narrow_rows(rows, "o25", {"strict_h2h_last3_over": True})
+        self.assertEqual([r["fixture"] for r in kept], ["A"],
+                         "only the fixture that clears the H2H discipline "
+                         "may survive")
+
+    def test_ticking_both_scored_requires_EVERY_side_to_clear_it(self):
+        """
+        The compound gate: BOTH sides must have scored in their own last
+        three. A one-sided check would let a fixture through where the away
+        side has not scored in three — which is not an Over 2.5 fixture.
+        """
+        from api.weekly_filter_live import narrow_rows
+        rows = [
+            {"fixture": "both", "home_goals_scored_last_3": 3,
+             "away_goals_scored_last_3": 2},
+            {"fixture": "home_only", "home_goals_scored_last_3": 3,
+             "away_goals_scored_last_3": 0},
+            {"fixture": "neither", "home_goals_scored_last_3": 0,
+             "away_goals_scored_last_3": 0},
+        ]
+        kept = narrow_rows(rows, "o25", {"strict_both_scored_last3": True})
+        self.assertEqual([r["fixture"] for r in kept], ["both"],
+                         "both sides must clear the gate, not just one")
+
+    def test_unticking_releases_the_fixtures_it_took(self):
+        """
+        THE INVERSION THIS GUARDS. A tick defaults to unticked, so a False
+        reaching the gate means the user ticked it and then unticked it. If
+        False were read as "force out everything that fails", unticking the
+        box would DELETE fixtures instead of releasing them — the control
+        would do the opposite of what the user just asked.
+        """
+        from api.weekly_filter_live import narrow_rows
+        rows = [{"fixture": "A", "kill_switch_pass": False,
+                 "home_goals_scored_last_3": 0, "away_goals_scored_last_3": 0}]
+        for key in self.KEYS:
+            kept = narrow_rows(rows, "o25", {key: False})
+            self.assertEqual(len(kept), 1,
+                             f"{key}=False must mean OFF, not 'delete "
+                             f"everything that fails'")
+
+    def test_untouched_drawer_sends_nothing(self):
+        """
+        With no tick set the drawer must send no override at all, so the
+        shipped result set is byte-identical until the user acts.
+        """
+        from api.weekly_filter_live import o25_filter_params
+        p = o25_filter_params(mode="public")
+        for key in self.KEYS:
+            self.assertNotIn(key, p["overrides"],
+                             f"{key} must be absent until it is ticked")
+
+    def test_the_engine_gate_matches_the_public_gate(self):
+        """
+        One tick, two implementations. The engine skips a falsy threshold and
+        must skip an unticked box the same way.
+        """
+        import inspect
+        from FILTER import over25_risk_filter as filt
+        src = inspect.getsource(filt)
+        self.assertIn("if strict_h2h_last3_over and", src,
+                      "the engine must apply the H2H tick only when it is on")
+        self.assertIn("if strict_both_scored_last3:", src,
+                      "the engine must apply the both-scored tick only when "
+                      "it is on")
+
+    def test_the_drawer_offers_them_as_ticks_not_numbers(self):
+        from pathlib import Path
+        cfg = (Path(__file__).parent / "alienedge-frontend" / "app" / "weekly" /
+               "filter-config.ts").read_text(encoding="utf-8")
+        for key in self.KEYS:
+            self.assertIn(f'{{ key: "{key}"', cfg,
+                          f"{key} must be offered in the O2.5 drawer")
+        # A tick box, not a number input: type must be "checkbox".
+        for key in self.KEYS:
+            line = next(l for l in cfg.splitlines() if f'key: "{key}"' in l)
+            self.assertIn('"checkbox"', line,
+                          f"{key} must be a TICK box — the request was for a "
+                          f"toggle like GG's Strict Parity Lock, not a "
+                          f"number field")
 
 
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
