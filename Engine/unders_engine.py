@@ -61,6 +61,21 @@ U35_TIER3_SCORE        = 45
 GK_ELITE_CPG           = 1.10   
 GK_AVERAGE_CPG         = 1.40   
 
+# ── KEEPER DATA-INTEGRITY GUARDS (Phase 0) ────────────────────────────────────
+# A keeper needs a real sample before he can be graded. Without these, a keeper
+# with one cameo produces a p90 from a single match and is scored as an ELITE
+# WALL, which hands out 20 free points to missing data.
+GK_MIN_APPS            = 5      # appearances required before a grade is trusted
+GK_MIN_MINS            = 270    # ~3 full matches of evidence
+GK_CPG_SANITY_MAX      = 5.00   # >5 goals conceded per 90 is corrupt, not elite
+# (an ungradeable keeper is reported as None, never as a filler number)
+
+# ── FATIGUE SIGNAL THRESHOLD (Phase 0) ─────────────────────────────────────────
+# The old constant (0.60) sat above the 99th percentile of the observed fatigue
+# distribution (p50 0.26, p90 0.40, max 0.64), so the signal essentially never
+# fired. This is set at the empirical 90th percentile.
+SIG5_FIRE_FATIGUE      = 0.40
+
 # ==============================================================================
 # TITANIUM HTTP HELPER 
 # ==============================================================================
@@ -531,10 +546,21 @@ def get_squad_data_for_gk(team_id, check_date_str):
 
     processed = {}
     for pid, d in player_stats.items():
-        c_p90 = (d["conceded"] / max(1, d["mins"])) * 90 if d["mins"] > 0 else 0
+        # PHASE 0 FIX: c_p90 is a per-90 rate, so it must be built from a
+        # genuine sample. The old form (conceded / max(1, mins)) * 90 divided
+        # by whatever minutes happened to be on the books: a keeper who conceded
+        # 3 goals in a single 1-minute cameo scored 3/1*90 = 270.00/90.
+        # Insufficient evidence now yields None (unknown), never a fake number.
+        if d["mins"] >= GK_MIN_MINS and d["apps"] >= GK_MIN_APPS and d["conceded"] >= 0:
+            c_p90 = (d["conceded"] / d["mins"]) * 90.0
+            if c_p90 > GK_CPG_SANITY_MAX:
+                c_p90 = GK_CPG_SANITY_MAX   # corrupt upstream total, clamp
+            c_p90 = round(c_p90, 2)
+        else:
+            c_p90 = None                    # unknown -> must not read as 0.0
         processed[pid] = {
             "id": pid, "name": d["name"], "pos": d["pos"],
-            "apps": d["apps"], "mins": d["mins"], "c_p90": round(c_p90, 2)
+            "apps": d["apps"], "mins": d["mins"], "c_p90": c_p90
         }
 
     result = {"players": processed, "team_avg_leak": team_avg_leak}
@@ -547,7 +573,10 @@ def evaluate_gk_wall(team_id, today_fixture, check_date_str):
     avg_leak  = sq_data.get("team_avg_leak", 1.2)
 
     if not squad_map:
-        return False, True, 1.5, "No squad data (proxy risk)"
+        # PHASE 0 FIX: no squad data used to return a 1.5 proxy, which sits
+        # inside the AVERAGE band and so scored a keeper bonus off pure absence
+        # of evidence. Report the keeper as ungraded instead.
+        return False, False, None, "❔ GK no squad data (no grade)"
 
     starting_gk_id = None
     is_expected_gk = False 
@@ -580,18 +609,25 @@ def evaluate_gk_wall(team_id, today_fixture, check_date_str):
                 starting_gk_id = number_1_gk['id']
                 is_expected_gk = True 
 
+    # PHASE 0 FIX: the third return value is a GRADE, not a filler number.
+    # An ungradable keeper is reported as None so calculate_u25_score() /
+    # calculate_u35_score() can withhold the keeper signal entirely, instead of
+    # quietly treating a neutral 1.50 proxy as evidence of a wall.
     if not starting_gk_id:
-        return False, True, avg_leak, "Unlisted GK"
+        return False, False, None, "❔ GK unlisted (no grade)"
 
     starter = squad_map[starting_gk_id]
     apps    = starter.get("apps", 0)
-    c_p90   = starter.get("c_p90", 0.0)
-    
+    c_p90   = starter.get("c_p90")        # None = insufficient evidence
+
     prefix = "[Exp #1] " if is_expected_gk else ""
 
-    if apps == 0:
-        c_p90 = avg_leak
-        
+    # PHASE 0 FIX: an ungradable keeper is NOT an elite wall.
+    # The old code let a missing c_p90 default to 0.0, and 0.0 <= GK_ELITE_CPG
+    # promoted a goalkeeper with zero usable data to ELITE WALL (+20 pts).
+    if c_p90 is None:
+        return False, False, None, f"❔ {prefix}GK unknown (apps={apps}, no reliable sample)"
+
     is_elite = c_p90 <= GK_ELITE_CPG
     is_avg   = c_p90 <= GK_AVERAGE_CPG
 
@@ -631,7 +667,12 @@ def calculate_u25_score(
         sig2_score = sig2_raw * 25.0
         sig2_fired = combined_lambda <= 2.4
 
-    if home_gk_cpg <= GK_ELITE_CPG and away_gk_cpg <= GK_ELITE_CPG:
+    # PHASE 0 FIX: the keeper signal requires BOTH keepers to carry a real,
+    # trustworthy grade. evaluate_gk_wall() now hands back None for a keeper it
+    # cannot grade, so a missing grade can no longer be read as a perfect wall.
+    if home_gk_cpg is None or away_gk_cpg is None:
+        sig3_score, sig3_fired = 0.0, False
+    elif home_gk_cpg <= GK_ELITE_CPG and away_gk_cpg <= GK_ELITE_CPG:
         sig3_score, sig3_fired = 20.0, True
     elif home_gk_cpg <= GK_AVERAGE_CPG and away_gk_cpg <= GK_AVERAGE_CPG:
         sig3_score, sig3_fired = 12.0, True
@@ -649,8 +690,15 @@ def calculate_u25_score(
     sig4_fired = venue_u25_combined >= 0.50
 
     avg_fatigue = (fatigue_home + fatigue_away) / 2.0
-    sig5_score = avg_fatigue * 10.0
-    sig5_fired = avg_fatigue >= 0.60
+    # PHASE 0 FIX: score and "fired" flag now agree.
+    # Before, sig5_score = avg_fatigue * 10 added up to ~6 pts to EVERY row while
+    # sig5_fired only tripped at >=0.60, a level the observed distribution never
+    # reaches (max 0.635, p90 0.40) — so fatigue silently diluted the score
+    # without ever registering as a signal. The bonus is now gated on the same
+    # threshold that sets the flag, and the threshold is set from the real
+    # distribution (SIG5_FIRE_FATIGUE) rather than an unreachable constant.
+    sig5_score = avg_fatigue * 10.0 if avg_fatigue >= SIG5_FIRE_FATIGUE else 0.0
+    sig5_fired = avg_fatigue >= SIG5_FIRE_FATIGUE
 
     total_score  = sig1_score + sig2_score + sig3_score + sig4_score + sig5_score
     signals_fired = sum([sig1_fired, sig2_fired, sig3_fired, sig4_fired, sig5_fired])
@@ -706,9 +754,15 @@ def calculate_u35_score(
     sig4_score = min(10.0, league_weight * 33.3)
 
     avg_fatigue = (fatigue_home + fatigue_away) / 2.0
-    avg_cpg = (home_gk_cpg + away_gk_cpg) / 2.0
-    
-    cpg_bonus = max(0.0, (1.8 - avg_cpg) / 0.7) * 5.0  
+
+    # PHASE 0 FIX: same integrity guard as the U2.5 scorer — an ungraded keeper
+    # must not be averaged in as a clean sheet.
+    if home_gk_cpg is None or away_gk_cpg is None:
+        cpg_bonus = 0.0
+    else:
+        avg_cpg = (home_gk_cpg + away_gk_cpg) / 2.0
+        cpg_bonus = max(0.0, (1.8 - avg_cpg) / 0.7) * 5.0
+
     fatigue_bonus = avg_fatigue * 5.0                  
     sig5_score = cpg_bonus + fatigue_bonus
 
