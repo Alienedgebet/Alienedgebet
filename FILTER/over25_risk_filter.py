@@ -25,20 +25,31 @@ GOAL_FORM_COLUMNS = (
     "away_goals_conceded_last_5",
 )
 
+# The per-match over/under split behind strict_both_overs_last3 ("both sides'
+# last three matches ALL cleared 2.5"). Added 2026-10-01, so until the next
+# pipeline run NO artifact carries them.
+OVERS3_COLUMNS = ("home_overs_last_3", "away_overs_last_3")
+
+# Drawer gate -> the columns it needs. Used to tell the user when a gate
+# cannot be evaluated instead of letting it look like it passed.
+GATE_COLUMNS = {
+    "goal_form": GOAL_FORM_COLUMNS,
+    "overs3": OVERS3_COLUMNS,
+}
+
 
 def over25_source_and_goal_form(target_date):
     """
-    (input_csv, has_goal_form_columns) for one date.
+    (input_csv, families_available) for one date.
 
-    Exists because the drawer's goal-form gates SKIP SILENTLY when their
-    columns are absent (`if not thr or col not in df_filtered.columns`), which
-    is correct as a data rule and disastrous as a user-facing one: the box is
-    filled in, the number is sent, the engine honours nothing, and the result
-    set comes back unchanged. That is reported to the user as "the box does
-    nothing".
+    Exists because the drawer's gates SKIP SILENTLY when their columns are
+    absent (`if not thr or col not in df_filtered.columns`), which is correct
+    as a data rule and disastrous as a user-facing one: the box is filled in,
+    the number is sent, the engine honours nothing, and the result set comes
+    back unchanged. That was reported as "the box does nothing".
 
-    So the caller asks this first and can say which dates were not evaluated,
-    instead of letting an unevaluable gate look like a passing one.
+    So the caller asks first and can say which dates were not evaluated,
+    rather than letting an unevaluable gate look like a passing one.
     """
     candidate_inputs = [
         os.path.join(OUTPUT_DIR, f"master_over_stage2_{target_date}.csv"),
@@ -47,13 +58,14 @@ def over25_source_and_goal_form(target_date):
     ]
     input_csv = next((f for f in candidate_inputs if os.path.exists(f)), None)
     if not input_csv:
-        return None, False
+        return None, frozenset()
     try:
-        header = pd.read_csv(input_csv, nrows=0)
-        has = all(c in header.columns for c in GOAL_FORM_COLUMNS)
+        header = set(pd.read_csv(input_csv, nrows=0).columns)
     except Exception:
-        has = False
-    return input_csv, has
+        return input_csv, frozenset()
+    available = {name for name, cols in GATE_COLUMNS.items()
+                 if set(cols) <= header}
+    return input_csv, frozenset(available)
 
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER (OVER 2.5 GOALS - STAGE 3 FILTER)
@@ -184,7 +196,7 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
                                   min_home_goals=0, min_away_goals=0,
                                   max_home_conceded=0, max_away_conceded=0,
                                   strict_h2h_last3_over=False,
-                                  strict_both_scored_last3=False):
+                                  strict_both_overs_last3=False):
         df_filtered = df.copy()
         if df_filtered.empty: return df_filtered
 
@@ -244,15 +256,25 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
             _ks = df_filtered["kill_switch_pass"]
             cond = cond & _ks.notna() & (_ks == True)  # noqa: E712 — engine writes a real bool
 
-        if strict_both_scored_last3:
-            _need = ["home_goals_scored_last_3", "away_goals_scored_last_3"]
+        if strict_both_overs_last3:
+            # CORRECTED 2026-10-01. This was originally "both sides scored at
+            # least once in their last three", which is NOT what the control
+            # means. What it means is that EVERY one of each side's last three
+            # matches cleared 2.5 goals — won or lost, the match went over.
+            #
+            # That cannot be derived from the summed goal columns: three matches
+            # totalling nine goals could be 3-3, 2-2 or 5-1. It needs the
+            # per-match over/under split, which the window helper already
+            # computed as `overs` and which over25_forecast.py now writes as
+            # home_overs_last_3 / away_overs_last_3.
+            #
+            # Both sides must reach 3 of 3. One side going 2 of 3 is a fixture
+            # out, not a near-miss.
+            _need = ["home_overs_last_3", "away_overs_last_3"]
             if all(c in df_filtered.columns for c in _need):
-                # Both sides must have found the net at least once in their own
-                # last three. A side that has scored nothing in three is not
-                # an Over 2.5 side yet, whatever the Poisson number says.
                 for _c in _need:
                     _v = pd.to_numeric(df_filtered[_c], errors="coerce")
-                    cond = cond & (_v.notna() & (_v >= 1))
+                    cond = cond & (_v.notna() & (_v >= 3))
 
         df_filtered = df_filtered[cond]
 

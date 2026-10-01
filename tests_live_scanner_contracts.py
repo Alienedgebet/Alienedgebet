@@ -5227,8 +5227,16 @@ class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
                      'a_m = get_complex_metrics(aid, team_histories.get(aid, []), "away")'):
             self.assertIn(call, src, f"expected call site changed: {call}")
         # The 3-window gets its own variables and nothing else may consume them.
+        #
+        # 2026-10-01: comment lines are excluded. The guard is about the 3-window
+        # REACHING the maths, not about it being named — a comment explaining
+        # why a column is written cannot feed the Poisson lambda, and failing on
+        # it would push people to write worse comments rather than better code.
         for bad in ("h_m3[", "a_m3["):
             for line in src.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
                 if bad in line and "int(" not in line and "get_complex_metrics" not in line:
                     self.fail(
                         f"{bad} is consumed outside the CSV write: {line.strip()}. "
@@ -5306,20 +5314,26 @@ class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
         explicitly requested. A 3-window gate is now intended.
 
         What must still hold is that it stays OPT-IN: only the named strict
-        gate may read those columns. Otherwise some ordinary threshold starts
+        gate may read 3-window data. Otherwise some ordinary threshold starts
         depending on a window the page does not display, and nobody can tell
         why the pick set moved.
+
+        2026-10-01, second revision: the gate's MEANING was corrected too. It
+        is "both sides' last three matches ALL cleared 2.5", which reads
+        home/away_overs_last_3 — the per-match over/under split — NOT the
+        summed *_goals_scored_last_3 columns. So the summed 3-window goal
+        columns are now read by no gate at all, and stay display-only.
         """
         from pathlib import Path
         filt = (Path(__file__).parent / "FILTER" /
                 "over25_risk_filter.py").read_text()
-        start = filt.index("if strict_both_scored_last3:")
+        start = filt.index("if strict_both_overs_last3:")
         end = filt.index("df_filtered = df_filtered[cond]", start)
         outside = filt[:start] + filt[end:]
         for col in self.WINDOW_3_COLUMNS:
             self.assertNotIn(
                 col, outside,
-                f"{col} may only be read by the strict_both_scored_last3 "
+                f"{col} may only be read by the strict_both_overs_last3 "
                 f"gate; reading it anywhere else makes an undisplayed window "
                 f"silently decide the pick set")
 
@@ -5767,7 +5781,7 @@ class TestOver25StrictTickBoxes(unittest.TestCase):
     silently dropped in the other.
     """
 
-    KEYS = ("strict_h2h_last3_over", "strict_both_scored_last3")
+    KEYS = ("strict_h2h_last3_over", "strict_both_overs_last3")
 
     def test_both_ticks_reach_public_and_tipster(self):
         """A tick present in the drawer must be honoured in either mode."""
@@ -5798,24 +5812,50 @@ class TestOver25StrictTickBoxes(unittest.TestCase):
                          "only the fixture that clears the H2H discipline "
                          "may survive")
 
-    def test_ticking_both_scored_requires_EVERY_side_to_clear_it(self):
+    def test_ticking_both_overs_requires_ALL_THREE_each_side(self):
         """
-        The compound gate: BOTH sides must have scored in their own last
-        three. A one-sided check would let a fixture through where the away
-        side has not scored in three — which is not an Over 2.5 fixture.
+        THE MEANING, stated as an assertion because it was first built wrong.
+
+        The control means: every one of each side's last three matches cleared
+        2.5 goals — won or lost, the match went over. It is NOT "both sides
+        scored at least once", which is what the first implementation checked
+        and which the label contradicted.
+
+        Two consequences this pins:
+          * it reads the per-match over/under count (home/away_overs_last_3),
+            because three matches totalling nine goals could be 3-3, 2-2 or
+            5-1 and the sums cannot tell them apart;
+          * it is 3 of 3, not "at least some". One side going 2 of 3 is out.
         """
         from api.weekly_filter_live import narrow_rows
         rows = [
-            {"fixture": "both", "home_goals_scored_last_3": 3,
-             "away_goals_scored_last_3": 2},
-            {"fixture": "home_only", "home_goals_scored_last_3": 3,
-             "away_goals_scored_last_3": 0},
-            {"fixture": "neither", "home_goals_scored_last_3": 0,
-             "away_goals_scored_last_3": 0},
+            {"fixture": "both_3of3", "home_overs_last_3": 3,
+             "away_overs_last_3": 3},
+            {"fixture": "home_2of3", "home_overs_last_3": 2,
+             "away_overs_last_3": 3},
+            {"fixture": "away_2of3", "home_overs_last_3": 3,
+             "away_overs_last_3": 2},
+            {"fixture": "both_1of3", "home_overs_last_3": 1,
+             "away_overs_last_3": 1},
         ]
-        kept = narrow_rows(rows, "o25", {"strict_both_scored_last3": True})
-        self.assertEqual([r["fixture"] for r in kept], ["both"],
-                         "both sides must clear the gate, not just one")
+        kept = narrow_rows(rows, "o25", {"strict_both_overs_last3": True})
+        self.assertEqual([r["fixture"] for r in kept], ["both_3of3"],
+                         "only a fixture where BOTH sides went 3 of 3 over "
+                         "2.5 may survive")
+
+    def test_the_gate_does_not_fall_back_to_the_goal_sums(self):
+        """
+        A row with high goals scored but a losing over/under split must be
+        rejected. 3-0, 3-0 and 0-3 all score plenty and none of them is over
+        2.5 — reading the sums instead of the split would wave them through.
+        """
+        from api.weekly_filter_live import narrow_rows
+        rows = [{"fixture": "lots_of_goals_but_under",
+                 "home_overs_last_3": 1, "away_overs_last_3": 1,
+                 "home_goals_scored_last_3": 9, "away_goals_scored_last_3": 9}]
+        self.assertEqual(
+            narrow_rows(rows, "o25", {"strict_both_overs_last3": True}), [],
+            "the gate must read the over/under split, not the goal sums")
 
     def test_unticking_releases_the_fixtures_it_took(self):
         """
@@ -5855,7 +5895,7 @@ class TestOver25StrictTickBoxes(unittest.TestCase):
         src = inspect.getsource(filt)
         self.assertIn("if strict_h2h_last3_over and", src,
                       "the engine must apply the H2H tick only when it is on")
-        self.assertIn("if strict_both_scored_last3:", src,
+        self.assertIn("if strict_both_overs_last3:", src,
                       "the engine must apply the both-scored tick only when "
                       "it is on")
 
