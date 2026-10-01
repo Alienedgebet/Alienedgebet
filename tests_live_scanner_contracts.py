@@ -5405,6 +5405,218 @@ class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
             "requiring BOTH to be absent is what made the corridor "
             "unreachable — the O2.5 drawer always sends min_odds")
 
+class TestWeeklyDrawerControlsAreAllWired(unittest.TestCase):
+    """
+    A drawer box must either gate the fixture set, or say out loud that it
+    cannot. It must never be a third thing.
+
+    THE 2026-10-01 REPORT: the four O2.5 goal-form boxes rendered, accepted a
+    number, and changed nothing. They were offered in filter-config.ts, clamped
+    by o25_filter_params, and mapped in O25_TIPSTER_KWARGS — and absent from
+    O25_NARROW. Public mode is the DEFAULT mode, and _live_o25's public branch
+    is the only path that reaches narrow_rows, so in the mode a user lands in
+    by default all four were silently discarded.
+
+    Nothing in the suite connected "this key exists in the UI" to "this key
+    reaches a filter", which is how a box ships that provably cannot work.
+    These tests assert that link for every market, so the next drawer field
+    added without a gate fails here instead of in production.
+    """
+
+    def _drawer(self):
+        """{market: {"fields": [...], "publicUnsupported": [...]}} from the TS."""
+        import re
+        from pathlib import Path
+        text = (Path(__file__).parent / "alienedge-frontend" / "app" / "weekly" /
+                "filter-config.ts").read_text(encoding="utf-8")
+        drawer = {}
+        for name, block in re.findall(
+                r"export const (\w+)_FILTER_CONFIG(.*?)\n\};", text, re.S):
+            fields_m = re.search(r"fields:\s*\[(.*?)\n  \]", block, re.S)
+            unsup_m = re.search(r"publicUnsupported:\s*\[(.*?)\n  \]", block, re.S)
+            drawer[name] = {
+                "fields": re.findall(r'key:\s*"([^"]+)"',
+                                     fields_m.group(1) if fields_m else ""),
+                "publicUnsupported": re.findall(r'key:\s*"([^"]+)"',
+                                                unsup_m.group(1) if unsup_m else ""),
+            }
+        return drawer
+
+    def test_every_drawer_box_reaches_a_gate_in_the_mode_it_is_offered_in(self):
+        """
+        THE ACTUAL BUG, and the precise shape of it.
+
+        A key being wired in SOME mode is not enough. Public mode is the default
+        and it runs a completely different dispatch, so each key must be
+        reachable in BOTH modes independently:
+
+          Public  -> WIN_NARROW / O25_NARROW, or declared publicUnsupported
+          Tipster -> WIN_TIPSTER_KWARGS / O25_TIPSTER_KWARGS
+
+        The four O2.5 goal-form keys were in O25_TIPSTER_KWARGS and not in
+        O25_NARROW. An "is it wired anywhere?" assertion passes them happily —
+        which is exactly why they shipped dead in the default mode.
+        """
+        from api import weekly_filter_live as wfl
+
+        drawer = self._drawer()
+        self.assertEqual(sorted(drawer), ["GG", "OVER25", "WIN"],
+                         "all three Weekly drawer configs must be readable")
+
+        # Keys _live_gg forwards by name, outside any lookup table. _live_gg has
+        # no mode branch at all, so these hold in every mode.
+        gg_explicit = {"max_parity", "strict_mode", "min_gg_odds", "max_gg_odds"}
+        # filter-config.ts market name -> api market name
+        api_market = {"GG": "gg", "OVER25": "o25", "WIN": "win"}
+
+        for name, info in drawer.items():
+            unsupported = set(info["publicUnsupported"])
+            for key in info["fields"]:
+                if name == "GG":
+                    self.assertTrue(
+                        key in gg_explicit or key in set(wfl.GG_CFG_KEYS),
+                        f"GG drawer box '{key}' reaches no filter in any mode")
+                    continue
+
+                market = api_market[name]
+                narrow = set(getattr(wfl, wfl.NARROW_SPEC[market]))
+                tipster = set(getattr(wfl, wfl.TIPSTER_SPEC[market]))
+
+                self.assertTrue(
+                    key in narrow or key in unsupported,
+                    f"{name}.{key} cannot be enforced in PUBLIC mode (the "
+                    f"default): it is not in {wfl.NARROW_SPEC[market]} and not "
+                    f"declared unsupported — it would render, accept a number, "
+                    f"and change nothing")
+                self.assertTrue(
+                    key in tipster or key in unsupported,
+                    f"{name}.{key} cannot be enforced in TIPSTER mode: it is "
+                    f"not in {wfl.TIPSTER_SPEC[market]} and not declared "
+                    f"unsupported")
+
+    def test_a_key_wired_only_for_tipster_must_be_flagged_for_public(self):
+        """
+        The gap that bit: a key in O25_TIPSTER_KWARGS but not O25_NARROW works
+        in Tipster mode and silently dies in the DEFAULT mode. Any such key must
+        be listed in publicUnsupported with a reason, or be added to the narrow
+        spec — one of the two, never neither.
+        """
+        from api import weekly_filter_live as wfl
+
+        drawer = self._drawer()
+        for name, (narrow_name, kwargs_map) in {
+                "OVER25": ("O25_NARROW", wfl.O25_TIPSTER_KWARGS),
+                "WIN": ("WIN_NARROW", wfl.WIN_TIPSTER_KWARGS)}.items():
+            narrow = set(getattr(wfl, narrow_name))
+            for key in drawer[name]["fields"]:
+                if key in kwargs_map and key not in narrow:
+                    self.assertIn(
+                        key, drawer[name]["publicUnsupported"],
+                        f"{name}.{key} works only in Tipster mode; it must be "
+                        f"in O25_NARROW/{narrow_name} or declared unsupported "
+                        f"for Public mode")
+
+    def test_frontend_and_backend_agree_on_what_public_cannot_do(self):
+        """
+        PUBLIC_UNSUPPORTED is the backend's statement of what Public mode cannot
+        enforce. The frontend disables exactly those boxes. If the two drift,
+        the UI disables a working control or leaves a dead one live.
+        """
+        from api import weekly_filter_live as wfl
+
+        drawer = self._drawer()
+        self.assertEqual(set(drawer["WIN"]["publicUnsupported"]),
+                         set(wfl.PUBLIC_UNSUPPORTED["win"]),
+                         "backend and frontend must agree on WIN's "
+                         "Public-mode limitations")
+        self.assertEqual(set(drawer["OVER25"]["publicUnsupported"]),
+                         set(wfl.PUBLIC_UNSUPPORTED["o25"]))
+        # GG forwards strict_mode in every mode, so it must NOT be flagged.
+        self.assertNotIn("strict_mode", drawer["GG"]["publicUnsupported"],
+                         "GG's _live_gg forwards strict_mode in Public mode too")
+
+    def test_each_goal_form_gate_actually_removes_rows(self):
+        """
+        Behavioural proof, not a lookup-table assertion: each of the four boxes,
+        set on its own, must change the surviving set. This is the difference
+        between "the key is named somewhere" and "the box filters fixtures".
+        """
+        from api.weekly_filter_live import narrow_rows
+
+        rows = [
+            {"fixture": "A", "home_goals_scored_last_5": 12, "away_goals_scored_last_5": 11,
+             "home_goals_conceded_last_5": 1, "away_goals_conceded_last_5": 2},
+            {"fixture": "B", "home_goals_scored_last_5": 3, "away_goals_scored_last_5": 2,
+             "home_goals_conceded_last_5": 14, "away_goals_conceded_last_5": 13},
+        ]
+        cases = {
+            "min_home_goals": 8,       # keeps A only
+            "min_away_goals": 8,       # keeps A only
+            "max_home_conceded": 5,    # keeps A only
+            "max_away_conceded": 5,    # keeps A only
+        }
+        for key, bound in cases.items():
+            kept = narrow_rows(rows, "o25", {key: bound})
+            self.assertEqual([r["fixture"] for r in kept], ["A"],
+                             f"{key}={bound} must keep exactly A")
+
+    def test_a_zero_threshold_is_off_in_both_modes(self):
+        """
+        0 means "do not gate on this" in the engine
+        (`if not thr: continue`), so it must mean the same in Public mode.
+
+        Without this, typing 0 into "Max Home Conceded" reads as "<= 0" and
+        deletes every fixture here while meaning nothing in Tipster mode — one
+        box, two meanings, chosen by a toggle the user cannot see.
+        """
+        from api.weekly_filter_live import narrow_rows
+
+        rows = [{"fixture": "A", "home_goals_conceded_last_5": 9}]
+        for key in ("max_home_conceded", "min_home_goals"):
+            self.assertEqual(len(narrow_rows(rows, "o25", {key: 0})), 1,
+                             f"{key}=0 must be OFF, not a gate at zero")
+        # And an explicit 0 alongside a real threshold changes nothing.
+        kept = narrow_rows(rows, "o25", {"max_home_conceded": 0, "min_home_goals": 5})
+        self.assertEqual(len(kept), 1)
+
+    def test_an_unknown_goal_value_passes_here_as_it_does_in_the_engine(self):
+        """
+        The engine does `cond & (~known | ok)` — an unknown value PASSES, so a
+        dated artifact graded before these columns existed is not wiped out.
+        narrow_rows used to EXCLUDE on a missing operand (correct for the strict
+        gates, wrong for these), which meant the same fixture survived in
+        Tipster mode and vanished in Public mode.
+        """
+        from api.weekly_filter_live import narrow_rows
+
+        blank = [{"fixture": "no_columns", "poisson_over_prob_num": 70.0}]
+        kept = narrow_rows(blank, "o25", {"min_home_goals": 5})
+        self.assertEqual(len(kept), 1,
+                         "an absent goal column must PASS, matching the engine")
+
+        # A strict gate still excludes on a missing operand — unchanged.
+        no_poisson = [{"fixture": "no_poisson"}]
+        strict = narrow_rows(no_poisson, "o25", {"min_poisson": 50})
+        self.assertEqual(len(strict), 0,
+                         "the strict gates keep their no-operand-no-verdict rule")
+
+    def test_public_and_tipster_agree_on_a_typed_zero(self):
+        """
+        End-to-end: the two modes run the same four gates through two different
+        implementations, so a value typed into the same box must not produce
+        two different pick sets.
+        """
+        import inspect
+        from api import weekly_filter_live as wfl
+        from FILTER import over25_risk_filter as filt
+
+        # Engine side skips a falsy threshold.
+        engine_src = inspect.getsource(filt)
+        self.assertIn("if not thr or col not in df_filtered.columns:", engine_src)
+        # API side must skip it identically rather than compare it.
+        self.assertIn('if op.endswith("_opt") and not bound:', inspect.getsource(wfl.narrow_rows))
+
+
 class TestNullPlayerIdDoesNotEmptyTheDangerFeed(unittest.TestCase):
     """A lineup row with `player_id: null` must not empty danger_audit.json.
 

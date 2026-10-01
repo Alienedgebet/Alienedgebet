@@ -16,6 +16,23 @@ export interface MarketFilterConfig {
   riskOptions: { key: string; label: string; icon: string }[];
   fields: FilterFieldDef[];
   priorityKeys: string[];
+  /**
+   * Fields the engine CANNOT enforce in Public mode, with the reason.
+   *
+   * These are disabled (with the reason shown) rather than rendered live. A box
+   * that accepts a number and changes nothing is worse than an absent box: it
+   * reads as a working filter and it is not.
+   *
+   *  - win `strict_mode`: `apply_public_filter()` (FILTER/win_filter_service.py)
+   *    has no soft/strict branch — `strict_mode` is a parameter of
+   *    `apply_tipster_filter` only. There is nothing to forward it to.
+   *  - gg `strict_mode` is NOT listed: `_live_gg` forwards it to the engine in
+   *    every mode, so it works in Public too.
+   *
+   * Mirrors `PUBLIC_UNSUPPORTED` in api/weekly_filter_live.py; the contract
+   * suite asserts the two agree.
+   */
+  publicUnsupported?: { key: string; reason: string }[];
 }
 
 export const GG_FILTER_CONFIG: MarketFilterConfig = {
@@ -102,6 +119,16 @@ export const WIN_FILTER_CONFIG: MarketFilterConfig = {
     { key: "max_odds", label: "Max Win Odds", type: "number", step: 0.01, defaultValue: 2.00 },
     { key: "require_no_draw", label: "Require No Draw Streak (Last 3)", type: "checkbox", defaultValue: false },
     { key: "strict_mode", label: "Strict Mode (Uncheck for Diamond-in-Rough soft mode)", type: "checkbox", defaultValue: true },
+  ],
+  // `strict_mode` is real in Tipster / Forensic mode. In Public mode the WIN
+  // engine has no soft/strict branch to forward it to (see MarketFilterConfig).
+  // It was previously rendered live here and silently discarded — the box read
+  // as a filter and was not one.
+  publicUnsupported: [
+    {
+      key: "strict_mode",
+      reason: "The Public WIN preset has no soft/strict branch. Switch to Tipster Sliders or Forensic Aggregator to use it.",
+    },
   ],
   priorityKeys: [
     "match_date", "fixture", "side", "team_name", "poisson_win_prob",
