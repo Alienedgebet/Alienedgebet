@@ -23,7 +23,7 @@ HEARTBEAT="$BACKEND/data/pipeline_heartbeat.json"
 STALE_AFTER=${STALE_AFTER:-1200}     # 20 min
 POLL=${POLL:-30}
 
-TARGET_DATE="$(date -d tomorrow +%F)"
+TARGET_DATE="${TARGET_DATE:-$(date -d tomorrow +%F)}"
 cd "$BACKEND" || exit 1
 
 # A fresh heartbeat file must not let a previous run's timestamp mask a hang.
