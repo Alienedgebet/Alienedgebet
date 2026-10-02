@@ -28,6 +28,19 @@ commit_summary.txt
 compile_check.txt
 fs*.txt
 
+# output/ and *.log are already ignored above, but that does NOT untrack a file
+# that was committed before the rule existed — git keeps tracking it and every
+# append shows up as a permanent spurious " M" in git status. output/system.log
+# was one of those, and it grows on every pipeline run, so it made the working
+# tree look dirty at all times and risked being committed by a `git add -A`.
+# It was untracked with `git rm --cached --sparse output/system.log` (the
+# --sparse flag is required here: this repo is a sparse checkout). The file
+# itself stays on disk because LIVE_SCANNER/live_stage6_alerts.py writes it via
+# a plain logging.FileHandler — untracking is about version control only, and
+# the live scanner is unaffected.
+#
+# If a log ever needs re-adding deliberately, use `git add -f <path>`.
+
 # ── OS / editor ─────────────────────────────────────────────
 Thumbs.db
 .vscode/
