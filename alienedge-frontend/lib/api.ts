@@ -906,13 +906,19 @@ export interface DrawPick extends FixtureRisk {
   away_team: string;
   tier: string;
   section: string;
-  composite_draw_score: number;
-  mc_draw_prob: number;
-  poisson_draw_prob: number;
+  // These four are null when the fixture had too little usable history for the
+  // engine to estimate a probability at all (Engine/draw_engine.py
+  // MIN_HISTORY_SAMPLE). The API preserves that null on purpose — see
+  // NULLABLE_FIELDS in api/main.py — so renderers must handle it. Note that
+  // `null * 100` is 0 in JS, so these must be null-checked, never multiplied
+  // blindly, or "no data" displays as a confident 0.0%.
+  composite_draw_score: number | null;
+  mc_draw_prob: number | null;
+  poisson_draw_prob: number | null;
   dmi: number;
   parity: number;
   draw_odds: number;
-  value_edge: number;
+  value_edge: number | null;
   mc_spread: number;
   mc_stability: string;
   most_likely_draw_score: string;
