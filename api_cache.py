@@ -295,6 +295,54 @@ def breaker_should_bypass():
 API_WAIT_BUDGET_S = 5400.0        # 90 min of total API sleeping per run
 _api_budget = {"spent": 0.0}
 
+# ── PROVIDER SUSPENSION (2026-10-02) ────────────────────────────────────────
+# Measured on 2026-10-02 while trying to rebuild 2026-10-02:
+#     /leagues                 HTTP 200  x-ratelimit-remaining: 176/180
+#     /venues                  HTTP 200  x-ratelimit-remaining: 178/180
+#     /fixtures/date/<date>    HTTP 429  retry-after: 998      <-- ~17 MINUTES
+# Quota was essentially untouched, yet the fixture endpoint was suspended by the
+# provider. That is an ENDPOINT-LEVEL suspension, not a rate-limit we caused.
+#
+# The old code could not tell the two apart: it clamped EVERY wait to 45s and
+# retried 5 times, so a 17-minute suspension became 45s of futile thrashing
+# repeated forever. That is precisely how the 2026-10-01 run burned 12.5h.
+#
+# So: a retry-after at or beyond SUSPENSION_RETRY_AFTER_S is treated as a real
+# suspension. We stop hammering, record it honestly, and let the run proceed and
+# finish (engines degrade) instead of pretending a 45s nap will help.
+SUSPENSION_RETRY_AFTER_S = 300.0   # 5 min: beyond this, it is a suspension
+_suspension = {"active_until": 0.0, "path": None, "seen": 0}
+
+
+def suspension_active(path=None):
+    """True while a long provider suspension is believed to be in force."""
+    return time.time() < _suspension["active_until"]
+
+
+def suspension_note():
+    if not suspension_active():
+        return None
+    left = _suspension["active_until"] - time.time()
+    return (f"provider suspended {_suspension['path'] or 'an endpoint'} "
+            f"(HTTP 429 retry-after); ~{left/60:.0f} min remaining")
+
+
+def note_suspension(path, retry_after):
+    """Record a long retry-after as a provider suspension."""
+    _suspension["active_until"] = time.time() + max(0.0, float(retry_after))
+    _suspension["path"] = path
+    _suspension["seen"] += 1
+    print(f"[API SUSPENDED] {path} returned 429 with retry-after="
+          f"{retry_after:.0f}s (~{float(retry_after)/60:.0f} min). Not a quota "
+          f"issue; stopping retries for this endpoint so the run can FINISH "
+          f"and report honestly instead of thrashing.", flush=True)
+
+
+def clear_suspension():
+    if _suspension["active_until"] or _suspension["seen"]:
+        _suspension["active_until"] = 0.0
+        _suspension["path"] = None
+
 
 def api_budget_remaining():
     return max(0.0, API_WAIT_BUDGET_S - _api_budget["spent"])
@@ -574,6 +622,7 @@ def smart_get(url, params=None, **kwargs):
                 # the shared cooldown so sibling processes stop pacing against
                 # a stale expiry the moment the provider is serving again.
                 breaker_reset()
+                clear_suspension()
                 broadcast_gate(0, f"cleared:{os.getpid()}")
                 data = resp.json()
                 try:
@@ -589,8 +638,27 @@ def smart_get(url, params=None, **kwargs):
                                              elapsed=getattr(resp, "elapsed", None),
                                              from_cache=False)
             elif resp.status_code == 429:
-                # Count the 429. A run of them with no 200 means the shared gate
-                # is stale, not that the provider is genuinely still refusing.
+                # ── SUSPENSION vs THROTTLE ────────────────────────────────────
+                # A LONG retry-after (>= SUSPENSION_RETRY_AFTER_S) means the
+                # provider has suspended this endpoint, not that we are being
+                # rate-limited. Retrying it now is pure waste: on 2026-10-02
+                # /fixtures/date answered 429 retry-after=998 while quota sat at
+                # 176/180. Record it honestly, broadcast it so sibling processes
+                # stop hammering too, and RETURN so the run can finish and report
+                # degraded rather than thrash for hours.
+                _ra = getattr(resp, "headers", {}).get("Retry-After")
+                try:
+                    _ra_s = float(_ra) if _ra is not None else 0.0
+                except (TypeError, ValueError):
+                    _ra_s = 0.0
+                if _ra_s >= SUSPENSION_RETRY_AFTER_S:
+                    note_suspension(path, _ra_s)
+                    broadcast_gate(_ra_s, f"suspension:{path}")
+                    return resp
+
+                # Short 429: a genuine throttle. Count it. A run of them with no
+                # 200 means the shared gate is stale, not that the provider is
+                # still refusing.
                 _breaker["consecutive_429"] += 1
                 if _breaker["consecutive_429"] >= CONSECUTIVE_429_BREAK:
                     breaker_trip("pipeline")

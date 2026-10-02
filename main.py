@@ -751,6 +751,7 @@ def alienedge_master_system(cli_date_override: str = None):
     try:
         import api_cache as _api_cache
         _api_cache.api_budget_reset()
+        _api_cache.clear_suspension()
     except Exception:
         pass
     heartbeat("pipeline:start", force=True)
@@ -1333,6 +1334,13 @@ if __name__ == "__main__":
         if _api._breaker["trips"]:
             print("   ⚠️ Circuit breaker fired: the shared cooldown was repeatedly "
                   "stale. Check whether the provider is genuinely rate-limiting.")
+        _susp = _api.suspension_note()
+        if _susp or _api._suspension["seen"]:
+            print(f"   ⚠️ PROVIDER SUSPENSION ({_api._suspension['seen']} event(s)): "
+                  f"{_susp or 'resolved'}")
+            print("      Engines that needed this endpoint produced NO data and were "
+                  "marked degraded. Their columns are blank because the data was "
+                  "unavailable — not because the engines are broken.")
     except Exception:
         pass
 
