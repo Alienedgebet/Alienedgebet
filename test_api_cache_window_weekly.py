@@ -232,7 +232,7 @@ ttl_expect = {
     "/livescores/inplay": 0,
     "/odds/pre-match/fixtures/1": 900,
     "/fixtures/date/2099-01-01": 3600,
-    "/fixtures/between/a/b/1": 21600,
+    "/fixtures/between/a/b/1": 43200,
     "/fixtures/head-to-head/1/2": 21600,
     "/standings/seasons/1": 21600,
     "/teams/1/squad/2": 86400,

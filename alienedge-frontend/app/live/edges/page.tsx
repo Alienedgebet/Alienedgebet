@@ -747,10 +747,20 @@ function DataFreshness({ rows }: { rows: unknown }) {
   // The scanner's cycle is ~72s. One cycle is normal, two is worth noticing,
   // three or more means the writer is genuinely stuck and the page should not
   // pretend otherwise.
+  //
+  // 2026-10-02: there is a SECOND, designed reason the board stops updating.
+  // The nightly pre-match pipeline (main.py) pauses the live scanner outright
+  // because both consume the same SportMonks key — see the LIVE SCANNER
+  // INTERLOCK in main.py. That pause lasts 1-2h. Reporting it with the same
+  // "not writing" wording as a crash is what made a deliberate pause read as a
+  // hang, so it now gets its own threshold, tone and explanation.
   const STALE_AT = 140;   // ~2 cycles
   const STUCK_AT = 240;  // ~3+ cycles
+  const PREMATCH_PAUSE_AT = 600;  // 10 min — far longer than any normal cycle
   const tone =
-    age > STUCK_AT
+    age > PREMATCH_PAUSE_AT
+      ? "border-accent-indigo/40 bg-accent-indigo/10 text-accent-indigo"
+      : age > STUCK_AT
       ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
       : age > STALE_AT
       ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
@@ -762,7 +772,9 @@ function DataFreshness({ rows }: { rows: unknown }) {
       ? `updated ${Math.round(age)}s ago`
       : `updated ${Math.round(age / 60)}m ago`;
   const explain =
-    age > STUCK_AT
+    age > PREMATCH_PAUSE_AT
+      ? " — scanner paused while the pre-match pipeline runs (they share one API key)"
+      : age > STUCK_AT
       ? " — the scanner is not writing; this board is not updating"
       : age > STALE_AT
       ? " — the scanner is behind its normal cycle"
