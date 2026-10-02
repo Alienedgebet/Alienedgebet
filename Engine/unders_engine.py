@@ -76,6 +76,40 @@ GK_CPG_SANITY_MAX      = 5.00   # >5 goals conceded per 90 is corrupt, not elite
 # fired. This is set at the empirical 90th percentile.
 SIG5_FIRE_FATIGUE      = 0.40
 
+# ── LAMBDA MODEL (Phase 2) ───────────────────────────────────────────────────
+# The old model averaged a raw 5-match attack rate with a raw concede rate:
+#     lambda = max(0.05, (raw_attack + opp_concede) / 2)
+# Its defining defect was NO SHRINKAGE: a team with one 3-0 win was treated as a
+# 3.0 goals/game attack, exactly as loud as a 20-match record.
+#
+# LAMBDA_PRIOR_STRENGTH is a pseudo-match count: a team is treated as if it had
+# this many matches against the prior mean before its own results count fully.
+#
+# NOT USED: league_weight as a league scoring prior. It was tried and rejected.
+# Post-mortem, kept here because the failure is instructive: `league_weight` is a
+# CAPPED U2.5 RATE, not a scoring base rate. Inverting it via P(total<=2) under
+# Poisson gave an impossible 8.0 goals/team for the 51.6% of cached leagues whose
+# weight is 0.0 (a 0% under-rate is not a real observation). Every fixture then
+# clamped to the LAMBDA_MAX ceiling and published u25_prob ~0.0006 -- and because
+# a clamped prediction is CONFIDENT, the board looked stricter, not broken. The
+# attempted helpers (league_base_goals / m_for_u25) have been deleted rather than
+# left dormant: do not reintroduce them without a real goals-per-team source.
+LAMBDA_PRIOR_STRENGTH   = 6.0    # pseudo-matches of prior weight
+LAMBDA_PRIOR_GOALS      = 1.35   # per-team prior (global mean goals / 2)
+LAMBDA_MIN              = 0.05
+LAMBDA_MAX              = 6.00
+
+# Health telemetry, added because the failure above was silent. A lambda sitting
+# on the clamp is a confident probability derived from a poisoned input, so it is
+# flagged just under the ceiling rather than left to be inferred from a
+# suspiciously low pick rate.
+LAMBDA_CLAMP_ALERT      = 4.50
+
+# Per-run collector for lambda health warnings. Reset at the start of every
+# run_unders_engine() call and printed in the summary, so a systemic clamp is
+# visible in the log even when every individual fixture looks plausible.
+LAMBDA_HEALTH_WARNINGS  = []
+
 # ── HARD TIER GATES (user rules — apply to EVERY tier, both engines) ───────────
 # A fixture only earns a tier if it clears ALL of these AND its score threshold.
 # They are gates, not bonus points: failing any one demotes the fixture out of
@@ -736,6 +770,102 @@ def calculate_u25_score(
     }
     return round(total_score, 1), signals_fired, breakdown
 
+def shrunk_rate(goals, matches, prior_mean, prior_strength=LAMBDA_PRIOR_STRENGTH):
+    """
+    Empirical-Bayes shrinkage of an observed scoring rate toward a prior mean.
+
+        (goals + prior_strength * prior_mean) / (matches + prior_strength)
+
+    A team with a long record keeps close to its own rate; a team with one or two
+    matches is pulled hard toward the prior mean. This is what the old lambda
+    lacked entirely -- it treated a single 3-0 as a 3.0 goals/game attack.
+    """
+    try:
+        goals = float(goals); matches = float(matches)
+    except (TypeError, ValueError):
+        return float(prior_mean)
+    if matches <= 0:
+        return float(prior_mean)
+    if not math.isfinite(goals) or not math.isfinite(matches):
+        return float(prior_mean)
+    return (goals + prior_strength * prior_mean) / (matches + prior_strength)
+
+
+def lambda_health_note(lh, la, base):
+    """
+    Telemetry for the failure that actually shipped: a degenerate base rate drove
+    lambda to the clamp ceiling and u25_prob collapsed to ~0.0006, but nothing
+    logged it -- the per-fixture `except Exception: continue` swallowed the
+    whole thing. Returns a short warning string, or None when healthy.
+    """
+    notes = []
+    for side, lam in (("home", lh), ("away", la)):
+        if lam >= LAMBDA_CLAMP_ALERT:
+            notes.append(f"{side} lambda {lam:.2f} at/over the clamp ceiling "
+                         f"({LAMBDA_CLAMP_ALERT:.2f})")
+        elif lam <= LAMBDA_MIN + 1e-9:
+            notes.append(f"{side} lambda {lam:.2f} at the floor")
+    if base is not None and (not math.isfinite(base) or base <= 0):
+        notes.append(f"base rate invalid: {base!r}")
+    return "; ".join(notes) if notes else None
+
+
+def build_lambdas(lastN_home, home_id, lastN_away, away_id, league_id, league_cache=None):
+    """
+    Rebuild the scoring lambdas with shrinkage toward a fixed prior mean.
+
+    Returns (lambda_home, lambda_away, detail). Each side's expected goals is the
+    blend of the team's own attack and the opponent's defence, both shrunk toward
+    LAMBDA_PRIOR_GOALS.
+
+    `league_id` / `league_cache` are accepted but deliberately UNUSED: a
+    league-relative prior was tried and rejected (post-mortem at the constants
+    block above). They are kept in the signature so the call site stays stable.
+    """
+    base = LAMBDA_PRIOR_GOALS
+    detail = {"lambda_base": round(base, 3)}
+
+    def side_attack_concede(fixtures_list, tid):
+        scored = 0.0
+        conceded = 0.0
+        n = 0
+        for f in fixtures_list or []:
+            tg, og = get_team_and_opponent_goals_from_fixture(f, tid)
+            if tg is None or og is None:
+                continue
+            scored += tg
+            conceded += og
+            n += 1
+        return scored, conceded, n
+
+    h_s, h_c, h_n = side_attack_concede(lastN_home, home_id)
+    a_s, a_c, a_n = side_attack_concede(lastN_away, away_id)
+
+    # Attack: own scoring, shrunk toward the league base rate.
+    h_att = shrunk_rate(h_s, h_n, base)
+    a_att = shrunk_rate(a_s, a_n, base)
+    # Defence: opponent scoring against this team, shrunk the same way.
+    h_def = shrunk_rate(h_c, h_n, base)
+    a_def = shrunk_rate(a_c, a_n, base)
+
+    # Expected goals: average of our attack and their defence, both already
+    # shrunk. The old model did the same arithmetic but on unshrunk raw rates.
+    lambda_home = (h_att + a_def) / 2.0
+    lambda_away = (a_att + h_def) / 2.0
+
+    detail.update({
+        "lambda_home": round(lambda_home, 3),
+        "lambda_away": round(lambda_away, 3),
+        "lambda_home_n": h_n,
+        "lambda_away_n": a_n,
+    })
+    return (
+        max(LAMBDA_MIN, min(LAMBDA_MAX, lambda_home)),
+        max(LAMBDA_MIN, min(LAMBDA_MAX, lambda_away)),
+        detail,
+    )
+
+
 def evaluate_unders_gates(lastN_home, home_id, lastN_away, away_id, h2h):
     """
     Apply the three hard gates to a fixture.
@@ -902,6 +1032,9 @@ def run_unders_engine(target_date=None, verbose=False):
     if not API_KEY:
         raise ValueError("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
 
+    # Fresh health report per run (see LAMBDA_HEALTH_WARNINGS).
+    LAMBDA_HEALTH_WARNINGS.clear()
+
     if target_date is None:
         target_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -967,16 +1100,25 @@ def run_unders_engine(target_date=None, verbose=False):
                     if og is not None: vals.append(og)
                 return float(np.mean(vals)) if vals else 0.0
 
-            hpg, _  = personal_goals_total(lastN_home, home_id)
-            apg, _  = personal_goals_total(lastN_away, away_id)
-            hca     = avg_conceded(lastN_home, home_id)
-            aca     = avg_conceded(lastN_away, away_id)
-
-            raw_home_attack = hpg / max(1, len(lastN_home))
-            raw_away_attack = apg / max(1, len(lastN_away))
-            lambda_home     = max(0.05, (raw_home_attack + aca) / 2.0)
-            lambda_away     = max(0.05, (raw_away_attack + hca) / 2.0)
+            # PHASE 2: rebuilt lambda with shrinkage toward a fixed prior mean.
+            # The old form averaged a raw 5-match attack rate with a raw concede
+            # rate (corr with actual goals was only +0.081): one 3-0 win implied a
+            # 3.0 goals/game attack. Shrinkage fixes that over-reaction.
+            lambda_home, lambda_away, lambda_detail = build_lambdas(
+                lastN_home, home_id, lastN_away, away_id, league_id, league_cache
+            )
             combined_lambda = lambda_home + lambda_away
+
+            # A clamped lambda is a confident-looking prediction built on a
+            # poisoned input. Surface it in the log and on the record instead of
+            # letting it pass as a strict, low-scoring fixture.
+            _lam_note = lambda_health_note(lambda_home, lambda_away,
+                                           lambda_detail.get("lambda_base"))
+            if _lam_note:
+                LAMBDA_HEALTH_WARNINGS.append(
+                    f"{home_name} v {away_name}: {_lam_note}")
+                if verbose:
+                    print(f"   [lambda-health] {_lam_note}")
 
             mc_summary = generate_scoreline_predictions(lambda_home, lambda_away, n_sim=SIMULATION_SIZE)
             u25_prob   = mc_summary.get("u25_prob", 0.0)
@@ -1050,6 +1192,12 @@ def run_unders_engine(target_date=None, verbose=False):
                 "home_team":         home_name,
                 "away_team":         away_name,
                 "combined_lambda":   round(combined_lambda, 3),
+                "lambda_home":      round(lambda_home, 3),
+                "lambda_away":      round(lambda_away, 3),
+                "lambda_base":      lambda_detail.get("lambda_base"),
+                "lambda_home_n":    lambda_detail.get("lambda_home_n"),
+                "lambda_away_n":    lambda_detail.get("lambda_away_n"),
+                "lambda_warning":   _lam_note,
                 "mc_u25_prob":       round(u25_prob, 4),
                 "mc_u35_prob":       round(u35_prob, 4),
                 "home_gk_cpg":       h_gk_cpg,
@@ -1095,6 +1243,18 @@ def run_unders_engine(target_date=None, verbose=False):
     u35_csv_path  = os.path.join(OUTPUT_DIR, f"ALIENEDGE_U35_PICKS_{target_date}.csv")
     df_u25.drop(columns=["tier_rank"], errors="ignore").to_csv(u25_csv_path, index=False)
     df_u35.drop(columns=["tier_rank"], errors="ignore").to_csv(u35_csv_path, index=False)
+
+    if LAMBDA_HEALTH_WARNINGS:
+        print(f"\n  ⚠️  LAMBDA HEALTH: {len(LAMBDA_HEALTH_WARNINGS)} fixture(s) hit the "
+              f"lambda clamp/floor.")
+        for _w in LAMBDA_HEALTH_WARNINGS[:10]:
+            print(f"      - {_w}")
+        if len(LAMBDA_HEALTH_WARNINGS) > 10:
+            print(f"      ... and {len(LAMBDA_HEALTH_WARNINGS) - 10} more")
+        print("     A clamped lambda publishes a confident probability from a "
+              "poisoned input. Treat these fixtures as untrusted.")
+    elif verbose:
+        print("\n  ✅ Lambda health: no fixture hit the clamp or floor.")
 
     if verbose:
         print(f"\n{'🛡️'*50}\n  UNDER 2.5 DEFENSIVE BOARD — {target_date}\n{'🛡️'*50}")
