@@ -272,10 +272,6 @@ export default function DnaAnalysisPage() {
             competition={matchMeta?.league_name ?? null}
             matchday={null}
             leagueGroup={matchMeta?.season_name ?? null}
-            kickoff={null}
-            gameId={entry.fixture_id}
-            isHot={false}
-            liveInPlay={false}
             homePosition={matchMeta?.home_position ?? null}
             awayPosition={matchMeta?.away_position ?? null}
             isUnranked={matchMeta?.is_unranked ?? false}
