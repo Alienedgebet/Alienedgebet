@@ -847,6 +847,25 @@ export default function LivePage() {
   });
   const board = validation.data;
 
+  // A Code 6 board is only rewritten when something IS live. When the in-play
+  // feed empties, Stage 6 deliberately preserves the previous board so a match
+  // does not vanish mid-view — which means the board can be minutes-to-hours
+  // old while the scanner itself is perfectly healthy.
+  //
+  // The API now returns `data_age_seconds`. Without this guard the page kept
+  // rendering the preserved fixture (observed: id 19745050 sitting at minute 97
+  // long after full time) as though it were live, because there was no way to
+  // tell a current board from a frozen one. Past this age the board is treated
+  // as stale: its minute badge and live statistics are withheld, since they
+  // describe a match that has already ended. The board is NOT discarded — it
+  // is still the last thing that was true, which is useful context, just not
+  // live data.
+  const BOARD_STALE_AT = 300; // 5 min — ~4x the ~72s write interval
+  const boardAge = (board as { data_age_seconds?: number | null })
+    ?.data_age_seconds;
+  const boardIsStale =
+    typeof boardAge === "number" && boardAge > BOARD_STALE_AT;
+
   const stats = useMemo(() => {
     const gkLiabilities = auditRows.filter((r) => r.home.gk_out || r.away.gk_out).length;
     const highMiss = auditRows.filter((r) => r.combined_miss >= 9).length;
@@ -854,10 +873,12 @@ export default function LivePage() {
       fixtures: auditRows.length,
       gkLiabilities,
       highMiss,
-      tracked: board?.matches.length ?? 0,
+      // `tracked` is a LIVE count. Reporting a frozen board's total here made
+      // the header claim live coverage while nothing was actually in play.
+      tracked: boardIsStale ? 0 : (board?.matches.length ?? 0),
       validated: 0,
     };
-  }, [auditRows, board?.matches.length]);
+  }, [auditRows, board?.matches.length, boardIsStale]);
 
   // The live row for the selected fixture, matched on fixture_id ALONE.
   //
@@ -870,6 +891,11 @@ export default function LivePage() {
         (m) => String(m.id) === String(selectedAudit.fixture_id)
       ) ?? null
     : (board?.matches?.[0] ?? null);
+
+  // Everything below renders LIVE state, so it is all gated on the board
+  // actually being current (see the boardIsStale note above). Declared here,
+  // after `activeMatch`, because it derives from it.
+  const liveMatch = boardIsStale ? null : activeMatch;
 
   // Map Code 6's raw provider stat names onto the shape the panel renders.
   // The provider spells them with hyphens and reports box entries under
@@ -891,14 +917,16 @@ export default function LivePage() {
   };
 
   const liveStatistics = useMemo(() => {
-    const raw = activeMatch?.statistics;
+    // `liveMatch`, not `activeMatch`: when the board is stale these stats
+    // describe a finished match and must not be presented as current.
+    const raw = liveMatch?.statistics;
     if (!raw?.home && !raw?.away) return null;
     return { home: sideStats(raw?.home), away: sideStats(raw?.away) };
-  }, [activeMatch?.statistics]);
+  }, [liveMatch?.statistics]);
 
   // The live scoreline, taken from the same provider stats block.
   const liveScore = useMemo(() => {
-    const raw = activeMatch?.statistics;
+    const raw = liveMatch?.statistics;
     const g = (side: "home" | "away") => {
       const v = raw?.[side]?.["goals"];
       return typeof v === "number" && !Number.isNaN(v) ? v : null;
@@ -906,7 +934,7 @@ export default function LivePage() {
     const h = g("home");
     const a = g("away");
     return h === null && a === null ? null : `${h ?? 0} - ${a ?? 0}`;
-  }, [activeMatch?.statistics]);
+  }, [liveMatch?.statistics]);
 
   return (
     <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
@@ -978,11 +1006,11 @@ export default function LivePage() {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="rounded-full border border-cyan-500/40 bg-cyan-950/40 px-2 py-0.5 font-mono text-[10px] font-black uppercase tracking-wider text-cyan-300">
-                      Live match
+                      {boardIsStale ? "Last known state" : "Live match"}
                     </span>
-                    {activeMatch?.storm?.stage && (
+                    {liveMatch?.storm?.stage && (
                       <span className="rounded-full border border-amber-500/40 bg-amber-950/40 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-amber-300">
-                        Storm {activeMatch.storm.stage}
+                        Storm {liveMatch.storm.stage}
                       </span>
                     )}
                   </div>
@@ -1014,9 +1042,17 @@ export default function LivePage() {
                   </span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-slate-400">
-                  {activeMatch?.minute != null && (
+                  {liveMatch?.minute != null && (
                     <span className="rounded border border-white/10 bg-white/5 px-2 py-0.5 font-bold text-white">
-                      {activeMatch.minute}&apos;
+                      {liveMatch.minute}&apos;
+                    </span>
+                  )}
+                  {boardIsStale && (
+                    <span
+                      className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300"
+                      title={`No match is live right now, so this fixture is not updating. The board was last written ${Math.round((boardAge ?? 0) / 60)}m ago.`}
+                    >
+                      not live now
                     </span>
                   )}
                   <span className="text-slate-600">ID {selectedAudit.fixture_id}</span>

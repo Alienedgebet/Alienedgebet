@@ -2344,8 +2344,28 @@ def get_live_aggregator():
 
 @app.get("/api/live/orchestrator", tags=["Live"])
 def get_live_orchestrator():
-    default_board = {"session": "", "cycle": 0, "total_live": 0, "total_db": 0, "matches": []}
-    return _read_json(os.path.join(OUTPUT_DIR, "orchestrator_board.json"), default_board)
+    """Code 6's per-cycle board, plus the age of the data behind it.
+
+    Same reasoning as /api/live/prematch: the board is only rewritten when
+    there IS something live to report. When the in-play feed is empty,
+    live_stage6_alerts.run_single_cycle() deliberately PRESERVES the previous
+    board rather than publishing an empty one, so a match that just finished
+    does not vanish from the screen mid-view.
+
+    That preservation means this file can be arbitrarily old while the scanner
+    is running perfectly. Without the age, /live/edges had no way to tell a
+    current board from one frozen at the end of the previous match, so it kept
+    rendering a finished fixture at minute 97 as if it were live. `cycle` alone
+    cannot express this because the cycle counter is part of the frozen
+    payload. Exposing the real age lets the client say so.
+    """
+    default_board = {"session": "", "cycle": 0, "total_live": 0,
+                     "total_db": 0, "matches": []}
+    path = os.path.join(OUTPUT_DIR, "orchestrator_board.json")
+    board = _read_json(path, default_board)
+    if isinstance(board, dict):
+        board["data_age_seconds"] = _data_age_seconds(path)
+    return board
 
 
 @app.get("/api/live/alerts", tags=["Live"])
