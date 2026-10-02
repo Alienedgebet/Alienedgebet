@@ -194,6 +194,25 @@ export interface DnaV2Profile {
     Opp_Dangerous_Attacks: number;
     Resistance_Score: number;
   };
+  /**
+   * DISPLAY ONLY — per-match recent results rendered by the SportyBet-style
+   * form strip. Fed by no pillar, archetype or clash. Optional because
+   * profiles cached before this field existed simply don't have it, and the
+   * UI must degrade to "—" rather than crash on an older snapshot.
+   */
+  form_rows?: DnaV2FormRow[];
+}
+
+/** One recent result. `venue` is "home" | "away" from THIS team's perspective. */
+export interface DnaV2FormRow {
+  date: string | null;
+  fixture_id: number | string | null;
+  opponent: string | null;
+  opponent_id: number | string | null;
+  venue: "home" | "away" | null;
+  result: "W" | "D" | "L";
+  goals_for: number;
+  goals_against: number;
 }
 
 export interface DnaV2PillarClash {
@@ -263,6 +282,41 @@ export interface DnaV2Response {
   dna_profiles: Record<string, DnaV2Profile>;
   fixture_clashes: DnaV2Clash[];
   market_factors: Record<string, DnaV2FixtureFactors>;
+}
+
+/**
+ * Per-fixture metadata for the SportyBet-style match header, joined on the
+ * backend from cache files the same pipeline run already wrote.
+ *
+ * Every field is nullable BY DESIGN: the backend returns null rather than
+ * guessing, so the UI can render an honest em-dash. In particular
+ * `home_position` / `away_position` are null for friendlies and cups, where
+ * there is no league table at all — the engines store 99 as an UNRANKED
+ * sentinel and the backend normalises it away, because showing "99" would
+ * claim a team is 99th.
+ */
+export interface DnaV2MatchMeta {
+  fixture_id: string;
+  league_name: string | null;
+  league_id: number | string | null;
+  competition: string | null;
+  classification: string | null;
+  is_friendly: boolean | null;
+  is_cup: boolean | null;
+  season_name: string | null;
+  stage_id: number | string | null;
+  venue_id: number | string | null;
+  home_team: string | null;
+  away_team: string | null;
+  home_position: number | null;
+  away_position: number | null;
+  /** True when the fixture has no league table (friendly/cup). */
+  is_unranked: boolean;
+}
+
+export interface DnaV2MatchMetaResponse {
+  date: string;
+  fixtures: Record<string, DnaV2MatchMeta>;
 }
 
 export interface UnderdogBasePick extends FixtureRisk {
@@ -2320,6 +2374,13 @@ export const dnaV2Api = {
   // DNA counts and for the DNA Analysis page so opening it feels instant.
   getLatest: (): Promise<AxiosResponse<DnaV2Response>> =>
     cachedGet(`/api/dna/v2/latest`),
+
+  // Read-only fixture metadata (league, competition, table position) for the
+  // SportyBet-style match header. Also disk-only: the backend joins cache files
+  // this same pipeline run already wrote, so this costs no engine run and no
+  // provider call.
+  getMatchMeta: (date: string): Promise<AxiosResponse<DnaV2MatchMetaResponse>> =>
+    cachedGet(`/api/dna/v2/${date}/match-meta`),
 };
 
 export const underdogApi = {

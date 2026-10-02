@@ -983,6 +983,115 @@ def get_dna_v2_latest():
     return get_dna_v2(max(dates))
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# ROUTE ORDER HAZARD: this route MUST stay registered BEFORE
+# /api/dna/v2/{date}. FastAPI matches in registration order, so with the
+# {date} catch-all first, the literal "match-meta" segment is captured as
+# part of the date and the request silently returns the DNA payload
+# instead of metadata — a 200 that looks fine and is entirely wrong.
+# Same hazard, same fix as /api/dna/v2/latest documented above.
+def _rows_by_fixture_id(payload) -> dict:
+    """Index a cached engine payload by fixture_id.
+
+    Cache files are not uniformly shaped: some engines write a bare list, some
+    write {fixture_id: row}, and some write {meta: {...}, data: [...]}. This
+    accepts all three so a new engine's layout cannot silently produce an empty
+    index and look like "no data".
+    """
+    rows = []
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        for value in payload.values():
+            if isinstance(value, list):
+                rows = value
+                break
+            if isinstance(value, dict) and value.get("fixture_id") is not None:
+                rows.append(value)
+    out = {}
+    for r in rows:
+        if isinstance(r, dict) and r.get("fixture_id") is not None:
+            out[str(r["fixture_id"])] = r
+    return out
+
+
+# Positions at or above this are the engines' UNRANKED sentinel, not a league
+# place. Engine/corner_catalyst.py::apply_positional_rules treats >= 99 as
+# unranked and returns "⚖️ UNRANKED"; surfacing a literal "99" in a rank badge
+# would tell the user a team is 99th, which is a different and false claim.
+_UNRANKED_AT = 99
+
+
+@app.get("/api/dna/v2/{date}/match-meta", tags=["Foundation"])
+def get_dna_match_meta(date: str):
+    """Read-only fixture metadata for the DNA match header.
+
+    Serves the SportyBet-style header (competition, league, round, kickoff,
+    league position) WITHOUT touching any engine and WITHOUT a single new
+    SportMonks call: it only joins cache files this same pipeline run already
+    wrote for this date.
+
+      fixture_risk_        -> league_name, classification, season, stage
+      corners_psychology_  -> home_position / away_position (league table)
+
+    Anything not present in a cache is returned as null rather than guessed, so
+    the client renders "—". Positions at or above 99 are normalised to null for
+    the reason documented on _UNRANKED_AT.
+    """
+    risk_rows = _rows_by_fixture_id(store.load("fixture_risk", date, default=[])[0])
+    psych_rows = _rows_by_fixture_id(store.load("corners_psychology", date, default=[])[0])
+
+    def position(value):
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return None
+        return None if n >= _UNRANKED_AT or n <= 0 else n
+
+    out = {}
+    for fid, risk in risk_rows.items():
+        psych = psych_rows.get(fid, {})
+        out[fid] = {
+            "fixture_id": fid,
+            "league_name": risk.get("league_name"),
+            "league_id": risk.get("league_id"),
+            "competition": risk.get("competition"),
+            "classification": risk.get("classification"),
+            "is_friendly": risk.get("is_friendly"),
+            "is_cup": risk.get("is_cup"),
+            "season_name": risk.get("season_name"),
+            "stage_id": risk.get("stage_id"),
+            "venue_id": risk.get("venue_id"),
+            "home_team": risk.get("home_team"),
+            "away_team": risk.get("away_team"),
+            "home_position": position(psych.get("home_position")),
+            "away_position": position(psych.get("away_position")),
+            # True when this fixture had no league table at all (friendly/cup),
+            # which is why there is no position to show.
+            "is_unranked": psych.get("home_position") is not None
+            and position(psych.get("home_position")) is None,
+        }
+
+    # Fixtures that only corners_psychology knows about still deserve a row, so
+    # a position is never withheld just because the risk file lacks the fixture.
+    for fid, psych in psych_rows.items():
+        if fid in out:
+            continue
+        out[fid] = {
+            "fixture_id": fid,
+            "league_name": None, "league_id": None, "competition": None,
+            "classification": None, "is_friendly": None, "is_cup": None,
+            "season_name": None, "stage_id": None, "venue_id": None,
+            "home_team": psych.get("home_team"), "away_team": psych.get("away_team"),
+            "home_position": position(psych.get("home_position")),
+            "away_position": position(psych.get("away_position")),
+            "is_unranked": psych.get("home_position") is not None
+            and position(psych.get("home_position")) is None,
+        }
+
+    return {"date": date, "fixtures": out}
+
+
 @app.get("/api/dna/v2/{date}", tags=["Foundation"])
 def get_dna_v2(date: str):
     engine_result, _ = store.load("dna_v2", date, default={})

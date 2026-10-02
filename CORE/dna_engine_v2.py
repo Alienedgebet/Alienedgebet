@@ -113,6 +113,11 @@ def run_dna_engine_v2(target_date):
     HISTORY_LOOKBACK = 8       # professional forensic sample size
     LOOKBACK_DAYS    = 365
     PAGINATION_PER_PAGE = 50
+    # How many recent results the SportyBet-style form strip shows. Purely a
+    # DISPLAY cap on rows DNA already fetched — it costs no extra API call and
+    # feeds no calculation. HISTORY_LOOKBACK stays the sample size for the
+    # averages; this only decides how many are rendered.
+    FORM_ROWS_DISPLAY = 5
 
     # How long a cached team profile is trusted before we spend one API call
     # re-checking whether their latest finished match has changed. A team
@@ -387,6 +392,67 @@ def run_dna_engine_v2(target_date):
         if tg < og:
             return "L"
         return "D"
+
+    def build_form_rows(team_id, fixtures):
+        """
+        Per-match recent results, for the read-only SportyBet-style form strip.
+
+        DISPLAY ONLY. Nothing here feeds a single DNA score, pillar, archetype
+        or clash — it is a rendering of history DNA has ALREADY fetched, kept
+        so the form strip never has to ask the provider for anything again.
+
+        Reuses get_team_and_opp_goals() / get_match_outcome_bulletproof()
+        rather than re-deriving scorelines, because this file already warns
+        that a second hand-typed variant of the score logic is how two
+        byte-identical engines ended up silently overwriting each other. If
+        the scoreline rules change, the form strip changes with them for free.
+
+        A match with no readable scoreline is OMITTED, not rendered as a 0-0
+        draw: a missing result is a data gap, and inventing "D" would put a
+        fabricated badge in a strip whose whole job is to be trusted.
+        """
+        rows = []
+        for fx in fixtures:
+            tg, og = get_team_and_opp_goals(fx, team_id, "FT")
+            if tg is None or og is None:
+                continue  # no readable scoreline — omit, never fake a draw
+
+            # Opponent name, for the "W BEL 0:1" line.
+            opp_name = None
+            opp_id = None
+            for p in fx.get("participants", []):
+                if str(p.get("id")) != str(team_id):
+                    opp_id = p.get("id")
+                    opp_name = p.get("name") or (p.get("meta") or {}).get("name")
+                    break
+            if not opp_name:
+                if str(fx.get("localteam_id")) == str(team_id):
+                    opp_name = (fx.get("visitorteam") or {}).get("name")
+                elif str(fx.get("visitorteam_id")) == str(team_id):
+                    opp_name = (fx.get("localteam") or {}).get("name")
+
+            # Venue, from the same participants meta the scoring path trusts.
+            venue = None
+            for p in fx.get("participants", []):
+                if str(p.get("id")) == str(team_id):
+                    venue = (p.get("meta") or {}).get("location")
+                    break
+
+            rows.append({
+                "date":        str(fx.get("starting_at", ""))[:10] or None,
+                "fixture_id":  fx.get("id"),
+                "opponent":    opp_name,
+                "opponent_id": opp_id,
+                "venue":       venue,          # "home" | "away" | None
+                "result":      "W" if tg > og else ("L" if tg < og else "D"),
+                "goals_for":   tg,
+                "goals_against": og,
+            })
+
+        # Newest first (the fetch is already sorted desc, but do not rely on
+        # the caller's ordering for a rendered strip).
+        rows.sort(key=lambda r: (r["date"] or ""), reverse=True)
+        return rows[:FORM_ROWS_DISPLAY]
 
     def compute_goal_volume(team_id, fixtures):
         """
@@ -720,6 +786,11 @@ def run_dna_engine_v2(target_date):
         # read it explicitly when they want goal-volume facts.
         goal_volume = compute_goal_volume(team_id, fixtures)
 
+        # Same additive-only contract as goal_volume above: a display-only
+        # rendering of fixtures this function was already given. No pillar,
+        # archetype, clash or downstream engine reads it.
+        form_rows = build_form_rows(team_id, fixtures)
+
         # ══════════════════════════════════════════════════════════════════════
         # ASSEMBLED PROFILE — returned to main loop and saved to JSON
         # ══════════════════════════════════════════════════════════════════════
@@ -772,6 +843,10 @@ def run_dna_engine_v2(target_date):
                 # must not be rendered as a row of zeros.
                 "Goal_Volume":             (goal_volume if goal_volume else {}),
             },
+            # DISPLAY ONLY — the read-only SportyBet-style form strip renders
+            # these verbatim. Empty list when no fixture carried a readable
+            # scoreline, which the UI shows as "—" rather than a fake 0-0.
+            "form_rows":                form_rows,
             # Stamped so _is_profile_fresh() can tell a profile that predates
             # the Goal_Volume fields from one that actually has them.
             "schema":                   DNA_SCHEMA_VERSION,

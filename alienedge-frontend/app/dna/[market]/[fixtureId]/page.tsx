@@ -1,10 +1,13 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Loader2, Swords } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDnaV2 } from "@/lib/use-dna-v2";
+import { useApi } from "@/lib/use-api";
+import { dnaV2Api, type DnaV2MatchMeta, type DnaV2MatchMetaResponse } from "@/lib/api";
+import SportyMatchOverview, { type SportyH2HMeeting } from "@/components/dna/SportyMatchOverview";
 import type {
   DnaV2Factor,
   DnaV2FixtureFactors,
@@ -142,6 +145,30 @@ export default function DnaAnalysisPage() {
 
   const { data, loading, isRefetching } = useDnaV2(date || undefined);
 
+  // League / competition / table position for the SportyBet-style header.
+  // Disk-only on the backend (it joins cache files this same run already
+  // wrote), so this adds no engine run and no provider call. A failure is
+  // non-fatal: the header simply keeps its em-dashes.
+  //
+  // With no date selected there is nothing to look up, so no request is made
+  // at all. The empty case still returns a well-typed response rather than
+  // null: useApi chains `request.then(...)` OUTSIDE its try/catch, so a null
+  // return would throw instead of resolving.
+  const matchMetaFetcher = useCallback((): ReturnType<typeof dnaV2Api.getMatchMeta> => {
+    if (!date) {
+      return Promise.resolve({
+        data: { date: "", fixtures: {} },
+      } as Awaited<ReturnType<typeof dnaV2Api.getMatchMeta>>);
+    }
+    return dnaV2Api.getMatchMeta(date);
+  }, [date]);
+  const { data: matchMetaRes } = useApi<DnaV2MatchMetaResponse>(
+    matchMetaFetcher,
+    [date],
+    { cacheKey: date ? `dna-match-meta:${date}` : "dna-match-meta:none" }
+  );
+  const matchMeta: DnaV2MatchMeta | undefined = matchMetaRes?.fixtures?.[params.fixtureId];
+
   const market = VALID_MARKETS.has(params.market)
     ? (params.market as DnaV2MarketKey)
     : "win";
@@ -176,6 +203,29 @@ export default function DnaAnalysisPage() {
   const awayPct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.away_count / totalFactors) * 100) : 0;
 
   const showLoading = loading && !entry;
+
+  // ── SportyBet-style panel: READ-ONLY mapping of data DNA already has ──────
+  // Nothing here computes a prediction. `form_rows` is the display-only field
+  // DNA now stores alongside its existing averages (see build_form_rows in
+  // CORE/dna_engine_v2.py); it feeds no pillar, archetype or clash. Profiles
+  // cached before that field existed simply lack it, and every panel below
+  // degrades to an em-dash rather than inventing a result.
+  //
+  // The H2H meeting list has no live source yet, so it is passed as explicit
+  // demo rows and the component labels them "demo". Swap this for a real
+  // endpoint later and nothing else has to change.
+  const demoH2H: SportyH2HMeeting[] = useMemo(() => {
+    const home = entry?.home_team ?? "Home";
+    const away = entry?.away_team ?? "Away";
+    // Deterministic per-fixture so the strip does not reshuffle on re-render.
+    const seed = [...`${home}${away}`].reduce((a, c) => a + c.charCodeAt(0), 0);
+    const pick = (n: number) => ((seed * (n + 3)) % 4) + 1;
+    return ["2026-06-14", "2026-03-22", "2025-11-09", "2025-08-16", "2025-03-23"].map((date, i) => {
+      const hg = pick(i);
+      const ag = pick(i + 2) % 4;
+      return { date, home, away, home_goals: hg, away_goals: ag, isPlaceholder: true };
+    });
+  }, [entry?.home_team, entry?.away_team]);
 
   return (
     <div className="fixed inset-0 z-[70] flex flex-col overflow-y-auto bg-bg-primary">
@@ -212,6 +262,34 @@ export default function DnaAnalysisPage() {
         </div>
       ) : (
         <div className="mx-auto w-full max-w-3xl flex-1 space-y-4 px-4 py-4 md:px-6 md:py-6">
+          {/* SportyBet-style match header + H2H statistics.
+              Mounted FIRST so it sits above the DNA engine output, which is
+              left entirely untouched below. Read-only: it renders history and
+              never contributes to a prediction. */}
+          <SportyMatchOverview
+            homeTeam={entry.home_team}
+            awayTeam={entry.away_team}
+            competition={matchMeta?.league_name ?? null}
+            matchday={null}
+            leagueGroup={matchMeta?.season_name ?? null}
+            kickoff={null}
+            gameId={entry.fixture_id}
+            isHot={false}
+            liveInPlay={false}
+            homePosition={matchMeta?.home_position ?? null}
+            awayPosition={matchMeta?.away_position ?? null}
+            isUnranked={matchMeta?.is_unranked ?? false}
+            homeForm={homeProfile?.form_rows}
+            awayForm={awayProfile?.form_rows}
+            homeWins={null}
+            draws={null}
+            awayWins={null}
+            highestWin={null}
+            points={null}
+            goalsScored={null}
+            h2hMeetings={demoH2H}
+          />
+
           {/* Team header + DNA count for this market */}
           <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg-card p-4">
             <div className="flex min-w-0 flex-1 items-center gap-2.5">
