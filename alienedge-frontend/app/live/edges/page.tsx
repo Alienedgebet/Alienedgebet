@@ -19,6 +19,7 @@ import {
   type LiveValidationSideStats,
 } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
+import { useSelectedDate } from "@/lib/date-context";
 import {
   MOCK_LIVE_PREMATCH_AUDIT,
 } from "@/lib/mock-chains";
@@ -814,9 +815,24 @@ export default function LivePage() {
   // API returns `data_age_seconds`) instead of implying a freshness it does not
   // have. Cutting 20s -> 60s removes ~2 of every 3 requests with no loss of
   // freshness, because those requests were duplicates anyway.
+  // ── CACHE KEYS MUST BE DATE-SCOPED (2026-10-03) ──────────────────────────
+  //
+  // These two keys used to be bare strings ("live-edges-prematch",
+  // "live-edges-orchestrator") with no date in them. use-api keeps a
+  // PERSISTENT tier in localStorage under exactly this key with a 24h TTL, so
+  // a board fetched for one day was served back on the next — which is how this
+  // page kept showing YESTERDAY's fixtures while /live/incoming looked live.
+  // Incoming looked fine only because its feeds churn faster; the edges board
+  // is written once per fixture, so a stale entry survives far longer.
+  //
+  // Every other dated page already scopes its key this way
+  // (`live-alerts-${date}`, `unders:${date}`, `gg-precision:${date}`). This page
+  // was the outlier. Scoping the key means a new day reads a different slot and
+  // yesterday's payload can never be served again.
+  const { date } = useSelectedDate();
   const prematch = useApi(() => liveApi.getPrematch(), [], {
     fallback: MOCK_LIVE_PREMATCH_AUDIT,
-    cacheKey: "live-edges-prematch",
+    cacheKey: `live-edges-prematch:${date}`,
     refreshMs: 60_000,
   });
   // The Code 2 validator no longer runs, so its board is retired as the
@@ -826,7 +842,7 @@ export default function LivePage() {
   // and nothing was lost. It still polls, because the underlying cycle is
   // ~3 minutes and a one-shot fetch would freeze on first paint.
   const validation = useApi(() => liveApi.getOrchestrator(), [], {
-    cacheKey: "live-edges-orchestrator",
+    cacheKey: `live-edges-orchestrator:${date}`,
     refreshMs: 15_000,
   });
 

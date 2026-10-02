@@ -11,6 +11,7 @@ import {
   type LiveIncomingPick,
 } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
+import { useSelectedDate } from "@/lib/date-context";
 import {
   MOCK_LIVE_AGG,
   MOCK_LIVE_DANGER,
@@ -312,20 +313,26 @@ function SyncChip({
 }
 
 export default function LiveIncomingPage() {
+  // Date-scoped cache keys — see the identical fix on /live/edges. These were
+  // bare strings, so the 24h persistent localStorage tier could replay one
+  // day's feeds on the next. This page only *seemed* immune because its feeds
+  // churn every 45s; the edges board is written once per fixture and stayed
+  // stale, which is why the two pages disagreed about what "today" meant.
+  const { date } = useSelectedDate();
   const incoming = useApi(
     () => liveApi.getIncoming().then(normalizeIncoming),
     [],
-    { fallback: MOCK_LIVE_INCOMING, cacheKey: "live-incoming-incoming", refreshMs: 45_000 }
+    { fallback: MOCK_LIVE_INCOMING, cacheKey: `live-incoming-incoming:${date}`, refreshMs: 45_000 }
   );
   const danger = useApi(
     () => liveApi.getDanger().then(normalizeDanger),
     [],
-    { fallback: MOCK_LIVE_DANGER, cacheKey: "live-incoming-danger", refreshMs: 45_000 }
+    { fallback: MOCK_LIVE_DANGER, cacheKey: `live-incoming-danger:${date}`, refreshMs: 45_000 }
   );
   const aggregator = useApi(
     () => liveApi.getAggregator().then(normalizeAggregator),
     [],
-    { fallback: MOCK_LIVE_AGG, cacheKey: "live-incoming-aggregator", refreshMs: 45_000 }
+    { fallback: MOCK_LIVE_AGG, cacheKey: `live-incoming-aggregator:${date}`, refreshMs: 45_000 }
   );
 
   const incomingRows = liveRows(incoming.data);
