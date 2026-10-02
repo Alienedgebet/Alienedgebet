@@ -20,7 +20,7 @@
  * prediction that had never actually been measured.
  */
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { DnaV2FormRow } from "@/lib/api";
 
@@ -51,13 +51,13 @@ export interface SportyMatchOverviewProps {
   awayTeam?: string;
 
   // Header / meta
+  // NOTE: kickoff / gameId / isHot / liveInPlay were part of the original
+  // SportyBet chrome but are no longer rendered — the match card now shows the
+  // team names only. They are kept out of the interface rather than left as
+  // props nothing reads, so the next person does not wire data to a dead prop.
   competition?: string | null;
   matchday?: string | number | null;
   leagueGroup?: string | null;
-  kickoff?: string | null;
-  gameId?: string | number | null;
-  isHot?: boolean;
-  liveInPlay?: boolean;
 
   // League position (the rank badges in the centre column)
   homePosition?: number | null;
@@ -115,17 +115,6 @@ function Present({
   return <span className={className}>{children(value as never)}</span>;
 }
 
-/** "DC United" -> "DC". Used by the circular badge fallback. */
-function initialsOf(name?: string | null): string {
-  if (!name) return "??";
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "??";
-  return parts
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? "")
-    .join("");
-}
-
 /**
  * National flags for common internationals so they read instantly. Purely
  * decorative and INLINE — no image request, so nothing can 404 or flash a
@@ -147,53 +136,6 @@ const FLAG_EMOJI: Record<string, string> = {
 };
 const flagFor = (name?: string | null): string =>
   (name && FLAG_EMOJI[name.trim().toLowerCase()]) || "";
-
-/**
- * Circular team badge: flag emoji when the country is known, otherwise
- * initials. No <img>, so it renders instantly and can never show a broken
- * image icon.
- */
-function TeamBadge({
-  name,
-  size = 56,
-  className,
-}: {
-  name?: string | null;
-  size?: number;
-  className?: string;
-}) {
-  const flag = flagFor(name);
-  return (
-    <div
-      className={cn(
-        "flex shrink-0 items-center justify-center overflow-hidden rounded-full border-2 bg-[#16202e] font-mono font-black text-white",
-        className
-      )}
-      style={{ width: size, height: size, borderColor: SB.line, fontSize: size * 0.36 }}
-      aria-hidden="true"
-    >
-      {flag ? (
-        <span style={{ fontSize: size * 0.55, lineHeight: 1 }}>{flag}</span>
-      ) : (
-        initialsOf(name)
-      )}
-    </div>
-  );
-}
-
-/** "2026-10-02T19:45:00+00:00" -> { date: "02/10 Friday", time: "19:45" } */
-function formatKickoff(iso?: string | null): { date: string; time: string } | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  return {
-    date: `${dd}/${mm} ${days[d.getDay()]}`,
-    time: `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
-  };
-}
 
 /** "2026-09-27" -> "27/09". */
 function shortDate(iso?: string | null): string | null {
@@ -222,160 +164,26 @@ function goalsSum(rows?: DnaV2FormRow[]): number | null {
   return rows.reduce((acc, r) => acc + (r.goals_for ?? 0), 0);
 }
 
-// ── Tier 2b: tab rows ─────────────────────────────────────────────────────
-const PRIMARY_TABS = ["BB", "Markets", "Stats", "Codes"] as const;
-type SubTab = (typeof SUB_TABS)[number];
-const SUB_TABS = ["H2H", "Comparison", "Lineups", "Table", "Standings"] as const;
-
-function TabPill({
-  label,
-  active,
-  onClick,
-  newBadge,
-}: {
-  label: string;
-  active: boolean;
-  onClick?: () => void;
-  newBadge?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        "relative shrink-0 rounded-full px-3 py-1 text-[11px] font-bold transition-colors",
-        active
-          ? "bg-[#0e1622] text-white"
-          : "text-[#0e1622]/60 hover:bg-[#0e1622]/10 hover:text-[#0e1622]"
-      )}
-    >
-      {label}
-      {newBadge && (
-        <span className="ml-1 rounded bg-[#e41e26] px-1 py-px text-[8px] font-black uppercase text-white">
-          New
-        </span>
-      )}
-    </button>
-  );
-}
-
-function FeatureTabs({ sub, onSubChange }: { sub: SubTab; onSubChange: (s: SubTab) => void }) {
-  const [primary, setPrimary] = useState<(typeof PRIMARY_TABS)[number]>("Stats");
-
-  return (
-    <>
-      <div className="flex items-center gap-1.5 overflow-x-auto border-t border-[#0e1622]/10 bg-[#f1f3f5] px-3 py-1.5">
-        {PRIMARY_TABS.map((t) => (
-          <TabPill key={t} label={t} active={primary === t} onClick={() => setPrimary(t)} newBadge={t === "Codes"} />
-        ))}
-        <button type="button" aria-label="Chat" className="ml-auto shrink-0 px-1 text-[13px] text-[#0e1622]/50 hover:text-[#0e1622]">
-          &#128172;
-        </button>
-      </div>
-
-      <div className="flex items-center gap-3 overflow-x-auto border-t border-[#0e1622]/10 bg-white px-3">
-        {SUB_TABS.map((t) => {
-          const active = sub === t;
-          return (
-            <button
-              key={t}
-              type="button"
-              onClick={() => onSubChange(t)}
-              aria-current={active ? "page" : undefined}
-              className={cn(
-                "relative shrink-0 py-2 text-[11px] font-semibold transition-colors",
-                active ? "text-[#0e1622]" : "text-[#0e1622]/50 hover:text-[#0e1622]/80"
-              )}
-            >
-              {t}
-              {active && (
-                <span className="absolute inset-x-0 -bottom-px h-[3px] rounded-full" style={{ backgroundColor: SB.emerald }} />
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-// ── Tier 2: white match card ──────────────────────────────────────────────
+// ── Tier 2: white match card — TEAM NAMES ONLY ───────────────────────────
+// Deliberately minimal. An earlier pass carried the full SportyBet chrome
+// (Switch match, competition link, nav arrows, Game ID, and both tab rows).
+// It was removed on request: on this page all of that was visual noise
+// competing with the team names, and the tab rows were decorative anyway —
+// they only ever swapped which panel was shown, never what was measured.
+// The real statistics live in the navy body below and are untouched.
 function MatchCard({
   homeTeam,
   awayTeam,
-  competition,
-  kickoff,
-  gameId,
-  isHot,
-  liveInPlay,
-  sub,
-  onSubChange,
-}: Pick<
-  SportyMatchOverviewProps,
-  "homeTeam" | "awayTeam" | "competition" | "kickoff" | "gameId" | "isHot" | "liveInPlay"
-> & { sub: SubTab; onSubChange: (s: SubTab) => void }) {
-  const ko = formatKickoff(kickoff);
-
+}: Pick<SportyMatchOverviewProps, "homeTeam" | "awayTeam">) {
   return (
-    <div className="bg-white text-[#0e1622]">
-      <div className="flex items-center justify-between px-3 pt-2.5">
-        {isHot ? (
-          <span className="rounded px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-white" style={{ backgroundColor: SB.red }}>
-            HOT &#128293;
-          </span>
-        ) : (
-          <span />
-        )}
-        <button type="button" className="flex items-center gap-1 text-[11px] font-semibold text-[#0e1622]/70 hover:text-[#0e1622]">
-          Switch match <span aria-hidden="true">&#9776;</span>
-        </button>
-      </div>
-
-      <div className="px-3 pt-1.5">
-        {competition ? (
-          <span className="text-[11px] font-medium text-[#1a7f37] underline">{competition}</span>
-        ) : (
-          <span className="text-[11px] text-[#0e1622]/40">—</span>
-        )}
-      </div>
-
-      <div className="relative flex items-center justify-between gap-2 px-3 py-3">
-        <span className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-2xl font-light text-[#fbd5d7]" aria-hidden="true">
-          &#8249;
-        </span>
-        <span className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-2xl font-light text-[#c9f2da]" aria-hidden="true">
-          &#8250;
-        </span>
-
-        <div className="flex min-w-0 flex-1 flex-col items-center gap-1">
-          <TeamBadge name={homeTeam} size={44} />
-          <span className="w-full truncate text-center text-[12px] font-bold">{homeTeam ?? "—"}</span>
-        </div>
-
-        <div className="shrink-0 px-1 text-center">
-          {ko ? (
-            <>
-              <p className="text-[11px] font-semibold leading-tight">{ko.date}</p>
-              <p className="font-mono text-[13px] font-black leading-tight">{ko.time}</p>
-            </>
-          ) : (
-            <span className="font-mono text-[11px] text-[#0e1622]/40">—</span>
-          )}
-        </div>
-
-        <div className="flex min-w-0 flex-1 flex-col items-center gap-1">
-          <TeamBadge name={awayTeam} size={44} />
-          <span className="w-full truncate text-center text-[12px] font-bold">{awayTeam ?? "—"}</span>
-        </div>
-      </div>
-
-      <div className="pb-2.5 text-center font-mono text-[10px] text-[#0e1622]/55">
-        Game ID: {gameId ?? "—"}
-        {liveInPlay ? " · Live In-Play Available" : ""}
-      </div>
-
-      <FeatureTabs sub={sub} onSubChange={onSubChange} />
+    <div className="flex items-center justify-center gap-3 bg-white px-4 py-5 text-[#0e1622]">
+      <span className="min-w-0 flex-1 truncate text-center text-[15px] font-bold">
+        {homeTeam ?? "—"}
+      </span>
+      <span className="shrink-0 font-mono text-[11px] font-medium text-[#0e1622]/30">vs</span>
+      <span className="min-w-0 flex-1 truncate text-center text-[15px] font-bold">
+        {awayTeam ?? "—"}
+      </span>
     </div>
   );
 }
@@ -568,10 +376,6 @@ export default function SportyMatchOverview(props: SportyMatchOverviewProps) {
     competition,
     matchday,
     leagueGroup,
-    kickoff,
-    gameId,
-    isHot,
-    liveInPlay,
     homePosition,
     awayPosition,
     isUnranked,
@@ -585,8 +389,6 @@ export default function SportyMatchOverview(props: SportyMatchOverviewProps) {
     goalsScored,
     h2hMeetings,
   } = props;
-
-  const [sub, setSub] = useState<SubTab>("H2H");
 
   // Points slider falls back to the real form rows so it shows live data as
   // soon as DNA has any; goals uses the same rows. Explicit props win.
@@ -603,21 +405,12 @@ export default function SportyMatchOverview(props: SportyMatchOverviewProps) {
 
   return (
     <div className="overflow-hidden rounded-lg border" style={{ borderColor: SB.line, backgroundColor: SB.navy }}>
-      {/* Tier 1 — red bar */}
-      <div className="h-1.5 w-full" style={{ backgroundColor: SB.red }} aria-hidden="true" />
+      {/* Tier 1 — red bar. 18px (was 6px): this strip is the strongest visual
+          anchor on the card and read as a hairline at 6px. */}
+      <div className="h-[18px] w-full" style={{ backgroundColor: SB.red }} aria-hidden="true" />
 
-      {/* Tier 2 — white match card */}
-      <MatchCard
-        homeTeam={homeTeam}
-        awayTeam={awayTeam}
-        competition={competition}
-        kickoff={kickoff}
-        gameId={gameId}
-        isHot={isHot}
-        liveInPlay={liveInPlay}
-        sub={sub}
-        onSubChange={setSub}
-      />
+      {/* Tier 2 — white match card (team names only) */}
+      <MatchCard homeTeam={homeTeam} awayTeam={awayTeam} />
 
       {/* Tier 3 — mint matchday banner */}
       <MatchdayBanner competition={competition} leagueGroup={leagueGroup} matchday={matchday} />
