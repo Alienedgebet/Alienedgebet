@@ -20,7 +20,34 @@ set -uo pipefail
 BACKEND="/var/www/backend"
 PY="$BACKEND/venv/bin/python3"
 HEARTBEAT="$BACKEND/data/pipeline_heartbeat.json"
-STALE_AFTER=${STALE_AFTER:-1200}     # 20 min
+GATE_LOCK="$BACKEND/data/api_429_cooldown.lock"
+
+# STALE_AFTER is 45 min, NOT 20 (2026-10-02).
+#
+# The 20-minute value was shorter than the cooldowns the run was required to
+# sit through, so the watchdog killed HEALTHY runs. Observed on the 2026-10-02
+# 18:00 run: SportMonks returned 429 with retry-after=1617s (~27 min) on
+# /fixtures/between/... and /fixtures/head-to-head/...; main.py correctly
+# stopped calling that endpoint and moved on to other work, and 1221s later the
+# watchdog declared the run wedged and SIGKILLed it mid weekly-pass (2026-10-09
+# ended with 0 output files).
+#
+# A run obeying a server-provided backoff is not hung — it is waiting. The
+# cooldown can legitimately reach ~28 min, so the hang threshold must sit above
+# the longest wait a healthy run can be asked to perform.
+STALE_AFTER=${STALE_AFTER:-2700}     # 45 min
+
+# The clock above is a floor, not a verdict. While the shared 429 gate is
+# ACTIVE the heartbeat can legitimately go quiet, so a quiet heartbeat during a
+# known cooldown is not evidence of a hang. This checks the gate the same way
+# main.py's _429_gate_remaining() does and grants an extension for as long as
+# the cooldown still has time left on it.
+#
+# Without this the watchdog would still reap a run that is correctly waiting,
+# just with a longer leash — the two mechanisms would fight again on the next
+# long suspension.
+GATE_GRACE_S=${GATE_GRACE_S:-300}     # 5 min of slack past each cooldown end
+
 POLL=${POLL:-30}
 
 TARGET_DATE="${TARGET_DATE:-$(date -d tomorrow +%F)}"
@@ -68,8 +95,26 @@ PYEOF
         AGE=$(( $(date +%s) - START_TS ))
     fi
 
+    # A run that is deliberately sitting out a shared 429 cooldown is WAITING,
+    # not wedged. Give it until the cooldown expires (plus a little slack) so
+    # the watchdog cannot reap a healthy run for obeying a server backoff.
     if [ "$AGE" -ge "$STALE_AFTER" ]; then
-        echo "WATCHDOG: no progress for ${AGE}s — aborting wedged pipeline" >&2
+        GATE_LEFT=$("$PY" - "$GATE_LOCK" <<'PYEOF' 2>/dev/null || echo 0
+import json, sys, time
+try:
+    with open(sys.argv[1]) as fh:
+        print(max(0.0, float(json.load(fh).get("until", 0)) - time.time()))
+except Exception:
+    print(0)
+PYEOF
+)
+        GATE_LEFT=${GATE_LEFT%%.*}
+        if [ "${GATE_LEFT:-0}" -gt 0 ]; then
+            echo "WATCHDOG: heartbeat quiet ${AGE}s, but a shared 429 cooldown is active for ${GATE_LEFT}s more — waiting, not aborting."
+            sleep "$POLL"
+            continue
+        fi
+        echo "WATCHDOG: no progress for ${AGE}s and no active cooldown — aborting wedged pipeline" >&2
         kill -ABRT $$
         exit 1
     fi
