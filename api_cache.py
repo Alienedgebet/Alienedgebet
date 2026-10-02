@@ -142,7 +142,14 @@ class CachedResponseWrapper:
 #                                     pre-match odds/lineups (PREMATCH_TTL).
 #   /fixtures/date/{date}    1 h    — fixture identity/schedule is stable once
 #                                     published; odds are NOT included here.
-#   /fixtures/between/...    6 h    — completed-match history (stable after FT)
+#   /fixtures/between/...   12 h    — completed-match history (stable after FT).
+#                                     RAISED 6 h -> 12 h on 2026-10-02: the
+#                                     2026-10-01 run lasted 13 h 18 min, so a 6 h
+#                                     TTL expired MID-RUN and every per-team
+#                                     /fixtures/between/ call was re-fetched in a
+#                                     later phase. The payload is immutable once a
+#                                     match is finished, so a 12 h TTL is strictly
+#                                     a quota saving with no freshness cost.
 #   /fixtures/head-to-head/  6 h    — same, historical results
 #   /standings/              6 h    — standings move only when matches finish
 #   /teams|leagues|seasons|stages|venues|countries  24 h — reference data
@@ -151,7 +158,7 @@ _TTL_RULES = (
     ("/livescores", 0),
     ("/odds/pre-match/", 900),
     ("/fixtures/date/", 3600),
-    ("/fixtures/between/", 21600),
+    ("/fixtures/between/", 43200),
     ("/fixtures/head-to-head/", 21600),
     ("/standings/", 21600),
     ("/teams/", 86400),

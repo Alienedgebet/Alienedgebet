@@ -232,6 +232,53 @@ def save_cache():
 FIXTURE_CACHE_FILE = os.path.join(DATA_DIR, "fixture_date_cache.json")
 FIXTURE_CACHE_TTL = 15 * 60  # 15 minutes
 
+# Retention (2026-10-02). The cache was append-only with no pruning, so it grew
+# without bound: 226 MB across 17 dates by 2026-10-02, gaining ~11 MB/day.
+#
+# It is re-read in full twice per cycle (`_save_fixture_cache_entry` and
+# `_get_fixture_cache` each call `_load_fixture_cache`), and a measured load of
+# the 226 MB file costs 872 MB RSS with a 1098 MB peak. That load happens inside
+# the loop that ALSO has to run alongside the pre-match pipeline on a 3.9 GB
+# box — it is the mechanism behind the RSS spikes recorded in the unit file's
+# OOM comment ("history-cache load drove RSS to 3.5GB").
+#
+# Only yesterday and today are ever requested (run_prematch_engine builds
+# dates_to_check from now-1day and now). Anything older is never read again, so
+# keeping it buys nothing and costs memory on every single cycle. KEEP_FIXTURE_
+# CACHE_DAYS retains a small margin over that 2-day working set.
+KEEP_FIXTURE_CACHE_DAYS = 3
+
+
+def _prune_fixture_cache(cache, now=None):
+    """Drop cached dates older than the retention window.
+
+    Mutates and returns `cache`. Never raises: pruning is an optimisation, and a
+    failure here must not cost the caller the cycle's data (the same reasoning
+    as the write guard below — a cache problem must never empty the feed).
+
+    Ages are measured against each entry's own timestamp, falling back to the
+    date key itself for entries written before `timestamp` existed.
+    """
+    try:
+        now = now or time.time()
+        cutoff = now - (KEEP_FIXTURE_CACHE_DAYS * 86400)
+        keep = {}
+        for key, entry in cache.items():
+            ts = entry.get("timestamp") if isinstance(entry, dict) else None
+            if not ts:
+                # Fall back to parsing the ISO date key so a legacy entry is
+                # judged on its date rather than being kept forever.
+                try:
+                    ts = datetime.strptime(key, "%Y-%m-%d").replace(
+                        tzinfo=timezone.utc).timestamp()
+                except Exception:
+                    ts = now  # unparseable -> retain, it is likely live data
+            if ts >= cutoff:
+                keep[key] = entry
+        return keep
+    except Exception:
+        return cache
+
 
 def _load_fixture_cache():
     """Load the fixture date cache from disk. Returns dict {date: entry}."""
@@ -270,6 +317,13 @@ def _save_fixture_cache_entry(target_date, fixtures, acquisition_ok=True):
         "data": fixtures if isinstance(fixtures, list) else [],
         "_acquisition_ok": acquisition_ok,
     }
+
+    # Prune on every write. The cache is re-read whole twice per cycle, so its
+    # size is a direct, recurring tax on RSS — see the retention note above.
+    # Pruning HERE (rather than on load) means the file shrinks as soon as the
+    # next cycle writes, instead of only shrinking the copy held in memory.
+    cache = _prune_fixture_cache(cache)
+
     try:
         tmp = f"{FIXTURE_CACHE_FILE}.tmp"
         with open(tmp, "w") as f:
