@@ -30,9 +30,47 @@ log() {
 # Only root may act on these units; the timer runs as root but be explicit.
 if ! systemctl is-active --quiet "$LIVE_UNIT"; then
     # Scanner is down. Only revive it when the pipeline is not competing.
-    if systemctl is-active --quiet "$PIPE_UNIT" || pgrep -f "main\.py" >/dev/null 2>&1; then
-        log "SKIP: $LIVE_UNIT is down but the pre-match pipeline is running."
-        exit 0
+    PIPE_PID="$(pgrep -f "main\.py --date" | head -1)"
+    if [ -n "$PIPE_PID" ] && kill -0 "$PIPE_PID" 2>/dev/null; then
+        # ── PROGRESS CHECK (2026-10-02) ──────────────────────────────────────
+        # Do NOT treat "the pipeline is running" as "the pipeline is working".
+        # On 2026-10-01 a wedged run (12.5h inside hrtimer_nanosleep) kept the
+        # scanner down for a full day because this check only asked whether a
+        # process existed. A WEDGED pipeline is not competing for quota -- it is
+        # asleep -- so the live scanner is exactly what should be running.
+        #
+        # A HEALTHY pipeline refreshes data/pipeline_heartbeat.json around every
+        # engine. Only a run whose heartbeat is stale past STALE_AFTER counts as
+        # wedged. STALE_AFTER (20 min) is deliberately far longer than the ~30s
+        # heartbeat interval, so a legitimately slow-but-working run is never
+        # mistaken for a hang.
+        STALE_AFTER=$((20 * 60))
+        HB=/var/www/backend/data/pipeline_heartbeat.json
+        STALE=0
+        if [ -f "$HB" ]; then
+            NOW=$(date +%s)
+            HB_TS=$(python3 -c "
+import json
+try: print(int(json.load(open('$HB'))['ts']))
+except Exception: print(0)
+" 2>/dev/null || echo 0)
+            if [ "${HB_TS:-0}" -gt 0 ]; then
+                AGE=$((NOW - HB_TS))
+                [ "$AGE" -ge "$STALE_AFTER" ] && STALE=1
+                log "pipeline alive (pid $PIPE_PID); heartbeat age ${AGE}s"
+            else
+                log "pipeline alive but heartbeat unreadable - treating as healthy"
+            fi
+        else
+            log "pipeline alive, no heartbeat file yet - treating as healthy"
+        fi
+
+        if [ "$STALE" -eq 1 ]; then
+            log "WARNING: pipeline WEDGED (no progress > ${STALE_AFTER}s) - not competing for API quota. Starting $LIVE_UNIT anyway."
+        else
+            log "SKIP: $LIVE_UNIT is down but the pre-match pipeline is running and making progress."
+            exit 0
+        fi
     fi
 
     log "ACTION: $LIVE_UNIT is down and no pipeline is running - starting it."

@@ -271,10 +271,112 @@ def _record_engine_failure(engine_name, save_key, save_date, reason):
     return None
 
 
+# ── HEARTBEAT / NO-PROGRESS WATCHDOG (2026-10-02) ───────────────────────────
+# A slow pipeline is CORRECT and must never be killed for being slow: engines
+# paginate (per_page=50, max_needed=200) and a legitimate run takes 65-105 min.
+# What must never happen is a run that makes NO PROGRESS at all -- that is what
+# wedged the 2026-10-01 run for 12.5h inside hrtimer_nanosleep.
+#
+# So the watchdog keys off PROGRESS, not wall clock. Each engine updates a
+# heartbeat file; systemd's ExecStartPost watchdog (see the .service) compares
+# the mtime and only acts when it goes stale. A busy pipeline refreshes it every
+# few seconds regardless of how long the whole run takes.
+HEARTBEAT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "pipeline_heartbeat.json")
+HEARTBEAT_INTERVAL_S = 30.0
+
+_heartbeat = {"last": 0.0}
+
+
+def heartbeat(note="", force=False):
+    """
+    Touch the heartbeat so the watchdog can tell 'slow' from 'wedged'.
+
+    Cheap (one small JSON write, at most every HEARTBEAT_INTERVAL_S) and never
+    raises: telemetry must not be able to kill a run.
+    """
+    now = time.time()
+    if not force and (now - _heartbeat["last"]) < HEARTBEAT_INTERVAL_S:
+        return
+    try:
+        payload = {
+            "pid": os.getpid(),
+            "ts": now,
+            "iso": datetime.now().isoformat(),
+            "note": note,
+        }
+        os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True)
+        tmp = HEARTBEAT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, HEARTBEAT_FILE)   # atomic: the watchdog never reads a partial file
+        _heartbeat["last"] = now
+    except Exception:
+        pass
+
+
+def pipeline_age_seconds():
+    """Seconds since the last heartbeat, or None when no heartbeat exists."""
+    try:
+        with open(HEARTBEAT_FILE, "r", encoding="utf-8") as fh:
+            return max(0.0, time.time() - float(json.load(fh).get("ts", 0)))
+    except Exception:
+        return None
+
+
 def _mark_dependency_blocked(save_key, save_date, upstream_key, label):
     """Mark a dependent engine as failed without overwriting good old data."""
     reason = f"{label} blocked: upstream {upstream_key} is unavailable"
     _record_engine_failure(label, save_key, save_date, reason)
+
+
+# ── ENGINE DEPENDENCY MAP (2026-10-02) ──────────────────────────────────────
+# These engines do not call each other in-process: an aggregator READS THE CSV
+# that the stage/psychology engine above it wrote to disk (see the win_apex entry
+# in the pipeline list). So an aggregator that runs after a starved upstream does
+# NOT fail -- it publishes a full, confident-looking board built on empty input.
+#
+# Observed on 2026-10-02 after the 429 wedge:
+#     win_forecast 222 rows | win_psychology 0 rows | win_apex 104 rows
+# 104 confident apex rows on a psychology engine that produced nothing. That is
+# the same failure class as the Under 2.5 clamped-lambda bug: a poisoned input
+# yielding a MORE convincing output.
+#
+# The rule is therefore not "abort the upstream engine" (that would starve every
+# downstream consumer) but "never publish downstream output when the declared
+# upstream produced zero rows".
+ENGINE_UPSTREAM = {
+    "win_apex":      ("win_psychology",    "Win Apex Aggregator"),
+    "gg_forensics":  ("gg_o15",            "GG Forensic Aggregator"),
+    "gg_supreme":    ("gg_psychology",     "Supreme GG VIP Aggregator"),
+    "over25_apex":   ("over25_psychology", "Over 2.5 Apex Aggregator"),
+    "over15_apex":   ("over15_psychology", "Over 1.5 Apex Aggregator"),
+    "underdog_apex": ("underdog_audit",    "Underdog Apex"),
+    "over25_gold":   ("over25_stage2",     "Gold Over 2.5 Engine"),
+}
+
+
+def _upstream_was_empty(upstream_key, save_date):
+    """
+    True when the declared upstream produced no rows for this date.
+
+    Reads the same date-keyed snapshot the aggregator itself consumes, so this
+    reflects exactly what the aggregator will see. Returns None when the
+    upstream snapshot is missing entirely (never ran) -- the caller treats that
+    as "unknown", which must NOT block, or a brand-new install could never run.
+    """
+    if upstream_key is None or save_date is None:
+        return None
+    try:
+        data, _meta = store.load(upstream_key, save_date, default=None)
+    except Exception:
+        return None
+    if data is None:
+        return None
+    try:
+        return len(data) == 0
+    except TypeError:
+        return False
 
 
 def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs):
@@ -290,7 +392,9 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
     """
     try:
         print(f"\n> ⚙️ Initializing: {engine_name}...")
+        heartbeat(f"start:{save_key or engine_name}", force=True)
         res = func(*args, **kwargs)
+        heartbeat(f"done:{save_key or engine_name}", force=True)
 
         # ── DISK FALLBACK CHECK ───────────────────────────────────────────────
         # RULE 1-3: a legitimate [] is a final result and is saved as-is;
@@ -317,6 +421,24 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
                     f"{engine_name}: returned None (no disk fallback)",
                 )
             else:
+                # ── UPSTREAM PRECONDITION (2026-10-02) ─────────────────────────
+                # An aggregator whose declared upstream produced ZERO rows must
+                # not publish. It would otherwise emit a full, confident board
+                # built on nothing -- the 2026-10-02 case was win_apex publishing
+                # 104 rows while win_psychology produced none. Marking it blocked
+                # keeps the frontend columns honest instead of showing a complete-
+                # looking page with empty PSYCH_* fields.
+                #
+                # Deliberately NOT an upstream abort: engines read each other's
+                # CSVs, so killing the upstream would starve this engine too.
+                _up_key, _up_label = ENGINE_UPSTREAM.get(save_key, (None, None))
+                if _up_key and _upstream_was_empty(_up_key, save_date) and res:
+                    _mark_dependency_blocked(save_key, save_date, _up_key,
+                                             _up_label or engine_name)
+                    print(f"   🛑 BLOCKED: upstream {_up_key} returned 0 rows — "
+                          f"not publishing {_up_label or engine_name} on empty input.")
+                    return res
+
                 # ── 429-DEGRADED GUARD ────────────────────────────────────
                 # A critical engine returning a 0-row result while the shared
                 # 429 cooldown gate is active means the run was starved, not
@@ -623,6 +745,15 @@ def alienedge_master_system(cli_date_override: str = None):
     print(f"{'🚀 ALIENEDGE SUPER-MATRIX COMMAND CENTER v11.0':^115}")
     print(f"{'THE TOTAL FORENSIC & PSYCHOLOGICAL PRE-MATCH BETTING MACHINE':^115}")
     print("█"*115)
+
+    # Fresh API wait budget + breaker state for this run, and publish a
+    # heartbeat so the watchdog can tell a slow run from a wedged one.
+    try:
+        import api_cache as _api_cache
+        _api_cache.api_budget_reset()
+    except Exception:
+        pass
+    heartbeat("pipeline:start", force=True)
 
     # ── CLI ARGUMENT & DATE RESOLUTION ────────────────────────────────────────
     cli_date = cli_date_override
@@ -1185,6 +1316,25 @@ if __name__ == "__main__":
                   f"{_r['existing_fixtures']} new_fixtures={_r['new_fixtures']} "
                   f"({_r['reason']})")
         sys.exit(2)
+
+    # ── API HEALTH REPORT ────────────────────────────────────────────────────
+    # Makes the invisible explicit: how much of the run was spent waiting on the
+    # provider, and whether the circuit breaker had to fire. On a healthy run
+    # this is near-zero; a large number here is the early warning that the next
+    # run is heading for a wedge.
+    try:
+        import api_cache as _api
+        _spent = _api.API_WAIT_BUDGET_S - _api.api_budget_remaining()
+        print(f"\n[API HEALTH] waited {_spent:.0f}s of a {_api.API_WAIT_BUDGET_S:.0f}s "
+              f"budget | breaker trips: {_api._breaker['trips']}")
+        if _spent >= _api.API_WAIT_BUDGET_S * 0.8:
+            print("   ⚠️ API wait budget nearly exhausted — raise API_WAIT_BUDGET_S "
+                  "or reduce per-engine pagination if runs are being starved.")
+        if _api._breaker["trips"]:
+            print("   ⚠️ Circuit breaker fired: the shared cooldown was repeatedly "
+                  "stale. Check whether the provider is genuinely rate-limiting.")
+    except Exception:
+        pass
 
     win_failures = sorted(_PIPELINE_FAILURES & _REQUIRED_WIN_PIPELINE_KEYS)
     if win_failures:

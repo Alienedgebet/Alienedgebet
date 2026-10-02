@@ -230,6 +230,88 @@ GATE_WAIT_CAP = 45.0
 RATE_RESET_CAP = 60.0
 GATE_READ_TTL = 2.0
 
+# ── CIRCUIT BREAKER (2026-10-02) ────────────────────────────────────────────
+# The 2026-10-01 run wedged for 12.5h. Root cause: the shared gate could only be
+# CLEARED by a 200, so once a phase's calls all 429'd, no success ever arrived to
+# disarm it, every later request re-paced against a stale expiry, and each pacing
+# sleep was followed by another request that 429'd again -- a self-sustaining
+# lockout. The run never crashed; it ground through ~158 fully-cooled requests at
+# 285s each while looking healthy.
+#
+# The fix is to stop treating the gate as trustworthy. After CONSECUTIVE_429_BREAK
+# 429s with NO intervening 200, the gate is declared stale and bypassed: requests
+# go to the wire, the server's own backoff decides, and a single 200 re-arms
+# normal pacing. A live 429 is better information than another blind sleep.
+CONSECUTIVE_429_BREAK = 6
+
+# Track consecutive 429s process-wide. Reset by ANY 200.
+_breaker = {"consecutive_429": 0, "open_until": 0.0, "trips": 0}
+
+
+def breaker_state():
+    """Current consecutive-429 count and whether the bypass is active."""
+    return _breaker["consecutive_429"], (time.time() < _breaker["open_until"])
+
+
+def breaker_trip(who="pipeline"):
+    """Declare the shared gate stale after a run of consecutive 429s."""
+    _breaker["consecutive_429"] = 0
+    _breaker["open_until"] = time.time() + 60.0
+    _breaker["trips"] += 1
+    print(f"[API BREAKER] {CONSECUTIVE_429_BREAK} consecutive 429s with no success "
+          f"— shared gate judged STALE, bypassing it for 60s (trip #{_breaker['trips']})",
+          flush=True)
+    # Disarm the shared file too, so sibling processes stop pacing on it.
+    broadcast_gate(0, f"breaker:{who}")
+
+
+def breaker_reset():
+    """A 200 arrived: the provider is serving again. Re-arm normal pacing."""
+    if _breaker["consecutive_429"] or _breaker["open_until"]:
+        _breaker["consecutive_429"] = 0
+        _breaker["open_until"] = 0.0
+
+
+def breaker_should_bypass():
+    """True when the circuit is open — skip pacing, hit the wire for a real answer."""
+    if time.time() < _breaker["open_until"]:
+        return True
+    if _breaker["open_until"]:
+        # window elapsed; close it and resume normal pacing
+        _breaker["open_until"] = 0.0
+    return False
+
+
+# ── GLOBAL API WAIT BUDGET (2026-10-02) ─────────────────────────────────────
+# The pipeline must ALWAYS finish. GATE_WAIT_CAP bounds any ONE sleep, but
+# nothing bounded the aggregate: engines paginate (per_page=50, max_needed=200),
+# so a single team lookup could absorb minutes per page and an engine could burn
+# hours inside one call site. This budget is the run-level guarantee.
+#
+# It deliberately does NOT kill an engine or abort a dependency chain (engines
+# read each other's CSVs; an upstream abort would starve every downstream apex).
+# When the budget is exhausted the run stops WAITING and proceeds with whatever
+# data it has, so remaining engines finish fast instead of sleeping.
+API_WAIT_BUDGET_S = 5400.0        # 90 min of total API sleeping per run
+_api_budget = {"spent": 0.0}
+
+
+def api_budget_remaining():
+    return max(0.0, API_WAIT_BUDGET_S - _api_budget["spent"])
+
+
+def api_budget_charge(seconds):
+    """Record sleep time and report whether we are still allowed to wait."""
+    _api_budget["spent"] += max(0.0, float(seconds))
+    return api_budget_remaining()
+
+
+def api_budget_reset():
+    _api_budget["spent"] = 0.0
+    _breaker["consecutive_429"] = 0
+    _breaker["open_until"] = 0.0
+
+
 _gate_read = {"ts": 0.0, "remaining": 0.0}
 
 
@@ -263,14 +345,18 @@ def broadcast_gate(seconds, who="smart_get"):
 
 
 def gate_wait(retry_after=None, limit_reset=None, attempt=1, who="pipeline",
-              broadcast=False, floor_base=2.0):
+              broadcast=False, floor_base=2.0, do_sleep=True):
     """Wait out a SportMonks 429 using the best available signal.
 
     Priority: server Retry-After > X-RateLimit-Reset > shared cooldown file >
     jittered exponential floor (2s, 4s, 8s, 16s…). CLAMPED to 45 s per attempt
     (SportMonks sometimes sends ~20-minute Retry-After values; a background
     pipeline must not freeze on those). With broadcast=True the cooldown is
-    published to sibling processes. Returns the seconds slept.
+    published to sibling processes. Returns the seconds it WOULD have slept.
+
+    do_sleep=False computes and broadcasts the wait WITHOUT sleeping, so the
+    caller can charge it against the run-wide API wait budget first and decide
+    whether the run can still afford to sleep. Added 2026-10-02.
     """
     now = time.time()
     wait = 0.0
@@ -293,7 +379,8 @@ def gate_wait(retry_after=None, limit_reset=None, attempt=1, who="pipeline",
         return 0.0                       # pacing call with nothing to wait for
     if broadcast:
         broadcast_gate(wait, who)
-    time.sleep(wait)
+    if do_sleep:
+        time.sleep(wait)
     return wait
 
 
@@ -460,11 +547,24 @@ def smart_get(url, params=None, **kwargs):
     #     server-side backoff) decides, instead of this process sleeping
     #     forever without ever reaching the wire.
     left = gate_remaining()
-    if left > 0:
-        pace = min(left, GATE_PACING_CAP) + random.random() * 4.0
-        print(f"[API GATE] smart_get: shared cooldown active — pacing {pace:.0f}s ",
+    if left > 0 and breaker_should_bypass():
+        # Circuit is open: the shared expiry is not believed. Skip the pacing
+        # sleep and take a real answer from the wire instead.
+        print("[API BREAKER] bypassing shared cooldown — requesting anyway",
               end="", flush=True)
-        time.sleep(pace)
+        left = 0.0
+    if left > 0:
+        # Adaptive pacing: never sleep longer than the window actually needs.
+        # A gate that expires in 5s must not cost 45s of blind waiting.
+        pace = min(left, GATE_PACING_CAP) + random.random() * 4.0
+        if not api_budget_charge(pace):
+            print(f"[API BUDGET] exhausted ({API_WAIT_BUDGET_S:.0f}s) — "
+                  f"skipping {pace:.0f}s pacing, proceeding without the wait",
+                  end="", flush=True)
+        else:
+            print(f"[API GATE] smart_get: shared cooldown active — pacing {pace:.0f}s ",
+                  end="", flush=True)
+            time.sleep(pace)
 
     for attempt in range(MAX_429_RETRIES):
         try:
@@ -473,6 +573,7 @@ def smart_get(url, params=None, **kwargs):
                 # GATE HYGIENE: a 200 proves the burst window is over — disarm
                 # the shared cooldown so sibling processes stop pacing against
                 # a stale expiry the moment the provider is serving again.
+                breaker_reset()
                 broadcast_gate(0, f"cleared:{os.getpid()}")
                 data = resp.json()
                 try:
@@ -488,12 +589,30 @@ def smart_get(url, params=None, **kwargs):
                                              elapsed=getattr(resp, "elapsed", None),
                                              from_cache=False)
             elif resp.status_code == 429:
+                # Count the 429. A run of them with no 200 means the shared gate
+                # is stale, not that the provider is genuinely still refusing.
+                _breaker["consecutive_429"] += 1
+                if _breaker["consecutive_429"] >= CONSECUTIVE_429_BREAK:
+                    breaker_trip("pipeline")
+                    continue
+
                 wait = gate_wait(
                     retry_after=getattr(resp, "headers", {}).get("Retry-After"),
                     limit_reset=getattr(resp, "headers", {}).get("X-RateLimit-Reset"),
                     attempt=attempt + 1, who="pipeline", broadcast=True,
-                    floor_base=BURST_FLOOR_BASE)
-                print(f"[API BURST: Cooling {wait:.1f}s] ", end="", flush=True)
+                    floor_base=BURST_FLOOR_BASE, do_sleep=False)
+                # gate_wait already computed (and broadcast) the wait. Charge it
+                # to the run budget; if the budget is spent the run simply stops
+                # SLEEPING and keeps going -- the request still goes out and the
+                # server decides, instead of the pipeline grinding to a halt.
+                # (This is why the 2026-10-01 run never finished.)
+                remaining = api_budget_charge(wait)
+                if remaining:
+                    print(f"[API BURST: Cooling {wait:.1f}s] ", end="", flush=True)
+                    time.sleep(wait)
+                else:
+                    print(f"[API BURST: budget spent, not sleeping {wait:.1f}s] ",
+                          end="", flush=True)
                 continue
             elif resp.status_code in (401, 403):
                 # Auth/subscription failure: retrying cannot help and would
