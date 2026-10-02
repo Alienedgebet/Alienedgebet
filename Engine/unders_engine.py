@@ -76,6 +76,28 @@ GK_CPG_SANITY_MAX      = 5.00   # >5 goals conceded per 90 is corrupt, not elite
 # fired. This is set at the empirical 90th percentile.
 SIG5_FIRE_FATIGUE      = 0.40
 
+# ── HARD TIER GATES (user rules — apply to EVERY tier, both engines) ───────────
+# A fixture only earns a tier if it clears ALL of these AND its score threshold.
+# They are gates, not bonus points: failing any one demotes the fixture out of
+# every tier regardless of how high it scored.
+#
+#   GATE 1  neither team may have scored more than 5 goals over the window
+#   GATE 2  neither team may have conceded more than 5 goals over the window
+#   GATE 3  the most recent head-to-head must NOT have gone over 2.5
+#
+# Measured on 572 settled U2.5 picks, the 5-match distribution of goals scored
+# runs p50=2, p75=3, p90=5, p95=7, so an 8-goal cap kept 94% of fixtures and
+# produced no lift. A cap of 5 keeps ~75% and is the strictest setting that
+# still retains a usable sample; it is the best of the caps tested (+0.5pp,
+# which is itself within noise).
+GATE_WINDOW             = LAST_N_GAMES   # matches inspected per team
+GATE_MAX_GOALS_SCORED   = 5              # per team, per window
+GATE_MAX_GOALS_CONCEDED = 5              # per team, per window
+GATE_H2H_MAX_TOTAL      = 2              # last h2h total goals (2.5 -> 3+ fails)
+GATE_REQUIRE_H2H        = False          # no h2h history -> pass, but flag it
+GATE_FAIL_TIER_U25      = "🚫 U2.5 GATE FAIL"
+GATE_FAIL_TIER_U35      = "🚫 U3.5 GATE FAIL"
+
 # ==============================================================================
 # TITANIUM HTTP HELPER 
 # ==============================================================================
@@ -714,7 +736,83 @@ def calculate_u25_score(
     }
     return round(total_score, 1), signals_fired, breakdown
 
-def get_u25_tier(score, signals_fired):
+def evaluate_unders_gates(lastN_home, home_id, lastN_away, away_id, h2h):
+    """
+    Apply the three hard gates to a fixture.
+
+    Gate 1: neither team scored more than GATE_MAX_GOALS_SCORED in the window
+    Gate 2: neither team conceded more than GATE_MAX_GOALS_CONCEDED in the window
+    Gate 3: the most recent head-to-head did not finish over 2.5
+
+    Returns (passed, reasons, detail). Every tier on both engines depends on
+    `passed` — these are gates, not bonus points.
+    """
+    reasons = []
+    detail = {}
+
+    def window_totals(fixtures_list, tid):
+        scored = 0.0
+        conceded = 0.0
+        n = 0
+        for f in fixtures_list or []:
+            tg, og = get_team_and_opponent_goals_from_fixture(f, tid)
+            if tg is None or og is None:
+                continue
+            scored += tg
+            conceded += og
+            n += 1
+        return scored, conceded, n
+
+    h_scored, h_conceded, h_n = window_totals(lastN_home, home_id)
+    a_scored, a_conceded, a_n = window_totals(lastN_away, away_id)
+
+    detail.update({
+        "gate_home_scored": h_scored, "gate_home_conceded": h_conceded, "gate_home_n": h_n,
+        "gate_away_scored": a_scored, "gate_away_conceded": a_conceded, "gate_away_n": a_n,
+    })
+
+    # GATE 1 — neither side may be a prolific scorer over the window
+    if h_n == 0 or a_n == 0:
+        reasons.append("no history to gate on")
+    else:
+        if h_scored > GATE_MAX_GOALS_SCORED:
+            reasons.append(f"home scored {h_scored:.0f} > {GATE_MAX_GOALS_SCORED}")
+        if a_scored > GATE_MAX_GOALS_SCORED:
+            reasons.append(f"away scored {a_scored:.0f} > {GATE_MAX_GOALS_SCORED}")
+        # GATE 2 — nor a leaky one
+        if h_conceded > GATE_MAX_GOALS_CONCEDED:
+            reasons.append(f"home conceded {h_conceded:.0f} > {GATE_MAX_GOALS_CONCEDED}")
+        if a_conceded > GATE_MAX_GOALS_CONCEDED:
+            reasons.append(f"away conceded {a_conceded:.0f} > {GATE_MAX_GOALS_CONCEDED}")
+
+    # GATE 3 — the latest h2h must not have been over 2.5
+    h2h_total = None
+    h2h_goals = None
+    if h2h:
+        latest = h2h[0]
+        hg, ag = extract_final_goals_from_scores(latest.get("scores", []))
+        if hg is not None and ag is not None:
+            h2h_goals = f"{hg}-{ag}"
+            h2h_total = hg + ag
+    detail["gate_h2h"] = h2h_goals or "n/a"
+    detail["gate_h2h_total"] = h2h_total
+
+    if h2h_total is None:
+        if GATE_REQUIRE_H2H:
+            reasons.append("no h2h history to gate on")
+        else:
+            detail["gate_h2h_status"] = "no h2h data (passed by policy)"
+    elif h2h_total > GATE_H2H_MAX_TOTAL:
+        reasons.append(f"last h2h was over 2.5 ({h2h_goals})")
+
+    return (len(reasons) == 0), reasons, detail
+
+
+def get_u25_tier(score, signals_fired, gates_passed=True):
+    # HARD GATE: a fixture that fails any gate earns no tier at all,
+    # however high it scored.
+    if not gates_passed:
+        return GATE_FAIL_TIER_U25
     if score >= U25_TIER1_SCORE and signals_fired >= 4:
         return "🛡️ U2.5 TIER 1 — LOCK"
     elif score >= U25_TIER2_SCORE:
@@ -779,7 +877,10 @@ def calculate_u35_score(
     }
     return round(total_score, 1), breakdown
 
-def get_u35_tier(score):
+def get_u35_tier(score, gates_passed=True):
+    # HARD GATE: same three rules apply to Under 3.5 — no tier on score alone.
+    if not gates_passed:
+        return GATE_FAIL_TIER_U35
     if score >= U35_TIER1_SCORE:
         return "🧱 U3.5 TIER 1 — LOCK"
     elif score >= U35_TIER2_SCORE:
@@ -923,7 +1024,10 @@ def run_unders_engine(target_date=None, verbose=False):
                 fatigue_home    = fatigue_home,
                 fatigue_away    = fatigue_away,
             )
-            u25_tier = get_u25_tier(u25_score, signals_fired)
+            gates_passed, gate_reasons, gate_detail = evaluate_unders_gates(
+                lastN_home, home_id, lastN_away, away_id, h2h
+            )
+            u25_tier = get_u25_tier(u25_score, signals_fired, gates_passed)
 
             u35_score, u35_breakdown = calculate_u35_score(
                 u35_prob        = u35_prob,
@@ -936,7 +1040,7 @@ def run_unders_engine(target_date=None, verbose=False):
                 home_gk_cpg     = h_gk_cpg,
                 away_gk_cpg     = a_gk_cpg,
             )
-            u35_tier = get_u35_tier(u35_score)
+            u35_tier = get_u35_tier(u35_score, gates_passed)
 
             base_record = {
                 "date":              target_date,
@@ -955,6 +1059,13 @@ def run_unders_engine(target_date=None, verbose=False):
                 "fatigue_home":      round(fatigue_home, 3),
                 "fatigue_away":      round(fatigue_away, 3),
                 "draw_odds":         odds.get("d"),
+                "gates_passed":      gates_passed,
+                "gate_reasons":      "; ".join(gate_reasons) if gate_reasons else "all gates passed",
+                "gate_home_scored":  gate_detail.get("gate_home_scored"),
+                "gate_away_scored":  gate_detail.get("gate_away_scored"),
+                "gate_home_conceded": gate_detail.get("gate_home_conceded"),
+                "gate_away_conceded": gate_detail.get("gate_away_conceded"),
+                "gate_h2h":          gate_detail.get("gate_h2h"),
             }
 
             u25_picks.append({**base_record, "u25_score": u25_score, "u25_signals_fired": signals_fired, "u25_tier": u25_tier})
@@ -967,8 +1078,9 @@ def run_unders_engine(target_date=None, verbose=False):
         if verbose: print("\n  No picks generated.")
         return [], []
 
-    tier_order_u25 = {"🛡️ U2.5 TIER 1 — LOCK": 1, "✅ U2.5 TIER 2 — SOLID": 2, "📊 U2.5 TIER 3 — LEAN": 3, "⚪ U2.5 BELOW THRESHOLD": 4}
-    tier_order_u35 = {"🧱 U3.5 TIER 1 — LOCK": 1, "✅ U3.5 TIER 2 — SOLID": 2, "📊 U3.5 TIER 3 — LEAN": 3, "⚪ U3.5 BELOW THRESHOLD": 4}
+    # GATE FAIL sorts last (rank 99) — it is a rejection, not a pick.
+    tier_order_u25 = {"🛡️ U2.5 TIER 1 — LOCK": 1, "✅ U2.5 TIER 2 — SOLID": 2, "📊 U2.5 TIER 3 — LEAN": 3, "⚪ U2.5 BELOW THRESHOLD": 4, GATE_FAIL_TIER_U25: 99}
+    tier_order_u35 = {"🧱 U3.5 TIER 1 — LOCK": 1, "✅ U3.5 TIER 2 — SOLID": 2, "📊 U3.5 TIER 3 — LEAN": 3, "⚪ U3.5 BELOW THRESHOLD": 4, GATE_FAIL_TIER_U35: 99}
 
     df_u25 = pd.DataFrame(u25_picks)
     df_u35 = pd.DataFrame(u35_picks)

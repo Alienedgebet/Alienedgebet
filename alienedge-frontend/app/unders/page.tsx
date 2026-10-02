@@ -30,6 +30,17 @@ const u25Columns: PredictionColumn<UndersPick>[] = [
     render: (r) => (r.mc_u25_prob != null ? <ProbCell value={r.mc_u25_prob * 100} showBar={false} /> : "—"),
   },
   { key: "signals", header: "Signals Fired", align: "right", render: (r) => r.u25_signals_fired ?? "—" },
+  {
+    key: "gates",
+    header: "Gates",
+    className: "max-w-[220px] truncate",
+    render: (r) =>
+      r.gates_passed === false ? (
+        <span className="text-danger-600">🚫 {r.gate_reasons || "failed"}</span>
+      ) : (
+        <span className="text-muted-foreground">✓ all passed</span>
+      ),
+  },
   { key: "lambda", header: "Combined Lambda", align: "right", render: (r) => r.combined_lambda.toFixed(2) },
   {
     key: "gk_home",
