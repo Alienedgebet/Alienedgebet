@@ -344,6 +344,29 @@ def to_records(x) -> list:
     return []
 
 
+# Keys whose `None` is a real MEASUREMENT ("we could not measure this"), not a
+# missing value. ensure_defaults() normally coerces a null on a schema key back
+# to that key's default, which is the right repair for a field an engine failed
+# to write — but for these it would be actively false.
+#
+# The draw engine (Engine/draw_engine.py) emits null for composite_draw_score /
+# mc_draw_prob / poisson_draw_prob / value_edge when a fixture has fewer than
+# MIN_HISTORY_SAMPLE usable results on either side, so there is no honest
+# probability to report. Substituting 0 here would render in the UI as a
+# confident "0.0%" — indistinguishable from a real prediction that the engine
+# made and that then went wrong. A consumer must be able to tell "measured, and
+# it is 0" from "never measured", so null is preserved and flows to the client.
+#
+# Only fields where a 0 is a plausible real measurement AND a null is a
+# deliberate engine signal belong here. Anything merely absent stays defaulted.
+NULLABLE_FIELDS = frozenset({
+    "composite_draw_score",
+    "mc_draw_prob",
+    "poisson_draw_prob",
+    "value_edge",
+})
+
+
 def ensure_defaults(rows, defaults: dict) -> list:
     """
     Guarantees every row has every key `defaults` names, using the default
@@ -355,6 +378,10 @@ def ensure_defaults(rows, defaults: dict) -> list:
     treated exactly like a missing value: replaced with the schema default
     (`defaults[k]`, else 0) so the row stays JSON-safe and numerically
     meaningful. Finite numbers are NEVER touched.
+
+    The one exception is a key listed in NULLABLE_FIELDS, where an explicit
+    null is a genuine "no data" measurement rather than a missing value.
+    See that constant for why a silent 0 there would be a lie.
 
     Also stamps `_incomplete` (bool) + `_missing_fields` (list) onto each
     row that needed any defaulting. This does NOT change any field the
@@ -383,8 +410,14 @@ def ensure_defaults(rows, defaults: dict) -> list:
         # Finite numbers are NEVER touched.
         clean_r = {}
         for k, v in r.items():
-            if isinstance(v, float) and not math.isfinite(v):
-                clean_r[k] = defaults.get(k, 0)
+            if v is None and k in NULLABLE_FIELDS:
+                # A deliberate "no data" signal from the engine. Preserved as
+                # null so the client can distinguish it from a real 0.0.
+                clean_r[k] = None
+            elif isinstance(v, float) and not math.isfinite(v):
+                # NaN/±Inf is corruption from an older engine version, not a
+                # measurement, so it takes the default even on a nullable key.
+                clean_r[k] = None if k in NULLABLE_FIELDS else defaults.get(k, 0)
             elif v is None and k in defaults:
                 clean_r[k] = defaults[k]
             else:

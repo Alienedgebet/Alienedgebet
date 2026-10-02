@@ -45,8 +45,28 @@ MAX_GOALS_DISPLAY = 6
 POISSON_MAX_GOALS = 8
 
 # Tier thresholds & league scale
-TIER1_COMPOSITE = 0.78
-TIER2_COMPOSITE = 0.60
+#
+# RECALIBRATED 2026-10-02 against 1,394 settled, non-degenerate rows
+# (tools/draw_precision_backtest.py, base draw rate 26.2%). The previous
+# TIER1_COMPOSITE=0.78 / TIER2_COMPOSITE=0.60 pair was unreachable: the
+# highest composite_draw_score ever produced was 0.709, so the flagship gate
+# could never fire and both surviving branches emitted "Perfect Draw List".
+#
+# Measured precision by composite cutoff (Wilson 95%, must clear 26.2%):
+#     >= 0.45   n=198   45.5%  CI[38.7,52.4]  CLEARS
+#     >= 0.50   n= 61   50.8%  CI[38.6,62.9]  CLEARS
+#     >= 0.52   n= 34   55.9%  CI[39.5,71.1]  CLEARS   <- flagship
+#     >= 0.55   n= 16   62.5%  CI[38.6,81.5]  CLEARS
+#     >= 0.58   n=  7   57.1%  CI[25.0,84.2]  overlaps base
+TIER1_COMPOSITE = 0.52
+TIER2_COMPOSITE = 0.45
+
+# A side needs at least this many usable last-N results before its scoring
+# rate means anything. Below this the attack average is 0 by default, both
+# lambdas hit their 0.05 floor together, and P(0-0)=e^-0.1=0.9048 -- a
+# fabricated "90.7% draw confidence" out of NO information. Such rows are now
+# flagged and excluded from every pick tier instead of being promoted.
+MIN_HISTORY_SAMPLE = 3
 LEAGUE_SCALE = 0.30
 
 # Limits & caps
@@ -787,7 +807,21 @@ def run_draw_engine(target_date=None, verbose=False):
             lambda_home = max(0.05, (raw_home_attack + away_concede_avg) / 2.0)
             lambda_away = max(0.05, (raw_away_attack + home_concede_avg) / 2.0)
 
-            poisson_prob = poisson_draw_probability(lambda_home, lambda_away)
+            # A side with too few usable results has an attack average of 0 by
+            # default, which floors BOTH lambdas at 0.05 and yields
+            # P(0-0) = e^-0.1 = 0.9048 -- a "90.7% draw confidence" invented out
+            # of missing data. Measured: those rows drew 20.5%, BELOW the 26.0%
+            # base rate, and 11 of 18 "Perfect Draw List" rows were exactly this
+            # artifact. Such a fixture has no draw signal at all, so its
+            # probability is reported as None ("no data") and it is barred from
+            # every pick tier rather than promoted on a phantom number.
+            history_ok = (home_cnt >= MIN_HISTORY_SAMPLE
+                          and away_cnt >= MIN_HISTORY_SAMPLE)
+
+            if history_ok:
+                poisson_prob = poisson_draw_probability(lambda_home, lambda_away)
+            else:
+                poisson_prob = None
 
             parity = parity_score(home_personal_goals_total, away_personal_goals_total, home_concede_avg, away_concede_avg)
             if home_analysis["tempo"] != away_analysis["tempo"]:
@@ -815,21 +849,30 @@ def run_draw_engine(target_date=None, verbose=False):
 
             league_weight = league_cache.get(league_id, {}).get("league_weight", 0.0)
 
-            composite = composite_draw_score(
-                poisson_prob=poisson_prob,
-                dmi=dmi,
-                league_balance=league_balance,
-                league_weight=league_weight,
-                parity=parity
-            )
+            composite = None
+            if history_ok:
+                composite = composite_draw_score(
+                    poisson_prob=poisson_prob,
+                    dmi=dmi,
+                    league_balance=league_balance,
+                    league_weight=league_weight,
+                    parity=parity
+                )
 
             mc_result, mc_summary = generate_scoreline_predictions(lambda_home, lambda_away, n_sim=SIMULATION_SIZE, max_display=MAX_GOALS_DISPLAY)
-            mc_draw = mc_summary.get("draw_prob", 0.0)
+            mc_draw = mc_summary.get("draw_prob", 0.0) if history_ok else None
 
             odds = sniper_fetch_odds(fx.get("id"))
             draw_odds = odds.get("d")
-            implied_draw_prob = (1 / draw_odds) if draw_odds else 0.0
-            value_edge = round(mc_draw - implied_draw_prob, 4) if draw_odds else 0.0
+            implied_draw_prob = (1 / draw_odds) if draw_odds else None
+            # Measured 2026-10-02: the old edge (mc_draw - implied) had AUC 0.465
+            # -- INVERTED, i.e. a "value" field that pointed the wrong way.
+            # composite_draw_prob is the only draw probability in this engine
+            # that ranks draws (AUC 0.655), and composite-minus-market reaches
+            # AUC 0.609 / 46.8% on its top 10% vs 26.2% base.
+            value_edge = (round(composite - implied_draw_prob, 4)
+                          if (composite is not None and implied_draw_prob is not None)
+                          else None)
 
             top_draw_score = None
             top_draw_prob = 0.0
@@ -858,22 +901,41 @@ def run_draw_engine(target_date=None, verbose=False):
                 else:
                     most_likely_draw = "1–1"
 
-            # ── RENAMED TIERING LOGIC ──
-            tier = "Below Threshold"
-            if composite >= TIER1_COMPOSITE or (composite >= 0.70 and mc_draw >= 0.30 and parity >= 0.6 and dmi >= 0.45):
+            # ── TIERING (corrected 2026-10-02) ──
+            # The old chain was: if -> "Perfect Draw List", elif -> "Perfect
+            # Draw List", else -> "Weak Draw List", making "Below Threshold"
+            # unreachable and collapsing two tiers into one label. Each tier
+            # now emits a DISTINCT label, and a fixture with no usable history
+            # can never be promoted on a fabricated probability.
+            if not history_ok:
+                tier = "Below Threshold"
+            elif composite >= TIER1_COMPOSITE or (
+                    composite >= 0.50 and mc_draw is not None
+                    and mc_draw >= 0.30 and parity >= 0.6 and dmi >= 0.45):
                 tier = "Perfect Draw List"
-            elif composite >= TIER2_COMPOSITE or (composite >= 0.58 and mc_draw >= 0.22):
-                tier = "Perfect Draw List"
-            else:
+            elif composite >= TIER2_COMPOSITE or (
+                    composite >= 0.42 and mc_draw is not None and mc_draw >= 0.22):
                 tier = "Weak Draw List"
+            else:
+                tier = "Below Threshold"
 
-            if home_personal_goals_total <= 5 and away_personal_goals_total <= 5 and parity >= 0.7 and composite >= 0.6:
-                tier = "Perfect Draw List"
+            # Low-scoring parity is a genuine draw signal, but only when both
+            # sides actually HAVE scoring history. Without this guard the rule
+            # fired on fixtures whose personal-goal totals were 0 -- "neither
+            # team scored in the last 5" scored as PERFECT parity (1.0) and
+            # overrode the tier above.
+            if (history_ok and home_personal_goals_total <= 5
+                    and away_personal_goals_total <= 5
+                    and parity >= 0.7 and composite >= TIER2_COMPOSITE):
+                tier = "Weak Draw List"
 
             if veto_reason:
                 tier = "🛑 VETOED"
 
-            section = "Section 1" if (poisson_prob >= SECTION1_POISSON_MIN and total_draws >= SECTION1_TOTAL_DRAWS_MIN) else ""
+            section = ("Section 1" if (history_ok and poisson_prob is not None
+                                       and poisson_prob >= SECTION1_POISSON_MIN
+                                       and total_draws >= SECTION1_TOTAL_DRAWS_MIN)
+                       else "")
 
             pick = {
                 "date": TARGET_DATE,
@@ -894,9 +956,13 @@ def run_draw_engine(target_date=None, verbose=False):
                 "total_draws": total_draws,
                 "dmi": round(dmi, 3),
                 "parity": parity,
-                "poisson_draw_prob": round(poisson_prob, 4),
-                "mc_draw_prob": round(mc_draw, 4),
-                "composite_draw_score": round(composite, 4),
+                "poisson_draw_prob": round(poisson_prob, 4) if poisson_prob is not None else None,
+                "mc_draw_prob": round(mc_draw, 4) if mc_draw is not None else None,
+                "composite_draw_score": round(composite, 4) if composite is not None else None,
+                # Explicit "no usable history" marker so a consumer can tell a
+                # genuine low score from an absent measurement. api/main.py
+                # preserves None on keys outside DRAW_DEFAULTS.
+                "history_ok": history_ok,
                 "fatigue_score": round(fatigue_score, 3),
                 "draw_odds": draw_odds,
                 "value_edge": value_edge,
@@ -918,7 +984,12 @@ def run_draw_engine(target_date=None, verbose=False):
 
             if verbose:
                 sec_mark = f" / {section}" if section else ""
-                print(f"[{tier}{sec_mark}] {home_name} vs {away_name} | DMI: {dmi:.3f} | Edge: {value_edge:.2f} | M-Spread: {mc_spread:.2f} ({mc_stability})")
+                # value_edge is None when there is no usable history, and
+                # f"{None:.2f}" raises TypeError. The bare `except` below would
+                # swallow that and silently drop the whole fixture, so the
+                # display value is resolved before formatting.
+                edge_disp = "n/a" if value_edge is None else f"{value_edge:.2f}"
+                print(f"[{tier}{sec_mark}] {home_name} vs {away_name} | DMI: {dmi:.3f} | Edge: {edge_disp} | M-Spread: {mc_spread:.2f} ({mc_stability})")
 
         except Exception as e:
             if verbose:
@@ -975,13 +1046,17 @@ def run_draw_engine(target_date=None, verbose=False):
             print("\n")
 
     parity_threshold = 0.9
-    draws_threshold = 5  
+    draws_threshold = 5
 
     df["parity"] = pd.to_numeric(df["parity"], errors="coerce").fillna(0.0)
     df["total_draws"] = pd.to_numeric(df["total_draws"], errors="coerce").fillna(0).astype(int)
 
-    parity_df = df[df["parity"] >= parity_threshold].copy()
-    draws_df = df[df["total_draws"] > draws_threshold].copy()
+    # Both sub-lists require real history. Without this guard the parity list
+    # was reachable by fixtures whose personal-goal totals were 0, because two
+    # zero totals produce gdiff=0 and therefore parity=1.0 -- the highest
+    # possible parity score, awarded for having no data at all.
+    parity_df = df[(df["parity"] >= parity_threshold) & (df["history_ok"] == True)].copy()  # noqa: E712
+    draws_df = df[(df["total_draws"] > draws_threshold) & (df["history_ok"] == True)].copy()  # noqa: E712
 
     if verbose:
         print(f"\n=== PARITY TEAM LIST (Parity >= {parity_threshold}) ===\n")

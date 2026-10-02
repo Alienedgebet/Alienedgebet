@@ -16,6 +16,18 @@ import { ChainBranch, TierBadge, ProbCell, type PredictionColumn } from "@/compo
 import { MOCK_DRAW } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 
+/**
+ * Placeholder for a probability the engine declined to measure.
+ *
+ * The draw engine emits null for a fixture with too little usable history
+ * rather than a fabricated number, and api/main.py deliberately preserves
+ * that null (NULLABLE_FIELDS). It must be rendered as an explicit absence:
+ * `null * 100` evaluates to 0 in JS, so the previous unguarded renders
+ * displayed a confident "0.0%" — visually identical to a real prediction
+ * that the engine made and that then went wrong.
+ */
+const NoData = () => <span className="font-mono text-text-dim">—</span>;
+
 const drawColumns: PredictionColumn<DrawPick>[] = [
   {
     key: "fixture",
@@ -26,18 +38,29 @@ const drawColumns: PredictionColumn<DrawPick>[] = [
   {
     key: "prob",
     header: "MC Draw %",
-    render: (r) => <ProbCell value={r.mc_draw_prob * 100} showBar={false} />,
+    render: (r) =>
+      r.mc_draw_prob == null ? <NoData /> : <ProbCell value={r.mc_draw_prob * 100} showBar={false} />,
   },
   {
     key: "poisson",
     header: "Poisson Draw %",
     align: "right",
-    render: (r) => <span className="font-mono text-text-muted">{(r.poisson_draw_prob * 100).toFixed(1)}%</span>,
+    render: (r) =>
+      r.poisson_draw_prob == null ? (
+        <NoData />
+      ) : (
+        <span className="font-mono text-text-muted">{(r.poisson_draw_prob * 100).toFixed(1)}%</span>
+      ),
   },
   { key: "odds", header: "Draw Odds", align: "right", render: (r) => r.draw_odds.toFixed(2) },
   { key: "dmi", header: "DMI", align: "right", render: (r) => r.dmi },
   { key: "parity", header: "Parity", align: "right", render: (r) => r.parity },
-  { key: "value", header: "Value Edge", align: "right", render: (r) => r.value_edge },
+  {
+    key: "value",
+    header: "Value Edge",
+    align: "right",
+    render: (r) => (r.value_edge == null ? <NoData /> : r.value_edge),
+  },
   {
     key: "likely",
     header: "Most Likely Score",
