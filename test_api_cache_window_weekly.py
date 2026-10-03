@@ -474,6 +474,10 @@ import WEEKLY.weekly_engine as we
 WEEKLY_OUT = os.path.join(SBOX, "output")
 os.makedirs(WEEKLY_OUT, exist_ok=True)
 we.OUTPUT_DIR = WEEKLY_OUT
+# The completion ledger and heartbeat are writable state too: redirect them into
+# the sandbox so this suite can never write into the repo's data/ directory.
+we.STATE_FILE = os.path.join(SBOX, "data", "weekly_state.json")
+we.HEARTBEAT_FILE = os.path.join(SBOX, "data", "pipeline_heartbeat.json")
 week_calls = []
 
 

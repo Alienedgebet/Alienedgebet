@@ -52,6 +52,58 @@ import output_store as store
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 HEARTBEAT_FILE = os.path.join(BASE_DIR, "data", "pipeline_heartbeat.json")
+STATE_FILE = os.path.join(BASE_DIR, "data", "weekly_state.json")
+
+# ── INCREMENTAL / ROLLING COMPLETION LEDGER (2026-10-03)────────────────────
+#
+# WHY THIS EXISTS
+# The original design is ROLLING: the shared fixture window keeps the previous
+# six relevant days, acquires only the newly required one and evicts the oldest
+# (shared_fixture_window.fill_window — UNCHANGED, it is correct). But the Weekly
+# COMPUTATION loop recomputed all seven dates on every run, because nothing
+# recorded that a day had already been done. That is ~6x the work every night and
+# it is why the run stayed long enough for the watchdog to reap it.
+#
+# WHAT A COMPLETED DAY IS
+# A day is complete when all seven Weekly snapshots exist with status "ok":
+#   filter_gg, filter_win__{safe,balanced,aggressive},
+#   filter_over25__{banker,balanced,aggressive}
+# _save_rows() already records a genuine failure through store.save_failure()
+# (status "failed"), so "all seven ok" cannot be satisfied by a half-finished or
+# failed day. That rule alone already prevents a partial day counting as done.
+#
+# WHAT IS *NOT* AN INVALIDATION TRIGGER (deliberate, and the whole point)
+# A completed day's bytes are NOT stable across reruns. Measured on this box, a
+# rerun of 2026-10-09 changed every one of its snapshots, from two causes:
+#   * gg_precision_filter stamps audit_timestamp = now() into every row, so the
+#     file differs byte-for-byte on any rerun even when the picks are identical;
+#   * odds are volatile and CANONICAL_INCLUDE deliberately excludes them so they
+#     are always refetched.
+# Treating either as a trigger would make every day permanently stale and reduce
+# this straight back to recomputing all seven, so neither is one. Freshness of a
+# 7-day-out pick's odds belongs to the match-day/live path, not here.
+#
+# The invalidation signals that ARE honoured are the ones meaning "the answer
+# would genuinely be different now":
+#   1. any of the seven keys missing or status != "ok"  (partial/failed day)
+#   2. the day's dated engine input CSV is NEWER than the Weekly snapshot, i.e. a
+#      dependent engine was re-run or fixed after this day was computed
+#   3. an explicit rebuild (force=True, or --weekly-only=<date>)
+#
+# LEDGER DISCIPLINE
+# The ledger is a cache/hint, never the source of truth: completion is ALWAYS
+# re-derived from the seven on-disk snapshots. An entry is written only AFTER all
+# three markets returned and all seven keys reported ok, in one atomic write at the
+# END of the date. A crash mid-date therefore leaves no entry and no false
+# "complete" — the day is simply recomputed next time. Nothing is ever written
+# optimistically at the start of a date.
+#
+# Nothing else in the codebase reads this file; deleting it costs nothing but a
+# recompute of the affected days.
+REQUIRED_KEYS = ("filter_gg",
+                 "filter_win__safe", "filter_win__balanced", "filter_win__aggressive",
+                 "filter_over25__banker", "filter_over25__balanced",
+                 "filter_over25__aggressive")
 
 # ── PROGRESS HEARTBEAT ───────────────────────────────────────────────────────
 #
@@ -79,6 +131,61 @@ HEARTBEAT_FILE = os.path.join(BASE_DIR, "data", "pipeline_heartbeat.json")
 # JSON write per step), and never raises — telemetry must not kill a run.
 _heartbeat_last = [0.0]
 HEARTBEAT_MIN_INTERVAL_S = 20.0
+
+
+# ── ledger helpers (self-contained: main.py cannot be imported from here) ────
+def _empty_state():
+    return {"schema": 1, "days": {}}
+
+
+def _load_state(path=None):
+    """Read the ledger. Any problem yields an empty ledger -> full recompute."""
+    p = path or STATE_FILE
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            s = json.load(fh)
+        if not isinstance(s, dict) or not isinstance(s.get("days"), dict):
+            return _empty_state()
+        return s
+    except Exception:
+        return _empty_state()
+
+
+def _save_state(state, path=None):
+    """Atomic tmp+os.replace, mirroring output_store's discipline."""
+    p = path or STATE_FILE
+    try:
+        d = os.path.dirname(p)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1, sort_keys=True)
+        os.replace(tmp, p)
+        return True
+    except Exception:
+        return False
+
+
+def _snapshot_state(key, date):
+    """(status, mtime_epoch) for one Weekly snapshot, or (None, None).
+
+    mtime, NOT the payload's `generated_at`: both engines and the store stamp
+    `generated_at` with datetime.now(), which does not share a clock base with
+    the filesystem mtime used for the engine-input comparison below. Comparing
+    the two would make a day permanently unable to confirm itself complete.
+    Every snapshot for one date is written by the same process within the same
+    second, so their mtimes are directly comparable to each other.
+    """
+    path = os.path.join(store.CACHE_DIR, f"{key}__{date}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        if not isinstance(payload, dict):
+            return None, None
+        return payload.get("status"), os.path.getmtime(path)
+    except Exception:
+        return None, None
 
 
 def weekly_heartbeat(note, force=False):
@@ -172,6 +279,86 @@ def _require_dated_input(market, date):
     name = _REQUIRED_INPUT[market].format(date=date)
     path = _out(name)
     return path, os.path.exists(path)
+
+
+def date_is_complete(date, state=None, force=False):
+    """True when this date needs no work.
+
+    Deliberately re-derives completion from the seven on-disk snapshots rather
+    than trusting the ledger, so a hand-deleted snapshot, a failed run or a
+    restored backup can never present itself as complete.
+    """
+    if force:
+        return False
+
+    # (1) every key present with status ok
+    snap_ts = []
+    for key in REQUIRED_KEYS:
+        status, ts = _snapshot_state(key, date)
+        if status != "ok":
+            return False
+        if ts is not None:
+            snap_ts.append(ts)
+    if not snap_ts:
+        return False
+
+    # A stale ledger must never outrank a snapshot: if the ledger claims the day
+    # was completed BEFORE these snapshots were written, the snapshots were
+    # replaced by something else, so the day is treated as incomplete.
+    entry = ((state if state is not None else _load_state()).get("days") or {}).get(date)
+    if isinstance(entry, dict) and entry.get("completed_ts"):
+        try:
+            if float(entry["completed_ts"]) < min(snap_ts):
+                return False
+        except Exception:
+            return False
+
+    # (2) a dependent engine re-run after we computed this day invalidates it
+    newest_snapshot = max(snap_ts)
+    for market in ("gg", "win", "over25"):
+        path, ok = _require_dated_input(market, date)
+        if not ok:
+            continue
+        try:
+            if os.path.getmtime(path) > newest_snapshot + 1:
+                return False
+        except OSError:
+            continue
+    return True
+
+
+def mark_date_complete(date, detail=None):
+    """Record a day as done. Called ONLY after all seven keys reported ok."""
+    state = _load_state()
+    state.setdefault("days", {})[str(date)[:10]] = {
+        "completed_ts": time.time(),
+        "completed_iso": datetime.now().isoformat(),
+        "keys": list(REQUIRED_KEYS),
+    }
+    state["schema"] = 1
+    return _save_state(state)
+
+
+def plan_dates(dates, force=False, state=None, dry_run=False):
+    """Split the window into (to_run, skipped) and explain every skip."""
+    st = state if state is not None else _load_state()
+    to_run, skipped = [], []
+    for d in dates:
+        (skipped if date_is_complete(d, st, force) else to_run).append(d)
+    print("=" * 115)
+    print(f"{'🔁 FULL REBUILD (force)' if force else '♻️  INCREMENTAL':^115}")
+    print("=" * 115)
+    print(f"  window   : {len(dates)} day(s)  [{dates[0]}..{dates[-1]}]")
+    print(f"  to run   : {len(to_run)}  {to_run}")
+    print(f"  complete : {len(skipped)}  {skipped}")
+    if skipped:
+        print("  ↻ skipped = all 7 snapshots ok AND no newer dependent-engine input")
+    if force:
+        print("  ⚠️  force=True: every day recomputed regardless of completion")
+    if dry_run:
+        print("  🧪 dry_run=True: nothing will be executed")
+    print("=" * 115)
+    return to_run, skipped
 
 
 def run_weekly_gg(target_date):
@@ -270,7 +457,7 @@ def run_weekly_over25(target_date, risk_levels=O25_RISK_LEVELS):
 
 def run_weekly_family(target_date=None, horizon=DEFAULT_HORIZON,
                       markets=("gg", "win", "over25"), flush_between_dates=True,
-                      window_file=None):
+                      window_file=None, force=False, dry_run=False):
     """Run the Weekly family over the shared 7-day future-fixture window.
 
     `target_date` is the pipeline's target date, i.e. the FIRST day of the
@@ -279,6 +466,15 @@ def run_weekly_family(target_date=None, horizon=DEFAULT_HORIZON,
     here: every engine's /fixtures/date/{date} request is answered by the global
     API cache from the shared window (0 API calls) whenever the window covers the
     narrower request safely.
+
+    INCREMENTAL (2026-10-03): by default only the dates that are NOT already
+    complete are computed, so a normal nightly run processes the one newly added
+    day instead of recomputing all seven. Completion is re-derived from the seven
+    on-disk snapshots every run (see date_is_complete) — never trusted from the
+    ledger alone. `force=True` restores the full 7-day rebuild and is what the
+    operational `--weekly-only=<date>` path passes, so the deliberate rebuild
+    capability is preserved by this same switch rather than a second code path.
+    `dry_run=True` prints the plan and returns without executing anything.
 
     Memory: the pipeline's OOM protection is preserved — the in-memory API cache
     is flushed between dates (the DURABLE window on disk is untouched, so the
@@ -300,11 +496,21 @@ def run_weekly_family(target_date=None, horizon=DEFAULT_HORIZON,
     print(f"{f'anchor={target_date}  dates={dates[0]}..{dates[-1]}  horizon={horizon}':^115}")
     print("=" * 115)
 
-    result = {"anchor": target_date, "dates": dates, "markets": markers,
-              "per_date": {}, "started_at": started}
+    to_run, skipped = plan_dates(dates, force=force, dry_run=dry_run)
 
-    total_dates = len(dates)
-    for idx, date in enumerate(dates, start=1):
+    result = {"anchor": target_date, "dates": dates, "markets": markers,
+              "per_date": {}, "skipped": skipped, "planned": to_run,
+              "incremental": not force, "started_at": started}
+
+    if dry_run:
+        print("\n🧪 DRY RUN — no engine executed, nothing written.")
+        return result
+
+    if not to_run:
+        print("\n✅ NOTHING TO DO — every day in the window is already complete.")
+
+    total_dates = len(to_run)
+    for idx, date in enumerate(to_run, start=1):
         # Beaten BEFORE the first market, so a slow first date is already
         # accounted for, and after each date, so one long date cannot
         # accumulate past the watchdog threshold while saying nothing.
@@ -321,6 +527,14 @@ def run_weekly_family(target_date=None, horizon=DEFAULT_HORIZON,
                 day["over25"] = run_weekly_over25(date)
             weekly_heartbeat(f"weekly:{market}:done:{date}")
         result["per_date"][date] = day
+        # Recorded ONLY here — after every market returned. Whether the day truly
+        # completed is still re-derived from the snapshots next run, so a market
+        # that recorded a failure simply leaves the day incomplete.
+        if date_is_complete(date, force=False):
+            mark_date_complete(date)
+        else:
+            print(f"   ⚠️ [WEEKLY] {date} did not reach a complete state — it stays "
+                  f"pending and will be recomputed next run.")
         weekly_heartbeat(f"weekly:done:{date}", force=True)
         if flush_between_dates:
             try:
@@ -334,7 +548,8 @@ def run_weekly_family(target_date=None, horizon=DEFAULT_HORIZON,
     mins = result["duration_minutes"]
     print("\n" + "=" * 115)
     print(f"{'✅ WEEKLY FAMILY COMPLETE':^115}")
-    print(f"{f'Duration: {mins} minutes | {len(dates)} dates | ' + ', '.join(markers):^115}")
+    print(f"{f'Ran {len(to_run)} of {len(dates)} day(s) | skipped {len(skipped)} '
+          f'| {mins} minutes | ' + ', '.join(markers):^115}")
     print("=" * 115)
     return result
 
