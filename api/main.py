@@ -2097,6 +2097,87 @@ def _data_age_seconds(path: str):
         return None
 
 
+def _scanner_429_cooldown_remaining() -> int:
+    """Seconds left on the scanner's shared provider-throttle lock, else 0."""
+    try:
+        with open(os.path.join(DATA_DIR, "api_429_cooldown.lock"), "r",
+                  encoding="utf-8") as f:
+            until = float((json.load(f) or {}).get("until", 0) or 0)
+        return max(0, int(until - time.time()))
+    except Exception:
+        return 0
+
+
+_SCANNER_STATE_CACHE = {"ts": 0.0, "value": {}}
+_SCANNER_STATE_TTL = 10.0
+
+
+def _scanner_running() -> bool:
+    """Is the 24/7 live scanner process actually alive right now?
+
+    Read from /proc rather than shelling out to `pgrep`, so this costs nothing
+    and cannot fail on a stripped-down image. The interlock in main.py STOPS
+    the scanner unit for the whole pre-match run, so "process absent" is the
+    reliable signal that a pipeline run is the reason nothing is being written.
+    """
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as f:
+                    if b"run_live_scanner_24_7.py" in f.read():
+                        return True
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _scanner_state() -> dict:
+    """Why the live feeds may be old — the truth, not an assumption.
+
+    This exists because the page used to report a stale board as "scanner
+    paused while the pre-match pipeline runs", which is a guess. Observed on
+    2026-10-03 at ~17:35, with the scanner healthy and cycling every ~85s:
+
+        [API GATE] stage1: shared cooldown active - pacing 15.5s
+        [FEED GUARD] prematch_team_audit.json: acquisition FAILED - existing
+                     feed (7 entries, age 35m8s) PRESERVED
+
+    Stage 1's acquisition was refused by the provider, and the feed-write guard
+    deliberately keeps the last good file instead of publishing an empty one.
+    The file's mtime therefore freezes while the scanner is running perfectly,
+    and the page blamed the pipeline for it. The pipeline was not running at
+    all — that pause STOPS the scanner, and the scanner was demonstrably alive.
+
+    So the three causes are now told apart instead of assumed:
+      * process absent          -> the pre-match pipeline really has it paused
+      * process alive + cooldown -> the provider is throttling us
+      * process alive, no lock  -> genuinely behind its cycle
+    """
+    now = time.time()
+    if now - _SCANNER_STATE_CACHE["ts"] < _SCANNER_STATE_TTL:
+        return _SCANNER_STATE_CACHE["value"]
+    running = _scanner_running()
+    cooldown = _scanner_429_cooldown_remaining()
+    if not running:
+        reason = "pipeline_pause"
+    elif cooldown > 0:
+        reason = "provider_throttle"
+    else:
+        reason = "behind_cycle"
+    value = {
+        "reason": reason,
+        "running": running,
+        "throttle_seconds_remaining": cooldown,
+    }
+    _SCANNER_STATE_CACHE["ts"] = now
+    _SCANNER_STATE_CACHE["value"] = value
+    return value
+
+
 @app.get("/api/live/prematch", tags=["Live"])
 def get_live_prematch():
     """Stage 1's strategic audit board, plus the age of the data behind it.
@@ -2105,15 +2186,20 @@ def get_live_prematch():
     client should show it rather than implying a freshness it does not have:
     a poll frequency above the write interval buys nothing and costs a request
     per tick.
+
+    `scanner_state` says WHY that age is what it is, so the page can report the
+    real cause instead of guessing at a pipeline pause — see _scanner_state().
     """
     path = os.path.join(DATA_DIR, "prematch_team_audit.json")
     raw = _read_json(path, {})
     rows = list(raw.values()) if isinstance(raw, dict) else (
         raw if isinstance(raw, list) else [])
     age = _data_age_seconds(path)
+    state = _scanner_state()
     for row in rows:
         if isinstance(row, dict):
             row["data_age_seconds"] = age
+            row["scanner_state"] = state
     return rows
 
 
@@ -2317,10 +2403,28 @@ def _live_index() -> dict:
         if sd_up == "HT":
             minute = 45  # canonical half-time minute
         elif active is not None:
+            # `periods[].minutes` is ALREADY the cumulative match minute.
+            # Verified against the provider payload on 2026-10-03: fixture
+            # 19881773 reported a ticking 2nd-half period with minutes=54 while
+            # its completed 1st-half period read minutes=47 — the counter only
+            # ever moves forward through the whole match, so it is cumulative,
+            # not "minutes elapsed inside this period".
+            #
+            # The old code added `counts_from` (45 in the second half) on top of
+            # it, double-counting the first half: that fixture displayed 99'
+            # while it was at 54', and any match at 77' displayed 122'. That is
+            # the "timeline is blind / shows absurd minutes" symptom — every
+            # second-half fixture on the live pages was inflated by exactly 45.
+            #
+            # The `>=` keeps a defensive fallback for the other reading
+            # (period-elapsed): if `minutes` were smaller than `counts_from` it
+            # could not be cumulative, so the two must be added.
+            am = int(active.get("minutes", 0) or 0)
             cf = int(active.get("counts_from", 0) or 0)
-            if "2ND" in str(active.get("description", "")).upper() and cf < 45:
-                cf = 45  # the second half always counts from minute 45
-            minute = cf + int(active.get("minutes", 0) or 0)
+            minute = am if am >= cf else cf + am
+            # A football match cannot be past ~125'. Anything beyond that means
+            # the feed is inconsistent, and showing it would be a lie.
+            minute = max(0, min(minute, 125))
         else:
             minute = max(found) if found else 0
 

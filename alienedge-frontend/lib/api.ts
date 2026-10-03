@@ -1541,6 +1541,23 @@ export interface LiveIncomingPick {
 }
 
 /**
+ * What the backend actually observed about the live scanner, attached to each
+ * `/api/live/prematch` row.
+ *
+ * The page must not infer a cause from the age alone. A stale board has three
+ * genuinely different explanations and they are NOT interchangeable:
+ *   * `pipeline_pause`      — the pre-match run stopped the scanner (interlock)
+ *   * `provider_throttle`   — the data provider is refusing requests, so the
+ *                             scanner is deliberately backing off
+ *   * `behind_cycle`        — the scanner is running but slower than one cycle
+ */
+export interface ScannerState {
+  reason: "pipeline_pause" | "provider_throttle" | "behind_cycle";
+  running: boolean;
+  throttle_seconds_remaining: number;
+}
+
+/**
  * `GET /api/live/board` — every fixture in play, read from the local in-play
  * disk cache only (no provider call).
  *
