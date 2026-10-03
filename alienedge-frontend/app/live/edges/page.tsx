@@ -1063,6 +1063,20 @@ export default function LivePage() {
   }, [liveMatch?.statistics]);
 
   // The live scoreline, taken from the same provider stats block.
+  //
+  // Falls back to the Live Now board when the Code 6 board is stale. Those two
+  // come from DIFFERENT places: the board is stage 6's output (frozen while the
+  // pre-match run holds the scanner), whereas the Live Now board is built from
+  // the shared in-play cache, which the lightweight score keeper keeps fresh
+  // during exactly that window. So even while the run is in progress the score
+  // and minute here stay correct, instead of being withheld and leaving the
+  // fixture looking dead.
+  const liveNowForFixture = useMemo(() => {
+    if (!selectedAudit) return null;
+    const fid = String(selectedAudit.fixture_id);
+    return liveNowRows.find((m) => m.fixture_id === fid) ?? null;
+  }, [selectedAudit, liveNowRows]);
+
   const liveScore = useMemo(() => {
     const raw = liveMatch?.statistics;
     const g = (side: "home" | "away") => {
@@ -1071,8 +1085,17 @@ export default function LivePage() {
     };
     const h = g("home");
     const a = g("away");
-    return h === null && a === null ? null : `${h ?? 0} - ${a ?? 0}`;
-  }, [liveMatch?.statistics]);
+    if (h === null && a === null) return liveNowForFixture?.score ?? null;
+    return `${h ?? 0} - ${a ?? 0}`;
+  }, [liveMatch?.statistics, liveNowForFixture]);
+
+  // Same fallback for the minute badge.
+  const liveMinute = useMemo(() => {
+    const fromBoard = liveMatch?.minute;
+    if (fromBoard != null) return fromBoard;
+    const fromLive = liveNowForFixture?.minute;
+    return fromLive != null && fromLive > 0 ? fromLive : null;
+  }, [liveMatch?.minute, liveNowForFixture]);
 
   return (
     <div className="relative flex flex-col gap-4 p-3.5 sm:p-5 md:p-6 max-w-7xl mx-auto w-full">
@@ -1188,9 +1211,9 @@ export default function LivePage() {
                   </span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-slate-400">
-                  {liveMatch?.minute != null && (
+                  {liveMinute != null && (
                     <span className="rounded border border-white/10 bg-white/5 px-2 py-0.5 font-bold text-white">
-                      {liveMatch.minute}&apos;
+                      {liveMinute}&apos;
                     </span>
                   )}
                   {boardIsStale && (
