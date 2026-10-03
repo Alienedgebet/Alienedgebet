@@ -48,20 +48,49 @@ export function DnaCountBadge({
     return <span className="font-mono text-2xs text-text-dim">–</span>;
   }
 
+  // Schema v3: when no factor could be measured, home_count and away_count are
+  // both 0. Rendering a bare "0:0" there would read as a genuine dead heat,
+  // when it actually means "we know nothing about this fixture" — the exact
+  // ambiguity that made an unmeasured team look like a real opponent. Such a
+  // badge is dimmed and labelled as no data instead.
+  const comparable = counts.comparable_count ?? counts.factors.length;
+  const noData = comparable === 0;
+
+  const title = noData
+    ? "No DNA factor could be measured for this fixture — provider stats missing for at least one side"
+    : `DNA factor count: home ${counts.home_count}, away ${counts.away_count}` +
+      (counts.unknown_count
+        ? ` · ${counts.unknown_count} factor${counts.unknown_count === 1 ? "" : "s"} not measured`
+        : "") +
+      ". This is factors won, not a strength percentage.";
+
   return (
     <Link
       href={`/dna/${market}/${resolvedId}?date=${date}`}
       prefetch
       className={cn(
-        "inline-flex items-center justify-center gap-1 rounded-md border border-cyan-500/30 bg-[#0c1526]/90 px-1.5 py-0.5 font-mono text-[11px] font-black tabular-nums text-cyan-200 shadow-[0_0_8px_rgba(6,182,212,0.15)] transition-all hover:border-cyan-400 hover:bg-cyan-500/20 hover:text-white active:scale-95",
+        "inline-flex items-center justify-center gap-1 rounded-md border bg-[#0c1526]/90 px-1.5 py-0.5 font-mono text-[11px] font-black tabular-nums shadow-[0_0_8px_rgba(6,182,212,0.15)] transition-all active:scale-95",
+        noData
+          ? "border-border text-text-dim hover:border-border-bright hover:text-text-secondary"
+          : "border-cyan-500/30 text-cyan-200 hover:border-cyan-400 hover:bg-cyan-500/20 hover:text-white",
         className
       )}
-      title="Tap to open full Tactical DNA analysis"
-      aria-label={`DNA count: home ${counts.home_count}, away ${counts.away_count}. Open DNA analysis.`}
+      title={title}
+      aria-label={
+        noData
+          ? "DNA: no factor could be measured for this fixture"
+          : `DNA count: home ${counts.home_count}, away ${counts.away_count} of ${comparable} comparable factors. Open DNA analysis.`
+      }
     >
-      <span>{counts.home_count}</span>
-      <span className="text-cyan-400/60 font-medium">:</span>
-      <span>{counts.away_count}</span>
+      {noData ? (
+        <span className="text-[10px] font-bold tracking-wider">NO DATA</span>
+      ) : (
+        <>
+          <span>{counts.home_count}</span>
+          <span className="text-cyan-400/60 font-medium">:</span>
+          <span>{counts.away_count}</span>
+        </>
+      )}
     </Link>
   );
 }

@@ -46,10 +46,22 @@ OUTPUT_PATH   = os.path.join(DATA_DIR, "dna_v2_market_factors.json")
 
 
 def _get(profile, section, field):
-    """Pull a numeric field out of a team's DNA v2 profile, defaulting to 0."""
+    """Pull a numeric field out of a team's DNA v2 profile.
+
+    Returns None when the value is genuinely unknown — that is now a distinct
+    state in schema v3, and it MUST stay distinct here.
+
+    The old body ended in `or 0`, which silently converted every unknown into
+    a real zero. That is precisely how a team with no provider data kept
+    "competing": its absent Resistance was read as 0, and when the opponent's
+    Resistance was 0 too the factor became a 0-0 tie rather than the honest
+    "neither team has this measured" that it actually was. Any None reaching
+    this function is unknown, not zero.
+    """
     if not profile:
-        return 0
-    return profile.get(section, {}).get(field, 0) or 0
+        return None
+    value = profile.get(section, {}).get(field)
+    return None if value is None else value
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -122,6 +134,20 @@ def _compare_factor(home_profile, away_profile, label, section, field, invert):
     home_val = _get(home_profile, section, field)
     away_val = _get(away_profile, section, field)
 
+    # Schema v3: an unknown value on EITHER side makes this factor undecided.
+    # It must NOT be treated as 0. Doing so is how a team with no data used to
+    # beat a team with real data — its missing Resistance read as 0 against a
+    # saturated 0, and elsewhere a phantom win was handed out on absence alone.
+    # "unknown" is reported as neutral, with both values left null so the UI
+    # can say so rather than printing a number we do not have.
+    if home_val is None or away_val is None:
+        return {
+            "name":       label,
+            "home_value": None if home_val is None else round(home_val, 1),
+            "away_value": None if away_val is None else round(away_val, 1),
+            "winner":     "unknown",
+        }
+
     if invert:
         winner = "home" if home_val < away_val else "away" if away_val < home_val else "neutral"
     else:
@@ -148,9 +174,14 @@ def build_market_counts_for_fixture(home_profile, away_profile):
         ]
         home_count = sum(1 for f in factors if f["winner"] == "home")
         away_count = sum(1 for f in factors if f["winner"] == "away")
+        # Factors neither team could be measured on. Reported so the UI can say
+        # "4 of 8 factors comparable" instead of implying all 8 were weighed.
+        unknown_count = sum(1 for f in factors if f["winner"] == "unknown")
         markets[market_key] = {
             "home_count": home_count,
             "away_count": away_count,
+            "unknown_count": unknown_count,
+            "comparable_count": len(factors) - unknown_count,
             "factors":    factors,
         }
     return markets

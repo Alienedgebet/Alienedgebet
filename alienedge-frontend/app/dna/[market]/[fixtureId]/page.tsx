@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { useApi } from "@/lib/use-api";
 import { dnaV2Api, type DnaV2MatchMeta, type DnaV2MatchMetaResponse } from "@/lib/api";
-import SportyMatchOverview, { type SportyH2HMeeting } from "@/components/dna/SportyMatchOverview";
+import SportyMatchOverview from "@/components/dna/SportyMatchOverview";
 import type {
   DnaV2Factor,
   DnaV2FixtureFactors,
@@ -53,6 +53,15 @@ const RAW_METRIC_LABELS: Record<keyof DnaV2Profile["Raw_Audit_Metrics"], string>
   Resistance_Score: "Resistance Score",
 };
 
+/**
+ * Renders a schema v4 nullable figure. `null` means UNMEASURED — it must not
+ * print as a number, and it must not print as a blank cell either. A dash is
+ * the only honest rendering of "we never measured this".
+ */
+function fmt(v: number | null): number | string {
+  return v == null ? "—" : v;
+}
+
 function initials(name: string | undefined): string {
   if (!name) return "??";
   return name
@@ -72,20 +81,32 @@ function TeamAvatar({ name }: { name: string | undefined }) {
 }
 
 function FactorRow({ factor }: { factor: DnaV2Factor }) {
+  // Schema v3: a null value is UNMEASURED, not zero. It gets an em-dash and an
+  // explicit "Not measured" verdict rather than a number and a colour, so a
+  // data gap is never dressed up as a losing (or winning) score.
+  const unknown = factor.winner === "unknown";
+  const verdict = unknown
+    ? "Not measured"
+    : factor.winner === "neutral"
+      ? "Neutral"
+      : factor.winner === "home"
+        ? "Home edge"
+        : "Away edge";
+
   return (
-    <div className="flex items-center gap-3 py-2">
+    <div className={cn("flex items-center gap-3 py-2", unknown && "opacity-60")}>
       <span
         className={cn(
           "w-16 shrink-0 text-right font-mono text-sm font-bold tabular-nums",
           factor.winner === "home" ? "text-accent-green" : "text-text-dim"
         )}
       >
-        {factor.home_value}
+        {fmt(factor.home_value)}
       </span>
       <div className="flex-1 text-center">
         <p className="text-xs text-text-secondary">{factor.name}</p>
         <p className="mt-0.5 font-mono text-2xs uppercase tracking-wider text-text-dim">
-          {factor.winner === "neutral" ? "Neutral" : factor.winner === "home" ? "Home edge" : "Away edge"}
+          {verdict}
         </p>
       </div>
       <span
@@ -94,7 +115,7 @@ function FactorRow({ factor }: { factor: DnaV2Factor }) {
           factor.winner === "away" ? "text-accent-green" : "text-text-dim"
         )}
       >
-        {factor.away_value}
+        {fmt(factor.away_value)}
       </span>
     </div>
   );
@@ -106,21 +127,32 @@ function PillarBar({
   away,
 }: {
   label: string;
-  home: number;
-  away: number;
+  home: number | null;
+  away: number | null;
 }) {
-  const total = Math.max(home + away, 1);
-  const homePct = (home / total) * 100;
+  // An unmeasured pillar has no ratio to draw, so the track stays empty rather
+  // than showing one side at 100% because the other side is unknown.
+  const known = home != null && away != null;
+  const total = known ? Math.max((home as number) + (away as number), 1) : 0;
+  const homePct = known ? ((home as number) / total) * 100 : 0;
   return (
     <div className="py-2">
       <div className="mb-1 flex items-center justify-between text-2xs">
-        <span className="font-mono font-semibold text-text-primary">{home}</span>
+        <span className={cn("font-mono font-semibold", known ? "text-text-primary" : "text-text-dim")}>
+          {fmt(home)}
+        </span>
         <span className="uppercase tracking-wider text-text-muted">{label}</span>
-        <span className="font-mono font-semibold text-text-primary">{away}</span>
+        <span className={cn("font-mono font-semibold", known ? "text-text-primary" : "text-text-dim")}>
+          {fmt(away)}
+        </span>
       </div>
       <div className="flex h-1.5 overflow-hidden rounded-full bg-bg-elevated">
-        <div className="bg-accent-indigo" style={{ width: `${homePct}%` }} />
-        <div className="flex-1 bg-accent-cyan" />
+        {known ? (
+          <>
+            <div className="bg-accent-indigo" style={{ width: `${homePct}%` }} />
+            <div className="flex-1 bg-accent-cyan" />
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -196,11 +228,44 @@ export default function DnaAnalysisPage() {
   }, [data, entry]);
 
   const marketCounts = entry?.markets?.[market];
+
+  // The DNA "count" is not a strength score — it is how many of N pairwise
+  // comparisons a team won. Schema v3 adds a fourth outcome, "unknown", for a
+  // factor where one side's underlying stat was never measured. Unknown factors
+  // are excluded from the denominator (they were never weighed) and counted
+  // separately so the UI can say "4 of 6 factors decided" rather than implying
+  // all 8 produced a verdict.
+  const unknownFactors =
+    marketCounts?.factors.filter((f) => f.winner === "unknown").length ?? 0;
+  const neutralFactors =
+    marketCounts?.factors.filter((f) => f.winner === "neutral").length ?? 0;
+  const decidedFactors = marketCounts
+    ? marketCounts.factors.length - unknownFactors
+    : 0;
   const totalFactors = marketCounts
-    ? marketCounts.home_count + marketCounts.away_count + marketCounts.factors.filter((f) => f.winner === "neutral").length
+    ? marketCounts.home_count + marketCounts.away_count + neutralFactors
     : 0;
   const homePct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.home_count / totalFactors) * 100) : 0;
   const awayPct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.away_count / totalFactors) * 100) : 0;
+
+  // Which side, if either, has too little measured data for its pillars to
+  // mean anything. Such a team must be shown as UNMEASURED, never as weak.
+  const lowCoverage = useMemo(() => {
+    const flagged: string[] = [];
+    for (const p of [homeProfile, awayProfile]) {
+      if (!p) continue;
+      const cov = p.Data_Coverage;
+      const weak = p.insufficient_data === true || (cov ? cov.Stats_Matches < 3 : false);
+      if (weak) {
+        flagged.push(
+          cov
+            ? `${p.team_name} — only ${cov.Stats_Matches} of ${cov.Stats_Sample} matches had provider stats`
+            : `${p.team_name} — insufficient match data`
+        );
+      }
+    }
+    return flagged;
+  }, [homeProfile, awayProfile]);
 
   const showLoading = loading && !entry;
 
@@ -211,21 +276,15 @@ export default function DnaAnalysisPage() {
   // cached before that field existed simply lack it, and every panel below
   // degrades to an em-dash rather than inventing a result.
   //
-  // The H2H meeting list has no live source yet, so it is passed as explicit
-  // demo rows and the component labels them "demo". Swap this for a real
-  // endpoint later and nothing else has to change.
-  const demoH2H: SportyH2HMeeting[] = useMemo(() => {
-    const home = entry?.home_team ?? "Home";
-    const away = entry?.away_team ?? "Away";
-    // Deterministic per-fixture so the strip does not reshuffle on re-render.
-    const seed = [...`${home}${away}`].reduce((a, c) => a + c.charCodeAt(0), 0);
-    const pick = (n: number) => ((seed * (n + 3)) % 4) + 1;
-    return ["2026-06-14", "2026-03-22", "2025-11-09", "2025-08-16", "2025-03-23"].map((date, i) => {
-      const hg = pick(i);
-      const ag = pick(i + 2) % 4;
-      return { date, home, away, home_goals: hg, away_goals: ag, isPlaceholder: true };
-    });
-  }, [entry?.home_team, entry?.away_team]);
+  // NO head-to-head meetings are passed. This block previously generated five
+  // hardcoded "demo" rows with dates fixed at 2026-06-14 / 2026-03-22 /
+  // 2025-11-09 / 2025-08-16 / 2025-03-23 and scorelines derived from a
+  // character-code hash of the two team names — so every fixture on the site
+  // showed the same five fabricated meetings, usually reading 1-1. They were
+  // labelled "demo", but they were still invented results sitting where real
+  // history belongs. There is no live H2H source, so the panel now renders an
+  // explicit "not connected" state. Wire a real endpoint into `h2hMeetings`
+  // when one exists and this page needs no further change.
 
   return (
     <div className="fixed inset-0 z-[70] flex flex-col overflow-y-auto bg-bg-primary">
@@ -262,6 +321,23 @@ export default function DnaAnalysisPage() {
         </div>
       ) : (
         <div className="mx-auto w-full max-w-3xl flex-1 space-y-4 px-4 py-4 md:px-6 md:py-6">
+          {/* Data-coverage warning. A team whose provider stats never arrived is
+              UNMEASURED, not weak — without this the zeros below read as a real
+              assessment and the whole page silently misleads. */}
+          {lowCoverage.length > 0 && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <p className="font-mono text-2xs font-semibold uppercase tracking-wider text-amber-400">
+                Insufficient data — read the numbers below with care
+              </p>
+              <ul className="mt-1.5 space-y-0.5">
+                {lowCoverage.map((msg) => (
+                  <li key={msg} className="text-xs text-amber-200/80">
+                    • {msg}. Any DNA figure shown as &ldquo;&mdash;&rdquo; was never measured, not zero.
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {/* SportyBet-style match header + H2H statistics.
               Mounted FIRST so it sits above the DNA engine output, which is
               left entirely untouched below. Read-only: it renders history and
@@ -283,7 +359,6 @@ export default function DnaAnalysisPage() {
             highestWin={null}
             points={null}
             goalsScored={null}
-            h2hMeetings={demoH2H}
           />
 
           {/* Team header + DNA count for this market */}
@@ -310,19 +385,36 @@ export default function DnaAnalysisPage() {
             </div>
           </div>
 
-          {/* DNA percentage + structural edge */}
-          <Section title="Structural edge">
+          {/* Factor split — NOT a strength percentage.
+            This bar is the ratio of pairwise factors won. It was previously
+            presented as "AFC Rushden & Diamonds — 13%", which reads as a
+            13%-as-strong judgement but actually means "won 1 of 8 coin
+            flips". It is now labelled with what it actually counts, and
+            factors nobody could measure are disclosed instead of folded
+            silently into the denominator. */}
+          <Section title="Factor split">
             <div className="mb-3 flex h-2 overflow-hidden rounded-full bg-bg-elevated">
               <div className="bg-accent-indigo" style={{ width: `${homePct}%` }} />
               <div className="bg-accent-cyan" style={{ width: `${awayPct}%` }} />
             </div>
             <div className="flex items-center justify-between text-2xs text-text-muted">
-              <span>{entry.home_team} — {homePct}%</span>
+              <span>
+                {entry.home_team} — won {marketCounts?.home_count ?? 0}
+              </span>
               <span className="font-semibold text-text-primary">
                 Overall edge: {clash?.overall_structural_edge ?? "Contested"}
               </span>
-              <span>{entry.away_team} — {awayPct}%</span>
+              <span>
+                won {marketCounts?.away_count ?? 0} — {entry.away_team}
+              </span>
             </div>
+            <p className="mt-2 text-center text-2xs leading-relaxed text-text-dim">
+              {decidedFactors} of {marketCounts?.factors.length ?? 0} factors decided
+              {neutralFactors > 0 && ` · ${neutralFactors} tied`}
+              {unknownFactors > 0 && ` · ${unknownFactors} not measured`}
+              {totalFactors > 0 && ` · ${homePct}% / ${awayPct}% of decided factors`}
+              {decidedFactors === 0 && " — no factor could be measured for either side"}
+            </p>
           </Section>
 
           {/* Market signals from the style clash */}
@@ -379,34 +471,56 @@ export default function DnaAnalysisPage() {
                   <p className="truncate text-xs font-semibold text-text-primary">{side.name}</p>
                   <p className="text-2xs text-accent-indigo">{side.archetype}</p>
                   <dl className="space-y-1 font-mono text-2xs text-text-secondary">
-                    <div className="flex justify-between"><dt className="text-text-dim">Tempo</dt><dd>{side.tactical.Tempo}</dd></div>
+                    <div className="flex justify-between"><dt className="text-text-dim">Tempo</dt><dd>{fmt(side.tactical.Tempo)}</dd></div>
                     <div className="flex justify-between"><dt className="text-text-dim">Line Height</dt><dd>{side.tactical.Line_Height}</dd></div>
                     <div className="flex justify-between"><dt className="text-text-dim">Risk Appetite</dt><dd>{side.tactical.Risk_Appetite}</dd></div>
                     <div className="flex justify-between"><dt className="text-text-dim">Verticality</dt><dd>{side.tactical.Verticality}</dd></div>
                     <div className="flex justify-between"><dt className="text-text-dim">Shot Quality</dt><dd className="text-right">{side.tactical.Shot_Quality}</dd></div>
                     <div className="flex justify-between"><dt className="text-text-dim">Transition</dt><dd className="text-right">{side.tactical.Transition_Style}</dd></div>
-                    <div className="flex justify-between"><dt className="text-text-dim">Transition Score</dt><dd>{side.tactical.Transition_Score}</dd></div>
+                    <div className="flex justify-between"><dt className="text-text-dim">Transition Score</dt><dd>{fmt(side.tactical.Transition_Score)}</dd></div>
                   </dl>
                 </div>
               ))}
             </div>
           </Section>
 
-          {/* Raw Audit Metrics — every field, nothing hidden */}
+          {/* Raw Audit Metrics — every field, nothing hidden.
+              A null value renders as an em-dash and dims the row: it was never
+              measured. Printing the raw null here would have produced a blank
+              cell that reads like a rendering fault rather than a known gap. */}
           <Section title="Raw audit metrics">
             <div className="divide-y divide-border/40">
-              {(Object.keys(RAW_METRIC_LABELS) as Array<keyof DnaV2Profile["Raw_Audit_Metrics"]>).map((key) => (
-                <div key={key} className="flex items-center justify-between py-1.5 text-xs">
-                  <span className="font-mono text-sm font-semibold tabular-nums text-text-primary">
-                    {homeProfile.Raw_Audit_Metrics[key]}
+              {(Object.keys(RAW_METRIC_LABELS) as Array<keyof DnaV2Profile["Raw_Audit_Metrics"]>).map((key) => {
+                const hv = homeProfile.Raw_Audit_Metrics[key];
+                const av = awayProfile.Raw_Audit_Metrics[key];
+                const unknown = hv == null || av == null;
+                const cell = (v: number | null, align: string) => (
+                  <span
+                    className={cn(
+                      "font-mono text-sm font-semibold tabular-nums",
+                      align,
+                      v == null ? "text-text-dim" : "text-text-primary"
+                    )}
+                  >
+                    {v == null ? "—" : v}
                   </span>
-                  <span className="px-2 text-center text-2xs text-text-muted">{RAW_METRIC_LABELS[key]}</span>
-                  <span className="font-mono text-sm font-semibold tabular-nums text-text-primary">
-                    {awayProfile.Raw_Audit_Metrics[key]}
-                  </span>
-                </div>
-              ))}
+                );
+                return (
+                  <div
+                    key={key}
+                    className={cn("flex items-center justify-between py-1.5 text-xs", unknown && "opacity-70")}
+                    title={unknown ? "Not measured by the provider — this is a data gap, not a zero" : undefined}
+                  >
+                    {cell(hv, "text-right")}
+                    <span className="px-2 text-center text-2xs text-text-muted">{RAW_METRIC_LABELS[key]}</span>
+                    {cell(av, "text-left")}
+                  </div>
+                );
+              })}
             </div>
+            <p className="mt-2 text-center text-2xs text-text-dim">
+              &ldquo;&mdash;&rdquo; means the provider never reported this stat — it is not a zero.
+            </p>
           </Section>
 
           <p className="pb-4 text-center font-mono text-2xs text-text-dim">

@@ -286,11 +286,19 @@ def run_apex_underdog_aggregator(target_date):
             dog_dna, fav_dna = (h_dna, a_dna) if is_home_dog else (a_dna, h_dna)
 
             # THE UNDERDOG DNA DOMINANCE RULE (INTACT)
-            dog_i = dog_dna.get("Market_Power_Scores", {}).get("Goal_Intent", 0)
-            fav_i = fav_dna.get("Market_Power_Scores", {}).get("Goal_Intent", 0)
-            dog_t = dog_dna.get("Tactical_DNA", {}).get("Tempo", 0)
-            fav_t = fav_dna.get("Tactical_DNA", {}).get("Tempo", 0)
-            
+            # `.get(k, 0)` only defaults when the key is ABSENT. Since schema
+            # v4, Tempo is present with the value None when the provider gave
+            # us no Passes/Attacks figures, so the default never fires and
+            # `None > x` raises TypeError. An unmeasured side must be excluded
+            # from the rule, not compared as 0.
+            dog_i = dog_dna.get("Market_Power_Scores", {}).get("Goal_Intent")
+            fav_i = fav_dna.get("Market_Power_Scores", {}).get("Goal_Intent")
+            dog_t = dog_dna.get("Tactical_DNA", {}).get("Tempo")
+            fav_t = fav_dna.get("Tactical_DNA", {}).get("Tempo")
+
+            if None in (dog_i, fav_i, dog_t, fav_t):
+                continue
+
             if dog_i > fav_i and dog_t > fav_t:
                 list_dna[key] = fx['id']
 
