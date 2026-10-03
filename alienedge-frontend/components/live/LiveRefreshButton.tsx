@@ -63,13 +63,42 @@ export function LiveRefreshButton({
 
   const locked = secondsLeft > 0;
 
+  // The countdown is a PROMISE, so it has to be kept. Reported on 2026-10-03:
+  // the button counted down to zero and then simply sat there, which read as
+  // "the refresh is broken" — the user was expecting the data to update by
+  // itself when the timer ran out, not merely to be clickable again.
+  //
+  // It cannot just be the poller, because these pages poll on a fixed interval
+  // that does not line up with the scanner's write. So when the cooldown
+  // expires, fetch once, and restart the countdown — the loop now keeps pulling
+  // new data on its own, at a rate the scanner can actually satisfy.
+  const armedRef = useRef(false);
+  const onRefreshRef = useRef(onRefresh);
+  useEffect(() => {
+    onRefreshRef.current = onRefresh;
+  }, [onRefresh]);
+
+  useEffect(() => {
+    if (secondsLeft > 0) {
+      armedRef.current = true;
+      return;
+    }
+    // Only fire if a countdown actually ran, so mounting with no press (or the
+    // prop changing) does not trigger a request.
+    if (!armedRef.current) return;
+    armedRef.current = false;
+    if (!mountedRef.current) return;
+    onRefreshRef.current();
+    setSecondsLeft(cooldownSeconds);
+  }, [secondsLeft, cooldownSeconds]);
+
   const handleClick = useCallback(() => {
     if (locked || refreshing) return;
     onRefresh();
     setSecondsLeft(cooldownSeconds);
   }, [locked, refreshing, onRefresh, cooldownSeconds]);
 
-  const label = locked ? `Refreshed · ${secondsLeft}s` : "Refresh";
+  const label = locked ? `Auto-refresh in ${secondsLeft}s` : "Refresh";
   const spinnerActive = refreshing || locked;
 
   return (
@@ -80,7 +109,7 @@ export function LiveRefreshButton({
       aria-live="polite"
       title={
         locked
-          ? "Waiting for the scanner's next write. The live scanner rewrites these feeds about once every 85 seconds."
+          ? "The scanner rewrites these feeds about every 85 seconds, so pressing refresh again now would return identical data. The page re-fetches automatically when the timer reaches zero."
           : "Fetch the latest live data now."
       }
       className={cn(

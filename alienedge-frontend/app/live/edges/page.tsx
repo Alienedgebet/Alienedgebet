@@ -18,6 +18,7 @@ import {
   type LivePrematchTeamAudit,
   type LiveValidationPrediction,
   type LiveValidationSideStats,
+  type ScannerState,
 } from "@/lib/api";
 import { useApi } from "@/lib/use-api";
 import { useSelectedDate } from "@/lib/date-context";
@@ -336,7 +337,11 @@ function OddsComparisonBlock({ row }: { row: LivePrematchAudit }) {
   }> = [
     { label: "HOME", pre: row.odds_home_win, live: row.live_odds_home_win },
     { label: "AWAY", pre: row.odds_away_win, live: row.live_odds_away_win },
-    { label: "O2.5", pre: row.odds_o25, live: row.live_odds_o25 },
+    // O2.5 removed 2026-10-03. This page is Code 1 EVIDENCE: the pre-match
+    // audit for a fixture's two sides (missing key players, keeper liability,
+    // 1X2). The O2.5 line was a goals threshold, not side evidence, and the
+    // engines never call a live-odds feed for it either — so it rendered as a
+    // third column of "live n/a" that said nothing about the fixture's risk.
   ];
   const hasLiveOdds = markets.some(
     (m) => m.live !== null && m.live !== undefined
@@ -355,7 +360,7 @@ function OddsComparisonBlock({ row }: { row: LivePrematchAudit }) {
         )}
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         {markets.map((m) => {
           const hasLive = m.live !== null && m.live !== undefined;
           const shift =
@@ -773,28 +778,50 @@ function PrematchAuditCard({
 function DataFreshness({ rows }: { rows: unknown }) {
   const age = useMemo(() => {
     if (!Array.isArray(rows) || rows.length === 0) return null;
-    const first = rows[0] as { data_age_seconds?: number | null } | undefined;
+    const first = rows[0] as {
+      data_age_seconds?: number | null;
+      scanner_state?: ScannerState;
+    } | undefined;
     return first?.data_age_seconds ?? null;
+  }, [rows]);
+
+  // What the BACKEND actually observed, rather than a guess made in the UI.
+  //
+  // The previous version blamed the pre-match pipeline for anything older than
+  // 10 minutes. That was wrong, and measurably so: on 2026-10-03 at ~17:35 the
+  // scanner was healthy and cycling every ~85s, but Stage 1's acquisition was
+  // being refused by the provider, so the feed-write guard preserved the old
+  // file and its mtime froze. The page reported "scanner paused" for a
+  // pipeline that was not running.
+  //
+  // A pipeline pause STOPS the scanner process entirely (the interlock in
+  // main.py), so "process absent" is the only honest signal for that case, and
+  // the API now reports it alongside the throttle state.
+  const scanner = useMemo(() => {
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const first = rows[0] as { scanner_state?: ScannerState } | undefined;
+    return first?.scanner_state ?? null;
   }, [rows]);
 
   if (age === null) return null;
 
-  // The scanner's cycle is ~72s. One cycle is normal, two is worth noticing,
-  // three or more means the writer is genuinely stuck and the page should not
-  // pretend otherwise.
-  //
-  // 2026-10-02: there is a SECOND, designed reason the board stops updating.
-  // The nightly pre-match pipeline (main.py) pauses the live scanner outright
-  // because both consume the same SportMonks key — see the LIVE SCANNER
-  // INTERLOCK in main.py. That pause lasts 1-2h. Reporting it with the same
-  // "not writing" wording as a crash is what made a deliberate pause read as a
-  // hang, so it now gets its own threshold, tone and explanation.
-  const STALE_AT = 140;   // ~2 cycles
-  const STUCK_AT = 240;  // ~3+ cycles
-  const PREMATCH_PAUSE_AT = 600;  // 10 min — far longer than any normal cycle
+  // The scanner's cycle is ~85s (40s of work + 45s sleep). One cycle is
+  // normal, two is worth noticing, three or more means the writer is genuinely
+  // stuck and the page should not pretend otherwise.
+  const STALE_AT = 180;  // ~2 cycles
+  const STUCK_AT = 300;  // ~3+ cycles
+
+  const reason = scanner?.reason ?? null;
+  const throttled = reason === "provider_throttle";
+  const paused = reason === "pipeline_pause";
+
+  // A throttle is EXPECTED behaviour — the scanner backs off on purpose to
+  // protect the shared quota — so it is reported calmly, not as a fault.
   const tone =
-    age > PREMATCH_PAUSE_AT
+    paused
       ? "border-accent-indigo/40 bg-accent-indigo/10 text-accent-indigo"
+      : throttled
+      ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
       : age > STUCK_AT
       ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
       : age > STALE_AT
@@ -806,9 +833,16 @@ function DataFreshness({ rows }: { rows: unknown }) {
       : age < 90
       ? `updated ${Math.round(age)}s ago`
       : `updated ${Math.round(age / 60)}m ago`;
+
+  // The real cause, in the user's terms. "API key" is deliberately not used:
+  // the constraint is the shared provider data allowance that the live scanner
+  // and the pre-match pipeline both draw from.
+  const throttleLeft = scanner?.throttle_seconds_remaining ?? 0;
   const explain =
-    age > PREMATCH_PAUSE_AT
-      ? " — scanner paused while the pre-match pipeline runs (they share one API key)"
+    paused
+      ? " — the pre-match run has the scanner paused (they share the same data allowance)"
+      : throttled
+      ? ` — the data provider is throttling us, so the scanner is holding back to protect the shared allowance${throttleLeft > 0 ? ` · ${throttleLeft}s left` : ""}`
       : age > STUCK_AT
       ? " — the scanner is not writing; this board is not updating"
       : age > STALE_AT
@@ -821,7 +855,7 @@ function DataFreshness({ rows }: { rows: unknown }) {
         "mt-1 inline-flex w-fit items-center rounded-full border px-2 py-0.5 font-mono text-[9px] font-bold",
         tone
       )}
-      title={`The live scanner rewrites this board about once every 72 seconds. Polling faster than that cannot make the data newer.${explain}`}
+      title={`The live scanner rewrites this board about once every 85 seconds. Polling faster than that cannot make the data newer.${explain}`}
     >
       {label}
       {explain}
@@ -1039,9 +1073,6 @@ export default function LivePage() {
           <div>
               <h1 className="text-sm font-black uppercase tracking-wider text-text-primary flex items-center gap-2">
                 Live Match Edges
-                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.2 font-mono text-[9px] font-bold text-emerald-400">
-                  CODE 1 EVIDENCE
-                </span>
               </h1>
               <p className="text-[11px] text-text-secondary">
                 Code 1 reveals pre-match evidence only — key-player gaps, goalkeeper
