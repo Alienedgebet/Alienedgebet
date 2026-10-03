@@ -714,19 +714,24 @@ def backfill_fixture_risk(target_date):
     return {"date": date, "totals": totals, "path": path}
 
 
-def run_weekly_phase(target_date, horizon=WINDOW_HORIZON_DAYS):
+def run_weekly_phase(target_date, horizon=WINDOW_HORIZON_DAYS, force=False):
     """PHASE 12 — the Weekly engine family (GG / WIN / O2.5) over the window.
 
     Composes the EXISTING AlienEdge intelligence (see WEEKLY/weekly_engine.py) and
     persists each date's rows through output_store under the same keys the
     existing Weekly API routes already read. Non-fatal by design.
+
+    Incremental by default (2026-10-03): only the dates that are not already
+    complete are computed, so the nightly run processes the one newly added day
+    instead of recomputing all seven. `force=True` is the deliberate FULL 7-day
+    rebuild used by the operational --weekly-only path.
     """
     print("\n" + "=" * 115)
     print(f"{'📅 PHASE 12: WEEKLY ENGINE FAMILY (GG / WIN / O2.5)':^115}")
     print("=" * 115)
     try:
         from WEEKLY.weekly_engine import run_weekly_family
-        return run_weekly_family(target_date, horizon=horizon)
+        return run_weekly_family(target_date, horizon=horizon, force=force)
     except Exception as e:
         print(f"   ⚠️ [WEEKLY] family failed (non-fatal): {e}")
         traceback.print_exc()
@@ -1254,6 +1259,11 @@ if __name__ == "__main__":
     # future window and run ONLY the Weekly family (GG / WIN / O2.5). This is the
     # ops/validation path: it never runs the pre-match pipeline, never touches the
     # Live scanner and never writes outside the existing output_store keys.
+    #
+    # It stays a DELIBERATE FULL 7-DAY REBUILD (force=True) — that is the whole
+    # point of an operational rebuild path. The nightly pipeline is the opposite:
+    # it runs incrementally and computes only the newly added day.
+    # --weekly-dry-run prints the incremental plan and executes nothing.
     _weekly_only_date = None
     for _arg in sys.argv[1:]:
         if _arg.startswith("--weekly-only="):
@@ -1271,11 +1281,32 @@ if __name__ == "__main__":
     if _weekly_only_date:
         fill_shared_future_window(_weekly_only_date)
         run_fixture_risk_classification(_weekly_only_date)
-        run_weekly_phase(_weekly_only_date)
+        run_weekly_phase(_weekly_only_date, force=True)
         _rejected = store.guard_rejections()
         if _rejected:
             print(f"\n⚠️ [SNAPSHOT GUARD] {len(_rejected)} snapshot write(s) rejected "
                   f"as suspiciously collapsed and preserved.")
+            sys.exit(2)
+        sys.exit(0)
+
+    # --weekly-dry-run[=<date>]: show exactly which days the INCREMENTAL pass
+    # would compute tonight, then exit without executing anything. The ops tool for
+    # answering "why did it run 7 days / why did it skip?" before committing.
+    _weekly_dry_date = None
+    for _arg in sys.argv[1:]:
+        if _arg.startswith("--weekly-dry-run="):
+            _weekly_dry_date = _arg.split("=", 1)[1].strip()
+            break
+    if "--weekly-dry-run" in sys.argv:
+        from datetime import timedelta as _td2
+        _weekly_dry_date = _weekly_dry_date or (
+            datetime.now() + _td2(days=1)).strftime("%Y-%m-%d")
+        try:
+            from WEEKLY.weekly_engine import run_weekly_family as _wf
+            print(f"[WEEKLY DRY RUN] anchor={_weekly_dry_date}")
+            _wf(_weekly_dry_date, dry_run=True)
+        except Exception as _e:
+            print(f"⚠️ [WEEKLY DRY RUN] failed: {_e}")
             sys.exit(2)
         sys.exit(0)
 
