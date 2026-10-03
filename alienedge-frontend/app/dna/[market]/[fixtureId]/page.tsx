@@ -6,7 +6,7 @@ import { ArrowLeft, Loader2, Swords } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { useApi } from "@/lib/use-api";
-import { dnaV2Api, type DnaV2MatchMeta, type DnaV2MatchMetaResponse } from "@/lib/api";
+import { dnaV2Api, type DnaV2H2HResponse, type DnaV2MatchMeta, type DnaV2MatchMetaResponse } from "@/lib/api";
 import SportyMatchOverview from "@/components/dna/SportyMatchOverview";
 import type {
   DnaV2Factor,
@@ -299,15 +299,54 @@ const awayPct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.away
   // cached before that field existed simply lack it, and every panel below
   // degrades to an em-dash rather than inventing a result.
   //
-  // NO head-to-head meetings are passed. This block previously generated five
-  // hardcoded "demo" rows with dates fixed at 2026-06-14 / 2026-03-22 /
-  // 2025-11-09 / 2025-08-16 / 2025-03-23 and scorelines derived from a
-  // character-code hash of the two team names — so every fixture on the site
-  // showed the same five fabricated meetings, usually reading 1-1. They were
-  // labelled "demo", but they were still invented results sitting where real
-  // history belongs. There is no live H2H source, so the panel now renders an
-  // explicit "not connected" state. Wire a real endpoint into `h2hMeetings`
-  // when one exists and this page needs no further change.
+  // HEAD-TO-HEAD IS NOW REAL. This block previously generated five hardcoded
+  // "demo" rows with dates fixed at 2026-06-14 / 2026-03-22 / 2025-11-09 /
+  // 2025-08-16 / 2025-03-23 and scorelines derived from a character-code hash
+  // of the two team names — so every fixture on the site showed the same five
+  // fabricated meetings, usually reading 1-1. They were labelled "demo", but
+  // they were still invented results sitting where real history belongs, and
+  // they were removed rather than kept.
+  //
+  // /api/dna/v2/h2h/{date}/{fixtureId} is the replacement: the provider's own
+  // finished meetings between these two team ids. The counts and the "Highest
+  // Win" callout are computed inside the component FROM that list, so the donut
+  // and the meeting rows cannot disagree.
+  //
+  // `h2hError` is passed through rather than collapsed into an empty list,
+  // because "these teams have never met" and "the provider was throttled" are
+  // different facts and only one of them is a claim about the fixture.
+  const h2hFetcher = useCallback((): ReturnType<typeof dnaV2Api.getH2H> => {
+    if (!date || !params.fixtureId) {
+      // Same reason match-meta returns a well-typed empty object rather than
+      // null: useApi chains `.then()` outside its try/catch, so a null return
+      // would throw instead of resolving. Cast through `unknown` because only
+      // the `data` field is meaningful here — status/headers are never read.
+      return Promise.resolve({
+        data: {
+          date: date ?? "",
+          fixture_id: params.fixtureId ?? "",
+          home_team: null,
+          away_team: null,
+          home_id: null,
+          away_id: null,
+          meetings: [],
+          error: "no_data" as const,
+        },
+      } as unknown as Awaited<ReturnType<typeof dnaV2Api.getH2H>>);
+    }
+    return dnaV2Api.getH2H(date, params.fixtureId);
+  }, [date, params.fixtureId]);
+
+  const { data: h2hRes } = useApi<DnaV2H2HResponse>(h2hFetcher, [date, params.fixtureId], {
+    cacheKey: date && params.fixtureId ? `dna-h2h:${date}:${params.fixtureId}` : "dna-h2h:none",
+  });
+  const h2h = h2hRes;
+
+  // The provider identifies the two sides by id. Passing them through is what
+  // lets the component attribute each past meeting to the right club when the
+  // two have swapped venues since.
+  const homeId = h2h?.home_id ?? null;
+  const awayId = h2h?.away_id ?? null;
 
   return (
     <div className="fixed inset-0 z-[70] flex flex-col overflow-y-auto bg-bg-primary">
@@ -368,6 +407,8 @@ const awayPct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.away
           <SportyMatchOverview
             homeTeam={entry.home_team}
             awayTeam={entry.away_team}
+            homeId={homeId}
+            awayId={awayId}
             competition={matchMeta?.league_name ?? null}
             matchday={null}
             leagueGroup={matchMeta?.season_name ?? null}
@@ -376,12 +417,8 @@ const awayPct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.away
             isUnranked={matchMeta?.is_unranked ?? false}
             homeForm={homeProfile?.form_rows}
             awayForm={awayProfile?.form_rows}
-            homeWins={null}
-            draws={null}
-            awayWins={null}
-            highestWin={null}
-            points={null}
-            goalsScored={null}
+            h2hMeetings={h2h?.meetings ?? null}
+            h2hError={h2h?.error ?? null}
           />
 
           {/* Team header + DNA count for this market */}

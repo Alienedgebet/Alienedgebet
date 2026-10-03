@@ -35,6 +35,10 @@ import secrets
 import subprocess
 import time
 import traceback
+# Used by the DNA head-to-head endpoint (get_dna_h2h) to read real past
+# meetings. Imported at module scope rather than inside the handler so a
+# missing dependency fails at startup instead of on the first page view.
+import requests
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -1090,6 +1094,246 @@ def get_dna_match_meta(date: str):
         }
 
     return {"date": date, "fixtures": out}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# REAL HEAD-TO-HEAD — the SportyBet panel's H2H block, from live data.
+#
+# WHY THIS EXISTS: that block previously received NO h2hMeetings at all and
+# rendered five hardcoded "demo" meetings whose dates were fixed and whose
+# scorelines came from a character-code hash of the two team names — so every
+# fixture on the site showed the same five invented results. The demo rows
+# were removed rather than kept. This endpoint is the replacement: real past
+# meetings between these two specific teams.
+#
+# ONE FIXTURE PER REQUEST, ON PURPOSE. This route is per-fixture rather than
+# per-date because a per-date version costs one provider call for EVERY
+# fixture on the slate — 53 calls to render one page, which is both slow and
+# enough to exhaust the provider quota on its own. The page being viewed is
+# exactly one fixture, so this spends exactly one call. (Measured: the
+# account's quota was already exhausted during development, and a fan-out
+# version would guarantee that on every page load.)
+#
+# ROUTE ORDER HAZARD: registered BEFORE /api/dna/v2/{date} for the reason
+# documented above match-meta. With the {date} catch-all matched first, the
+# literal "h2h" segment is swallowed as a date and the client receives the DNA
+# payload with HTTP 200 — a success that is entirely the wrong data.
+#
+# READ-ONLY: touches no engine, no cache file and no score. Same contract as
+# the whole SportyBet panel — history in, numbers out, nothing computed.
+@app.get("/api/dna/v2/h2h/{date}/{fixture_id}", tags=["Foundation"])
+def get_dna_h2h(date: str, fixture_id: str):
+    """Real previous meetings between the two teams of ONE DNA fixture.
+
+    Team IDs come from the DNA profile cache, which is keyed by team id and
+    carries `team_name`. The join is name -> id and was verified against a
+    real slate: 108 profiles, 0 duplicate team names, 0 unmapped fixtures, so
+    the lookup is unambiguous. A duplicate name is refused rather than guessed
+    (see _h2h_id_index).
+
+    Always returns 200 with a well-typed body. This block is one panel on one
+    page and must never be the thing that errors it out; the `error` field
+    carries the reason so the UI can tell "never met" apart from "throttled".
+    """
+    empty = {
+        "date": date,
+        "fixture_id": str(fixture_id),
+        "home_team": None,
+        "away_team": None,
+        "home_id": None,
+        "away_id": None,
+        "meetings": [],
+        "error": "no_data",
+    }
+
+    engine_result, _ = store.load("dna_v2", date, default={})
+    profiles = engine_result.get("dna_profiles", {}) if isinstance(engine_result, dict) else {}
+    factors, _ = store.load("dna_market_factors", date, default={})
+    row = (factors or {}).get(str(fixture_id))
+    if not profiles or not isinstance(row, dict):
+        return empty
+
+    api_key = os.getenv("SPORTMONKS_API_KEY")
+    if not api_key:
+        return {**empty, "error": "no_provider_key"}
+
+    name_to_id, ambiguous = _h2h_id_index(profiles)
+    home_name, away_name = row.get("home_team"), row.get("away_team")
+    home_id = name_to_id.get(home_name)
+    away_id = name_to_id.get(away_name)
+    # Ambiguous or unknown name -> no lookup. Guessing a team id would attach
+    # another club's results to this fixture.
+    if not home_id or not away_id or home_id == away_id:
+        return {**empty, "error": "unresolved_teams"}
+    if ambiguous & {home_id, away_id}:
+        return {**empty, "error": "ambiguous_team_name"}
+
+    meetings, error = _h2h_meetings(api_key, home_id, away_id, date)
+    return {
+        "date": date,
+        "fixture_id": str(fixture_id),
+        "home_team": home_name,
+        "away_team": away_name,
+        "home_id": home_id,
+        "away_id": away_id,
+        "meetings": meetings,
+        "error": error,
+    }
+
+
+def _h2h_id_index(profiles):
+    """(name -> team_id, set of ids whose name is ambiguous).
+
+    The provider addresses teams by id, but the DNA factor file carries only
+    names. Joining on a duplicated name would silently attach one club's
+    history to another, so any name held by more than one id is marked
+    ambiguous and refused at the call site instead of being resolved by
+    iteration order.
+    """
+    by_name: dict = {}
+    ambiguous: set = set()
+    for team_id, profile in (profiles or {}).items():
+        if not isinstance(profile, dict):
+            continue
+        name = profile.get("team_name")
+        if not name:
+            continue
+        if name in by_name and by_name[name] != str(team_id):
+            ambiguous.add(str(team_id))
+            ambiguous.add(by_name[name])
+        else:
+            by_name[name] = str(team_id)
+    return by_name, ambiguous
+
+
+# In-process H2H cache, keyed by (home_id, away_id, date). A page reload must
+# not re-spend a provider call, and the pipeline regenerates these fixtures
+# every run anyway, so the lifetime is bounded by the process.
+_H2H_CACHE: dict = {}
+_H2H_CACHE_MAX = 500
+
+
+def _h2h_meetings(api_key, home_id, away_id, date):
+    """Fetch real past meetings. Returns (meetings, error|None).
+
+    `fixtureStates:5` is FINISHED only: an unplayed fixture has no scoreline,
+    and rendering one as 0-0 would put a fabricated result in a list whose
+    entire purpose is to be real history.
+
+    A meeting with no readable scoreline is OMITTED, never shown as 0-0 — the
+    same rule build_form_rows() applies in the DNA engine, and for the same
+    reason.
+    """
+    key = (str(home_id), str(away_id), str(date))
+    if key in _H2H_CACHE:
+        return _H2H_CACHE[key]
+
+    url = (
+        "https://api.sportmonks.com/v3/football"
+        f"/fixtures/head-to-head/{home_id}/{away_id}"
+    )
+    params = {
+        "api_token": api_key,
+        "include": "scores;participants",
+        "filters": "fixtureStates:5",
+        "sortBy": "starting_at",
+        "order": "desc",
+        "per_page": 10,
+    }
+
+    error = None
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        if resp.status_code == 200:
+            payload = resp.json()
+        elif resp.status_code == 429:
+            # Rate limited. Distinct from "no history" on purpose: the UI can
+            # say the lookup was throttled instead of claiming these teams
+            # have never met.
+            error = "rate_limited"
+            payload = {"data": []}
+        else:
+            error = f"provider_http_{resp.status_code}"
+            payload = {"data": []}
+    except Exception:
+        error = "provider_unreachable"
+        payload = {"data": []}
+
+    meetings = []
+    for fx in payload.get("data", []) or []:
+        if not isinstance(fx, dict):
+            continue
+        row = _h2h_readable_result(fx, home_id, away_id)
+        # No readable scoreline -> omit. Never render it as 0-0.
+        if row is not None:
+            meetings.append(row)
+
+    meetings.sort(key=lambda m: (m.get("date") or ""), reverse=True)
+    result = (meetings[:5], error)
+
+    if len(_H2H_CACHE) >= _H2H_CACHE_MAX:
+        _H2H_CACHE.clear()
+    _H2H_CACHE[key] = result
+    return result
+
+
+def _h2h_readable_result(fx, home_id, away_id):
+    """One finished meeting as a display row, or None if it is not readable.
+
+    Returns None — rather than a 0-0 — when the scoreline, or either team's
+    name, is missing. Every field on the row has to be real before it is
+    shown: a partially-invented result is still an invented result.
+    """
+    home_goals = away_goals = None
+    for entry in fx.get("scores", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        score = entry.get("score") or entry
+        desc = str(entry.get("description", score.get("description", ""))).upper()
+        # A shootout is not a goal scored in open play.
+        if any(w in desc for w in ("PENALTY", "EXTRA", "AGG")):
+            continue
+        if desc != "CURRENT":
+            continue
+        goals = score.get("goals") if isinstance(score, dict) else entry.get("goals")
+        side = score.get("participant") if isinstance(score, dict) else entry.get("participant")
+        if goals is None:
+            continue
+        try:
+            goals = int(goals)
+        except (TypeError, ValueError):
+            continue
+        if side == "home":
+            home_goals = max(home_goals or 0, goals)
+        elif side == "away":
+            away_goals = max(away_goals or 0, goals)
+
+    if home_goals is None or away_goals is None:
+        return None
+
+    names = {}
+    for p in fx.get("participants") or []:
+        if not isinstance(p, dict):
+            continue
+        names[str(p.get("id"))] = p.get("name") or (p.get("meta") or {}).get("name")
+
+    home_name = names.get(str(home_id))
+    away_name = names.get(str(away_id))
+    # Without both names the row cannot be read, and inferring them from
+    # participant ORDER would depend on an ordering we do not control.
+    if not home_name or not away_name:
+        return None
+
+    return {
+        "date": str(fx.get("starting_at", ""))[:10] or None,
+        "fixture_id": fx.get("id"),
+        "home": home_name,
+        "away": away_name,
+        "home_goals": home_goals,
+        "away_goals": away_goals,
+        "home_id": str(home_id),
+        "away_id": str(away_id),
+    }
 
 
 @app.get("/api/dna/v2/{date}", tags=["Foundation"])
@@ -2656,3 +2900,45 @@ def get_team_intelligence(
     except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Team intelligence evaluation failed")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROUTE ORDER SELF-TEST
+# FastAPI resolves paths in REGISTRATION order, so every literal segment that
+# sits under /api/dna/v2/ is at risk of being swallowed by the /api/dna/v2/{date}
+# catch-all. When that happens the client gets HTTP 200 and a payload of the
+# WRONG shape — the worst kind of failure, because nothing looks broken.
+#
+# This is not checkable by the type checker (each route is individually
+# well-typed), so it is asserted here against the live route table. It runs at
+# import time and raises rather than warning, because shipping a silently
+# mis-routed endpoint is exactly the failure this file keeps documenting.
+_LITERAL_DNA_ROUTES = (
+    "/api/dna/v2/latest",
+    "/api/dna/v2/{date}/match-meta",
+    "/api/dna/v2/h2h/{date}/{fixture_id}",
+)
+_DNA_CATCHALL = "/api/dna/v2/{date}"
+
+
+def _assert_dna_route_order(app_obj) -> None:
+    order = [r.path for r in app_obj.routes if getattr(r, "path", "").startswith("/api/dna/v2/")]
+    if _DNA_CATCHALL not in order:
+        return  # nothing to be wrong about
+    catchall_at = order.index(_DNA_CATCHALL)
+    for literal in _LITERAL_DNA_ROUTES:
+        if literal not in order:
+            raise RuntimeError(
+                f"DNA route {literal!r} is missing from the route table; "
+                "the route-order self-test cannot vouch for it."
+            )
+        if order.index(literal) > catchall_at:
+            raise RuntimeError(
+                f"DNA route {literal!r} is registered AFTER the catch-all "
+                f"{_DNA_CATCHALL!r} and will be shadowed by it. Requests to it "
+                "will return the DNA payload with HTTP 200 instead of their own "
+                "data. Move the @app.get above the catch-all."
+            )
+
+
+_assert_dna_route_order(app)
