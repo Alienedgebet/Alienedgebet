@@ -2906,9 +2906,19 @@ def _team_context(snap, fid_s, fxn, team_name):
             dna[mkey] = {
                 "home_count": (mv or {}).get("home_count"),
                 "away_count": (mv or {}).get("away_count"),
+                # Schema v4: factors measured on both sides but inside the
+                # noise floor award nobody a point. Propagated so downstream
+                # consumers can tell "won 1-0 on one real separator" from
+                # "won 1-0 having separated the teams on all six factors".
+                "unknown_count": (mv or {}).get("unknown_count"),
+                "undecided_count": (mv or {}).get("undecided_count"),
+                "decided_count": (mv or {}).get("decided_count"),
                 "factors": [
                     {"name": f.get("name"), "home_value": f.get("home_value"),
-                     "away_value": f.get("away_value"), "winner": f.get("winner")}
+                     "away_value": f.get("away_value"), "winner": f.get("winner"),
+                     "difference": f.get("difference"),
+                     "min_margin": f.get("min_margin"),
+                     "reason": f.get("reason")}
                     for f in factors
                 ],
             }

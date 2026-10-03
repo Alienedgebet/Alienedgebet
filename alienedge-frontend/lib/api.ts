@@ -295,11 +295,22 @@ export interface DnaV2Factor {
   home_value: number | null;
   away_value: number | null;
   /**
-   * "unknown" means the factor could not be decided because one side's value
-   * was unmeasured. It is NOT a tie between two real equal numbers, and it
-   * awards no point to either team.
+   * Four outcomes, and only two of them are wins:
+   *   "unknown"   — one side's value was unmeasured. Never weighed.
+   *   "undecided" — both sides measured, but the gap is smaller than the
+   *                 measurement noise of the two averages. This is NOT a tie
+   *                 between two equal numbers; it is "too close to call". It
+   *                 awards no point and is excluded from the denominator.
+   *   "neutral"   — the two values are exactly equal.
+   *   "home"/"away" — the gap exceeds the noise floor. These are the only wins.
    */
-  winner: "home" | "away" | "neutral" | "unknown";
+  winner: "home" | "away" | "neutral" | "unknown" | "undecided";
+  /** Size of the gap. null when unmeasured. */
+  difference?: number | null;
+  /** The 95% noise floor this factor had to clear. */
+  min_margin?: number | null;
+  /** Why the factor landed where it did. */
+  reason?: "decided" | "within_noise" | "unmeasured";
 }
 
 export interface DnaV2MarketCount {
@@ -307,6 +318,10 @@ export interface DnaV2MarketCount {
   away_count: number;
   /** Factors neither team could be measured on (schema v3+). */
   unknown_count?: number;
+  /** Measured on both sides but inside the noise floor — no point awarded. */
+  undecided_count?: number;
+  /** Factors that produced a verdict for either side (home + away). */
+  decided_count?: number;
   /** Factors actually weighed — total minus unknown. */
   comparable_count?: number;
   factors: DnaV2Factor[];

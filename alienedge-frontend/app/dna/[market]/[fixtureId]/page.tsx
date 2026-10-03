@@ -80,21 +80,33 @@ function TeamAvatar({ name }: { name: string | undefined }) {
   );
 }
 
+/**
+ * One pairwise factor row.
+ *
+ * Three non-win outcomes must be visually distinct from a real verdict:
+ *   unknown   — one side was never measured
+ *   undecided — both measured, gap inside the measurement noise floor
+ *   neutral   — the two values are exactly equal
+ * Only "home"/"away" are wins, and only those get the accent colour.
+ */
 function FactorRow({ factor }: { factor: DnaV2Factor }) {
-  // Schema v3: a null value is UNMEASURED, not zero. It gets an em-dash and an
-  // explicit "Not measured" verdict rather than a number and a colour, so a
-  // data gap is never dressed up as a losing (or winning) score.
+  // A null value is UNMEASURED, not zero. It gets an em-dash and an explicit
+  // "Not measured" verdict rather than a number and a colour, so a data gap
+  // is never dressed up as a losing (or winning) score.
   const unknown = factor.winner === "unknown";
+  const undecided = factor.winner === "undecided";
   const verdict = unknown
     ? "Not measured"
-    : factor.winner === "neutral"
-      ? "Neutral"
-      : factor.winner === "home"
-        ? "Home edge"
-        : "Away edge";
+    : undecided
+      ? `Too close (${factor.difference ?? "?"} vs ${factor.min_margin ?? "?"} needed)`
+      : factor.winner === "neutral"
+        ? "Neutral"
+        : factor.winner === "home"
+          ? "Home edge"
+          : "Away edge";
 
   return (
-    <div className={cn("flex items-center gap-3 py-2", unknown && "opacity-60")}>
+    <div className={cn("flex items-center gap-3 py-2", (unknown || undecided) && "opacity-60")}>
       <span
         className={cn(
           "w-16 shrink-0 text-right font-mono text-sm font-bold tabular-nums",
@@ -229,24 +241,35 @@ export default function DnaAnalysisPage() {
 
   const marketCounts = entry?.markets?.[market];
 
-  // The DNA "count" is not a strength score — it is how many of N pairwise
-  // comparisons a team won. Schema v3 adds a fourth outcome, "unknown", for a
-  // factor where one side's underlying stat was never measured. Unknown factors
-  // are excluded from the denominator (they were never weighed) and counted
-  // separately so the UI can say "4 of 6 factors decided" rather than implying
-  // all 8 produced a verdict.
-  const unknownFactors =
-    marketCounts?.factors.filter((f) => f.winner === "unknown").length ?? 0;
-  const neutralFactors =
-    marketCounts?.factors.filter((f) => f.winner === "neutral").length ?? 0;
-  const decidedFactors = marketCounts
-    ? marketCounts.factors.length - unknownFactors
-    : 0;
-  const totalFactors = marketCounts
-    ? marketCounts.home_count + marketCounts.away_count + neutralFactors
-    : 0;
-  const homePct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.home_count / totalFactors) * 100) : 0;
-  const awayPct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.away_count / totalFactors) * 100) : 0;
+  // The DNA "count" is not a strength score and it is not a prediction.
+// Measured on a 130-fixture temporal holdout (each team's DNA built only from
+// matches strictly BEFORE the fixture it judged), the count picked the winner
+// 52.0% of the time versus 58.8% for always choosing the home team (p = 0.19,
+// indistinguishable from a coin flip). Adding recent form did not help (51.0%).
+// It is a style-statistic comparison, so it is labelled and sized as one.
+//
+// Three outcomes per factor, not two:
+//   unknown   — one side's stat was never measured (never weighed)
+//   undecided — both measured, but the gap is inside the measurement noise
+//   home/away — the gap is real and larger than that noise floor
+// Only home/away award a point. `undecided` must be excluded from the
+// denominator too, otherwise a 2-0 built from two real separators out of six
+// factors renders as a confident-looking bar.
+const unknownFactors =
+  marketCounts?.factors.filter((f) => f.winner === "unknown").length ?? 0;
+const undecidedFactors =
+  marketCounts?.factors.filter((f) => f.winner === "undecided").length ?? 0;
+const neutralFactors =
+  marketCounts?.factors.filter((f) => f.winner === "neutral").length ?? 0;
+const decidedFactors = marketCounts
+  ? marketCounts.factors.length - unknownFactors - undecidedFactors - neutralFactors
+  : 0;
+// Denominator = factors that actually produced a verdict for either side.
+const totalFactors = marketCounts
+  ? marketCounts.home_count + marketCounts.away_count
+  : 0;
+const homePct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.home_count / totalFactors) * 100) : 0;
+const awayPct = totalFactors > 0 && marketCounts ? Math.round((marketCounts.away_count / totalFactors) * 100) : 0;
 
   // Which side, if either, has too little measured data for its pillars to
   // mean anything. Such a team must be shown as UNMEASURED, never as weak.
@@ -375,7 +398,7 @@ export default function DnaAnalysisPage() {
                 {marketCounts?.away_count ?? 0}
               </div>
               <p className="font-mono text-2xs uppercase tracking-wider text-text-dim">
-                {MARKET_LABELS[market]} DNA count
+                {MARKET_LABELS[market]} style factors
               </p>
             </div>
 
@@ -409,11 +432,18 @@ export default function DnaAnalysisPage() {
               </span>
             </div>
             <p className="mt-2 text-center text-2xs leading-relaxed text-text-dim">
-              {decidedFactors} of {marketCounts?.factors.length ?? 0} factors decided
+              {decidedFactors} of {marketCounts?.factors.length ?? 0} factors separated the teams
+              {undecidedFactors > 0 && ` · ${undecidedFactors} too close to call`}
               {neutralFactors > 0 && ` · ${neutralFactors} tied`}
               {unknownFactors > 0 && ` · ${unknownFactors} not measured`}
-              {totalFactors > 0 && ` · ${homePct}% / ${awayPct}% of decided factors`}
-              {decidedFactors === 0 && " — no factor could be measured for either side"}
+              {totalFactors > 0 && ` · ${homePct}% / ${awayPct}% of separated factors`}
+              {decidedFactors === 0 && unknownFactors === 0 && " — every factor was inside measurement noise"}
+              {decidedFactors === 0 && unknownFactors > 0 && " — no factor could be measured for either side"}
+            </p>
+            <p className="mt-2 text-center text-2xs leading-relaxed text-text-dim">
+              This is a comparison of style statistics, not a strength score and not a
+              forecast. On a 130-fixture holdout it picked the winner 52% of the time
+              versus 59% for always choosing the home team.
             </p>
           </Section>
 

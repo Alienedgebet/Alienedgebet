@@ -48,21 +48,34 @@ export function DnaCountBadge({
     return <span className="font-mono text-2xs text-text-dim">–</span>;
   }
 
-  // Schema v3: when no factor could be measured, home_count and away_count are
-  // both 0. Rendering a bare "0:0" there would read as a genuine dead heat,
+  // Schema v3/v4: when no factor could be measured, home_count and away_count
+  // are both 0. Rendering a bare "0:0" there would read as a genuine dead heat,
   // when it actually means "we know nothing about this fixture" — the exact
   // ambiguity that made an unmeasured team look like a real opponent. Such a
   // badge is dimmed and labelled as no data instead.
+  //
+  // v4 adds a third no-winner state: `undecided`. Factors measured on both
+  // sides whose gap is inside the measurement noise floor. Those award no
+  // point, so a badge can legitimately read "1:0" while four of six factors
+  // were too close to call. The tooltip has to say so, otherwise the number
+  // reads as a clean sweep.
   const comparable = counts.comparable_count ?? counts.factors.length;
   const noData = comparable === 0;
+  const noDecision = !noData && (counts.home_count ?? 0) + (counts.away_count ?? 0) === 0;
+
+  const parts: string[] = [];
+  if (counts.unknown_count)
+    parts.push(`${counts.unknown_count} factor${counts.unknown_count === 1 ? "" : "s"} not measured`);
+  if (counts.undecided_count)
+    parts.push(`${counts.undecided_count} too close to call (inside measurement noise)`);
 
   const title = noData
     ? "No DNA factor could be measured for this fixture — provider stats missing for at least one side"
-    : `DNA factor count: home ${counts.home_count}, away ${counts.away_count}` +
-      (counts.unknown_count
-        ? ` · ${counts.unknown_count} factor${counts.unknown_count === 1 ? "" : "s"} not measured`
-        : "") +
-      ". This is factors won, not a strength percentage.";
+    : noDecision
+      ? `No factor separated these teams: ${parts.join(" · ") || "every factor was a dead heat"}. This is not a prediction of the result.`
+      : `Style-factor count: home ${counts.home_count}, away ${counts.away_count}` +
+        (parts.length ? ` · ${parts.join(" · ")}` : "") +
+        ". Factors won on style statistics — NOT a strength score and NOT a prediction of the winner.";
 
   return (
     <Link
