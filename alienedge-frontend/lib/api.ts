@@ -376,6 +376,64 @@ export interface DnaV2MatchMetaResponse {
   fixtures: Record<string, DnaV2MatchMeta>;
 }
 
+/**
+ * ONE real past meeting between the two teams of a fixture.
+ *
+ * Every field is non-null on purpose. The backend OMITS any meeting whose
+ * scoreline or team names it could not read, rather than emitting a 0-0, so
+ * a row that exists at all is a row where every number was measured.
+ * A genuine 0-0 IS present — that is a real result, not a data gap.
+ */
+export interface DnaV2H2HMeeting {
+  date: string | null;
+  fixture_id: number | string | null;
+  home: string;
+  away: string;
+  home_goals: number;
+  away_goals: number;
+  home_id: string;
+  away_id: string;
+}
+
+/**
+ * Why the H2H block has nothing to show.
+ *
+ * These are deliberately distinct. "These two have never met" and "we could
+ * not ask the provider" are completely different facts, and collapsing them
+ * into one empty panel is how a missing feed gets mistaken for a missing
+ * rivalry.
+ *
+ *  - null                 — the lookup succeeded; `meetings` is authoritative
+ *                          (possibly empty, which really means never met)
+ *  - "no_data"            — no DNA data for this fixture/date
+ *  - "unresolved_teams"   — a team name did not map to exactly one team id
+ *  - "ambiguous_team_name"— two teams share a display name; refused, not guessed
+ *  - "no_provider_key"    — server has no provider credentials configured
+ *  - "rate_limited"       — provider throttled us; NOT a claim of no history
+ *  - "provider_http_*"    — provider returned an unexpected status
+ *  - "provider_unreachable" — network failure
+ */
+export type DnaV2H2HError =
+  | "no_data"
+  | "unresolved_teams"
+  | "ambiguous_team_name"
+  | "no_provider_key"
+  | "rate_limited"
+  | "provider_unreachable"
+  | `provider_http_${number}`
+  | null;
+
+export interface DnaV2H2HResponse {
+  date: string;
+  fixture_id: string;
+  home_team: string | null;
+  away_team: string | null;
+  home_id: string | null;
+  away_id: string | null;
+  meetings: DnaV2H2HMeeting[];
+  error: DnaV2H2HError;
+}
+
 export interface UnderdogBasePick extends FixtureRisk {
   fixture_id: string;
   fixture: string;
@@ -2438,6 +2496,21 @@ export const dnaV2Api = {
   // provider call.
   getMatchMeta: (date: string): Promise<AxiosResponse<DnaV2MatchMetaResponse>> =>
     cachedGet(`/api/dna/v2/${date}/match-meta`),
+
+  // Real past meetings between the two teams of ONE fixture.
+  //
+  // This is the only call on the DNA page that spends provider quota, and it
+  // is per-fixture precisely so it spends exactly one: a per-date version
+  // would ask the provider about every fixture on the slate (53 on a real
+  // day) just to render the one page in front of the user.
+  //
+  // `cachedGet` is deliberately NOT used. That helper memoises by URL for the
+  // life of the session, which would freeze the very first (possibly
+  // rate-limited) answer forever and hide the block permanently after one bad
+  // response. The server already caches per team-pair, so a reload is cheap
+  // and always reflects the latest provider state.
+  getH2H: (date: string, fixtureId: string): Promise<AxiosResponse<DnaV2H2HResponse>> =>
+    api.get(`/api/dna/v2/h2h/${date}/${fixtureId}`),
 };
 
 export const underdogApi = {

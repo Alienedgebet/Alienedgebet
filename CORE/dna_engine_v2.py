@@ -113,11 +113,29 @@ def run_dna_engine_v2(target_date):
     HISTORY_LOOKBACK = 8       # professional forensic sample size
     LOOKBACK_DAYS    = 365
     PAGINATION_PER_PAGE = 50
-    # How many recent results the SportyBet-style form strip shows. Purely a
-    # DISPLAY cap on rows DNA already fetched — it costs no extra API call and
-    # feeds no calculation. HISTORY_LOOKBACK stays the sample size for the
-    # averages; this only decides how many are rendered.
+    # DISPLAY cap on rows DNA already fetched — it only decides how many are
+    # rendered. HISTORY_LOOKBACK stays the sample size for the averages.
     FORM_ROWS_DISPLAY = 5
+
+    # A strip that promises "Last 5 Matches" and can only show 1 is a broken
+    # promise, not a data gap. Measured on the live provider: 77 of 108 teams
+    # in a real day's slate had fewer than 5 FINISHED matches inside the
+    # 365-day window, so the strip rendered 1-4 rows against a heading that
+    # says five. Scoreline parsing was verified NOT to be at fault — every
+    # fixture the provider returned parsed successfully (readable == fetched
+    # on every sampled team); the provider genuinely has fewer matches.
+    #
+    # So the window is widened, in steps, ONLY when the strip would otherwise
+    # be short. This never touches the sample the averages are computed from:
+    # `fixtures` (the 8-match forensic sample) feeds every pillar exactly as
+    # before, and the widened set is used for the form strip alone. That split
+    # is the whole point — the previous fix in this file rejected a plain
+    # re-scale precisely because it silently moved downstream thresholds, and
+    # widening the averaging sample would do the same thing.
+    #
+    # Escalation stops as soon as the strip is full, so the common case costs
+    # ZERO extra calls and only genuinely sparse teams pay for the extra ones.
+    FORM_WIDEN_DAYS = (730, 1095)
 
     # How long a cached team profile is trusted before we spend one API call
     # re-checking whether their latest finished match has changed. A team
@@ -162,7 +180,19 @@ def run_dna_engine_v2(target_date):
     # are None when unmeasured, and every string label gained an explicit
     # "Unknown". v3 was authored but never ran, so this collapses the
     # unreleased v3 numbering rather than stacking two unshipped versions.
-    DNA_SCHEMA_VERSION = 4
+    #
+    # v5 (2026-10-03): THE FORM STRIP HONOURS ITS OWN HEADING. 1814 cached
+    # profiles were on schema 2 or carried no schema at all, and only 107 of
+    # them had form_rows — so the SportyBet-style "Last 5 Matches" strip was
+    # rendering 1-4 rows for 77 of 108 teams in a real day's slate. Root cause
+    # measured against the live provider: not a scoreline-parsing failure
+    # (readable == fetched on every sampled team) but too few FINISHED matches
+    # inside the 365-day window for sparse clubs. build_form_rows() now
+    # escalates the window for the strip alone, 365 -> 730 -> 1095 days, and
+    # only when the strip came back short. The 8-match forensic sample that
+    # feeds every pillar is NOT widened, so no pillar, archetype, clash or
+    # downstream engine moves. This bump is what forces the rebuild.
+    DNA_SCHEMA_VERSION = 5
 
     if not API_KEY:
         print("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
@@ -286,6 +316,52 @@ def run_dna_engine_v2(target_date):
         }
         resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{team_id}", params=params)
         return resp.get("data", [])
+
+    def get_widened_history_for_form(team_id, have_rows):
+        """
+        DISPLAY-ONLY extra fetch, used only when the form strip came back
+        short. Returns [] when the strip is already full, so a team with
+        plenty of history costs nothing extra.
+
+        Deliberately a SEPARATE call from get_team_history_stats() and
+        deliberately never merged into the forensic sample: widening the set
+        the averages are computed from would move every pillar, and this file
+        has already rejected one such "harmless" re-scale for silently
+        retuning six downstream engines. The widened fixtures are consumed by
+        build_form_rows() and by nothing else.
+        """
+        if have_rows >= FORM_ROWS_DISPLAY:
+            return []
+
+        t_date_obj = datetime.strptime(target_date, "%Y-%m-%d").date()
+        end_dt = (t_date_obj - timedelta(days=1)).isoformat()
+        # Only ever ask for what the strip still needs, plus a little slack so
+        # a single postponed fixture cannot leave the strip one row short.
+        want = min(FORM_ROWS_DISPLAY + 3, 12)
+
+        best: list = []
+        for days in FORM_WIDEN_DAYS:
+            start_dt = (t_date_obj - timedelta(days=days)).isoformat()
+            params = {
+                "include":  "statistics.type;participants;scores",
+                "filters":  "fixtureStates:5",
+                "sortBy":   "starting_at",
+                "order":    "desc",
+                "per_page": want,
+            }
+            resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{team_id}", params=params)
+            data = resp.get("data", [])
+            # Keep the richest window seen. A wider window can legitimately
+            # return FEWER rows than a narrower one, so the comparison is on
+            # length, never on "it was the last request".
+            if len(data) > len(best):
+                best = data
+            if len(best) >= FORM_ROWS_DISPLAY:
+                break
+            time.sleep(REQUEST_DELAY)
+
+        # Only worth returning if it actually adds rows the strip can use.
+        return best if len(best) > have_rows else []
 
     def _is_profile_fresh(profile):
         """
@@ -986,6 +1062,26 @@ def run_dna_engine_v2(target_date):
         # rendering of fixtures this function was already given. No pillar,
         # archetype, clash or downstream engine reads it.
         form_rows = build_form_rows(team_id, fixtures)
+
+        # The strip promises five rows. Measured on a real day's slate, 77 of
+        # 108 teams had fewer than five FINISHED matches inside the standard
+        # 365-day window, so the strip silently rendered 1-4 rows under a
+        # heading that says five. Parsing was verified innocent (every
+        # returned fixture parsed), so this widens the WINDOW for the strip
+        # only — see get_widened_history_for_form() for why the averaging
+        # sample is deliberately left untouched.
+        if len(form_rows) < FORM_ROWS_DISPLAY:
+            widened = get_widened_history_for_form(team_id, len(form_rows))
+            if widened:
+                # build_form_rows() is re-run over the union rather than the
+                # widened set alone: the two windows overlap heavily, and
+                # concatenating raw lists would print the same fixture twice
+                # in the strip. Deduping by fixture id is the only merge that
+                # cannot invent a duplicate result.
+                seen_ids = {r.get("fixture_id") for r in form_rows}
+                extra = [fx for fx in widened if fx.get("id") not in seen_ids]
+                if extra:
+                    form_rows = build_form_rows(team_id, fixtures + extra)
 
         # ══════════════════════════════════════════════════════════════════════
         # ASSEMBLED PROFILE — returned to main loop and saved to JSON
