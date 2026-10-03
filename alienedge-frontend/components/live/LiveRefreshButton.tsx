@@ -21,8 +21,16 @@ import { cn } from "@/lib/utils";
  * was already on screen, because the scanner has not written since.
  */
 
-/** Seconds the button stays locked after a press. Tuned to ~1 scanner cycle. */
-const COOLDOWN_SECONDS = 30;
+/**
+ * Seconds the button stays locked after a press.
+ *
+ * This is a SPAM GUARD, not a scheduler. 30s was chosen because the live feeds
+ * are rewritten roughly once every 85s, so locking longer than that only
+ * annoys the user; 10s is enough to stop an accidental double-tap returning two
+ * identical responses. Background freshness is handled by the page's poll
+ * interval, never by this timer.
+ */
+const COOLDOWN_SECONDS = 10;
 
 export interface LiveRefreshButtonProps {
   /** Trigger the refetch. Should be stable (wrap in useCallback). */
@@ -63,43 +71,30 @@ export function LiveRefreshButton({
 
   const locked = secondsLeft > 0;
 
-  // The countdown is a PROMISE, so it has to be kept. Reported on 2026-10-03:
-  // the button counted down to zero and then simply sat there, which read as
-  // "the refresh is broken" — the user was expecting the data to update by
-  // itself when the timer ran out, not merely to be clickable again.
-  //
-  // It cannot just be the poller, because these pages poll on a fixed interval
-  // that does not line up with the scanner's write. So when the cooldown
-  // expires, fetch once, and restart the countdown — the loop now keeps pulling
-  // new data on its own, at a rate the scanner can actually satisfy.
-  const armedRef = useRef(false);
-  const onRefreshRef = useRef(onRefresh);
-  useEffect(() => {
-    onRefreshRef.current = onRefresh;
-  }, [onRefresh]);
-
-  useEffect(() => {
-    if (secondsLeft > 0) {
-      armedRef.current = true;
-      return;
-    }
-    // Only fire if a countdown actually ran, so mounting with no press (or the
-    // prop changing) does not trigger a request.
-    if (!armedRef.current) return;
-    armedRef.current = false;
-    if (!mountedRef.current) return;
-    onRefreshRef.current();
-    setSecondsLeft(cooldownSeconds);
-  }, [secondsLeft, cooldownSeconds]);
-
   const handleClick = useCallback(() => {
     if (locked || refreshing) return;
     onRefresh();
     setSecondsLeft(cooldownSeconds);
   }, [locked, refreshing, onRefresh, cooldownSeconds]);
 
-  const label = locked ? `Auto-refresh in ${secondsLeft}s` : "Refresh";
-  const spinnerActive = refreshing || locked;
+  // The cooldown is a SPAM GUARD, not a scheduler.
+  //
+  // 2026-10-03: the previous version auto-fetched when the countdown hit zero
+  // and restarted it, and the spinner ran for the whole `locked || refreshing`
+  // window. The result was an icon that spun almost continuously and a page
+  // that never visibly settled — reported as "it keeps rolling unstop". An
+  // earlier version before that did nothing at zero, reported as "not
+  // working". Both were wrong because they conflated two separate jobs.
+  //
+  // Correct behaviour, and what this now does:
+  //   * the click refreshes ONCE, immediately;
+  //   * the spinner shows ONLY while that request is actually in flight;
+  //   * the countdown is just a short lock so identical data cannot be
+  //     re-fetched ten times in a row;
+  //   * background freshness is left to the page's own poll interval, which
+  //     already runs on a 30-60s cycle. The button never schedules anything.
+  const label = locked ? `Ready in ${secondsLeft}s` : "Refresh";
+  const spinnerActive = refreshing;
 
   return (
     <button
@@ -109,7 +104,7 @@ export function LiveRefreshButton({
       aria-live="polite"
       title={
         locked
-          ? "The scanner rewrites these feeds about every 85 seconds, so pressing refresh again now would return identical data. The page re-fetches automatically when the timer reaches zero."
+          ? "Just refreshed. The button unlocks in a moment — pressing it sooner would return the same data. This page keeps itself up to date on its own."
           : "Fetch the latest live data now."
       }
       className={cn(

@@ -991,6 +991,19 @@ export default function LivePage() {
   const boardIsStale =
     typeof boardAge === "number" && boardAge > BOARD_STALE_AT;
 
+  // When the pre-match run has the scanner paused, NOTHING live can be written,
+  // for any fixture. Saying "not live now" about one specific fixture in that
+  // window is simply false — the match is very likely in play, this page just
+  // cannot see it. Reported as a global condition instead, and it is read from
+  // what the backend actually observed (scanner process + throttle lock).
+  const scannerState = useMemo(() => {
+    const first = auditRows[0] as
+      | (LivePrematchAudit & { scanner_state?: ScannerState })
+      | undefined;
+    return first?.scanner_state ?? null;
+  }, [auditRows]);
+  const pausedNow = scannerState?.reason === "pipeline_pause";
+
   const stats = useMemo(() => {
     const gkLiabilities = auditRows.filter((r) => r.home.gk_out || r.away.gk_out).length;
     const highMiss = auditRows.filter((r) => r.combined_miss >= 9).length;
@@ -1182,10 +1195,19 @@ export default function LivePage() {
                   )}
                   {boardIsStale && (
                     <span
-                      className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-300"
-                      title={`No match is live right now, so this fixture is not updating. The board was last written ${Math.round((boardAge ?? 0) / 60)}m ago.`}
+                      className={cn(
+                        "rounded border px-2 py-0.5",
+                        pausedNow
+                          ? "border-accent-indigo/40 bg-accent-indigo/10 text-accent-indigo"
+                          : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                      )}
+                      title={
+                        pausedNow
+                          ? `The pre-match run has the live scanner paused, so no live data is being written for ANY fixture right now. This board was last written ${Math.round((boardAge ?? 0) / 60)}m ago and will stay frozen until the run finishes. The match itself may well be in play — this page simply cannot see it until the scanner restarts.`
+                          : `This board was last written ${Math.round((boardAge ?? 0) / 60)}m ago, so the score and minute shown here may be out of date.`
+                      }
                     >
-                      not live now
+                      {pausedNow ? "scanner paused" : "not live now"}
                     </span>
                   )}
                   <span className="text-slate-600">ID {selectedAudit.fixture_id}</span>
