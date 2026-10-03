@@ -657,16 +657,23 @@ def run_win_apex_aggregator(target_date=None):
             a_dna = dna_db.get(str(aid), {})
             if not h_dna or not a_dna: continue
 
-            h_i = h_dna.get("Market_Power_Scores",{}).get("Goal_Intent",0)
-            h_t = h_dna.get("Tactical_DNA",{}).get("Tempo",0)
+            h_i = h_dna.get("Market_Power_Scores",{}).get("Goal_Intent")
+            h_t = h_dna.get("Tactical_DNA",{}).get("Tempo")
             h_r = risk_map.get(
                 h_dna.get("Tactical_DNA",{}).get("Risk_Appetite","Low"), 1
             )
-            a_i = a_dna.get("Market_Power_Scores",{}).get("Goal_Intent",0)
-            a_t = a_dna.get("Tactical_DNA",{}).get("Tempo",0)
+            a_i = a_dna.get("Market_Power_Scores",{}).get("Goal_Intent")
+            a_t = a_dna.get("Tactical_DNA",{}).get("Tempo")
             a_r = risk_map.get(
                 a_dna.get("Tactical_DNA",{}).get("Risk_Appetite","Low"), 1
             )
+
+            # Schema v4: an unmeasured Goal_Intent or Tempo arrives as None,
+            # not as a missing key, so the old `.get(..., 0)` default no longer
+            # applies and `None > None` would raise TypeError. Skip the
+            # fixture rather than inventing a 0 for the missing side.
+            if None in (h_i, a_i, h_t, a_t):
+                continue
 
             if h_i > a_i and h_t > a_t and h_r >= a_r:
                 list_dna[key] = {"fav_side":"home","fixture_id":fx['id']}

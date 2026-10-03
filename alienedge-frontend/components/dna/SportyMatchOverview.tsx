@@ -42,8 +42,6 @@ export interface SportyH2HMeeting {
   away: string;
   home_goals: number;
   away_goals: number;
-  /** True when this row is demo scaffolding, not a real recorded meeting. */
-  isPlaceholder?: boolean;
 }
 
 export interface SportyMatchOverviewProps {
@@ -489,7 +487,7 @@ export default function SportyMatchOverview(props: SportyMatchOverviewProps) {
 
         {/* Previous direct encounters */}
         <div className="border-t pt-3" style={{ borderColor: SB.line }}>
-          <p className="mb-2 text-center text-[10px] font-bold uppercase tracking-wider text-white/50">Last 5 Matches</p>
+          <p className="mb-2 text-center text-[10px] font-bold uppercase tracking-wider text-white/50">Head to Head</p>
           {(h2hMeetings && h2hMeetings.length > 0) ? (
             <div className="space-y-1">
               {h2hMeetings.map((m, i) => {
@@ -513,20 +511,23 @@ export default function SportyMatchOverview(props: SportyMatchOverviewProps) {
                       {m.home_goals}-{m.away_goals}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-white/75">{m.away}</span>
-                    <span className="w-8 shrink-0 text-right font-mono text-white/30">
-                      {m.isPlaceholder ? "demo" : ""}
-                    </span>
                   </div>
                 );
               })}
-              {h2hMeetings.some((m) => m.isPlaceholder) && (
-                <p className="pt-1 text-center text-[9px] italic text-white/35">
-                  Demo rows — awaiting live head-to-head data
-                </p>
-              )}
             </div>
           ) : (
-            <Dash className="block py-2 text-center text-[11px]" />
+            /* Honest empty state. This panel used to render five invented
+               "demo" meetings on every fixture; a plain "no data" notice is far
+               more useful than a fabricated scoreline, and it says plainly
+               that the gap is a missing feed rather than a missing rivalry. */
+            <div className="rounded px-3 py-2.5 text-center" style={{ backgroundColor: SB.navy }}>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-white/45">
+                No head-to-head data
+              </p>
+              <p className="mt-1 text-[9px] italic leading-relaxed text-white/30">
+                No live head-to-head feed is connected yet, so nothing is shown here rather than a fabricated result.
+              </p>
+            </div>
           )}
         </div>
       </div>

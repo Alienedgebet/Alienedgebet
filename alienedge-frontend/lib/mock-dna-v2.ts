@@ -109,7 +109,12 @@ function buildProfile(name: string): DnaV2Profile {
 
 interface FactorDef {
   name: string;
-  get: (p: DnaV2Profile) => number;
+  /**
+   * May return null. Schema v3 lets any stat be "never measured", so the mock
+   * must be able to model that too — a getter typed as plain `number` cannot
+   * represent a data gap and would quietly paper over it.
+   */
+  get: (p: DnaV2Profile) => number | null;
   invert?: boolean;
 }
 
@@ -174,6 +179,19 @@ const MARKET_FACTOR_DEFS: Record<DnaV2MarketKey, FactorDef[]> = {
 function compareFactor(home: DnaV2Profile, away: DnaV2Profile, def: FactorDef): DnaV2Factor {
   const h = def.get(home);
   const a = def.get(away);
+
+  // Mirrors CORE/dna_v2_market_factors.py: an unknown value on either side
+  // makes the factor undecided and awards it to nobody. It is never coerced
+  // to 0, which is precisely the behaviour that produced phantom factor wins.
+  if (h === null || a === null) {
+    return {
+      name: def.name,
+      home_value: h === null ? null : Math.round(h * 10) / 10,
+      away_value: a === null ? null : Math.round(a * 10) / 10,
+      winner: "unknown",
+    };
+  }
+
   const winner: DnaV2Factor["winner"] = def.invert
     ? h < a
       ? "home"
@@ -197,9 +215,12 @@ function buildMarkets(home: DnaV2Profile, away: DnaV2Profile): Record<DnaV2Marke
   const result = {} as Record<DnaV2MarketKey, DnaV2MarketCount>;
   (Object.keys(MARKET_FACTOR_DEFS) as DnaV2MarketKey[]).forEach((key) => {
     const factors = MARKET_FACTOR_DEFS[key].map((def) => compareFactor(home, away, def));
+    const unknownCount = factors.filter((f) => f.winner === "unknown").length;
     result[key] = {
       home_count: factors.filter((f) => f.winner === "home").length,
       away_count: factors.filter((f) => f.winner === "away").length,
+      unknown_count: unknownCount,
+      comparable_count: factors.length - unknownCount,
       factors,
     };
   });
@@ -216,6 +237,20 @@ function buildClash(fixtureId: string, home: DnaV2Profile, away: DnaV2Profile): 
   CLASH_PILLARS.forEach((pillar) => {
     const h = home.Market_Power_Scores[pillar];
     const a = away.Market_Power_Scores[pillar];
+
+    // Schema v3: a pillar can be unmeasurable. It is recorded as "Unknown" and
+    // scores for neither side rather than being treated as a 0.
+    if (h === null || a === null) {
+      pillarClash[pillar] = {
+        home_score: h,
+        away_score: a,
+        difference: null,
+        edge: "Unknown",
+        margin: "Unknown",
+      };
+      return;
+    }
+
     const diff = Math.round((h - a) * 10) / 10;
     const edge = diff > 5 ? home.team_name : diff < -5 ? away.team_name : "Neutral";
     if (diff > 5) homeEdges += 1;
@@ -229,7 +264,17 @@ function buildClash(fixtureId: string, home: DnaV2Profile, away: DnaV2Profile): 
     };
   });
 
-  const combinedBox = Math.round(((home.Market_Power_Scores.Box_Dominance + away.Market_Power_Scores.Box_Dominance) / 2) * 10) / 10;
+  // Schema v4: Box_Dominance is nullable (unknown, not zero). Averaging with a
+  // null would coerce it to 0 and invent a combined figure out of an
+  // unmeasured pillar, so an unmeasured side yields null here — mirroring
+  // `_mean2` in the engine.
+  const meanNullable = (a: number | null, b: number | null): number | null =>
+    a == null || b == null ? null : Math.round(((a + b) / 2) * 10) / 10;
+
+  const combinedBox = meanNullable(
+    home.Market_Power_Scores.Box_Dominance,
+    away.Market_Power_Scores.Box_Dominance
+  );
   const combinedGoal = Math.round(((home.Market_Power_Scores.Goal_Intent + away.Market_Power_Scores.Goal_Intent) / 2) * 10) / 10;
 
   return {
@@ -245,9 +290,19 @@ function buildClash(fixtureId: string, home: DnaV2Profile, away: DnaV2Profile): 
       homeEdges > awayEdges + 1 ? home.team_name : awayEdges > homeEdges + 1 ? away.team_name : "Contested",
     combined_box_dominance: combinedBox,
     combined_goal_intent: combinedGoal,
+    // An unmeasured combined Box Dominance yields UNKNOWN, mirroring the
+    // engine's `_cmp_signal`. Deciding "LEAN OVER" from a null would invent a
+    // directional lean out of missing data.
     market_signals: {
-      Over_Under: combinedBox > 65 ? "LEAN OVER" : combinedBox < 45 ? "LEAN UNDER" : "NEUTRAL",
-      GG_NoGG: combinedBox > 60 ? "LEAN GG" : "NEUTRAL",
+      Over_Under:
+        combinedBox == null
+          ? "UNKNOWN"
+          : combinedBox > 65
+            ? "LEAN OVER"
+            : combinedBox < 45
+              ? "LEAN UNDER"
+              : "NEUTRAL",
+      GG_NoGG: combinedBox == null ? "UNKNOWN" : combinedBox > 60 ? "LEAN GG" : "NEUTRAL",
       Corners: home.Market_Power_Scores.Corner_Power > 70 || away.Market_Power_Scores.Corner_Power > 70 ? "HIGH CORNERS" : "AVERAGE",
     },
   };

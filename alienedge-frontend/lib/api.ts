@@ -161,38 +161,49 @@ export interface DnaProfile {
 export interface DnaV2Profile {
   team_name: string;
   Archetype: string;
+  /**
+   * A pillar is `number` when it was measured and `null` when it could not
+   * be. `null` is NOT zero: zero means "measured, and it is terrible".
+   * Schema v3 introduced this distinction because collapsing the two let a
+   * team with no provider data look like a genuinely 0-strength side.
+   */
   Market_Power_Scores: {
     Corner_Power: number;
     Goal_Intent: number;
     BTTS_Friction: number;
-    Win_Dominance: number;
-    Box_Dominance: number;
+    Win_Dominance: number | null;
+    /** Schema v4: nullable — the pillar is unknown when its inputs were never
+     *  reported, rather than scored as 0. */
+    Box_Dominance: number | null;
   };
   Tactical_DNA: {
-    Tempo: number;
+    /** Schema v4: nullable — was a fabricated 0.0 for a team with no stats. */
+    Tempo: number | null;
     Line_Height: string;
     Risk_Appetite: string;
     Verticality: string;
     Shot_Quality: string;
     Transition_Style: string;
-    Transition_Score: number;
+    /** Schema v4: nullable — was a fabricated 0.0 for a team with no stats. */
+    Transition_Score: number | null;
   };
   Raw_Audit_Metrics: {
-    Avg_Corners: number;
+    Avg_Corners: number | null;
     Estimated_Crosses: number;
     Estimated_Blocks: number;
-    Dangerous_Attacks: number;
-    Passing_Control: number;
-    Big_Chances_Created: number;
-    Shots_Insidebox: number;
-    Shots_Outsidebox: number;
+    Dangerous_Attacks: number | null;
+    Passing_Control: number | null;
+    Big_Chances_Created: number | null;
+    Shots_Insidebox: number | null;
+    Shots_Outsidebox: number | null;
     Inside_Shot_Ratio_Pct: number;
-    Tackles_Avg: number;
-    Interceptions_Avg: number;
-    Own_Pass_Quality_Pct: number;
-    Opp_Pass_Acc_Allowed: number;
-    Opp_Dangerous_Attacks: number;
-    Resistance_Score: number;
+    Tackles_Avg: number | null;
+    Interceptions_Avg: number | null;
+    Own_Pass_Quality_Pct: number | null;
+    Opp_Pass_Acc_Allowed: number | null;
+    Opp_Dangerous_Attacks: number | null;
+    /** null when the opponent was never measured — never a perfect 100. */
+    Resistance_Score: number | null;
   };
   /**
    * DISPLAY ONLY — per-match recent results rendered by the SportyBet-style
@@ -201,6 +212,23 @@ export interface DnaV2Profile {
    * UI must degrade to "—" rather than crash on an older snapshot.
    */
   form_rows?: DnaV2FormRow[];
+  /**
+   * How much of this profile is actually measured. The engine used to compute
+   * per-stat match counts and throw them away, so a one-match average rendered
+   * exactly like an eight-match one. Present from schema v3 onward.
+   */
+  Data_Coverage?: {
+    Stats_Matches: number;
+    Stats_Sample: number;
+    Stats_Coverage_Pct: number;
+    Form_Rows_Matches: number;
+    Form_Rows_Sample: number;
+  };
+  /**
+   * True when too few matches carried provider statistics for these pillars to
+   * mean anything. The UI must NOT present such a team as merely weak.
+   */
+  insufficient_data?: boolean;
 }
 
 /** One recent result. `venue` is "home" | "away" from THIS team's perspective. */
@@ -216,11 +244,14 @@ export interface DnaV2FormRow {
 }
 
 export interface DnaV2PillarClash {
-  home_score: number;
-  away_score: number;
-  difference: number;
+  /** null when that side's pillar could not be measured (schema v3+). */
+  home_score: number | null;
+  away_score: number | null;
+  /** null when either side is unmeasured — there is no gap to report. */
+  difference: number | null;
+  /** "Unknown" means unmeasured, which is NOT the same as "Neutral". */
   edge: string;
-  margin: "Clear" | "Tight";
+  margin: "Clear" | "Tight" | "Unknown";
 }
 
 export interface DnaV2Clash {
@@ -239,7 +270,8 @@ export interface DnaV2Clash {
   home_pillar_edges: number;
   away_pillar_edges: number;
   overall_structural_edge: string;
-  combined_box_dominance: number;
+  /** Schema v4: null when either side's Box Dominance was unmeasured. */
+  combined_box_dominance: number | null;
   combined_goal_intent: number;
   market_signals: {
     Over_Under: string;
@@ -259,14 +291,24 @@ export type DnaV2MarketKey =
 
 export interface DnaV2Factor {
   name: string;
-  home_value: number;
-  away_value: number;
-  winner: "home" | "away" | "neutral";
+  /** null when the underlying stat was never measured for that team. */
+  home_value: number | null;
+  away_value: number | null;
+  /**
+   * "unknown" means the factor could not be decided because one side's value
+   * was unmeasured. It is NOT a tie between two real equal numbers, and it
+   * awards no point to either team.
+   */
+  winner: "home" | "away" | "neutral" | "unknown";
 }
 
 export interface DnaV2MarketCount {
   home_count: number;
   away_count: number;
+  /** Factors neither team could be measured on (schema v3+). */
+  unknown_count?: number;
+  /** Factors actually weighed — total minus unknown. */
+  comparable_count?: number;
   factors: DnaV2Factor[];
 }
 

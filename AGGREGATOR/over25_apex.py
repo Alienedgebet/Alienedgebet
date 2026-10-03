@@ -367,16 +367,25 @@ class ApexO25Aggregator:
                     h_dna, a_dna = dna_db.get(str(hid), {}), dna_db.get(str(aid), {})
                     
                     if h_dna and a_dna:
-                        h_intent = h_dna.get("Market_Power_Scores", {}).get("Goal_Intent", 0)
-                        a_intent = a_dna.get("Market_Power_Scores", {}).get("Goal_Intent", 0)
-                        h_tempo = h_dna.get("Tactical_DNA", {}).get("Tempo", 0)
-                        a_tempo = a_dna.get("Tactical_DNA", {}).get("Tempo", 0)
+                        h_intent = h_dna.get("Market_Power_Scores", {}).get("Goal_Intent")
+                        a_intent = a_dna.get("Market_Power_Scores", {}).get("Goal_Intent")
+                        h_tempo = h_dna.get("Tactical_DNA", {}).get("Tempo")
+                        a_tempo = a_dna.get("Tactical_DNA", {}).get("Tempo")
                         h_risk = h_dna.get("Tactical_DNA", {}).get("Risk_Appetite", "Low")
                         a_risk = a_dna.get("Tactical_DNA", {}).get("Risk_Appetite", "Low")
                         h_arch, a_arch = h_dna.get("Archetype", ""), a_dna.get("Archetype", "")
 
-                        intent_pass = (h_intent > 55 and a_intent > 55)
-                        tempo_pass = (h_tempo > 50 and a_tempo > 50)
+                        # Schema v4: these keys are now PRESENT with the value
+                        # None when unmeasured, so the old `.get(..., 0)`
+                        # default never fired and `None > 55` raised TypeError
+                        # (swallowed by the bare `except` below, which is how
+                        # this rule silently stopped contributing). A missing
+                        # measurement cannot satisfy a threshold, so both
+                        # intent_pass and tempo_pass are False when None.
+                        intent_pass = (h_intent is not None and a_intent is not None
+                                       and h_intent > 55 and a_intent > 55)
+                        tempo_pass = (h_tempo is not None and a_tempo is not None
+                                      and h_tempo > 50 and a_tempo > 50)
                         risk_pass = (h_risk == "High" or a_risk == "High")
                         arch_pass = ("OVER" in h_arch or "OVER" in a_arch)
 

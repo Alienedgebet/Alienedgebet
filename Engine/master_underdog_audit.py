@@ -81,10 +81,14 @@ def run_underdog_master_engine(target_date):
         A dominant favorite physically reduces the underdog's oxygen.
         """
         multiplier = 1.0
-        if fav_dom_index > 65:
+        # Schema v3: DNA pillars are None when the underlying stat was never
+        # measured. An unknown Win Dominance must leave the penalty OFF — it is
+        # not evidence of dominance, and comparing None > 65 would raise.
+        # Same for Tempo.
+        if fav_dom_index is not None and fav_dom_index > 65:
             # Every 1% of dominance above 65 reduces Dog Lambda by 0.75%
             multiplier -= (fav_dom_index - 65) * 0.0075
-        if fav_tempo > 60:
+        if fav_tempo is not None and fav_tempo > 60:
             multiplier -= 0.05
         return max(0.4, round(multiplier, 3)) # Cap penalty at 60% reduction
 
