@@ -176,6 +176,27 @@ const MARKET_FACTOR_DEFS: Record<DnaV2MarketKey, FactorDef[]> = {
   ],
 };
 
+// Schema v4: the same 95% noise floors as CORE/dna_v2_market_factors.py.
+// Kept in sync deliberately — a demo page that awarded factors on sub-noise
+// gaps would misrepresent what the real engine now does.
+const MIN_MARGIN: Record<string, number> = {
+  "Win Dominance": 7.2,
+  "Corner Power": 5.0,
+  "BTTS Friction": 5.0,
+  "Passing Control": 5.05,
+  Tackles: 4.14,
+  Interceptions: 2.92,
+  Tempo: 4.14,
+  Transition: 10.8,
+  "Avg Corners": 2.25,
+  "Estimated Crosses": 2.0,
+  "Estimated Blocks": 2.0,
+  "Big Chances Created": 1.25,
+  "Shots Insidebox": 2.94,
+  "Goal Intent": 5.0,
+  "Box Dominance": 5.0,
+};
+
 function compareFactor(home: DnaV2Profile, away: DnaV2Profile, def: FactorDef): DnaV2Factor {
   const h = def.get(home);
   const a = def.get(away);
@@ -183,31 +204,43 @@ function compareFactor(home: DnaV2Profile, away: DnaV2Profile, def: FactorDef): 
   // Mirrors CORE/dna_v2_market_factors.py: an unknown value on either side
   // makes the factor undecided and awards it to nobody. It is never coerced
   // to 0, which is precisely the behaviour that produced phantom factor wins.
+  const floor = MIN_MARGIN[def.name] ?? 0;
   if (h === null || a === null) {
     return {
       name: def.name,
       home_value: h === null ? null : Math.round(h * 10) / 10,
       away_value: a === null ? null : Math.round(a * 10) / 10,
       winner: "unknown",
+      difference: null,
+      min_margin: floor,
+      reason: "unmeasured",
     };
   }
 
-  const winner: DnaV2Factor["winner"] = def.invert
-    ? h < a
-      ? "home"
-      : a < h
-        ? "away"
-        : "neutral"
-    : h > a
-      ? "home"
-      : a > h
-        ? "away"
-        : "neutral";
+  // A gap smaller than the noise floor is "undecided", not a win. Same rule,
+  // same reason: `h > a` awarded the factor on any gap at all.
+  const signed = def.invert ? a - h : h - a;
+  const difference = Math.abs(signed);
+  if (difference < floor) {
+    return {
+      name: def.name,
+      home_value: Math.round(h * 10) / 10,
+      away_value: Math.round(a * 10) / 10,
+      winner: "undecided",
+      difference: Math.round(difference * 10) / 10,
+      min_margin: floor,
+      reason: "within_noise",
+    };
+  }
+
   return {
     name: def.name,
     home_value: Math.round(h * 10) / 10,
     away_value: Math.round(a * 10) / 10,
-    winner,
+    winner: signed > 0 ? "home" : "away",
+    difference: Math.round(difference * 10) / 10,
+    min_margin: floor,
+    reason: "decided",
   };
 }
 
@@ -216,10 +249,15 @@ function buildMarkets(home: DnaV2Profile, away: DnaV2Profile): Record<DnaV2Marke
   (Object.keys(MARKET_FACTOR_DEFS) as DnaV2MarketKey[]).forEach((key) => {
     const factors = MARKET_FACTOR_DEFS[key].map((def) => compareFactor(home, away, def));
     const unknownCount = factors.filter((f) => f.winner === "unknown").length;
+    const undecidedCount = factors.filter((f) => f.winner === "undecided").length;
+    const homeCount = factors.filter((f) => f.winner === "home").length;
+    const awayCount = factors.filter((f) => f.winner === "away").length;
     result[key] = {
-      home_count: factors.filter((f) => f.winner === "home").length,
-      away_count: factors.filter((f) => f.winner === "away").length,
+      home_count: homeCount,
+      away_count: awayCount,
       unknown_count: unknownCount,
+      undecided_count: undecidedCount,
+      decided_count: homeCount + awayCount,
       comparable_count: factors.length - unknownCount,
       factors,
     };
