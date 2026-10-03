@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import Link from "next/link";
 import { AlertTriangle, ChevronRight, Handshake, Radio } from "lucide-react";
 import {
@@ -27,6 +27,7 @@ import {
   type PredictionColumn,
 } from "@/components/predictions";
 import { Skeleton } from "@/components/ui/skeleton";
+import { LiveNowPanel, LiveRefreshButton } from "@/components/live/LiveRefreshButton";
 import { cn } from "@/lib/utils";
 
 /**
@@ -322,22 +323,90 @@ export default function LiveIncomingPage() {
   const incoming = useApi(
     () => liveApi.getIncoming().then(normalizeIncoming),
     [],
-    { fallback: MOCK_LIVE_INCOMING, cacheKey: `live-incoming-incoming:${date}`, refreshMs: 45_000 }
+    {
+      fallback: MOCK_LIVE_INCOMING,
+      cacheKey: `live-incoming-incoming:${date}`,
+      refreshMs: 45_000,
+      revalidateOnMount: true,
+    }
   );
   const danger = useApi(
     () => liveApi.getDanger().then(normalizeDanger),
     [],
-    { fallback: MOCK_LIVE_DANGER, cacheKey: `live-incoming-danger:${date}`, refreshMs: 45_000 }
+    {
+      fallback: MOCK_LIVE_DANGER,
+      cacheKey: `live-incoming-danger:${date}`,
+      refreshMs: 45_000,
+      revalidateOnMount: true,
+    }
   );
   const aggregator = useApi(
     () => liveApi.getAggregator().then(normalizeAggregator),
     [],
-    { fallback: MOCK_LIVE_AGG, cacheKey: `live-incoming-aggregator:${date}`, refreshMs: 45_000 }
+    {
+      fallback: MOCK_LIVE_AGG,
+      cacheKey: `live-incoming-aggregator:${date}`,
+      refreshMs: 45_000,
+      revalidateOnMount: true,
+    }
+  );
+  // The "Live Now" panel. This is the fix for the page showing none of the
+  // matches that are actually in play: the three feeds above are built by the
+  // forensic engines, which admit a fixture only once it has an OFFICIAL LINEUP
+  // (stage 1 `admitted = has_lineup`; stage 3 `MIN_LINEUP_ENTRIES = 2`). The
+  // provider publishes no lineups for many leagues — measured on 2026-10-03,
+  // 39 of the 40 live fixtures were English non-league ties with lineups=0 —
+  // so they were silently absent from this page while being genuinely live.
+  //
+  // This feed is assembled from `live_inplay_cache.json`, which the API already
+  // reads on disk for the `live` column of these very tables. It therefore
+  // costs ZERO extra provider calls and cannot affect the pre-match pipeline,
+  // which shares one SportMonks key. Fixtures with no lineup are shown with an
+  // explicit reason rather than being hidden.
+  const liveNow = useApi(
+    () => liveApi.getLiveBoard(),
+    [],
+    { cacheKey: `live-incoming-board:${date}`, refreshMs: 30_000, revalidateOnMount: true }
   );
 
   const incomingRows = liveRows(incoming.data);
   const dangerRows = liveRows(danger.data);
   const aggRows = liveRows(aggregator.data);
+
+  // One button refreshes every feed on the page. `refetch()` bumps the same tick
+  // the poller uses, so it bypasses both the session cache and the 24h
+  // localStorage tier — this genuinely re-reads the backend.
+  const refreshing =
+    incoming.loading ||
+    incoming.isRefetching ||
+    danger.loading ||
+    danger.isRefetching ||
+    aggregator.loading ||
+    aggregator.isRefetching ||
+    liveNow.loading ||
+    liveNow.isRefetching;
+
+  const handleRefresh = useCallback(() => {
+    incoming.refetch();
+    danger.refetch();
+    aggregator.refetch();
+    liveNow.refetch();
+  }, [incoming, danger, aggregator, liveNow]);
+
+  // Split the live board into what the engines could analyse and what they could
+  // not. The second group is the whole point of this panel: those fixtures ARE
+  // live, the provider simply publishes no lineup for that league, so the
+  // forensic tables below have nothing to say about them.
+  const { liveNowRows, liveWithPicks, liveWithoutPicks } = useMemo(() => {
+    const rows = (liveNow.data?.matches ?? []).filter((m) => !m.is_finished);
+    return {
+      liveNowRows: rows,
+      liveWithPicks: rows.filter((m) => m.has_forensic_picks).length,
+      liveWithoutPicks: rows.filter((m) => !m.has_forensic_picks).length,
+    };
+  }, [liveNow.data]);
+
+  const boardAge = liveNow.data?.data_age_seconds ?? null;
 
   const stats = useMemo(() => {
     const breaches = dangerRows.filter(
@@ -357,16 +426,46 @@ export default function LiveIncomingPage() {
       <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow opacity-70" />
 
       <section className="relative overflow-hidden rounded-2xl border border-accent-cyan/20 bg-nebula shadow-elevated">
-        <div className="relative z-10 px-5 py-3.5 md:px-6">
-          <h1 className="text-xl font-extrabold tracking-tight text-text-primary sm:text-2xl">
-            Incoming Forensics
-          </h1>
-          <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-text-secondary">
-            Structural pick stream from live lineups, squad danger audit (GK leak / missing stars),
-            then master handshake chemistry across GG · Win · O2.5 · Corners · Unders.
-          </p>
+        <div className="relative z-10 flex flex-wrap items-start justify-between gap-3 px-5 py-3.5 md:px-6">
+          <div>
+            <h1 className="text-xl font-extrabold tracking-tight text-text-primary sm:text-2xl">
+              Incoming Forensics
+            </h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-text-secondary">
+              Structural pick stream from live lineups, squad danger audit (GK leak / missing stars),
+              then master handshake chemistry across GG · Win · O2.5 · Corners · Unders.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1.5">
+            <LiveRefreshButton onRefresh={handleRefresh} refreshing={refreshing} />
+            {boardAge !== null && (
+              <span
+                className={cn(
+                  "rounded-full border px-2 py-0.5 font-mono text-[9px] font-bold",
+                  boardAge > 300
+                    ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                )}
+                title={`Scores and minutes come from the shared in-play cache, which the scanner refreshes about once every 2 minutes. This panel is ${Math.round(boardAge)}s old.`}
+              >
+                live feed {boardAge < 90 ? `updated ${Math.round(boardAge)}s ago` : `updated ${Math.round(boardAge / 60)}m ago`}
+              </span>
+            )}
+          </div>
         </div>
       </section>
+
+      {/* The live board comes FIRST and is unconditional. It is the honest
+          answer to "is anything actually live right now?", and it deliberately
+          sits above the forensic tables because those tables are empty for
+          most of today's slate — a page that opens on an empty table reads as
+          "nothing is live" even when 40 matches are in play. */}
+      <LiveNowPanel
+        rows={liveNowRows}
+        loading={liveNow.loading}
+        withPicks={liveWithPicks}
+        withoutPicks={liveWithoutPicks}
+      />
 
       <section className="flex flex-col gap-3">
         <div className="flex items-center gap-3">

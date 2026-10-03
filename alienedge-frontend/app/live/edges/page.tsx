@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, type ReactNode } from "react";
+import { useState, useMemo, useCallback, type ReactNode } from "react";
 import {
   Radio,
   Shield,
@@ -26,6 +26,7 @@ import {
 import {
 } from "@/components/predictions";
 import { Skeleton } from "@/components/ui/skeleton";
+import { LiveNowPanel, LiveRefreshButton } from "@/components/live/LiveRefreshButton";
 import { PushToggle } from "./PushToggle";
 import { cn } from "@/lib/utils";
 
@@ -834,6 +835,7 @@ export default function LivePage() {
     fallback: MOCK_LIVE_PREMATCH_AUDIT,
     cacheKey: `live-edges-prematch:${date}`,
     refreshMs: 60_000,
+    revalidateOnMount: true,
   });
   // The Code 2 validator no longer runs, so its board is retired as the
   // source for this page. Live team statistics now come from the Code 6
@@ -843,8 +845,48 @@ export default function LivePage() {
   // ~3 minutes and a one-shot fetch would freeze on first paint.
   const validation = useApi(() => liveApi.getOrchestrator(), [], {
     cacheKey: `live-edges-orchestrator:${date}`,
-    refreshMs: 15_000,
+    // 30s, not 15s. Measured on the running box: a cycle is 40.08s of work plus
+    // a 45s sleep, so the board is rewritten about every 85s. At 15s, 5 of every
+    // 6 responses were byte-identical while still forcing a full React re-render
+    // — cost without freshness. 30s keeps a sub-cycle cadence (a board is never
+    // more than ~1 cycle stale) at half the request count.
+    refreshMs: 30_000,
+    revalidateOnMount: true,
   });
+
+  // The same live board the Incoming page shows. Code 1 below only lists
+  // fixtures that have an official lineup, so on most nights this page's own
+  // table is a fraction of what is actually in play — which is exactly the
+  // "prematch shows matches, the live section doesn't" gap. Fed by the
+  // read-only /api/live/board, so this adds no provider call.
+  const liveBoard = useApi(() => liveApi.getLiveBoard(), [], {
+    cacheKey: `live-edges-board:${date}`,
+    refreshMs: 30_000,
+    revalidateOnMount: true,
+  });
+
+  const { liveNowRows, liveWithPicks, liveWithoutPicks } = useMemo(() => {
+    const rows = (liveBoard.data?.matches ?? []).filter((m) => !m.is_finished);
+    return {
+      liveNowRows: rows,
+      liveWithPicks: rows.filter((m) => m.has_forensic_picks).length,
+      liveWithoutPicks: rows.filter((m) => !m.has_forensic_picks).length,
+    };
+  }, [liveBoard.data]);
+
+  const refreshing =
+    prematch.loading ||
+    prematch.isRefetching ||
+    validation.loading ||
+    validation.isRefetching ||
+    liveBoard.loading ||
+    liveBoard.isRefetching;
+
+  const handleRefresh = useCallback(() => {
+    prematch.refetch();
+    validation.refetch();
+    liveBoard.refetch();
+  }, [prematch, validation, liveBoard]);
 
   // Code 1 render filter — the FINAL guard against a finished match appearing.
   //
@@ -976,7 +1018,18 @@ export default function LivePage() {
               <DataFreshness rows={prematch.data} />
           </div>
         </div>
+        <LiveRefreshButton onRefresh={handleRefresh} refreshing={refreshing} />
       </div>
+
+      {/* Same rationale as the identical panel on /live/incoming: the Code 1
+          table below only holds fixtures with an official lineup, so without
+          this the page understates what is actually in play. */}
+      <LiveNowPanel
+        rows={liveNowRows}
+        loading={liveBoard.loading}
+        withPicks={liveWithPicks}
+        withoutPicks={liveWithoutPicks}
+      />
 
       <section className="flex flex-col gap-3">
         <div className="flex items-center justify-between border-b border-white/5 pb-2 px-1">
