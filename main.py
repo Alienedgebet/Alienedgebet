@@ -498,8 +498,8 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
 # ==============================================================================
 # 4. 429-DEGRADED RUN GUARD — never persist a starved empty day as "ok"
 # ==============================================================================
-# The 2026-09-18 outage: the 23:30 pipeline ran while the shared SportMonks 429
-# cooldown gate was active. Starved feeds returned "Feed is empty" and every
+# The 2026-09-18 outage: the evening pipeline ran while the shared SportMonks
+# 429 cooldown gate was active. Starved feeds returned "Feed is empty" and every
 # critical engine legitimately saved a 0-row snapshot with status "ok" — which
 # the API then served all day as an honest-but-blank market page.
 #
@@ -1002,7 +1002,9 @@ def _win_forecast_healthy(date_str: str) -> bool:
 def alienedge_second_chance(target_date: str) -> int:
     """06:00 safety net: re-run ONLY the critical keys that are missing,
     failed, degraded, or empty for the target date. Full runs stay on the
-    23:30 timer; this catches whatever that run starved (429) or failed."""
+    18:00 timer (see /etc/systemd/system/alienedge-pipeline.timer,
+    OnCalendar=*-*-* 18:00:00); this catches whatever that run starved (429)
+    or failed."""
     print("\n" + "█" * 115)
     print(f"{'🛟 ALIENEDGE SECOND-CHANCE RECOVERY':^115}")
     print(f"{f'Target Date: {target_date}':^115}")
@@ -1219,7 +1221,11 @@ if __name__ == "__main__":
 
     # --second-chance=<date>: 06:00 safety net — re-run only failed/empty/
     # degraded critical keys for the date, then exit. No argument (or
-    # --date=...): the full 23:30 pipeline as before.
+    # --date=...): the full pipeline, which the systemd timer runs at 18:00
+    # (OnCalendar=*-*-* 18:00:00). Do not hardcode that time here: the timer
+    # unit is the single source of truth, and these comments were previously
+    # stuck at "23:30" after the schedule had moved — which sent the operator
+    # looking for a second, duplicate pipeline that never existed.
     _second_chance_date = None
     for _arg in sys.argv[1:]:
         if _arg.startswith("--second-chance="):
