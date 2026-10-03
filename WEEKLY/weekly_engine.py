@@ -42,6 +42,7 @@ as main.py persists its own engine results.
 """
 
 import gc
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -50,6 +51,56 @@ import output_store as store
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+HEARTBEAT_FILE = os.path.join(BASE_DIR, "data", "pipeline_heartbeat.json")
+
+# ── PROGRESS HEARTBEAT ───────────────────────────────────────────────────────
+#
+# WHY THIS EXISTS (2026-10-03)
+# The run watchdog (run_pipeline_watchdog.sh) SIGKILLs a run whose
+# data/pipeline_heartbeat.json has not moved for STALE_AFTER (45 min). Until
+# now ONLY main.py's _safe_exec() touched that file, so the heartbeat went
+# silent the moment the WEEKLY family started — even though the weekly pass was
+# demonstrably working and writing artefacts.
+#
+# Measured on the 2026-10-03 18:00 run: last heartbeat 18:13:56
+# ("done:filter_win__aggressive"), killed 18:59:10 = 45.2 minutes silent,
+# exactly at the threshold — while weekly artefacts were being written at
+# 18:37, 18:38, 18:39 and 18:44. The watchdog did precisely what it was told;
+# it was simply never told the run was alive.
+#
+# The same failure killed the 2026-10-02 run mid weekly-pass at 2026-10-09 (see
+# the history note in run_pipeline_watchdog.sh), so this is a recurring kill of
+# healthy runs, not a one-off. It silently cost the final day of the 7-day
+# window every night.
+#
+# main.py cannot be imported from here (circular: main imports this module), so
+# this writes the same file with the same shape and the same atomic
+# tmp+os.replace discipline. It is deliberately self-contained, cheap (one small
+# JSON write per step), and never raises — telemetry must not kill a run.
+_heartbeat_last = [0.0]
+HEARTBEAT_MIN_INTERVAL_S = 20.0
+
+
+def weekly_heartbeat(note, force=False):
+    """Tell the watchdog the Weekly pass is alive. Never raises."""
+    now = time.time()
+    if not force and (now - _heartbeat_last[0]) < HEARTBEAT_MIN_INTERVAL_S:
+        return
+    try:
+        payload = {
+            "pid": os.getpid(),
+            "ts": now,
+            "iso": datetime.now().isoformat(),
+            "note": note,
+        }
+        os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True)
+        tmp = f"{HEARTBEAT_FILE}.{os.getpid()}.weekly.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, HEARTBEAT_FILE)
+        _heartbeat_last[0] = now
+    except Exception:
+        pass
 
 # Risk levels are EXACTLY the ones main.py precomputes for the existing Weekly
 # Filter page (see app/weekly/filter-config.ts + main.py phase 11).
@@ -252,17 +303,25 @@ def run_weekly_family(target_date=None, horizon=DEFAULT_HORIZON,
     result = {"anchor": target_date, "dates": dates, "markets": markers,
               "per_date": {}, "started_at": started}
 
-    for date in dates:
-        print(f"\n> 🗓️  Weekly pass for {date}")
+    total_dates = len(dates)
+    for idx, date in enumerate(dates, start=1):
+        # Beaten BEFORE the first market, so a slow first date is already
+        # accounted for, and after each date, so one long date cannot
+        # accumulate past the watchdog threshold while saying nothing.
+        weekly_heartbeat(f"weekly:start:{date}", force=True)
+        print(f"\n> 🗓️  Weekly pass for {date}  ({idx}/{total_dates})")
         day = {}
         for market in markers:
+            weekly_heartbeat(f"weekly:{market}:{date}")
             if market == "gg":
                 day["gg"] = run_weekly_gg(date)
             elif market == "win":
                 day["win"] = run_weekly_win(date)
             else:
                 day["over25"] = run_weekly_over25(date)
+            weekly_heartbeat(f"weekly:{market}:done:{date}")
         result["per_date"][date] = day
+        weekly_heartbeat(f"weekly:done:{date}", force=True)
         if flush_between_dates:
             try:
                 import api_cache
