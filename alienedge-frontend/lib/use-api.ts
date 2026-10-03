@@ -214,6 +214,23 @@ export interface UseApiOptions<T> {
   cacheKey?: string;
   refreshMs?: number;
   /**
+   * Paint the cached payload immediately on mount but STILL hit the network.
+   *
+   * The cache-hit branch below normally paints and `return`s, so a page opened
+   * from localStorage never calls the API at all until the first poll tick.
+   * That is fine for a page whose data is historical, but it is wrong for a
+   * LIVE feed: the 24h persistent tier means the user stares at a snapshot up
+   * to a full poll interval old (measured 15-60s here) immediately after
+   * clicking through to the page, which reads as "I opened it and it isn't
+   * live".
+   *
+   * With `revalidateOnMount: true` the cached rows still paint (first paint is
+   * instant, no skeleton flash) and the effect then falls through to the fetch,
+   * exactly like the unsettled-Verify branch above. The cache is only ever used
+   * to accelerate the first paint — never to substitute for a request.
+   */
+  revalidateOnMount?: boolean;
+  /**
    * Explicit opt-in for demo fallback rendering. When `true`, `fallback`
    * is used as the initial seed, to fill genuinely-empty engine responses,
    * and when the request fails — always flagged with `isMock: true`. When
@@ -397,7 +414,7 @@ export function useApi<T>(
   deps: DependencyList,
   options?: UseApiOptions<T>
 ): UseApiResult<T> {
-  const { fallback, cacheKey, demo } = options ?? {};
+  const { fallback, cacheKey, demo, revalidateOnMount } = options ?? {};
   // Demo fallback is OFF unless explicitly requested per-hook (`demo`)
   // or explicitly enabled for the deployment (NEXT_PUBLIC_DEMO_MODE=1).
   const demoActive = demo ?? DEMO_MODE_ENABLED;
@@ -449,6 +466,35 @@ export function useApi<T>(
 
   const refetch = useCallback(() => setRefetchTick((t) => t + 1), []);
 
+  // ── Re-fetch when the tab comes back to the foreground ───────
+  //
+  // A backgrounded tab keeps its timers throttled (browsers clamp them to
+  // ~1/min), so a live page left in a background tab can return to the
+  // foreground showing a board many minutes old — the interval fired while
+  // nobody could see it. Re-fetching on `visibilitychange` / window `focus`
+  // means returning to the tab always shows current data without the user
+  // having to click anything, which is the behaviour they expect from a page
+  // labelled "live".
+  //
+  // Deliberately unconditional (not gated on refreshMs): the point is to
+  // recover from throttling, and it costs one request per tab return. Each
+  // event bumps the same refetchTick the poller uses, so it inherits the
+  // cache-bypass and keep-visible semantics already proven above.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        setRefetchTick((v) => v + 1);
+      }
+    };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -474,7 +520,13 @@ export function useApi<T>(
         // stays visible), then CONTINUE to the fetch so the backend can replace
         // them. `keepVisible` below keeps the table on screen during the
         // background request rather than dropping to a skeleton.
-        if (payloadHasVerification(hit) && !payloadIsSettled(hit)) {
+        //
+        // `revalidateOnMount` opts a LIVE feed into the same treatment for a
+        // more urgent reason: its rows carry no `verification` object at all,
+        // so without this flag every live page took the `else` branch below,
+        // painted localStorage and returned WITHOUT a request — which is why
+        // opening a live page showed data from up to a poll interval ago.
+        if ((payloadHasVerification(hit) && !payloadIsSettled(hit)) || revalidateOnMount) {
           setData(hit);
           dataRef.current = hit;
           requestKeyRef.current = cacheKey ?? JSON.stringify(deps);

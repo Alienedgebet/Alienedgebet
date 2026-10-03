@@ -1540,6 +1540,34 @@ export interface LiveIncomingPick {
   };
 }
 
+/**
+ * `GET /api/live/board` — every fixture in play, read from the local in-play
+ * disk cache only (no provider call).
+ *
+ * The forensic feeds (`/api/live/incoming`, `/api/live/prematch`) admit a
+ * fixture only once it has an official lineup, which the provider does not
+ * publish for every league. This board therefore covers a strictly LARGER set,
+ * and `has_forensic_picks` is what tells the two apart — a false value means
+ * the match is live but the engines had no lineup to analyse, not that the
+ * match is missing or not real.
+ */
+export interface LiveBoard {
+  matches: Array<{
+    fixture_id: string;
+    fixture: string;
+    /** e.g. "2 - 1". Null when the provider has not published a score yet. */
+    score: string | null;
+    minute: number;
+    /** Raw provider state, e.g. "INPLAY_1ST_HALF", "HT", "FT". */
+    state: string;
+    is_finished: boolean;
+    has_forensic_picks: boolean;
+  }>;
+  total_live: number;
+  /** How old the underlying in-play cache file is, in seconds. */
+  data_age_seconds: number | null;
+}
+
 /** One side of a fixture, as the Live Match page reports it (Code 1). */
 export interface LiveIncomingTeamView {
   gk_ok: boolean;
@@ -2813,6 +2841,19 @@ export const liveApi = {
 
   getIncoming: (): Promise<AxiosResponse<LiveIncomingPick[]>> =>
     api.get("/api/live/incoming"),
+
+  /**
+   * Every fixture genuinely in play right now, read from the local in-play disk
+   * cache — no provider call, so it cannot consume the shared SportMonks quota
+   * the pre-match pipeline depends on.
+   *
+   * This exists because the forensic feeds above only admit a fixture once it
+   * has an official LINEUP, and the provider publishes none for several leagues.
+   * On 2026-10-03 that meant 40 fixtures were in play while those feeds carried
+   * 7, so 39 live matches were invisible on the live pages.
+   */
+  getLiveBoard: (): Promise<AxiosResponse<LiveBoard>> =>
+    api.get("/api/live/board"),
 
   /**
    * Full drill-down for one incoming fixture: the key-11 table, the keeper

@@ -2367,6 +2367,75 @@ def _live_index_cached() -> dict:
     return _LIVE_INDEX_CACHE["idx"]
 
 
+@app.get("/api/live/board", tags=["Live"])
+def get_live_board():
+    """Every fixture that is genuinely in play right now, from local disk only.
+
+    WHY THIS EXISTS
+    ---------------
+    The forensic feeds behind /live/incoming and /live/edges (incoming
+    predictions, danger audit, the Code 1 audit board) only admit a fixture once
+    it has an OFFICIAL LINEUP:
+
+      * stage 1 - `admit_to_prematch_board`: for a live fixture
+        `admitted = has_official_lineup(fixture)`;
+      * stage 3 - `if len(lineups_raw) < MIN_LINEUP_ENTRIES: continue`.
+
+    SportMonks publishes no `lineups`/`formations` for a number of leagues.
+    Measured on 2026-10-03: `data/live_inplay_cache.json` held 40 fixtures in
+    play, while `incoming_predictions.json` and `prematch_team_audit.json` each
+    held the SAME 7 - so 39 genuinely-live fixtures (all English non-league ties
+    with lineups=0) were invisible on the live pages, which read as "nothing is
+    live" while 40 matches were in fact playing.
+
+    Loosening the engine gates would fix the visibility but would also admit 39
+    more fixtures into the per-cycle squad-history work against the SAME shared
+    SportMonks key the nightly pre-match pipeline uses - the one change that
+    could starve the pre-match run. This route deliberately does NOT do that.
+
+    It is assembled entirely from files the API already reads for the `live`
+    column of these same tables, so it costs ZERO provider calls and cannot
+    affect the pre-match pipeline at all. A fixture with no lineup is reported
+    with `has_lineup: False` so the UI can say why there are no forensic picks,
+    rather than silently omitting it.
+    """
+    index = _live_index_cached()
+    names = _fixture_name_index()
+    # Ids the forensic engines DID produce, so the UI can separate "live but
+    # not analysable" from "live and analysed".
+    covered = set()
+    for fname in ("incoming_predictions.json", "prematch_team_audit.json"):
+        raw = _read_json(os.path.join(DATA_DIR, fname), {})
+        if isinstance(raw, dict):
+            covered.update(str(k) for k in raw)
+        elif isinstance(raw, list):
+            for row in raw:
+                if isinstance(row, dict) and row.get("fixture_id") is not None:
+                    covered.add(str(row["fixture_id"]))
+
+    rows = []
+    for fid, entry in index.items():
+        if not isinstance(entry, dict):
+            continue
+        rows.append({
+            "fixture_id": fid,
+            "fixture": names.get(fid) or fid,
+            "score": entry.get("score"),
+            "minute": entry.get("minute"),
+            "state": entry.get("state") or "",
+            "is_finished": bool(entry.get("is_finished")),
+            "has_forensic_picks": fid in covered,
+        })
+    rows.sort(key=lambda r: (-int(r["minute"] or 0), r["fixture"]))
+    return {
+        "matches": rows,
+        "total_live": sum(1 for r in rows if not r["is_finished"]),
+        "data_age_seconds": _data_age_seconds(
+            os.path.join(DATA_DIR, "live_inplay_cache.json")
+        ),
+    }
+
+
 @app.get("/api/live/incoming", tags=["Live"])
 def get_live_incoming():
     rows = _incoming_rows_from_disk()
