@@ -8,6 +8,7 @@ import {
   Info,
   X,
   ChevronRight,
+  ChevronDown,
   Activity,
   AlertTriangle,
 } from "lucide-react";
@@ -26,7 +27,8 @@ import {
 import {
 } from "@/components/predictions";
 import { Skeleton } from "@/components/ui/skeleton";
-import { LiveNowPanel, LiveRefreshButton } from "@/components/live/LiveRefreshButton";
+import { LiveNowPanel } from "@/components/live/LiveNowPanel";
+import { LiveRefreshButton } from "@/components/live/LiveRefreshButton";
 import { PushToggle } from "./PushToggle";
 import { cn } from "@/lib/utils";
 
@@ -621,6 +623,17 @@ function PrematchAuditCard({
   const isLive = status.includes("LIVE");
   const isFinished = status.includes("FINISH") || /\bFT\b/.test(status);
 
+  // Every fixture folds, same as the Live Now panel and the pre-match pick
+  // pack's ChainSection. The header is deliberately NOT collapsible: the
+  // fixture name, live/upcoming badge and risk band are the scan-level facts,
+  // and they must stay readable when every card is closed — otherwise a
+  // collapsed board tells you nothing at all.
+  //
+  // Default expanded, matching ChainSection's rule that a stage is never
+  // hidden on arrival. Toggling is local state, so collapsing is instant and
+  // costs no request.
+  const [open, setOpen] = useState(true);
+
   return (
     <article className="glass overflow-hidden rounded-xl border border-white/10 shadow-panel transition-all hover:border-cyan-500/30">
       {/* ── CARD HEADER: Match + Status + Risk + Arrow ──────────────────── */}
@@ -662,6 +675,22 @@ function PrematchAuditCard({
 
         <button
           type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          aria-label={open ? `Collapse ${row.fixture}` : `Expand ${row.fixture}`}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/15 bg-white/5 text-slate-400 transition-all hover:scale-105 hover:border-white/30 hover:text-white"
+          title={open ? "Collapse this fixture" : "Expand this fixture"}
+        >
+          <ChevronDown
+            className={cn(
+              "h-4 w-4 transition-transform duration-150",
+              open && "rotate-180"
+            )}
+          />
+        </button>
+
+        <button
+          type="button"
           onClick={() => onOpenDetails(row)}
           className="ml-2 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-cyan-500/30 bg-cyan-950/40 text-cyan-300 shadow-sm transition-all hover:scale-105 hover:bg-cyan-500/20"
           title="Open Code 2 live validation"
@@ -670,6 +699,8 @@ function PrematchAuditCard({
         </button>
       </div>
 
+      {open && (
+        <>
       {/* ── PURPOSE STRIP: Code 1 contract + fixture meta ──────────────── */}
       <div className="border-b border-border/50 bg-bg-elevated/10 px-4 py-1.5">
         <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
@@ -719,6 +750,8 @@ function PrematchAuditCard({
         <TeamAuditPanel team={row.home} />
         <TeamAuditPanel team={row.away} />
       </div>
+        </>
+      )}
     </article>
   );
 }
