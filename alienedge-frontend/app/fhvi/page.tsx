@@ -5,6 +5,11 @@ import { Hourglass } from "lucide-react";
 import { specialsApi, type FHVIPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import {
+  createPickStatsColumn,
+  splitFixtureTeams,
+} from "@/components/dna/PickStatsCell";
+import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
@@ -47,11 +52,22 @@ const columns: PredictionColumn<FHVIPick>[] = [
 
 export default function FHVIPage() {
   const { date } = useSelectedDate();
+  // (2026-10-04) Supplies each team's real history for the DNA column.
+  const { data: dnaV2 } = useDnaV2();
 
-  // Verify -> Fixture -> Rest
+  // Verify -> DNA -> Fixture -> Rest
+  // DNA added 2026-10-04: no FHVI factor set exists, so this opens the team's
+  // real history rather than a factor count. Labelled DNA like every other page.
   const columnsWithVerify = useMemo(
     () => [
       createVerifyColumn<FHVIPick>(),
+      createPickStatsColumn<FHVIPick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: () => null,
+        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
+      }),
       createIntelligentPassColumn<FHVIPick>({
         market: "fhvi",
         getLabel: (r) => r.fixture,
@@ -59,7 +75,7 @@ export default function FHVIPage() {
       }),
       ...columns,
     ],
-    []
+    [date, dnaV2]
   );
 
   return (
