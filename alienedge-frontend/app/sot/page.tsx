@@ -74,7 +74,7 @@ export default function SOTPage() {
       createPickStatsColumn<SOTPick>({
         dna: dnaV2,
         date,
-        getFixtureId: () => null,
+        getFixtureId: (r) => r.fixture_id,
         getHomeTeam: (r) => splitFixtureTeams(r.Fixture).home,
         getAwayTeam: (r) => splitFixtureTeams(r.Fixture).away,
       }),

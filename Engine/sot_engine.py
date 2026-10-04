@@ -314,6 +314,13 @@ def run_sot_engine(target_date=None, verbose=False):
         else: verdict = "🥈 VALUE PLAY"
         
         results.append({
+            # (2026-10-04) ADDITIVE. The fixture object is already in scope here,
+            # so publishing its id costs nothing. It exists so the pick row can be
+            # joined to the provider fixture — the "Stats" panel needs a real
+            # fixture_id to look up the head-to-head record, and SOT rows
+            # previously carried only a "Home vs Away" string, which cannot
+            # identify one specific match.
+            "fixture_id": fx.get("id"),
             "Fixture": f"{home['name']} vs {away['name']}",
             "Verdict": verdict,
             "Proj_SOT": total_proj,

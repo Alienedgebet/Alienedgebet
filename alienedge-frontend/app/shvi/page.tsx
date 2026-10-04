@@ -149,7 +149,7 @@ export default function SHVIPage() {
       createPickStatsColumn<SHVIPick>({
         dna: dnaV2,
         date,
-        getFixtureId: () => null,
+        getFixtureId: (r) => r.fixture_id,
         getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
         getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
       }),
@@ -189,7 +189,7 @@ export default function SHVIPage() {
       createPickStatsColumn<SHMasterPick>({
         dna: dnaV2,
         date,
-        getFixtureId: () => null,
+        getFixtureId: (r) => r.fixture_id,
         getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
         getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
       }),

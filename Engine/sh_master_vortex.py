@@ -220,6 +220,10 @@ def run_sh_master_vortex(target_date):
             (h_ht, a_ht), (h_ft, a_ft) = get_scores_ht_ft(fx.get("scores",[]))
 
             results.append({
+                # (2026-10-04) ADDITIVE — `fx` is in scope here. Lets the pick be
+                # joined to its provider fixture so the head-to-head panel can
+                # resolve it; the row previously carried only a name string.
+                "fixture_id": fx.get("id"),
                 "fixture": f"{h_name} vs {a_name}",
                 "league": league_names[l_id],
                 "shvi_score": shvi,
