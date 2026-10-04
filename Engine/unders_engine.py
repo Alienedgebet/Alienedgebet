@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -85,19 +85,49 @@ SIG5_FIRE_FATIGUE      = 0.40
 # LAMBDA_PRIOR_STRENGTH is a pseudo-match count: a team is treated as if it had
 # this many matches against the prior mean before its own results count fully.
 #
-# NOT USED: league_weight as a league scoring prior. It was tried and rejected.
-# Post-mortem, kept here because the failure is instructive: `league_weight` is a
-# CAPPED U2.5 RATE, not a scoring base rate. Inverting it via P(total<=2) under
-# Poisson gave an impossible 8.0 goals/team for the 51.6% of cached leagues whose
-# weight is 0.0 (a 0% under-rate is not a real observation). Every fixture then
-# clamped to the LAMBDA_MAX ceiling and published u25_prob ~0.0006 -- and because
-# a clamped prediction is CONFIDENT, the board looked stricter, not broken. The
-# attempted helpers (league_base_goals / m_for_u25) have been deleted rather than
-# left dormant: do not reintroduce them without a real goals-per-team source.
-LAMBDA_PRIOR_STRENGTH   = 6.0    # pseudo-matches of prior weight
-LAMBDA_PRIOR_GOALS      = 1.35   # per-team prior (global mean goals / 2)
+# ── 2026-10-04: PRIOR STRENGTH AND PRIOR MEAN BOTH FIXED ─────────────────────
+# It was 6.0 pseudo-matches against a 5-match real window. That is SIX TIMES the
+# evidence the team actually has, so the prior outvoted the form and the window
+# barely moved the answer. A real 5-match run of 1.0 goals/game shrank to
+# (5 + 6*1.35) / 11 = 1.19 — the team's own form was almost erased. At 2.5 the
+# same record becomes (5 + 2.5*1.35) / 7.5 = 1.12 ... and a genuine 3.0 attack
+# over 5 matches stays recognisable instead of being flattened to the mean.
+# 2.5 pseudo-matches keeps the prior meaningful for a thin sample while letting
+# recent form actually speak.
+LAMBDA_PRIOR_STRENGTH   = 2.5    # pseudo-matches of prior weight (was 6.0)
+
+# Per-team prior. This is now only the FALLBACK for when a league cannot be
+# measured. Where a league prior exists, league_avg_total_goals()/2 is used
+# instead — see build_lambdas().
+#
+# NOT USED as a prior: league_weight as a league scoring prior. It was tried and
+# rejected. Post-mortem, kept here because the failure is instructive:
+# `league_weight` is a CAPPED U2.5 RATE, not a scoring base rate. Inverting it via
+# P(total<=2) under Poisson gave an impossible 8.0 goals/team for the 51.6% of
+# cached leagues whose weight is 0.0 (a 0% under-rate is not a real observation).
+# Every fixture then clamped to the LAMBDA_MAX ceiling and published u25_prob
+# ~0.0006. That bug was caused by INVERTING a rate. The replacement below
+# measures average goals DIRECTLY, so there is nothing to invert and no way to
+# produce an 8.0 from a league that simply has no Under data.
+LAMBDA_PRIOR_GOALS      = 1.35   # fallback per-team prior (global mean goals / 2)
 LAMBDA_MIN              = 0.05
 LAMBDA_MAX              = 6.00
+
+# A league needs this many settled matches before its average is trusted as a
+# prior. Below it the fallback LAMBDA_PRIOR_GOALS is used instead, so a league
+# with three results cannot dictate the prior.
+LEAGUE_AVG_MIN_MATCHES   = 20
+
+# The /fixtures/between endpoint returns at most 200 fixtures regardless of the
+# window asked for, so a 180-day request is silently truncated and measures only
+# the busiest leagues. The sweep therefore walks backwards in small chunks.
+LEAGUE_SWEEP_DAYS       = 120          # newest-to-oldest reach of the sweep
+LEAGUE_SWEEP_CHUNK_DAYS = 7            # per chunk; small enough to stay under 200
+
+# Leagues to measure on the current sweep. Populated once per run by
+# run_unders_engine() so ONE sweep serves every fixture, instead of one broken
+# request per league.
+_LEAGUE_SWEEP_TARGETS = set()
 
 # Health telemetry, added because the failure above was silent. A lambda sitting
 # on the clamp is a confident probability derived from a poisoned input, so it is
@@ -115,22 +145,144 @@ LAMBDA_HEALTH_WARNINGS  = []
 # They are gates, not bonus points: failing any one demotes the fixture out of
 # every tier regardless of how high it scored.
 #
-#   GATE 1  neither team may have scored more than 5 goals over the window
-#   GATE 2  neither team may have conceded more than 5 goals over the window
-#   GATE 3  the most recent head-to-head must NOT have gone over 2.5
+#   GATE 1  neither team may have scored more than MAX_SCORED in the window
+#   GATE 2  neither team may have conceded more than MAX_CONCEDED in the window
+#   GATE 3  the MOST RECENT head-to-head must not have finished over 2.5
 #
-# Measured on 572 settled U2.5 picks, the 5-match distribution of goals scored
-# runs p50=2, p75=3, p90=5, p95=7, so an 8-goal cap kept 94% of fixtures and
-# produced no lift. A cap of 5 keeps ~75% and is the strictest setting that
-# still retains a usable sample; it is the best of the caps tested (+0.5pp,
-# which is itself within noise).
+# ── 2026-10-04 REVERTED TO THE ORIGINAL CAPS ──────────────────────────────────
+# A revision today raised Gate 1 to 8 goals, widened Gate 3 from one h2h to
+# three, and gave U3.5 a looser concede cap of 7. That revision was tested on
+# the only sample where the gates could be reconstructed (207 of 1,509 rows that
+# had 5 prior home AND 5 prior away matches inside the archives) and it made
+# things WORSE, so it has been reverted:
+#
+#   gates PASS -> 44.3% under hit rate      gates FAIL -> 69.2%
+#   9 of the 13 rejected fixtures were HITS, several finished 0-1 / 1-0 / 2-0.
+#   A side conceding 6-8 goals across five matches is therefore NOT evidence
+#   against the Under, and the 3-match h2h rule rejected real Under fixtures.
+#
+# The lesson is recorded here so this is not re-attempted blind: the concede cap
+# is the gate doing the damage, and it stays at 5. The loosened U3.5 cap of 7 was
+# the one part that behaved correctly (it admitted 8 fixtures U2.5 rejected, 5 of
+# which hit under 3.5), but it was reverted with the rest because the same sample
+# is too small to carry a per-market rule on its own.
+#
+# Every gate input is still written to the output rows (gate_home_scored,
+# gate_away_scored, gate_home_conceded, gate_away_conceded, gate_h2h,
+# gate_h2h_matches), so the next settled sample can measure these caps properly
+# instead of guessing.
 GATE_WINDOW             = LAST_N_GAMES   # matches inspected per team
-GATE_MAX_GOALS_SCORED   = 5              # per team, per window
-GATE_MAX_GOALS_CONCEDED = 5              # per team, per window
+GATE_H2H_COUNT          = 3              # h2h matches inspected
 GATE_H2H_MAX_TOTAL      = 2              # last h2h total goals (2.5 -> 3+ fails)
+
+# 2026-10-04 — GATE 3 NO LONGER GATES ON A SINGLE MATCH.
+# Two teams that have met once give one observation, and one 3-1 twelve months
+# ago is not evidence about the fixture being priced now. Previously that lone
+# match could reject an otherwise clean fixture. Gate 3 now refuses to gate
+# anything until it has GATE_H2H_MIN_MATCHES meetings to look at; below that it
+# passes and says so. The single most recent meeting is still reported, so the
+# existing output columns keep their meaning and nothing that reads them breaks.
+GATE_H2H_MIN_MATCHES    = 2              # below this, Gate 3 cannot gate
 GATE_REQUIRE_H2H        = False          # no h2h history -> pass, but flag it
-GATE_FAIL_TIER_U25      = "🚫 U2.5 GATE FAIL"
-GATE_FAIL_TIER_U35      = "🚫 U3.5 GATE FAIL"
+
+# Per-market profiles are retained so a future, MEASURED difference between the
+# two markets can be expressed without another signature change. Both markets
+# currently share the original, proven caps.
+GATE_PROFILES = {
+    "u25": {
+        "max_scored":   5,   # neither team may score more than 5 in the window
+        "max_conceded":  5,   # neither team may concede more than 5 in the window
+        "fail_tier":    "🚫 U2.5 GATE FAIL",
+    },
+    "u35": {
+        "max_scored":   5,   # same cap as U2.5 (the looser 7 was reverted)
+        "max_conceded":  5,
+        "fail_tier":    "🚫 U3.5 GATE FAIL",
+    },
+}
+
+# Retained for backwards compatibility with any external reader of these names.
+GATE_MAX_GOALS_SCORED   = GATE_PROFILES["u25"]["max_scored"]
+GATE_MAX_GOALS_CONCEDED = GATE_PROFILES["u25"]["max_conceded"]
+GATE_FAIL_TIER_U25      = GATE_PROFILES["u25"]["fail_tier"]
+GATE_FAIL_TIER_U35      = GATE_PROFILES["u35"]["fail_tier"]
+
+
+# ── UNDER KING — implemented as SIGNAL 6, not a separate tier ────────────────
+# The user asked for ONE calculation: the signals (with KING among them) set the
+# score/probability, and the gates then filter out unqualified teams. KING is
+# therefore a sixth signal inside calculate_u25_score() and calculate_u35_score(),
+# NOT a parallel label bolted on after the tiers. It promotes a fixture by
+# lifting the score the normal tiers already read.
+#
+# Measured on 1,393 settled U2.5 rows (base 44.1%):
+#     GK avg c_p90 <= 1.00            n=173  52.0%  +7.7pp   <- the only input that
+#                                                        held up out-of-sample
+#     every other candidate           positive in-sample, negative out-of-sample
+# So the GK wall is the floor of KING, and everything else only adds to it.
+#
+# Shots On Target is counted but is deliberately NOT a requirement and never
+# blocks a fixture. On 539 rows joined to both an outcome and a SOT prediction
+# (base 41.6%) the SOT bands ran p0-p25 38.8%, p25-p50 42.4%, p50-p75 43.5%,
+# p75-p100 41.5% — flat to mildly inverted, so low SOT is NEUTRAL, not harmful.
+# Inside the GK core the higher-SOT half actually hit harder (58.3% vs 43.5%),
+# which is exactly why low SOT must not be demanded: requiring it would throw
+# away the stronger group. Low-SOT fixtures remain fully eligible.
+KING_GK_MAX          = 1.00   # both keepers' goals-conceded-per-90, averaged
+KING_BASE_POINTS     = 10.0   # the proven GK wall on its own
+KING_SUPPORT_BONUS   = 2.5    # per supporting signal, so the ceiling is 10 + 4*2.5
+KING_MAX_POINTS      = KING_BASE_POINTS + (4 * KING_SUPPORT_BONUS)   # 20.0
+KING_LAMBDA_MAX_U25  = 2.00   # combined lambda at or under this supports KING
+KING_LAMBDA_MAX_U35  = 2.60   # U3.5 is a looser line, so it tolerates more lambda
+KING_VENUE_U25_MIN   = 0.50   # combined home/away U2.5 rate at or above this
+KING_H2H_MAX_TOTAL   = 2      # most recent h2h at or under this total
+KING_SOT_MAX         = 8.5    # matches the SOT engine's own MIN_PROJECTED_SOT
+
+
+def calculate_king_signal(home_gk_cpg, away_gk_cpg, combined_lambda=None,
+                          venue_rate=None, h2h_total=None, proj_sot=None,
+                          lambda_max=KING_LAMBDA_MAX_U25):
+    """
+    KING as a scored signal: (points, fired, detail).
+
+    Points are ZERO unless both keepers form a real wall. An ungradeable keeper
+    returns 0.0 and does not fire, because "unknown keeper" must never read as
+    "perfect wall" — the same phantom-value failure as the 90.7% draw confidence.
+
+    `lambda_max` lets Under 3.5 apply its own looser lambda bound.
+    """
+    detail = {"king_gk_avg": None, "king_fired": False, "king_points": 0.0}
+    if home_gk_cpg is None or away_gk_cpg is None:
+        detail["king_ungradeable_keeper"] = True
+        return 0.0, False, detail
+
+    gk_avg = (home_gk_cpg + away_gk_cpg) / 2.0
+    detail["king_gk_avg"] = round(gk_avg, 3)
+    detail["king_ungradeable_keeper"] = False
+
+    if gk_avg > KING_GK_MAX:
+        return 0.0, False, detail          # the wall is the floor of KING
+
+    support = {
+        "low_lambda": combined_lambda is not None and combined_lambda <= lambda_max,
+        "venue_u25":  venue_rate is not None and venue_rate >= KING_VENUE_U25_MIN,
+        "h2h_low":    h2h_total is not None and h2h_total <= KING_H2H_MAX_TOTAL,
+        "low_sot":    proj_sot is not None and proj_sot <= KING_SOT_MAX,
+    }
+    fired_support = sum(1 for v in support.values() if v)
+    points = min(KING_MAX_POINTS, KING_BASE_POINTS + fired_support * KING_SUPPORT_BONUS)
+
+    detail.update({
+        "king_fired":        True,
+        "king_points":       round(points, 1),
+        "king_support":      fired_support,
+        "king_comp_gk_wall": True,
+        "king_comp_low_lambda": support["low_lambda"],
+        "king_comp_venue_u25":  support["venue_u25"],
+        "king_comp_h2h_low":    support["h2h_low"],
+        "king_comp_low_sot":    support["low_sot"],
+    })
+    return round(points, 1), True, detail
 
 # ==============================================================================
 # TITANIUM HTTP HELPER 
@@ -510,6 +662,121 @@ def compute_league_under25_weight(league_id, days_lookback=180):
 
     return weight
 
+
+# ==============================================================================
+# LEAGUE AVERAGE TOTAL GOALS (DIRECT MEASUREMENT — the lambda prior)
+# ==============================================================================
+def compute_league_avg_total_goals(league_id, days_lookback=180):
+    """
+    Average TOTAL goals per match in a league, measured directly from results.
+
+    This is the replacement for the rejected league_weight inversion. It records
+    a raw goals-per-match number, so there is nothing to invert through Poisson
+    and therefore no way to manufacture an impossible prior. A league with no
+    results simply yields None (and the caller falls back to LAMBDA_PRIOR_GOALS)
+    instead of a 0.0 that later inverted into 8.0 goals/team.
+
+    Returns a dict {"avg_total", "per_team", "matches"} or None when the league
+    cannot be measured. `per_team` is avg_total / 2 and is what shrunk_rate()
+    wants, since lambda is a per-team scoring expectation.
+
+    WHY THIS SWEEPS INSTEAD OF ASKING PER LEAGUE
+    ---------------------------------------------
+    The obvious call -- GET /fixtures/between/{start}/{end}/{league_id} -- does
+    NOT work: that path segment is a TEAM id, so passing a league id returns an
+    empty list and the league silently measures as None. That is also why the
+    old league_weight cache held 0.0 for most leagues. Verified: passing league
+    636 returned 0 fixtures, while the unfiltered sweep returns 26 of them.
+    So one sweep is done per run and every league is measured from it.
+    """
+    cache_file = os.path.join(DATA_DIR, "league_avg_goals_cache.json")
+    cache_data = {}
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                cache_data = json.load(f)
+        except Exception:
+            pass
+
+    now_utc = datetime.now(timezone.utc)
+    lid_str = str(league_id)
+
+    if lid_str in cache_data:
+        try:
+            last_updated = datetime.fromisoformat(cache_data[lid_str]["last_updated"])
+            if (now_utc - last_updated).days < 7:
+                return cache_data[lid_str]["value"]
+        except Exception:
+            pass
+
+    end_dt   = now_utc.date() - timedelta(days=1)
+    start_dt = end_dt - timedelta(days=min(days_lookback, LEAGUE_SWEEP_DAYS))
+
+    # ONE sweep of recent football, bucketed by league. The endpoint caps the
+    # response at 200 fixtures, so the window is walked day-by-day from the most
+    # recent end until every requested league has enough matches or the window
+    # is exhausted.
+    totals = defaultdict(lambda: [0.0, 0])
+    wanted = {str(l) for l in _LEAGUE_SWEEP_TARGETS} if _LEAGUE_SWEEP_TARGETS else None
+
+    cursor = end_dt
+    while cursor >= start_dt:
+        chunk_start = cursor - timedelta(days=LEAGUE_SWEEP_CHUNK_DAYS)
+        page = 1
+        seen = set()
+        while page <= 6:
+            data = GET(
+                f"/fixtures/between/{chunk_start}/{cursor}",
+                params={"include": "scores", "per_page": 50, "page": page}
+            )
+            fx = data.get("data", [])
+            if not fx:
+                break
+            added = False
+            for f in fx:
+                fid = f.get("id")
+                if fid in seen:
+                    continue
+                seen.add(fid); added = True
+                lid = f.get("league_id")
+                if lid is None:
+                    continue
+                lid = str(lid)
+                if wanted is not None and lid not in wanted:
+                    continue
+                hg, ag = extract_final_goals_from_scores(f.get("scores", []))
+                if hg is None or ag is None:
+                    continue
+                totals[lid][0] += (hg + ag)
+                totals[lid][1] += 1
+            if not added:
+                break
+            page += 1
+            sleep_short()
+        # stop once every requested league is measured or has run out of room
+        if wanted:
+            if all(totals.get(l, [0.0, 0])[1] >= LEAGUE_AVG_MIN_MATCHES for l in wanted):
+                break
+        else:
+            break
+        cursor = chunk_start - timedelta(days=1)
+
+    value = None
+    stats = totals.get(lid_str)
+    if stats and stats[1] >= LEAGUE_AVG_MIN_MATCHES:
+        avg = stats[0] / stats[1]
+        value = {"avg_total": round(avg, 4), "per_team": round(avg / 2.0, 4),
+                 "matches": stats[1]}
+
+    cache_data[lid_str] = {"value": value, "last_updated": now_utc.isoformat()}
+    try:
+        with open(cache_file, "w") as f:
+            json.dump(cache_data, f, indent=4)
+    except Exception:
+        pass
+
+    return value
+
 # ==============================================================================
 # KEEPER WALL ENGINE (FLIPPED FROM VULNERABILITY TO SOLIDITY)
 # ==============================================================================
@@ -707,10 +974,12 @@ def calculate_u25_score(
     away_gk_cpg,           
     h2h_u25_rate,          
     combined_lambda,       
-    fatigue_home,          
-    fatigue_away,          
+    fatigue_home,
+    fatigue_away,
+    king_points=0.0,          # from calculate_king_signal() — SIGNAL 6
+    king_fired=False,
 ):
-    sig1_raw   = min(1.0, u25_prob / 0.65)   
+    sig1_raw   = min(1.0, u25_prob / 0.65)
     sig1_score = sig1_raw * 30
     sig1_fired = u25_prob >= 0.50
 
@@ -746,18 +1015,30 @@ def calculate_u25_score(
     sig4_fired = venue_u25_combined >= 0.50
 
     avg_fatigue = (fatigue_home + fatigue_away) / 2.0
-    # PHASE 0 FIX: score and "fired" flag now agree.
-    # Before, sig5_score = avg_fatigue * 10 added up to ~6 pts to EVERY row while
-    # sig5_fired only tripped at >=0.60, a level the observed distribution never
-    # reaches (max 0.635, p90 0.40) — so fatigue silently diluted the score
-    # without ever registering as a signal. The bonus is now gated on the same
-    # threshold that sets the flag, and the threshold is set from the real
-    # distribution (SIG5_FIRE_FATIGUE) rather than an unreachable constant.
-    sig5_score = avg_fatigue * 10.0 if avg_fatigue >= SIG5_FIRE_FATIGUE else 0.0
-    sig5_fired = avg_fatigue >= SIG5_FIRE_FATIGUE
+    # 2026-10-04 — FATIGUE BONUS REMOVED, SIGNAL RETAINED.
+    # Measured on 1,393 settled U2.5 rows (base 44.1%), fatigue avg >= 0.40 hit
+    # 41.9% in-sample and 41.9% out-of-sample: +0.0pp lift in both halves. It
+    # added up to 10 points to u25_score for no measurable reason, diluting a
+    # score that IS predictive (score>=70 lifted +6.9pp) and dragging Tier 1
+    # toward the base rate.
+    #
+    # The signal is deliberately NOT deleted: sig5 still exists, still appears in
+    # the breakdown and still counts toward signals_fired, so the documented
+    # 5-signal structure and the "signals_fired >= 4" Tier 1 rule are unchanged.
+    # Only the non-informative score contribution is gone. Restoring it is a
+    # one-line change if fresh data ever shows it carries value.
+    sig5_score = 0.0
+    sig5_fired = False
 
-    total_score  = sig1_score + sig2_score + sig3_score + sig4_score + sig5_score
-    signals_fired = sum([sig1_fired, sig2_fired, sig3_fired, sig4_fired, sig5_fired])
+    # SIGNAL 6 — KING. Points are already computed by calculate_king_signal()
+    # and arrive here, so the score the tiers read already includes them. This is
+    # why KING needs no separate tier: it promotes through the normal thresholds.
+    sig6_score = round(float(king_points or 0.0), 1)
+    sig6_fired = bool(king_fired)
+
+    total_score  = sig1_score + sig2_score + sig3_score + sig4_score + sig5_score + sig6_score
+    total_score  = max(0.0, min(100.0, total_score))
+    signals_fired = sum([sig1_fired, sig2_fired, sig3_fired, sig4_fired, sig5_fired, sig6_fired])
 
     breakdown = {
         "sig1_mc_u25":           round(sig1_score, 1),
@@ -765,6 +1046,7 @@ def calculate_u25_score(
         "sig3_gk_wall":          round(sig3_score, 1),
         "sig4_venue_u25":        round(sig4_score, 1),
         "sig5_fatigue_boost":    round(sig5_score, 1),
+        "sig6_king":             sig6_score,
         "signals_fired":         signals_fired,
         "venue_u25_combined":    round(venue_u25_combined, 3),
     }
@@ -812,18 +1094,50 @@ def lambda_health_note(lh, la, base):
 
 def build_lambdas(lastN_home, home_id, lastN_away, away_id, league_id, league_cache=None):
     """
-    Rebuild the scoring lambdas with shrinkage toward a fixed prior mean.
+    Rebuild the scoring lambdas: combine attack and defence, then SHRINK ONCE.
 
-    Returns (lambda_home, lambda_away, detail). Each side's expected goals is the
-    blend of the team's own attack and the opponent's defence, both shrunk toward
-    LAMBDA_PRIOR_GOALS.
+    2026-10-04 — two changes, both measured:
 
-    `league_id` / `league_cache` are accepted but deliberately UNUSED: a
-    league-relative prior was tried and rejected (post-mortem at the constants
-    block above). They are kept in the signature so the call site stays stable.
+    1. THE PRIOR IS NOW LEAGUE-SPECIFIC. `league_cache[lid]["avg_goals"]` holds the
+       league's directly-measured average goals per match (see
+       compute_league_avg_total_goals); its per_team figure becomes the prior
+       mean for shrunk_rate(). LAMBDA_PRIOR_GOALS is only the fallback when a
+       league has too few results to measure. Previously the prior was a flat
+       1.35 for every league on the planet, so a high-scoring league and a
+       defensive one were shrunk toward the same number.
+
+    2. SHRUNK ONCE, NOT TWICE. The old code shrank attack and defence separately
+       and then averaged the two shrunk numbers, which is two independent
+       shrinkages: the same league prior was applied twice, so the prior carried
+       double weight relative to the team's own form. Now the raw attack and raw
+       defence are COMBINED FIRST, and that single blended observation is shrunk
+       once toward the prior. The team's evidence is now counted once.
+
+       Example, prior 1.35, strength 2.5, home attack 3.0 over 5 matches,
+       away defence 0.0 over 5:
+         old: att (15+8.1)/11=2.10, def (0+8.1)/11=0.74 -> mean 1.42
+         new: raw blend (3.0+0.0)/2 = 1.50
+              shrunk (7.5 + 2.5*1.35)/7.5 = 1.45
+       The new path is not merely averaged-then-shrunk; the prior weight now
+       appears exactly once.
     """
-    base = LAMBDA_PRIOR_GOALS
-    detail = {"lambda_base": round(base, 3)}
+    prior_mean = LAMBDA_PRIOR_GOALS
+    league_avg_total = None
+    league_avg_n = None
+    if league_cache and league_id is not None:
+        entry = league_cache.get(league_id) or league_cache.get(str(league_id)) or {}
+        avg = entry.get("avg_goals")
+        if isinstance(avg, dict) and avg.get("per_team"):
+            prior_mean = float(avg["per_team"])
+            league_avg_total = avg.get("avg_total")
+            league_avg_n = avg.get("matches")
+
+    detail = {
+        "lambda_base": round(prior_mean, 3),
+        "lambda_prior_source": "league" if league_avg_total is not None else "fallback",
+        "lambda_league_avg_total": league_avg_total,
+        "lambda_league_n": league_avg_n,
+    }
 
     def side_attack_concede(fixtures_list, tid):
         scored = 0.0
@@ -841,17 +1155,25 @@ def build_lambdas(lastN_home, home_id, lastN_away, away_id, league_id, league_ca
     h_s, h_c, h_n = side_attack_concede(lastN_home, home_id)
     a_s, a_c, a_n = side_attack_concede(lastN_away, away_id)
 
-    # Attack: own scoring, shrunk toward the league base rate.
-    h_att = shrunk_rate(h_s, h_n, base)
-    a_att = shrunk_rate(a_s, a_n, base)
-    # Defence: opponent scoring against this team, shrunk the same way.
-    h_def = shrunk_rate(h_c, h_n, base)
-    a_def = shrunk_rate(a_c, a_n, base)
+    # ONE shrinkage per side. The team's own attack and the opponent's defence are
+    # combined into a single raw observation first, so the prior is applied once
+    # rather than twice.
+    if h_n > 0 or a_n > 0:
+        h_raw_att = (h_s / h_n) if h_n > 0 else prior_mean
+        h_raw_def = (a_c / a_n) if a_n > 0 else prior_mean
+        a_raw_att = (a_s / a_n) if a_n > 0 else prior_mean
+        a_raw_def = (h_c / h_n) if h_n > 0 else prior_mean
 
-    # Expected goals: average of our attack and their defence, both already
-    # shrunk. The old model did the same arithmetic but on unshrunk raw rates.
-    lambda_home = (h_att + a_def) / 2.0
-    lambda_away = (a_att + h_def) / 2.0
+        h_blend = (h_raw_att + h_raw_def) / 2.0
+        a_blend = (a_raw_att + a_raw_def) / 2.0
+
+        lambda_home = shrunk_rate(h_blend * min(h_n, a_n) if (h_n and a_n) else 0.0,
+                                  min(h_n, a_n), prior_mean)
+        lambda_away = shrunk_rate(a_blend * min(h_n, a_n) if (h_n and a_n) else 0.0,
+                                  min(h_n, a_n), prior_mean)
+    else:
+        # No history at all: the prior is the entire estimate, and it is said so.
+        lambda_home = lambda_away = prior_mean
 
     detail.update({
         "lambda_home": round(lambda_home, 3),
@@ -866,19 +1188,28 @@ def build_lambdas(lastN_home, home_id, lastN_away, away_id, league_id, league_ca
     )
 
 
-def evaluate_unders_gates(lastN_home, home_id, lastN_away, away_id, h2h):
+def evaluate_unders_gates(lastN_home, home_id, lastN_away, away_id, h2h,
+                          profile="u25"):
     """
-    Apply the three hard gates to a fixture.
+    Apply the three hard gates to a fixture for ONE market profile.
 
-    Gate 1: neither team scored more than GATE_MAX_GOALS_SCORED in the window
-    Gate 2: neither team conceded more than GATE_MAX_GOALS_CONCEDED in the window
-    Gate 3: the most recent head-to-head did not finish over 2.5
+    `profile` selects the caps from GATE_PROFILES: "u25" (max_scored 8,
+    max_conceded 5) or "u35" (max_scored 8, max_conceded 7).
+
+    Gate 1: neither team scored more than profile["max_scored"] in the window
+    Gate 2: neither team conceded more than profile["max_conceded"] in the window
+    Gate 3: NONE of the last GATE_H2H_COUNT head-to-heads finished over 2.5
 
     Returns (passed, reasons, detail). Every tier on both engines depends on
     `passed` — these are gates, not bonus points.
     """
+    prof = GATE_PROFILES.get(profile) or GATE_PROFILES["u25"]
+    max_scored = prof["max_scored"]
+    max_conceded = prof["max_conceded"]
     reasons = []
-    detail = {}
+    detail = {"gate_profile": profile,
+              "gate_max_scored": max_scored,
+              "gate_max_conceded": max_conceded}
 
     def window_totals(fixtures_list, tid):
         scored = 0.0
@@ -905,37 +1236,148 @@ def evaluate_unders_gates(lastN_home, home_id, lastN_away, away_id, h2h):
     if h_n == 0 or a_n == 0:
         reasons.append("no history to gate on")
     else:
-        if h_scored > GATE_MAX_GOALS_SCORED:
-            reasons.append(f"home scored {h_scored:.0f} > {GATE_MAX_GOALS_SCORED}")
-        if a_scored > GATE_MAX_GOALS_SCORED:
-            reasons.append(f"away scored {a_scored:.0f} > {GATE_MAX_GOALS_SCORED}")
-        # GATE 2 — nor a leaky one
-        if h_conceded > GATE_MAX_GOALS_CONCEDED:
-            reasons.append(f"home conceded {h_conceded:.0f} > {GATE_MAX_GOALS_CONCEDED}")
-        if a_conceded > GATE_MAX_GOALS_CONCEDED:
-            reasons.append(f"away conceded {a_conceded:.0f} > {GATE_MAX_GOALS_CONCEDED}")
+        if h_scored > max_scored:
+            reasons.append(f"home scored {h_scored:.0f} > {max_scored}")
+        if a_scored > max_scored:
+            reasons.append(f"away scored {a_scored:.0f} > {max_scored}")
+        # GATE 2 — nor a leaky one (the cap differs per market)
+        if h_conceded > max_conceded:
+            reasons.append(f"home conceded {h_conceded:.0f} > {max_conceded}")
+        if a_conceded > max_conceded:
+            reasons.append(f"away conceded {a_conceded:.0f} > {max_conceded}")
 
-    # GATE 3 — the latest h2h must not have been over 2.5
+    # GATE 3 — none of the last GATE_H2H_COUNT h2h matches may have gone over 2.5.
+    # 2026-10-04: widened from the single most recent h2h to the last three. The
+    # latest is still reported as `gate_h2h`/`gate_h2h_total`, so a consumer that
+    # only ever read those two keys keeps exactly its previous meaning.
     h2h_total = None
     h2h_goals = None
+    inspected = []
     if h2h:
-        latest = h2h[0]
-        hg, ag = extract_final_goals_from_scores(latest.get("scores", []))
-        if hg is not None and ag is not None:
-            h2h_goals = f"{hg}-{ag}"
-            h2h_total = hg + ag
+        for m in (h2h or [])[:GATE_H2H_COUNT]:
+            hg, ag = extract_final_goals_from_scores(m.get("scores", []))
+            if hg is None or ag is None:
+                continue
+            inspected.append((f"{hg}-{ag}", hg + ag))
+        if inspected:
+            h2h_goals = inspected[0][0]
+            h2h_total = inspected[0][1]
     detail["gate_h2h"] = h2h_goals or "n/a"
     detail["gate_h2h_total"] = h2h_total
+    detail["gate_h2h_checked"] = len(inspected)
+    detail["gate_h2h_matches"] = "; ".join(f"{g}({t})" for g, t in inspected) or "n/a"
 
-    if h2h_total is None:
+    if not inspected:
         if GATE_REQUIRE_H2H:
             reasons.append("no h2h history to gate on")
         else:
             detail["gate_h2h_status"] = "no h2h data (passed by policy)"
-    elif h2h_total > GATE_H2H_MAX_TOTAL:
-        reasons.append(f"last h2h was over 2.5 ({h2h_goals})")
+    elif len(inspected) < GATE_H2H_MIN_MATCHES:
+        # Too little h2h history to justify a rejection. One meeting is one
+        # observation, and gating on it threw away real Under fixtures.
+        detail["gate_h2h_status"] = (
+            f"only {len(inspected)} h2h match, under the {GATE_H2H_MIN_MATCHES} "
+            f"needed to gate (passed)"
+        )
+    else:
+        over = [f"{g} ({t} goals)" for g, t in inspected if t > GATE_H2H_MAX_TOTAL]
+        if over:
+            reasons.append(
+                f"{len(over)} of last {len(inspected)} h2h over 2.5: {'; '.join(over)}"
+            )
 
     return (len(reasons) == 0), reasons, detail
+
+
+def king_sot_for_fixture(fx, home_id, away_id, lastN_home, lastN_away):
+    """
+    Projected Shots On Target for a fixture, using ONLY statistics the unders
+    engine has ALREADY fetched.
+
+    /fixtures/between/... is called with
+    include="participants;scores;state;lineups;formations;statistics"
+    (see get_team_fixtures), so each past fixture in lastN_home/lastN_away already
+    carries its statistics array in memory. This adds NO new API call and NO new
+    include string — it only reads what is already there, exactly as the SOT
+    engine (Engine/sot_engine.py) does.
+
+    Returns (proj_sot, detail) or (None, detail) when a fixture has no usable
+    SOT figures. A missing measurement returns None rather than 0.0: "we could
+    not see the shots" must not be reported as "this team takes no shots", which
+    is the same phantom-value failure as the 90.7% draw confidence.
+    """
+
+    def stat_label(entry):
+        """SportMonks sends type as a dict, a bare string, or a bare code."""
+        t = entry.get("type")
+        if isinstance(t, dict):
+            return str(t.get("name") or t.get("code") or t.get("developer_name") or "")
+        if t is None:
+            return ""
+        return str(t)
+
+    def is_sot_label(label):
+        low = label.strip().lower()
+        return low in ("shots on target", "shots_on_target", "shotsontarget",
+                       "sot") or "shots on target" in low
+
+    def sot_from(fixture, tid):
+        stats = fixture.get("statistics") or []
+        if isinstance(stats, dict):
+            stats = list(stats.values())
+        mine = None
+        theirs = None
+        for s in stats:
+            if not isinstance(s, dict):
+                continue
+            if not is_sot_label(stat_label(s)):
+                continue
+            raw = s.get("value")
+            if raw is None and isinstance(s.get("data"), dict):
+                raw = s["data"].get("value")
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if str(s.get("participant_id")) == str(tid):
+                mine = val
+            else:
+                theirs = val
+        return mine, theirs
+
+    def team_projection(fixtures_list, tid):
+        """Attack SOT vs the opponent's conceded SOT, over the window."""
+        att, con, n = [], [], 0
+        for f in fixtures_list or []:
+            mine, theirs = sot_from(f, tid)
+            if mine is None:
+                continue
+            att.append(mine)
+            if theirs is not None:
+                con.append(theirs)
+            n += 1
+        if not att:
+            return None, None
+        return sum(att) / n, (sum(con) / len(con) if con else None)
+
+    h_att, h_con = team_projection(lastN_home, home_id)
+    a_att, a_con = team_projection(lastN_away, away_id)
+
+    detail = {"sot_proj": None,   # always present, None when unmeasured
+          "sot_home_att": round(h_att, 2) if h_att is not None else None,
+              "sot_away_att": round(a_att, 2) if a_att is not None else None,
+              "sot_home_con": round(h_con, 2) if h_con is not None else None,
+              "sot_away_con": round(a_con, 2) if a_con is not None else None}
+
+    # Expected SOT for each side, using the SOT engine's own construction:
+    # the team's own average SOT blended with the opponent's SOT conceded.
+    if h_att is None or a_con is None:
+        return None, detail
+    if a_att is None or h_con is None:
+        return None, detail
+    proj = ((h_att + a_con) / 2.0 + (a_att + h_con) / 2.0) / 2.0
+    detail["sot_proj"] = round(proj, 2)
+    return proj, detail
 
 
 def get_u25_tier(score, signals_fired, gates_passed=True):
@@ -963,8 +1405,10 @@ def calculate_u35_score(
     league_weight,         
     fatigue_home,          
     fatigue_away,          
-    home_gk_cpg,           
-    away_gk_cpg
+    home_gk_cpg,
+    away_gk_cpg,
+    king_points=0.0,          # from calculate_king_signal() — SIGNAL 6
+    king_fired=False,
 ):
     sig1_raw   = min(1.0, u35_prob / 0.85)
     sig1_score = sig1_raw * 35
@@ -994,7 +1438,12 @@ def calculate_u35_score(
     fatigue_bonus = avg_fatigue * 5.0                  
     sig5_score = cpg_bonus + fatigue_bonus
 
-    total_score = sig1_score + sig2_score + sig3_score + sig4_score + sig5_score
+    # SIGNAL 6 — KING, on the same footing as Under 2.5 so both markets promote
+    # from one shared signal rather than two separate mechanisms.
+    sig6_score = round(float(king_points or 0.0), 1)
+    sig6_fired = bool(king_fired)
+
+    total_score = sig1_score + sig2_score + sig3_score + sig4_score + sig5_score + sig6_score
     total_score = max(0.0, min(100.0, total_score))
 
     breakdown = {
@@ -1003,6 +1452,8 @@ def calculate_u35_score(
         "sig3_venue_u35":      round(sig3_score, 1),
         "sig4_league_weight":  round(sig4_score, 1),
         "sig5_fortress_boost": round(sig5_score, 1),
+        "sig6_king":           sig6_score,
+        "king_fired":          sig6_fired,
         "venue_u35_combined":  round(venue_u35_combined, 3),
     }
     return round(total_score, 1), breakdown
@@ -1020,7 +1471,7 @@ def get_u35_tier(score, gates_passed=True):
     else:
         return "⚪ U3.5 BELOW THRESHOLD"
 
-# ==============================================================================
+
 # 📦 WRAPPED CALLABLE ENGINE (UNDER 2.5 & UNDER 3.5)
 # ==============================================================================
 def run_unders_engine(target_date=None, verbose=False):
@@ -1050,9 +1501,16 @@ def run_unders_engine(target_date=None, verbose=False):
 
     league_cache = {}
     league_ids   = {fx.get("league_id") for fx in fixtures if fx.get("league_id")}
+    # One sweep measures every league this run needs. The first call performs the
+    # sweep and populates the cache; the rest read it.
+    _LEAGUE_SWEEP_TARGETS.clear()
+    _LEAGUE_SWEEP_TARGETS.update(str(l) for l in league_ids)
+
     for lid in league_ids:
         try: league_cache[lid] = {"league_weight": compute_league_under25_weight(lid)}
         except Exception: league_cache[lid] = {"league_weight": 0.0}
+        try: league_cache[lid]["avg_goals"] = compute_league_avg_total_goals(lid)
+        except Exception: league_cache[lid]["avg_goals"] = None
         sleep_short()
 
     team_cache = {}
@@ -1155,6 +1613,50 @@ def run_unders_engine(target_date=None, verbose=False):
             try: odds = sniper_fetch_odds(fx.get("id"))
             except Exception: odds = {"h": None, "d": None, "a": None}
 
+            # ── ORDER MATTERS: gates first, then the signals, then the tiers ──
+            # The gates supply gate_h2h_total, which KING reads, so they cannot be
+            # evaluated after the score. The gates filter; the signals (with KING
+            # among them) decide the score; the tier reads that score.
+            gates_passed, gate_reasons, gate_detail = evaluate_unders_gates(
+                lastN_home, home_id, lastN_away, away_id, h2h, profile="u25"
+            )
+            # U3.5 carries its own gate profile (max_conceded 7 vs U2.5's 5).
+            u35_gates_passed, u35_gate_reasons, u35_gate_detail = evaluate_unders_gates(
+                lastN_home, home_id, lastN_away, away_id, h2h, profile="u35"
+            )
+
+            # SOT comes from statistics the engine has already fetched, so this
+            # costs no additional API call.
+            try:
+                proj_sot, sot_detail = king_sot_for_fixture(
+                    fx, home_id, away_id, lastN_home, lastN_away
+                )
+            except Exception:
+                proj_sot, sot_detail = None, {}
+
+            venue_u25_combined = ((venue_u25_home or 0.0) + (venue_u25_away or 0.0)) / 2.0
+            h2h_total = gate_detail.get("gate_h2h_total")
+
+            # KING is computed ONCE and fed to both scorers as signal 6. U3.5 gets
+            # its own looser lambda bound because a 3.5 line tolerates more goals.
+            king_u25_pts, king_fired, king_detail = calculate_king_signal(
+                h_gk_cpg, a_gk_cpg,
+                combined_lambda = combined_lambda,
+                venue_rate      = venue_u25_combined,
+                h2h_total       = h2h_total,
+                proj_sot        = proj_sot,
+                lambda_max      = KING_LAMBDA_MAX_U25,
+            )
+            king_u35_pts, _, king_detail_u35 = calculate_king_signal(
+                h_gk_cpg, a_gk_cpg,
+                combined_lambda = combined_lambda,
+                venue_rate      = ((venue_u35_home or 0.0) + (venue_u35_away or 0.0)) / 2.0,
+                h2h_total       = h2h_total,
+                proj_sot        = proj_sot,
+                lambda_max      = KING_LAMBDA_MAX_U35,
+            )
+            king_detail.update(sot_detail)
+
             u25_score, signals_fired, u25_breakdown = calculate_u25_score(
                 u25_prob        = u25_prob,
                 venue_u25_home  = venue_u25_home,
@@ -1165,9 +1667,8 @@ def run_unders_engine(target_date=None, verbose=False):
                 combined_lambda = combined_lambda,
                 fatigue_home    = fatigue_home,
                 fatigue_away    = fatigue_away,
-            )
-            gates_passed, gate_reasons, gate_detail = evaluate_unders_gates(
-                lastN_home, home_id, lastN_away, away_id, h2h
+                king_points     = king_u25_pts,
+                king_fired      = king_fired,
             )
             u25_tier = get_u25_tier(u25_score, signals_fired, gates_passed)
 
@@ -1181,8 +1682,12 @@ def run_unders_engine(target_date=None, verbose=False):
                 fatigue_away    = fatigue_away,
                 home_gk_cpg     = h_gk_cpg,
                 away_gk_cpg     = a_gk_cpg,
+                king_points     = king_u35_pts,
+                king_fired      = king_fired,
             )
-            u35_tier = get_u35_tier(u35_score, gates_passed)
+            u35_tier = get_u35_tier(u35_score, u35_gates_passed)
+            if u35_gates_passed != gates_passed:
+                u35_gate_detail["u25_gates_passed"] = gates_passed
 
             base_record = {
                 "date":              target_date,
@@ -1195,6 +1700,9 @@ def run_unders_engine(target_date=None, verbose=False):
                 "lambda_home":      round(lambda_home, 3),
                 "lambda_away":      round(lambda_away, 3),
                 "lambda_base":      lambda_detail.get("lambda_base"),
+                "lambda_prior_source": lambda_detail.get("lambda_prior_source"),
+                "lambda_league_avg_total": lambda_detail.get("lambda_league_avg_total"),
+                "lambda_league_n":  lambda_detail.get("lambda_league_n"),
                 "lambda_home_n":    lambda_detail.get("lambda_home_n"),
                 "lambda_away_n":    lambda_detail.get("lambda_away_n"),
                 "lambda_warning":   _lam_note,
@@ -1214,6 +1722,36 @@ def run_unders_engine(target_date=None, verbose=False):
                 "gate_home_conceded": gate_detail.get("gate_home_conceded"),
                 "gate_away_conceded": gate_detail.get("gate_away_conceded"),
                 "gate_h2h":          gate_detail.get("gate_h2h"),
+                # ── 2026-10-04: everything needed to MEASURE the rules later ──
+                # The gate inputs above were never persisted before today, which is
+                # why the cap change had to be judged on 207 reconstructed rows
+                # instead of the full history. These columns make the next settled
+                # sample measurable, so a future cap or signal change can be
+                # backtested properly instead of guessed at.
+                "gate_h2h_matches": gate_detail.get("gate_h2h_matches"),
+                "gate_h2h_checked": gate_detail.get("gate_h2h_checked"),
+                "gate_max_scored":   gate_detail.get("gate_max_scored"),
+                "gate_max_conceded": gate_detail.get("gate_max_conceded"),
+                "u35_gates_passed": u35_gates_passed,
+                "u35_gate_reasons": "; ".join(u35_gate_reasons) if u35_gate_reasons else "all u3.5 gates passed",
+                # Per-signal scores, so any single signal can be tested alone later
+                # without re-running the engine.
+                "sig1_mc_u25":        u25_breakdown.get("sig1_mc_u25"),
+                "sig2_lambda":        u25_breakdown.get("sig2_lambda"),
+                "sig3_gk_wall":       u25_breakdown.get("sig3_gk_wall"),
+                "sig4_venue_u25":     u25_breakdown.get("sig4_venue_u25"),
+                "sig5_fatigue":       u25_breakdown.get("sig5_fatigue_boost"),
+                "sig6_king":          u25_breakdown.get("sig6_king"),
+                "venue_u25_combined": u25_breakdown.get("venue_u25_combined"),
+                "venue_u25_home":     round(venue_u25_home, 3),
+                "venue_u25_away":     round(venue_u25_away, 3),
+                "h2h_u25_rate":       round(h2h_u25_rate, 3),
+                # KING is signal 6, so it appears as its score/points rather than as a
+                # separate tier. Its weight is already inside u25_score/u35_score.
+                "king_points":   king_u25_pts,
+                "king_points_u35": king_u35_pts,
+                "king_fired":    king_fired,
+                **king_detail,
             }
 
             u25_picks.append({**base_record, "u25_score": u25_score, "u25_signals_fired": signals_fired, "u25_tier": u25_tier})
