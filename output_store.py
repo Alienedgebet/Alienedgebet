@@ -29,6 +29,30 @@ CACHE_DIR = os.path.join(ROOT, "output", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
+# Field names that are numeric in EVERY engine that writes them. Only these
+# are eligible for string→number repair at the serving boundary — see
+# _coerce_numeric_strings for why the list is explicit rather than a
+# "parses as a number" heuristic.
+_NUMERIC_FIELD_NAMES = frozenset({
+    # Prices / odds
+    "Odds", "odds", "o25_odds", "o15_odds", "dog_odds", "fav_odds",
+    "draw_odds", "win_odds", "bm_win", "bm_draw", "bm_lay",
+    # Counts and grades
+    "Votes", "GradeNum", "Score", "Value", "Cat_Priority",
+    # Probabilities (stored 0-100 by the engines)
+    "poisson_over_prob_num", "poisson_over_prob", "poisson_under_prob",
+    "Monte_Win_Prob", "Monte_Draw_Prob", "Super_Monte_Prob",
+    "Psych_Score", "U25_Risk",
+    # Corners / aggregates
+    "expected_total_corners", "corners_line", "pos_gap", "parity_diff",
+    "combined_gs_last_5", "combined_lambda",
+    # Live / result feeds
+    "total", "ft_score", "h_ft", "a_ft", "h_ht", "a_ht",
+    "total_goals", "total_corners", "dangerous_attacks",
+    "shots_on_target", "possession", "minute",
+})
+
+
 class SafeEncoder(json.JSONEncoder):
     """Handles numpy/pandas types that engines commonly return without
     every engine needing to remember to convert them itself."""
@@ -78,16 +102,63 @@ def sanitize_non_finite(obj):
     returned UNCHANGED. This is the single serving/write boundary that keeps
     every engine file (including historical ones written with raw NaN
     literals) serializable by FastAPI's `allow_nan=False` JSON encoder and
-    by the browser's JSON.parse."""
+    by the browser's JSON.parse.
+
+    It ALSO repairs the inverse defect: a numeric field that persisted as a
+    STRING. Rows recovered from an engine CSV parse as all-strings via
+    csv.DictReader, so `Odds` was stored as '1.41' where the frontend
+    declares `number` and calls `.toFixed(2)` — the Over 2.5 page died with
+    `e.Odds.toFixed is not a function`. `_coerce_numeric_strings` fixes that
+    at this same boundary, so historical files are repaired on read without
+    being rewritten.
+    """
     import math
 
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
     if isinstance(obj, dict):
-        return {k: sanitize_non_finite(v) for k, v in obj.items()}
+        return {
+            k: _coerce_numeric_strings(k, v) if isinstance(v, str)
+            else sanitize_non_finite(v)
+            for k, v in obj.items()
+        }
     if isinstance(obj, (list, tuple)):
         return [sanitize_non_finite(v) for v in obj]
     return obj
+
+
+def _coerce_numeric_strings(key, value):
+    """
+    One key/value of a dict at the serving boundary: restore a numeric string
+    to a number when the KEY is known to be numeric in the engine schema,
+    otherwise return the string untouched.
+
+    Key-driven on purpose. Coercing "anything that parses as a number" would
+    destroy legitimate text — a fixture literally named "2026", a version
+    string, a team name — and a text column must reach the client exactly as
+    the engine wrote it. An unparseable string is also returned unchanged
+    rather than replaced with 0: inventing a number from text is worse than
+    showing the real value.
+    """
+    import math
+
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        # An empty CSV cell is an absent measurement, not the string "".
+        return None
+    if key not in _NUMERIC_FIELD_NAMES:
+        return value
+    try:
+        parsed = float(text)
+    except (TypeError, ValueError):
+        return value
+    if not math.isfinite(parsed):
+        return None
+    return (int(parsed)
+            if parsed.is_integer() and "." not in text and "e" not in text.lower()
+            else parsed)
 
 
 def to_jsonable(x):

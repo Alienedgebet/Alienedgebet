@@ -371,6 +371,41 @@ NULLABLE_FIELDS = frozenset({
 })
 
 
+def _coerce_to_number(value):
+    """
+    Return `value` as a finite float, or None when no honest number exists.
+
+    Used by ensure_defaults to repair a numeric schema field that arrived with
+    the WRONG TYPE rather than a missing one. The real-world source is the CSV
+    recovery path in main.py `_recover_engine_output_from_disk`, which parses
+    with `csv.DictReader` and therefore yields every value as a string:
+    `Odds` arrived as '1.41' while the frontend declares it `number`, and
+    `r.Odds.toFixed(2)` threw, taking down the whole Over 2.5 page.
+
+    Deliberately conservative:
+      * NaN / ±Infinity are NOT numbers here (the caller already handles those
+        as corruption and substitutes the schema default).
+      * Booleans never become 1/0 — a bool in a numeric field is a schema
+        error, not a measurement, and must not be silently renumbered.
+      * An unparseable string returns None so the caller leaves the original
+        value in place instead of fabricating a number from it.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = float(text)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+    return None
+
+
 def ensure_defaults(rows, defaults: dict) -> list:
     """
     Guarantees every row has every key `defaults` names, using the default
@@ -425,7 +460,29 @@ def ensure_defaults(rows, defaults: dict) -> list:
             elif v is None and k in defaults:
                 clean_r[k] = defaults[k]
             else:
-                clean_r[k] = v
+                # ── TYPE repair for numeric schema keys ──────────────────
+                # A value can be present and still be the WRONG TYPE, which
+                # the missing-key branch above cannot see. The concrete case:
+                # rows recovered from an engine CSV via csv.DictReader carry
+                # every value as a string, so `Odds` arrived as '1.41' while
+                # lib/api.ts declares it `number`. The Over 2.5 page then died
+                # on `e.Odds.toFixed is not a function`.
+                #
+                # So: when the schema default for this key is numeric, a value
+                # that PARSES as a number is restored to that type. Anything
+                # that does not parse is left untouched rather than replaced —
+                # inventing a number from an unparseable string would be worse
+                # than showing the real value. `missing` is not updated because
+                # the key was present; this is a type correction, not a default.
+                if k in defaults and isinstance(defaults[k], (int, float)) \
+                        and not isinstance(defaults[k], bool) \
+                        and not isinstance(v, bool):
+                    parsed = _coerce_to_number(v)
+                    clean_r[k] = defaults[k] if parsed is None and v is None else (
+                        v if parsed is None else parsed
+                    )
+                else:
+                    clean_r[k] = v
         missing = [k for k in defaults.keys() if k not in clean_r]
         merged = dict(defaults)
         merged.update(clean_r)
@@ -920,6 +977,55 @@ def noop_cache_clear(request: Request, x_admin_token: Optional[str] = Header(def
 # ════════════════════════════════════════════════════════════════════════════
 # FOUNDATION
 # ════════════════════════════════════════════════════════════════════════════
+# DNA v1 pillars that are nullable by design (schema v3/v4).
+#
+# `null` means "this pillar could not be measured"; `0` means "measured, and
+# the result is zero". Those are different facts and the difference was worth
+# a schema change, so a null is NEVER silently replaced with 0 here — that is
+# the fabrication this project has already had to undo once.
+#
+# What IS guaranteed is the SHAPE: the key is always present on every pillar
+# object, so a client can distinguish "the engine said null" from "this field
+# does not exist in this response". A missing key is what let the Win page
+# throw `null is not an object (evaluating 'e.Market_Power_Scores.Win_Dominance')`.
+DNA_V1_PILLAR_KEYS = ("Corner_Power", "Goal_Intent", "BTTS_Friction",
+                      "Win_Dominance", "Box_Dominance")
+
+
+def _normalize_dna_profile(profile):
+    """
+    Guarantee Market_Power_Scores exists and carries every pillar key.
+
+    Returns the profile with `Market_Power_Scores` present as a dict holding
+    all five pillar keys, each either a finite number or `None`.
+
+    `None` is preserved deliberately — it is an honest "never measured"
+    signal, and the frontend renders it as "—" via `fmt()` in lib/utils. The
+    frontend type (lib/api.ts DnaProfile) is `number | null` to match, so the
+    two sides agree on what a pillar can be.
+
+    A non-finite pillar (NaN/±Inf from an older engine) is normalised to None
+    rather than 0, for the same reason: it is an absent measurement, not a
+    score of zero.
+    """
+    if not isinstance(profile, dict):
+        return profile
+    scores = profile.get("Market_Power_Scores")
+    if not isinstance(scores, dict):
+        # The whole object is missing or the wrong shape. Build a complete,
+        # fully-null set: honest, and safe for the client to index into.
+        profile["Market_Power_Scores"] = {k: None for k in DNA_V1_PILLAR_KEYS}
+        return profile
+    for key in DNA_V1_PILLAR_KEYS:
+        if key not in scores:
+            scores[key] = None
+        else:
+            value = scores[key]
+            if isinstance(value, float) and not math.isfinite(value):
+                scores[key] = None
+    return profile
+
+
 @app.get("/api/dna/{date}", tags=["Foundation"])
 def get_dna_profiles(date: str):
     data, _ = store.load("dna", date, default={})
@@ -929,8 +1035,14 @@ def get_dna_profiles(date: str):
         # and emit records — otherwise Array.isArray() on the client sees an
         # object and the "Team DNA — Goal Intent Board" renders empty despite
         # real profiles being present on disk.
+        #
+        # Each profile is normalised first so every pillar key is present. This
+        # route deliberately does NOT use ensure_defaults(): that helper merges
+        # only TOP-LEVEL keys and so could never reach a nested pillar, which
+        # is exactly why 11 profiles with `Win_Dominance: null` reached the
+        # browser and took the Win page down on 2026-10-04.
         return [
-            {"team_id": str(team_id), **profile}
+            _normalize_dna_profile({"team_id": str(team_id), **profile})
             for team_id, profile in data.items()
             if isinstance(profile, dict)
         ]
@@ -1336,6 +1448,38 @@ def _h2h_readable_result(fx, home_id, away_id):
     }
 
 
+DNA_V2_PILLAR_KEYS = ("Corner_Power", "Goal_Intent", "BTTS_Friction",
+                      "Win_Dominance", "Box_Dominance")
+
+
+def _normalize_dna_v2_profiles(profiles):
+    """
+    Apply the same pillar-shape guarantee to the v2 profile map.
+
+    `/api/dna/v2/{date}` serves `dna_profiles` straight from the engine, so a
+    v2 profile missing a pillar key reaches the browser exactly as saved — and
+    the full-screen DNA Analysis page indexes these keys directly
+    (app/dna/[market]/[fixtureId]/page.tsx). Same rule as v1: the key is always
+    present, a genuinely unmeasured pillar stays `null`, and `null` is never
+    rewritten to 0.
+    """
+    if not isinstance(profiles, dict):
+        return {}
+    for team_id, profile in profiles.items():
+        if not isinstance(profile, dict):
+            continue
+        scores = profile.get("Market_Power_Scores")
+        if not isinstance(scores, dict):
+            profile["Market_Power_Scores"] = {k: None for k in DNA_V2_PILLAR_KEYS}
+            continue
+        for key in DNA_V2_PILLAR_KEYS:
+            if key not in scores:
+                scores[key] = None
+            elif isinstance(scores[key], float) and not math.isfinite(scores[key]):
+                scores[key] = None
+    return profiles
+
+
 @app.get("/api/dna/v2/{date}", tags=["Foundation"])
 def get_dna_v2(date: str):
     engine_result, _ = store.load("dna_v2", date, default={})
@@ -1343,7 +1487,7 @@ def get_dna_v2(date: str):
     dna_profiles = engine_result.get("dna_profiles", {}) if isinstance(engine_result, dict) else {}
     fixture_clashes = engine_result.get("fixture_clashes", []) if isinstance(engine_result, dict) else []
     return {
-        "dna_profiles": dna_profiles,
+        "dna_profiles": _normalize_dna_v2_profiles(dna_profiles),
         "fixture_clashes": fixture_clashes,
         "market_factors": market_factors or {},
     }

@@ -13,6 +13,7 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
+import { fmt } from "@/lib/utils";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
@@ -289,6 +290,31 @@ const forecastColumns: PredictionColumn<WinForecastPick>[] = [
   },
 ];
 
+// The DNA pillars are `number | null`, not `number` — schema v3 made a
+// pillar nullable because `null` ("never measured") and `0` ("measured and
+// terrible") are different facts, and collapsing them lied about the team.
+// These four renderers therefore go through `fmt`, which renders an absent
+// pillar as "—". Calling `.toFixed()` directly here is what threw
+//   `null is not an object (evaluating 'e.Market_Power_Scores.Win_Dominance.toFixed')`
+// and replaced the entire Win page with "Something went wrong" on 2026-10-04.
+//
+// `readPillar` also tolerates the WHOLE object being absent or null, because
+// this endpoint (/api/dna/{date}) returns engine output verbatim — it never
+// runs through the API's `ensure_defaults`, which only repairs top-level keys
+// and so can never reach a nested pillar.
+type DnaPillarKey =
+  | "Goal_Intent"
+  | "Win_Dominance"
+  | "BTTS_Friction"
+  | "Corner_Power";
+
+function readPillar(row: DnaProfile, key: DnaPillarKey): unknown {
+  const scores = (row as { Market_Power_Scores?: unknown })
+    .Market_Power_Scores;
+  if (!scores || typeof scores !== "object") return null;
+  return (scores as Record<string, unknown>)[key];
+}
+
 const dnaColumns: PredictionColumn<DnaProfile>[] = [
   {
     key: "team_name",
@@ -303,25 +329,25 @@ const dnaColumns: PredictionColumn<DnaProfile>[] = [
     key: "Goal_Intent",
     header: "Goal Intent",
     align: "right",
-    render: (r) => r.Market_Power_Scores.Goal_Intent.toFixed(1),
+    render: (r) => fmt(readPillar(r, "Goal_Intent"), 1),
   },
   {
     key: "Win_Dominance",
     header: "Win Dominance",
     align: "right",
-    render: (r) => r.Market_Power_Scores.Win_Dominance.toFixed(1),
+    render: (r) => fmt(readPillar(r, "Win_Dominance"), 1),
   },
   {
     key: "BTTS_Friction",
     header: "BTTS Friction",
     align: "right",
-    render: (r) => r.Market_Power_Scores.BTTS_Friction.toFixed(1),
+    render: (r) => fmt(readPillar(r, "BTTS_Friction"), 1),
   },
   {
     key: "Corner_Power",
     header: "Corner Power",
     align: "right",
-    render: (r) => r.Market_Power_Scores.Corner_Power.toFixed(1),
+    render: (r) => fmt(readPillar(r, "Corner_Power"), 1),
   },
   {
     key: "Tempo",

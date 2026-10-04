@@ -133,11 +133,27 @@ export interface DnaProfile {
   team_id: string;
   team_name: string;
   Archetype: string;
+  /**
+   * A pillar is `number` when measured and `null` when it could not be.
+   * `null` is NOT zero — see the identical note on DnaV2Profile below.
+   *
+   * This was previously typed as all-`number`, which is a LIE: /api/dna/{date}
+   * returns the engine's saved profile verbatim (it never passes through the
+   * API's `ensure_defaults`, which only repairs top-level keys and cannot
+   * reach a nested pillar). On 2026-10-04, 11 of 1825 profiles on disk had
+   * `Win_Dominance: null`, and the Win page crashed on
+   * `r.Market_Power_Scores.Win_Dominance.toFixed(1)` as a result.
+   *
+   * The `| null` here is what makes that a compile-time concern instead of a
+   * runtime one; render with `fmt()` from lib/utils.
+   */
   Market_Power_Scores: {
-    Corner_Power: number;
-    Goal_Intent: number;
-    BTTS_Friction: number;
-    Win_Dominance: number;
+    Corner_Power: number | null;
+    Goal_Intent: number | null;
+    BTTS_Friction: number | null;
+    Win_Dominance: number | null;
+    /** Present in saved output from schema v4 onward; null when unmeasured. */
+    Box_Dominance?: number | null;
   };
   Tactical_DNA: {
     Tempo: number;

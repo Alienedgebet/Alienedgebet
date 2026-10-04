@@ -12,6 +12,7 @@ import {
   type Over15Stage3Pick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
+import { fmt } from "@/lib/utils";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
@@ -100,7 +101,10 @@ const stage3Columns: PredictionColumn<Over15Stage3Pick>[] = [
     render: (r) => <FixtureRiskTag row={r} label={r.Match} className="font-medium text-text-primary" />,
   },
   { key: "poisson", header: "Poisson %", render: (r) => <ProbCell value={r["Poisson%"]} showBar={false} /> },
-  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
+  // Same CSV-string Odds hazard as the Over 2.5 stage-2 column — this market
+  // inherits the same engine output shape. `fmt` keeps a numeric string
+  // renderable and degrades an absent price to "—" rather than throwing.
+  { key: "odds", header: "Odds", align: "right", render: (r) => fmt(r.Odds, 2) },
   { key: "grade", header: "Grade", render: (r) => <TierBadge tier={r.Grade} /> },
   { key: "h2h", header: "H2H Record", render: (r) => r.H2H_Record },
   { key: "picked", header: "Picked By", render: (r) => r.PickedBy },
