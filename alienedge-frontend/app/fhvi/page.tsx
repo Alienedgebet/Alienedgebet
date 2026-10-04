@@ -7,6 +7,11 @@ import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import {
+  createPickStatsColumn,
+  splitFixtureTeams,
+} from "@/components/dna/PickStatsCell";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_FHVI } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
@@ -47,11 +52,24 @@ const columns: PredictionColumn<FHVIPick>[] = [
 
 export default function FHVIPage() {
   const { date } = useSelectedDate();
+  // (2026-10-04) For the Stats column: one useDnaV2 call, same as the other
+  // pick pages, supplying both teams' last-five form.
+  const { data: dnaV2 } = useDnaV2();
 
-  // Verify -> Fixture -> Rest
+  // Verify -> Stats -> Fixture -> Rest
+  // Stats (2026-10-04): last-five form + H2H history on demand. FHVI rows carry
+  // no fixture_id, so form resolves by team name and H2H states that it could
+  // not be checked — deliberately worded apart from "these teams never met".
   const columnsWithVerify = useMemo(
     () => [
       createVerifyColumn<FHVIPick>(),
+      createPickStatsColumn<FHVIPick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: () => null,
+        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
+      }),
       createIntelligentPassColumn<FHVIPick>({
         market: "fhvi",
         getLabel: (r) => r.fixture,
@@ -59,7 +77,7 @@ export default function FHVIPage() {
       }),
       ...columns,
     ],
-    []
+    [date, dnaV2]
   );
 
   return (
