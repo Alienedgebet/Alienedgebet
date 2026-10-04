@@ -9,6 +9,11 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import {
+  createPickStatsColumn,
+  splitFixtureTeams,
+} from "@/components/dna/PickStatsCell";
+import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
@@ -80,11 +85,23 @@ const baseColumns: PredictionColumn<UnderdogBasePick>[] = [
 
 export default function UnderdogPage() {
   const { date } = useSelectedDate();
+  // (2026-10-04) Supplies each team's real history for the DNA columns.
+  const { data: dnaV2 } = useDnaV2();
 
   // 2. Audit (Verify -> Rest)
   const auditColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<UnderdogMasterPick>(),
+      // DNA added 2026-10-04, labelled DNA like every other page. Underdog has no
+      // factor set, so this opens the team's real history. These rows DO carry a
+      // fixture_id, so the head-to-head resolves too.
+      createPickStatsColumn<UnderdogMasterPick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: (r) => r.fixture_id,
+        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
+      }),
       createIntelligentPassColumn<UnderdogMasterPick>({
         market: "u2s",
         getLabel: (r) => r.fixture,
@@ -92,13 +109,20 @@ export default function UnderdogPage() {
       }),
       ...auditColumns,
     ],
-    []
+    [date, dnaV2]
   );
 
-  // 3. Base (Verify -> Rest)
+  // 3. Base (Verify -> DNA -> Rest)
   const baseColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<UnderdogBasePick>(),
+      createPickStatsColumn<UnderdogBasePick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: (r) => r.fixture_id,
+        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
+      }),
       createIntelligentPassColumn<UnderdogBasePick>({
         market: "u2s",
         getLabel: (r) => r.fixture,
@@ -106,7 +130,7 @@ export default function UnderdogPage() {
       }),
       ...baseColumns,
     ],
-    []
+    [date, dnaV2]
   );
 
   return (

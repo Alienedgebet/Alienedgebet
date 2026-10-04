@@ -6,6 +6,11 @@ import { Crosshair } from "lucide-react";
 import { specialsApi, type SOTPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import {
+  createPickStatsColumn,
+  splitFixtureTeams,
+} from "@/components/dna/PickStatsCell";
+import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortSOT } from "@/lib/signal-ranking";
@@ -36,6 +41,8 @@ const columns: PredictionColumn<SOTPick>[] = [
 
 export default function SOTPage() {
   const { date } = useSelectedDate();
+  // (2026-10-04) Supplies each team's real history for the DNA column.
+  const { data: dnaV2 } = useDnaV2();
   // Default ON: this is the one ordering the backtest actually supports
   // (Consistency >= 48 AND Proj_SOT >= 9.3 -> 96.1% over 51 settled rows,
   // p = 0.00136, surviving a Bonferroni correction). See
@@ -56,10 +63,21 @@ export default function SOTPage() {
     [date, smartRank]
   );
 
-  // Verify -> Intelligent Pass Count -> Fixture -> Rest
+  // Verify -> DNA -> Intelligent Pass Count -> Fixture -> Rest
+  // DNA added 2026-10-04. The DNA engine has no SOT factor set, so this cannot
+  // be the factor-count badge the WIN / GG / DRAW / UNDERS pages show; it opens
+  // the same team's real history instead. The column is still labelled DNA, so
+  // the slot reads identically on every page.
   const columnsWithVerify = useMemo(
     () => [
       createVerifyColumn<SOTPick>(),
+      createPickStatsColumn<SOTPick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: () => null,
+        getHomeTeam: (r) => splitFixtureTeams(r.Fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.Fixture).away,
+      }),
       createIntelligentPassColumn<SOTPick>({
         market: "sot",
         getLabel: (r) => r.Fixture,
@@ -67,7 +85,7 @@ export default function SOTPage() {
       }),
       ...columns,
     ],
-    [date]
+    [date, dnaV2]
   );
 
   return (
