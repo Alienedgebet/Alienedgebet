@@ -811,6 +811,29 @@ export interface Over25GoldPick extends FixtureRisk {
  */
 export type Over15GoldPick = Over25GoldPick;
 
+/**
+ * One row of the Over 1.5 VIP block.
+ *
+ * Extends the SH-GG Winner row with the two fields /api/over15/vip adds, plus
+ * the last-5 goal metrics.
+ *
+ * The goals metrics are OPTIONAL, and deliberately so: Engine/sh_gg_winner.py
+ * only started emitting them on 2026-10-04, so every historical file predates
+ * them. A required field here would be a type lie — it would claim the data is
+ * always present when a third of it is not. Absent renders as "—".
+ */
+export interface Over15VipPick extends SHGGWinnerPick {
+  vip_reason: string;
+  /** null when goals_last_5 is absent (pre-2026-10-04 files). */
+  vip_tier: string | null;
+  metrics: SHGGWinnerPick["metrics"] & {
+    home_goals_last_5?: number;
+    away_goals_last_5?: number;
+    home_games_sampled?: number;
+    away_games_sampled?: number;
+  };
+}
+
 export interface Over25ApexPick extends FixtureRisk {
   fixture_id: string;
   Fixture: string;
@@ -2705,6 +2728,14 @@ export const over15Api = {
    */
   getGold: (date: string): Promise<AxiosResponse<Over25GoldPick[]>> =>
     api.get(`/api/over15/gold/${date}`),
+
+  /**
+   * The VIP block: Engine/sh_gg_winner.py filtered to Rule A | Rule B and
+   * tiered by recent scoring volume. Reads the same sh_gg_winner store as
+   * /api/sh-gg-winner — no second engine run.
+   */
+  getVIP: (date: string): Promise<AxiosResponse<Over15VipPick[]>> =>
+    api.get(`/api/over15/vip/${date}`),
 
   getPsychology: (date: string): Promise<AxiosResponse<Over15PsychologyPick[]>> =>
     api.get(`/api/over15/psychology/${date}`),
