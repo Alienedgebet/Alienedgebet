@@ -11,8 +11,6 @@ import {
   type CornerStage2Pick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
-import { useDnaV2 } from "@/lib/use-dna-v2";
-import { createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
@@ -363,7 +361,6 @@ function CornerList({
 
 export default function CornersPage() {
   const { date } = useSelectedDate();
-  const { data: dnaV2 } = useDnaV2();
   // Default ON: U2.5% <= 48.8 AND at most one side wounded is the ordering the
   // full-history backtest supports (92.7% vs 81.5% for the rest, p = 0.000037,
   // 10 of 11 leave-one-day-out days). See lib/signal-ranking.ts.
@@ -438,16 +435,15 @@ export default function CornersPage() {
     [date, smartRank]
   );
 
-  // 1. Master Aggregator (Verify -> DNA -> Rest)
+  // 1. Master Aggregator (Verify -> Rest)
+  // (2026-10-04) The DNA count badge was REMOVED from this page at the owner's
+  // instruction: corners is excluded from the pick-statistics rollout, so it
+  // shows no DNA column and no Stats column. Display only — nothing backend was
+  // touched, and the corner market's DNA factors are still computed and still
+  // published by CORE/dna_v2_market_factors.py.
   const aggregatorColumnsWithVerifyAndDna = useMemo(
     () => [
       createVerifyColumn<CornerAggregatorPick>(),
-      createDnaColumnByLabel<CornerAggregatorPick>(
-        dnaV2?.market_factors,
-        "corners",
-        date,
-        (r) => r.Fixture
-      ),
       createIntelligentPassColumn<CornerAggregatorPick>({
         market: "corners",
         getLabel: (r) => r.Fixture,
@@ -455,7 +451,7 @@ export default function CornersPage() {
       }),
       ...aggregatorColumns,
     ],
-    [dnaV2, date]
+    [date]
   );
 
   // 4. Refiner Stage 2 (Verify -> Rest)

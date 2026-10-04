@@ -9,6 +9,11 @@ import { createVerifyColumn } from "@/components/predictions/createVerifyColumn"
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortSOT } from "@/lib/signal-ranking";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import {
+  createPickStatsColumn,
+  splitFixtureTeams,
+} from "@/components/dna/PickStatsCell";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SOT } from "@/lib/mock-chains";
@@ -36,6 +41,9 @@ const columns: PredictionColumn<SOTPick>[] = [
 
 export default function SOTPage() {
   const { date } = useSelectedDate();
+  // (2026-10-04) Added for the Stats column: one call already used by the other
+  // pick pages, delivering both teams' last-five form.
+  const { data: dnaV2 } = useDnaV2();
   // Default ON: this is the one ordering the backtest actually supports
   // (Consistency >= 48 AND Proj_SOT >= 9.3 -> 96.1% over 51 settled rows,
   // p = 0.00136, surviving a Bonferroni correction). See
@@ -56,10 +64,20 @@ export default function SOTPage() {
     [date, smartRank]
   );
 
-  // Verify -> Intelligent Pass Count -> Fixture -> Rest
+  // Verify -> Stats -> Intelligent Pass Count -> Fixture -> Rest
+  // Stats (2026-10-04): last-five form + H2H history on demand. SOT rows carry
+  // no fixture_id, so form resolves by team name and H2H reports that it could
+  // not be checked — which the panel words differently from "never met".
   const columnsWithVerify = useMemo(
     () => [
       createVerifyColumn<SOTPick>(),
+      createPickStatsColumn<SOTPick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: () => null,
+        getHomeTeam: (r) => splitFixtureTeams(r.Fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.Fixture).away,
+      }),
       createIntelligentPassColumn<SOTPick>({
         market: "sot",
         getLabel: (r) => r.Fixture,
@@ -67,7 +85,7 @@ export default function SOTPage() {
       }),
       ...columns,
     ],
-    [date]
+    [date, dnaV2]
   );
 
   return (

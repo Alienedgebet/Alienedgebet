@@ -20,6 +20,11 @@ import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/compon
 import { MOCK_O15_PSYCH } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import {
+  createPickStatsColumn,
+  splitFixtureTeams,
+} from "@/components/dna/PickStatsCell";
 
 /**
  * Columns for the GG Over 1.5 twin head.
@@ -200,6 +205,8 @@ const vipColumns: PredictionColumn<Over15VipPick>[] = [
 
 export default function Over15Page() {
   const { date } = useSelectedDate();
+  // (2026-10-04) For the Stats column on the psychology block.
+  const { data: dnaV2 } = useDnaV2();
 
   /**
    * The Gold engine's rows.
@@ -227,10 +234,20 @@ export default function Over15Page() {
     [date]
   );
 
-  // 1. Psychology (Verify -> Rest)
+  // 1. Psychology (Verify -> Stats -> Rest)
+  // Stats (2026-10-04): last-five form + H2H history on demand. The psychology
+  // payload publishes no fixture_id, so form resolves by team name and H2H
+  // reports that it could not be checked — worded distinctly from "never met".
   const psychologyColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<Over15PsychologyPick>(),
+      createPickStatsColumn<Over15PsychologyPick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: () => null,
+        getHomeTeam: (r) => splitFixtureTeams(r.Fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.Fixture).away,
+      }),
       createIntelligentPassColumn<Over15PsychologyPick>({
         market: "over15",
         getLabel: (r) => r.Fixture,
@@ -238,7 +255,7 @@ export default function Over15Page() {
       }),
       ...psychologyColumns,
     ],
-    []
+    [date, dnaV2]
   );
 
   // 2. Gold (Verify -> Rest)
