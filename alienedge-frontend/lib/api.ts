@@ -1951,6 +1951,24 @@ export interface LiveOrchestratorMatch {
   /** Settled markets e.g. ["GG","O2.5"] */
   settled?: string[];
   /**
+   * True when this row is a RETAINED FINISHED result read back from the FT
+   * snapshot / nightly archive, not a match analysed this cycle.
+   *
+   * Such a row carries NONE of the live-analysis fields above (no conf, no
+   * key_loss, no chaos) and must never be rendered with a live minute badge —
+   * that is exactly how a finished match used to sit on screen at minute 97.
+   * `score` carries the final result.
+   */
+  retained_finished?: boolean;
+  /** Final score for a retained finished row (e.g. "2-1"). */
+  score?: string | null;
+  /** "FINISHED" for a retained row. */
+  status?: string | null;
+  /** "FULL TIME" for a retained row. */
+  period?: string | null;
+  /** Explicit finished flag; retained rows always set this. */
+  is_finished?: boolean;
+  /**
    * Raw live team statistics for this fixture, published by Code 6 from the
    * same payload it already analyses. This replaced the Code 2 validation
    * board as the live page's source for team statistics, at no extra provider
@@ -2007,6 +2025,26 @@ export interface LiveOrchestratorBoard {
   total_db: number;
   matches: LiveOrchestratorMatch[];
   coverage?: LiveCoverage;
+  /**
+   * "live" | "idle" | "unknown".
+   *
+   * An explicit statement of whether football is in play right now, published
+   * by Stage 6 every cycle. Before this existed the board was only rewritten
+   * when something was live, so with an empty feed the file froze and the page
+   * had no way to tell "nothing in play" from "stale board" — it showed a
+   * fixture at minute 97 hours after full time.
+   *
+   * "unknown" means the board could not be read at all; it is deliberately
+   * distinct from "idle", which is a positive claim that Stage 6 checked.
+   */
+  live_state?: "live" | "idle" | "unknown";
+  /**
+   * How many rows in `matches` are retained FINISHED results rather than
+   * matches analysed this cycle.
+   */
+  retained_finished?: number;
+  /** Age of this board on disk, in seconds. */
+  data_age_seconds?: number | null;
 }
 
 // ============================================================

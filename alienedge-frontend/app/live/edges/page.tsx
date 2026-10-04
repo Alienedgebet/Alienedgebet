@@ -972,24 +972,30 @@ export default function LivePage() {
   });
   const board = validation.data;
 
-  // A Code 6 board is only rewritten when something IS live. When the in-play
-  // feed empties, Stage 6 deliberately preserves the previous board so a match
-  // does not vanish mid-view — which means the board can be minutes-to-hours
-  // old while the scanner itself is perfectly healthy.
+  // Is there football in play right now?
   //
-  // The API now returns `data_age_seconds`. Without this guard the page kept
-  // rendering the preserved fixture (observed: id 19745050 sitting at minute 97
-  // long after full time) as though it were live, because there was no way to
-  // tell a current board from a frozen one. Past this age the board is treated
-  // as stale: its minute badge and live statistics are withheld, since they
-  // describe a match that has already ended. The board is NOT discarded — it
-  // is still the last thing that was true, which is useful context, just not
-  // live data.
+  // Stage 6 used to rewrite this board only when something was live and
+  // deliberately PRESERVE it otherwise, so a match finishing mid-view did not
+  // vanish. But with an empty feed the file was then never rewritten again:
+  // the board froze on the last cycle's state indefinitely and there was no
+  // way to tell "nothing is in play" from "this board is hours old". Observed
+  // on 2026-10-04: `orchestrator_board.json` frozen at 00:48 still listing a
+  // fixture at minute 97, hours after full time.
+  //
+  // Stage 6 now publishes an explicit idle board EVERY cycle carrying
+  // `live_state` ("live" | "idle" | "unknown"). That is a fact the backend
+  // observed, so the page no longer infers liveness from an empty list or
+  // from an age heuristic. `data_age_seconds` remains as the second guard for
+  // the case `live_state` cannot cover: the scanner itself being down.
   const BOARD_STALE_AT = 300; // 5 min — ~4x the ~72s write interval
-  const boardAge = (board as { data_age_seconds?: number | null })
-    ?.data_age_seconds;
+  const boardAge = board?.data_age_seconds ?? null;
   const boardIsStale =
     typeof boardAge === "number" && boardAge > BOARD_STALE_AT;
+  // "idle" is a positive claim that Stage 6 checked and found nothing in
+  // play. "unknown" means the board could not be read, which is NOT the same
+  // as idle and must never be presented as "nothing is happening".
+  const liveState = board?.live_state ?? "unknown";
+
 
   // When the pre-match run has the scanner paused, NOTHING live can be written,
   // for any fixture. Saying "not live now" about one specific fixture in that
@@ -1004,6 +1010,13 @@ export default function LivePage() {
   }, [auditRows]);
   const pausedNow = scannerState?.reason === "pipeline_pause";
 
+  // Scanner stopped for any reason: the pre-match run holds it, it is down, or
+  // the board has stopped being rewritten. Nothing on this page is current.
+  const scannerStopped = pausedNow || boardIsStale;
+  // Nothing is in play AND we have a current board saying so. Distinct from
+  // "the scanner is down" (scannerStopped) — there, the truth is unknown.
+  const nothingInPlay = liveState === "idle" && !scannerStopped;
+
   const stats = useMemo(() => {
     const gkLiabilities = auditRows.filter((r) => r.home.gk_out || r.away.gk_out).length;
     const highMiss = auditRows.filter((r) => r.combined_miss >= 9).length;
@@ -1011,12 +1024,16 @@ export default function LivePage() {
       fixtures: auditRows.length,
       gkLiabilities,
       highMiss,
-      // `tracked` is a LIVE count. Reporting a frozen board's total here made
-      // the header claim live coverage while nothing was actually in play.
-      tracked: boardIsStale ? 0 : (board?.matches.length ?? 0),
+      // `tracked` is a LIVE count. It must not include retained FINISHED
+      // results: those are settled outcomes read back from the FT snapshot,
+      // not matches being analysed. Counting them would make the header claim
+      // live coverage while nothing is actually in play. The retained count is
+      // published separately as `settled`.
+      tracked: scannerStopped ? 0 : (board?.total_live ?? 0),
+      settled: scannerStopped ? 0 : (board?.retained_finished ?? 0),
       validated: 0,
     };
-  }, [auditRows, board?.matches.length, boardIsStale]);
+  }, [auditRows, board?.total_live, board?.retained_finished, scannerStopped]);
 
   // The live row for the selected fixture, matched on fixture_id ALONE.
   //
@@ -1030,10 +1047,15 @@ export default function LivePage() {
       ) ?? null
     : (board?.matches?.[0] ?? null);
 
-  // Everything below renders LIVE state, so it is all gated on the board
-  // actually being current (see the boardIsStale note above). Declared here,
-  // after `activeMatch`, because it derives from it.
-  const liveMatch = boardIsStale ? null : activeMatch;
+  // A RETAINED row is a finished result, not a live match. Binding one to the
+  // live panel would render its final score and minute-90-ish reading as if the
+  // game were under way — the exact failure this page had when the board froze.
+  // So the live panel only ever binds a genuinely current, non-finished row.
+  const activeIsRetained = Boolean(activeMatch?.retained_finished);
+  // Everything below renders LIVE state, so it is gated on the board actually
+  // being current (scannerStopped covers a paused/down scanner) and on the
+  // selected row being a live one.
+  const liveMatch = scannerStopped || activeIsRetained ? null : activeMatch;
 
   // Map Code 6's raw provider stat names onto the shape the panel renders.
   // The provider spells them with hyphens and reports box entries under
@@ -1121,6 +1143,32 @@ export default function LivePage() {
         <LiveRefreshButton onRefresh={handleRefresh} refreshing={refreshing} />
       </div>
 
+      {/* An explicit statement of liveness. Previously this page had to infer
+          it: with an empty feed the board froze and a finished match kept
+          rendering at minute 97. `live_state` is what Stage 6 actually
+          observed, so "nothing in play" can be said plainly, and "the scanner
+          is down" (we do not know) stays visibly different from "checked,
+          and nothing is live" (idle). */}
+      {nothingInPlay && (
+        <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
+          <p className="text-xs font-semibold text-text-primary">
+            Nothing is in play right now
+          </p>
+          <p className="mt-1 text-[11px] text-text-secondary">
+            The live scanner checked this cycle and the in-play feed is empty
+            {"— "}
+            every match on today&apos;s card has finished.
+            {stats.settled > 0 && (
+              <>
+                {" "}
+                {stats.settled} settled result{stats.settled === 1 ? "" : "s"}{" "}
+                {stats.settled === 1 ? "is" : "are"} retained below.
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
       {/* Same rationale as the identical panel on /live/incoming: the Code 1
           table below only holds fixtures with an official lineup, so without
           this the page understates what is actually in play. */}
@@ -1175,7 +1223,11 @@ export default function LivePage() {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="rounded-full border border-cyan-500/40 bg-cyan-950/40 px-2 py-0.5 font-mono text-[10px] font-black uppercase tracking-wider text-cyan-300">
-                      {boardIsStale ? "Last known state" : "Live match"}
+                      {scannerStopped
+                        ? "Last known state"
+                        : activeIsRetained
+                          ? "Finished"
+                          : "Live match"}
                     </span>
                     {liveMatch?.storm?.stage && (
                       <span className="rounded-full border border-amber-500/40 bg-amber-950/40 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wide text-amber-300">
@@ -1216,7 +1268,7 @@ export default function LivePage() {
                       {liveMinute}&apos;
                     </span>
                   )}
-                  {boardIsStale && (
+                  {scannerStopped && (
                     <span
                       className={cn(
                         "rounded border px-2 py-0.5",
