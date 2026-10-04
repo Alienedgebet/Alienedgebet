@@ -2913,19 +2913,32 @@ def get_live_orchestrator():
     board rather than publishing an empty one, so a match that just finished
     does not vanish from the screen mid-view.
 
-    That preservation means this file can be arbitrarily old while the scanner
-    is running perfectly. Without the age, /live/edges had no way to tell a
-    current board from one frozen at the end of the previous match, so it kept
-    rendering a finished fixture at minute 97 as if it were live. `cycle` alone
-    cannot express this because the cycle counter is part of the frozen
-    payload. Exposing the real age lets the client say so.
+    SUPERSEDED 2026-10-04: that preservation froze the board forever. With
+    nothing live the file was never rewritten again, so it kept showing the
+    last cycle's state indefinitely — observed as a fixture stuck at minute 97
+    hours after full time, and as finished matches disappearing instead of
+    settling. Stage 6 now publishes an explicit idle board instead (see
+    `_publish_idle_board`) carrying `live_state: "idle"` plus every finished
+    fixture it can still find, so the board is rewritten every cycle, honest
+    about liveness, and settled results stay visible.
+
+    `data_age_seconds` is still exposed so the client can tell a current board
+    from one frozen mid-match if the scanner ever stops.
     """
     default_board = {"session": "", "cycle": 0, "total_live": 0,
-                     "total_db": 0, "matches": []}
+                     "total_db": 0, "matches": [], "live_state": "unknown",
+                     "retained_finished": 0}
     path = os.path.join(OUTPUT_DIR, "orchestrator_board.json")
     board = _read_json(path, default_board)
     if isinstance(board, dict):
         board["data_age_seconds"] = _data_age_seconds(path)
+        # Backfill for a board written before this field existed, and for a
+        # read of a missing file. "unknown" is deliberately distinct from
+        # "idle": one means we do not know, the other is a positive statement
+        # that Stage 6 checked and there was nothing in play.
+        board.setdefault("live_state",
+                         "live" if board.get("total_live") else "unknown")
+        board.setdefault("retained_finished", 0)
     return board
 
 

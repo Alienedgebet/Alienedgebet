@@ -127,8 +127,43 @@ function payloadIsSettled(payload: unknown): boolean {
   return nodes.some((node) => isSettledRow(node));
 }
 
+/**
+ * LIVE-FEED CACHE KEYS — payloads describing the state of play RIGHT NOW.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * `PERSISTENT_CACHE_TTL_MS` is 24 hours and its retention rule was "keep
+ * serving a SETTLED payload past expiry". That rule is right for VERIFY
+ * history — a finished match must survive as a record — and wrong for a live
+ * feed, because a live feed is by definition NOT settled.
+ *
+ * The retention test keyed on `verification.verdict`, so a Code 6 board of
+ * in-play rows (which carries no `verification` objects at all) was never
+ * treated as settled and was dropped only once past expiry. Inside the window
+ * it was served unconditionally, so reopening the page painted the previous
+ * board instantly and it read as live: observed on 2026-10-04 as the Verify
+ * page showing a board frozen at 00:48 — a fixture at minute 97, hours after
+ * full time — while the scanner itself was running perfectly.
+ *
+ * The rule now: a LIVE feed may be cached in memory for an instant first
+ * paint, but it is never restored from localStorage. Every mount comes from
+ * the network, and the backend's own `live_state` decides what is shown.
+ * Verify/history keys are deliberately absent from this pattern and keep the
+ * settled-payload retention they need.
+ */
+const LIVE_FEED_KEY_PATTERN =
+  /live-(edges-orchestrator|edges-board|incoming|alerts|danger|inplay|aggregator)|orchestrator|live-board/;
+
+/** True when this cache key holds a payload describing play as it is NOW. */
+function isLiveFeedKey(key: string): boolean {
+  return LIVE_FEED_KEY_PATTERN.test(key);
+}
+
 function getPersistentEntry<T>(key: string): CacheEntry<T> | null {
   if (typeof window === "undefined") return null;
+  // A live feed is never restored from storage. Replaying it is exactly what
+  // made a frozen board look like a live match.
+  if (isLiveFeedKey(key)) return null;
   try {
     const raw = window.localStorage.getItem(`${PERSISTENT_CACHE_PREFIX}${key}`);
     if (!raw) return null;
@@ -180,7 +215,11 @@ function getCached<T>(key: string): T | null {
 function setCached<T>(key: string, data: T): void {
   const entry: CacheEntry<T> = { data, ts: Date.now() };
   apiCache.set(key, { data: data as unknown, ts: entry.ts });
-  if (typeof window !== "undefined") {
+  // A live feed goes to MEMORY ONLY. Persisting it is what let a board frozen
+  // at 00:48 be replayed on a later visit as though it were live; not writing
+  // it in the first place is stronger than filtering on read, and it also
+  // keeps yesterday's live payload out of storage entirely.
+  if (typeof window !== "undefined" && !isLiveFeedKey(key)) {
     try {
       window.localStorage.setItem(`${PERSISTENT_CACHE_PREFIX}${key}`, JSON.stringify(entry));
     } catch {
@@ -193,6 +232,22 @@ function setCached<T>(key: string, data: T): void {
 export function invalidateCache(prefix: string): void {
   for (const key of apiCache.keys()) {
     if (key.startsWith(prefix)) apiCache.delete(key);
+  }
+  // Also drop the persisted tier, including live-feed keys written by an
+  // older build before the memory-only rule existed.
+  if (typeof window !== "undefined") {
+    try {
+      const doomed: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i += 1) {
+        const k = window.localStorage.key(i);
+        if (k?.startsWith(PERSISTENT_CACHE_PREFIX) && k.includes(prefix)) {
+          doomed.push(k);
+        }
+      }
+      doomed.forEach((k) => window.localStorage.removeItem(k));
+    } catch {
+      // Storage unavailable — the in-memory tier is already cleared above.
+    }
   }
 }
 

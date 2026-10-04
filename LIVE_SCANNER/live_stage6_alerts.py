@@ -21,6 +21,16 @@ from dotenv import load_dotenv
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
 
+# Persistent result sources used by _finished_snapshot_entries to keep a
+# finished match on the board after it leaves the in-play feed. Imported at
+# module scope (not inside the function) so an import problem surfaces once,
+# loudly, instead of silently degrading retention on every idle cycle.
+try:
+    from settlement_service import load_ft_snapshot, load_finished_archive
+except Exception:  # pragma: no cover - defensive only
+    load_ft_snapshot = None
+    load_finished_archive = None
+
 
 def _api_gate_pace(tag=""):
     """Sleep while a shared 429 cooldown is active (cheap no-op otherwise).
@@ -1003,6 +1013,160 @@ class SupremeOrchestrator:
         }
 
 
+    def _finished_snapshot_entries(self, already_shown_ids):
+        """
+        Build board rows for fixtures that have FINISHED but already left the
+        in-play feed, so they stay on the Verify page instead of vanishing.
+
+        WHY THIS EXISTS
+        ---------------
+        Stage 6 used to `return` early when the live feed came back empty,
+        deliberately preserving the previous board so a match would not
+        disappear mid-view. That helped a match that finished WHILE you were
+        watching, but it left the board frozen forever afterwards: with
+        nothing live the file was never rewritten, so it kept showing the last
+        cycle's state indefinitely. Observed on 2026-10-04:
+        `orchestrator_board.json` frozen at 00:48 still listing
+        "Atlético Mineiro vs Bragantino" at minute 97, hours after full time.
+
+        The retention that kept finished matches visible lived in the Code 2
+        validator (live_stage2_verification.py, removed in 7a22f87), which
+        merged the persistent FT snapshot. `validation_board.json` has not been
+        written since 2026-09-27, so that behaviour was ported here — into the
+        stage that actually runs.
+
+        Sources, both read-only and already on disk (no provider call):
+          * data/ft_result_snapshot.json — captured at the moment the finish was
+            seen, so it has the best chance of holding a real score.
+          * output/archive_{date}.json — the nightly archiver's record.
+
+        Today AND yesterday are consulted, because a European matchday runs
+        past midnight: a 22:00 kickoff finishes at 00:00+, so the fixture is
+        filed under the previous date while the user is still looking at
+        "today".
+
+        Rows match the shape the page already renders, with `is_finished` set
+        so the client relabels them instead of showing a stale minute.
+        """
+        rows = []
+        seen = set()
+
+        def _add(std):
+            if not isinstance(std, dict):
+                return
+            fid = str(std.get("fixture_id") or "").strip()
+            # already_shown_ids covers what this cycle rendered from the live
+            # feed, so a fixture in play is never duplicated here.
+            if not fid or fid in already_shown_ids or fid in seen:
+                return
+            ft_score = std.get("ft_score")
+            h_ft, a_ft = std.get("h_ft"), std.get("a_ft")
+            if ft_score is None and h_ft is not None and a_ft is not None:
+                ft_score = f"{int(h_ft)}-{int(a_ft)}"
+            # No score means we know it ended but not how. The row is still
+            # shown: a finished match with an unknown score is real
+            # information, and hiding it is the "they all disappeared" report.
+            seen.add(fid)
+            rows.append({
+                "name": f"{std.get('home_team') or 'Home'} vs {std.get('away_team') or 'Away'}",
+                "id": fid,
+                "fixture_id": fid,
+                "minute": int(std.get("minute") or 0),
+                "score": ft_score,
+                "status": "FINISHED",
+                "period": "FULL TIME",
+                "is_finished": True,
+                "retained_finished": True,
+                "in_db": False,
+                "structural": "",
+                "evaluation": "not_evaluated",
+                "evaluation_note": (
+                    "Finished. Retained from the persisted FT snapshot so the "
+                    "result stays visible after it leaves the in-play feed."
+                ),
+                "alerts": [],
+                "statistics": {},
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        for date_str in (today, yesterday):
+            # FT snapshot first: it is captured at the moment of the finish.
+            for loader, label in ((load_ft_snapshot, "FT snapshot"),
+                                  (load_finished_archive, "finished archive")):
+                if loader is None:
+                    continue
+                try:
+                    for fid, std in (loader(date_str) or {}).items():
+                        if str(fid) not in already_shown_ids:
+                            _add(std)
+                except Exception as exc:
+                    logging.warning("%s retention skipped for %s: %s",
+                                    label, date_str, exc)
+        return rows
+
+    def _publish_idle_board(self, db, fixture_errors=None):
+        """
+        Publish an HONEST board for the "nothing is in play right now" case.
+
+        Previously this case did nothing at all: run_single_cycle returned
+        early and the previous board stayed on disk indefinitely, which is how
+        a fixture sat at minute 97 for hours and why finished matches
+        disappeared instead of settling.
+
+        It now writes a real board carrying:
+          * `live_state: "idle"` — an explicit fact the API exposes, so the page
+            can say "nothing in play" rather than inferring it from an empty
+            list or, worse, from a stale one.
+          * every finished fixture still known from the FT snapshot / archive,
+            so results remain visible after they leave the in-play feed.
+
+        A failure here must never take the 24/7 scanner down, so every step is
+        guarded — a broken idle board is still better than a frozen live one.
+        """
+        retained = []
+        try:
+            retained = self._finished_snapshot_entries(set())
+        except Exception as exc:
+            logging.warning("Finished retention failed on idle cycle: %s", exc)
+
+        board = {
+            "session": SESSION_ID,
+            "cycle": self.cycle,
+            "total_live": 0,
+            "total_db": len(db or {}),
+            "matches": retained,
+            "errors": fixture_errors or [],
+            "rule_live": {},
+            "live_state": "idle",
+            "retained_finished": len(retained),
+            "coverage": {
+                "evaluated": 0,
+                "unevaluated": 0,
+                # 0, NOT len(retained): the coverage denominator counts rows
+                # that were candidates for LIVE evaluation this cycle. A
+                # retained row is a settled result read back from the FT
+                # snapshot and was never evaluated. Counting it would publish
+                # a 0% figure that the page reads as "the engine is blind",
+                # when the truth is "nothing is in play". This matches
+                # save_orchestrator_board, which excludes retained rows from
+                # the same denominator.
+                "total": 0,
+                "warming_up": False,
+            },
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            with open(ORCHESTRATOR_BOARD_FILE, "w", encoding="utf-8") as f:
+                json.dump(board, f)
+        except Exception as exc:
+            logging.warning("Idle board publish failed: %s", exc)
+            return
+        logging.info(
+            "Stage 6: nothing in play — published idle board with %d retained "
+            "finished fixture(s).", len(retained))
+
     def run_single_cycle(self):
         """Run one full pass, isolating bad fixtures from the cycle board."""
         self.cycle += 1
@@ -1020,7 +1184,15 @@ class SupremeOrchestrator:
         try:
             live_data = self.fetch_live_scores() or []
             if not live_data:
-                logging.warning("Stage 6 live feed returned no fixtures; preserving previous board")
+                # Nothing is in play. Preserving the previous board unchanged
+                # used to freeze it forever — it was never rewritten again —
+                # so a finished match stayed on screen at its last live minute
+                # indefinitely. An explicit idle board is both self-clearing
+                # and it keeps settled results visible.
+                logging.warning(
+                    "Stage 6 live feed returned no fixtures; publishing idle "
+                    "board (retained finished results)")
+                self._publish_idle_board(db, fixture_errors)
                 return
             # Request squads for the LIVE fixtures too. Without this, a match
             # absent from the prematch report could never be structurally
@@ -1086,11 +1258,35 @@ class SupremeOrchestrator:
                         "error": str(exc),
                     })
             if not cycle_matches:
-                logging.warning("Stage 6 found no processable live fixtures; preserving previous board")
+                # The feed had fixtures but none of them could be evaluated.
+                # Same reasoning as the empty-feed case above: preserving the
+                # old board froze it, so publish an idle board that is honest
+                # about the situation instead.
+                logging.warning(
+                    "Stage 6 found no processable live fixtures; publishing "
+                    "idle board (retained finished results)")
+                self._publish_idle_board(db, fixture_errors)
                 return
-            self.print_orchestrator_board(cycle_matches, len(live_data), len(db))
-            self.save_orchestrator_board(cycle_matches, len(live_data), len(db), fixture_errors)
-            self.save_live_dashboard(cycle_matches, len(live_data), len(db), fixture_errors)
+            # Finished fixtures that already left the in-play feed are retained
+            # alongside the live ones. They are excluded from `total_live` and
+            # from the coverage counts (they were never evaluated this cycle),
+            # but they must stay visible so a result does not disappear the
+            # moment its fixture leaves the feed.
+            try:
+                live_ids_seen = {
+                    str(m.get("id")) for m in cycle_matches if isinstance(m, dict)
+                }
+                retained_now = self._finished_snapshot_entries(live_ids_seen)
+            except Exception as exc:
+                logging.warning("Live-cycle finished retention skipped: %s", exc)
+                retained_now = []
+            board_matches = cycle_matches + retained_now
+            self.print_orchestrator_board(board_matches, len(live_data), len(db))
+            self.save_orchestrator_board(board_matches, len(live_data), len(db),
+                                         fixture_errors,
+                                         retained_finished=len(retained_now))
+            self.save_live_dashboard(board_matches, len(live_data), len(db),
+                                     fixture_errors)
         except Exception as exc:
             logging.exception("Engine Loop Failure: %s", exc)
 
@@ -1189,6 +1385,16 @@ class SupremeOrchestrator:
             print("  No live matches with valid minute data found.")
         else:
             for m in cycle_matches:
+                # A RETAINED finished row has no live-analysis fields at all —
+                # no conf, no key_loss, no chaos. Printing it through the live
+                # template would raise KeyError and abort the whole board, so
+                # it gets its own one-line "settled" rendering instead.
+                if m.get("retained_finished"):
+                    print(
+                        f"\n  🏁 RETAINED {m.get('name')} | FT "
+                        f"{m.get('score') or 'score unknown'}"
+                    )
+                    continue
                 db_tag = "🎯 VIP" if m['in_db'] else "👁️  LIVE"
                 print(
                     f"\n  {db_tag} {m['name']} | "
@@ -1225,7 +1431,7 @@ class SupremeOrchestrator:
 
     # ── NEW: JSON BOARD SNAPSHOT (for the API process to read) ─────────────
     def save_orchestrator_board(self, cycle_matches, total_live, total_db,
-                               fixture_errors=None):
+                               fixture_errors=None, retained_finished=0):
         # EVALUATION COVERAGE
         #
         # The storm gates need a squad-derived structural reading (one side's
@@ -1245,6 +1451,14 @@ class SupremeOrchestrator:
         evaluated = 0
         unevaluated = 0
         for m in cycle_matches:
+            # A RETAINED finished row is not part of coverage at all. It was
+            # never evaluated this cycle — it is a result read back from the
+            # FT snapshot — and it carries `structural: ""`. Keying the test on
+            # `"OK"` would treat that empty string as "OK" and count a
+            # settled match as a live structural read, inflating coverage with
+            # matches the engine never looked at. Count it separately.
+            if m.get("retained_finished"):
+                continue
             # Only "OK" means the structural test actually ran. The detective
             # can also return INSUFFICIENT_SQUAD_DATA (no squad) or
             # STALE_CACHE_FORMAT (a cached squad in the wrong shape) — both mean
@@ -1264,7 +1478,15 @@ class SupremeOrchestrator:
                 evaluated += 1
             else:
                 unevaluated += 1
-        total_matches = len(cycle_matches)
+        # Coverage denominator counts only rows that were CANDIDATES for
+        # evaluation this cycle. Retained finished results were never
+        # evaluated, so including them would drag the published percentage
+        # down for matches the engine was never meant to look at — and with
+        # only retained rows on an idle board it would report 0%, which
+        # reads as "the engine is blind" when the truth is "nothing is live".
+        total_matches = sum(
+            1 for m in cycle_matches if not m.get("retained_finished")
+        )
         # WARM-UP GUARD
         # On a cold start the squad vault is empty until maintenance_thread's
         # background fetches land, so the first cycle or two after every
@@ -1288,6 +1510,13 @@ class SupremeOrchestrator:
             "total_db":   total_db,
             "matches":   cycle_matches,
             "errors":    fixture_errors or [],
+            # Explicit "there IS football in play" fact, so the client never has
+            # to infer liveness from a list that may simply be stale. The idle
+            # board published by _publish_idle_board() sets this to "idle".
+            "live_state": "live" if total_live else "idle",
+            # How many rows are finished results retained from the FT snapshot
+            # rather than matches evaluated this cycle.
+            "retained_finished": int(retained_finished or 0),
             # Which of the user's rules match a LIVE fixture at this instant.
             # Read by the rules API to answer "is anything happening for this
             # alert right now?", which the alert log alone cannot: a rule that

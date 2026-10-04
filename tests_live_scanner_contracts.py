@@ -1128,28 +1128,118 @@ class LiveScannerContractTests(unittest.TestCase):
         orchestrator._process_live_fixture = process
         orchestrator.print_orchestrator_board = lambda *args: None
         saved = {}
-        orchestrator.save_orchestrator_board = lambda *args: saved.update(
-            board=args[3], matches=args[0], errors=args[3])
+        # `retained_finished` is a keyword argument on the real
+        # save_orchestrator_board signature, so the stub must tolerate it.
+        def _save(*args, **kwargs):
+            saved.update(board=args[3], matches=args[0], errors=args[3])
+        orchestrator.save_orchestrator_board = _save
         orchestrator.save_live_dashboard = lambda *args: None
+        # Retention reads the real FT snapshot / archive; stub it so this test
+        # asserts only the isolation contract it is named for.
+        orchestrator._finished_snapshot_entries = lambda shown: []
         orchestrator.run_single_cycle()
         self.assertEqual([m["id"] for m in saved["matches"]], ["good"])
         self.assertEqual(saved["errors"][0]["fixture_id"], "bad")
 
-    def test_stage6_preserves_board_when_live_feed_is_empty(self):
+    def test_stage6_publishes_idle_board_when_live_feed_is_empty(self):
+        """
+        The empty-feed case must PUBLISH, not preserve.
+
+        It used to `return` early and leave the previous board on disk, which
+        froze it forever: with nothing live the file was never rewritten again,
+        so a fixture that had already finished stayed on screen at its last
+        live minute indefinitely (observed 2026-10-04 as minute 97 hours after
+        full time). The idle board is what makes the board self-clearing and
+        keeps settled results visible.
+        """
         orchestrator = object.__new__(stage6.SupremeOrchestrator)
         orchestrator.cycle = 0
         orchestrator.load_all_prematch_data = lambda: {}
         orchestrator.maintenance_thread = lambda db, live=None: None
         orchestrator.fetch_live_scores = lambda: []
         orchestrator.cleanup_stale_memory = lambda live_ids: None
-        called = []
-        orchestrator.print_orchestrator_board = lambda *args: called.append("print")
-        orchestrator.save_orchestrator_board = lambda *args: called.append("save")
+        published = {}
+        orchestrator._publish_idle_board = lambda db, errors=None: published.update(db=db)
+        orchestrator.print_orchestrator_board = lambda *args: published.setdefault("printed", True)
+        orchestrator.save_orchestrator_board = lambda *args, **kwargs: None
         orchestrator.run_single_cycle()
 
-# ═══════════════════════════════════════════════════════════════════════════
+        # An idle board WAS published, and nothing was printed as if live.
+        self.assertIn("db", published)
+        self.assertNotIn("printed", published)
 
-        self.assertEqual(called, [])
+    def test_stage6_idle_board_carries_finished_results_and_honest_coverage(self):
+        """
+        The idle board must state liveness as a FACT and carry the finished
+        results that would otherwise disappear, while keeping coverage honest:
+        a retained row is a settled result, not an evaluation, so counting it
+        would publish a misleading 0% and read as "the engine is blind".
+        """
+        orchestrator = object.__new__(stage6.SupremeOrchestrator)
+        orchestrator.cycle = 7
+        orchestrator._finished_snapshot_entries = lambda shown: [
+            {"id": "1", "name": "A vs B", "fixture_id": "1", "minute": 90,
+             "score": "2-1", "status": "FINISHED", "period": "FULL TIME",
+             "is_finished": True, "retained_finished": True, "in_db": False,
+             "structural": "", "evaluation": "not_evaluated",
+             "evaluation_note": None, "alerts": [], "statistics": {},
+             "updated_at": "now"},
+        ]
+        out = {}
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "orchestrator_board.json")
+            orig = stage6.ORCHESTRATOR_BOARD_FILE
+            stage6.ORCHESTRATOR_BOARD_FILE = path
+            try:
+                orchestrator._publish_idle_board({}, [])
+                with open(path, encoding="utf-8") as fh:
+                    out = json.load(fh)
+            finally:
+                stage6.ORCHESTRATOR_BOARD_FILE = orig
+
+        self.assertEqual(out["live_state"], "idle")
+        self.assertEqual(out["total_live"], 0)
+        self.assertEqual(out["retained_finished"], 1)
+        self.assertEqual(len(out["matches"]), 1)
+        self.assertTrue(out["matches"][0]["is_finished"])
+        self.assertEqual(out["coverage"]["evaluated"], 0)
+        self.assertEqual(out["coverage"]["unevaluated"], 0)
+        self.assertEqual(out["coverage"]["total"], 0)
+
+    def test_stage6_coverage_ignores_retained_finished_rows(self):
+        """A settled result must never inflate or deflate live coverage."""
+        orchestrator = object.__new__(stage6.SupremeOrchestrator)
+        orchestrator.cycle = 1
+        rows = [
+            {"name": "live", "id": "1", "in_db": True, "structural": "OK",
+             "minute": 30, "conf": 1, "h_pressure": 0, "a_pressure": 0,
+             "chaos": 0.0, "h_xg": 0, "a_xg": 0, "h_sot": 0, "a_sot": 0,
+             "key_loss": {"h_lost": 0, "a_lost": 0}, "alerts": []},
+            {"name": "settled", "id": "2", "in_db": False, "structural": "",
+             "retained_finished": True, "alerts": []},
+        ]
+        written = {}
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "orchestrator_board.json")
+            orig = stage6.ORCHESTRATOR_BOARD_FILE
+            stage6.ORCHESTRATOR_BOARD_FILE = path
+            try:
+                stage6.SupremeOrchestrator.save_orchestrator_board(
+                    orchestrator, rows, 1, 0, [], retained_finished=1)
+                with open(path, encoding="utf-8") as fh:
+                    written = json.load(fh)
+            finally:
+                stage6.ORCHESTRATOR_BOARD_FILE = orig
+
+        self.assertEqual(written["coverage"]["evaluated"], 1)
+        self.assertEqual(written["coverage"]["unevaluated"], 0)
+        # Retained row excluded from the denominator: a clean 100% of what was
+        # actually a candidate, not 50%.
+        self.assertEqual(written["coverage"]["total"], 1)
+        self.assertEqual(written["coverage"]["pct"], 100)
+        self.assertEqual(written["retained_finished"], 1)
+        self.assertEqual(written["live_state"], "live")
+        self.assertTrue(written["matches"][1]["retained_finished"])
 
 # VALIDATION LEDGER — the rules confirmed for this build
 #   1. UNDER 2.5 gets a FINAL verdict at 45' and is never extended.
