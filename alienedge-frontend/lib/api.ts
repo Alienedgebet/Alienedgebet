@@ -801,6 +801,16 @@ export interface Over25GoldPick extends FixtureRisk {
   };
 }
 
+/**
+ * The Over 1.5 page's Gold block.
+ *
+ * An ALIAS, not a copy: this is literally the same row object that
+ * /api/over25/gold serves. Duplicating the interface would let the two drift
+ * apart silently, which is how this block ended up mislabelled in the first
+ * place. Only the settlement market differs between the two pages.
+ */
+export type Over15GoldPick = Over25GoldPick;
+
 export interface Over25ApexPick extends FixtureRisk {
   fixture_id: string;
   Fixture: string;
@@ -2681,6 +2691,20 @@ export const over25Api = {
 export const over15Api = {
   getStage3: (date: string): Promise<AxiosResponse<Over15Stage3Pick[]>> =>
     api.get(`/api/over15/stage3/${date}`),
+
+  /**
+   * The Gold engine's rows on the Over 1.5 page.
+   *
+   * Deliberately a SEPARATE route rather than a reuse of over25Api.getGold.
+   * Both read the same store key (`over25_gold`), so the fixture list is
+   * identical; only the settlement market differs (this one grades Over 1.5,
+   * >= 2 goals, because that is the page it is rendered on).
+   *
+   * Typed as Over25GoldPick because the row IS that row — the payload is the
+   * Gold engine's output, unmodified.
+   */
+  getGold: (date: string): Promise<AxiosResponse<Over25GoldPick[]>> =>
+    api.get(`/api/over15/gold/${date}`),
 
   getPsychology: (date: string): Promise<AxiosResponse<Over15PsychologyPick[]>> =>
     api.get(`/api/over15/psychology/${date}`),

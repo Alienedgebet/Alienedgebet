@@ -1719,6 +1719,39 @@ def get_over25_gold(date: str):
     return _settled(ensure_defaults(data, O25_GOLD_DEFAULTS), "o25", date)
 
 
+# Gold O2.5 rows are NESTED, so the defaults dict is identical to the Over 2.5
+# one — the row shape is the same object, only the settlement market differs.
+O15_GOLD_DEFAULTS = dict(
+    fixture_id="", engine="", league="", kickoff_datetime="", kickoff_timestamp="",
+    flags={},
+)
+
+
+@app.get("/api/over15/gold/{date}", tags=["Over 1.5"])
+def get_over15_gold(date: str):
+    """The Gold engine's rows, shown on the Over 1.5 page.
+
+    SAME STORE KEY as /api/over25/gold — "over25_gold". The fixture list is
+    therefore byte-identical to the Over 2.5 Gold block by construction: no
+    second run, no re-filtering, no second set of criteria. The Gold engine
+    itself is untouched.
+
+    The ONE difference is the settlement market. The Over 2.5 route settles
+    "o25" (>= 3 goals WON). Reusing that route here would put a verdict computed
+    on 3+ goals onto the Over 1.5 page, where the reader is judging Over 1.5.
+    So this settles "o15" (>= 2 goals WON) — same fixtures, verdict that matches
+    the page it is rendered on.
+
+    This is also a legitimately independent Over 1.5 opinion, unlike the
+    over15_stage3 rows that previously held this slot: the Gold engine's only two
+    hard filters are BOTH Over 1.5 conditions (H2H must be 100% over 1.5, and
+    both sides 8+ goals in the last 5), so it grades the market on its own rules
+    rather than re-reading the tier ladder's Tier 1/2 output.
+    """
+    data, _ = store.load("over25_gold", date, default=[])
+    return _settled(ensure_defaults(data, O15_GOLD_DEFAULTS), "o15", date)
+
+
 @app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
 def get_over25_apex(date: str):
     return _with_intelligent_pass(
