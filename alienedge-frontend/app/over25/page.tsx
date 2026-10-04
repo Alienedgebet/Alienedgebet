@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
+import { fmt } from "@/lib/utils";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
@@ -119,7 +120,14 @@ const stage2Columns: PredictionColumn<Over25Stage2Pick>[] = [
   },
   { key: "time", header: "Time", render: (r) => r.Time },
   { key: "votes", header: "Votes", align: "right", render: (r) => r.Votes },
-  { key: "odds", header: "Odds", align: "right", render: (r) => r.Odds.toFixed(2) },
+  // `Odds` is typed `number` in lib/api.ts, but that type is not enforced at
+  // runtime and the payload does not always honour it: rows recovered from the
+  // engine's CSV (main.py `_recover_engine_output_from_disk` uses
+  // csv.DictReader) carry Odds as the STRING '1.41'. `fmt` accepts either and
+  // shows "—" for a genuinely absent price, instead of throwing
+  //   `e.Odds.toFixed is not a function`
+  // which previously unmounted the whole Over 2.5 page.
+  { key: "odds", header: "Odds", align: "right", render: (r) => fmt(r.Odds, 2) },
   { key: "algo", header: "Algorithm", render: (r) => r.Algorithm },
   {
     key: "reasons",

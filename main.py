@@ -113,15 +113,104 @@ from FILTER.win_filter_service import run_win_filter_service
 # ==============================================================================
 # 3. FAULT-TOLERANT EXECUTION BARRIER — now saves output on success
 # ==============================================================================
+def _coerce_csv_row_types(rows):
+    """
+    Restore numbers in rows that were recovered from a CSV.
+
+    WHY THIS EXISTS
+    ---------------
+    `csv.DictReader` returns EVERY value as a string. An engine that writes
+    floats to /output/*.csv and returns None from memory (so `_safe_exec`
+    falls through to the on-disk recovery path) therefore registers a row
+    like `{"Odds": "1.41"}` where the in-memory engine produced `1.41`.
+
+    That survived all the way to the browser, where lib/api.ts declares
+    `Odds: number`, the column renderer called `r.Odds.toFixed(2)`, and the
+    whole Over 2.5 page died with
+    `e.Odds.toFixed is not a function (In 'e.Odds.toFixed(2)')`.
+    Measured on 2026-10-04: `output/over25_stage2_picks_2026-10-03.json`
+    held `Odds = 1.41` (float) while `output/cache/over25_stage2__2026-10-04.json`
+    held `Odds = '1.41'` (str) — same engine, same day, different writer.
+
+    Rules, all deliberately conservative — a wrong value is worse than an
+    untouched one:
+      * Only values that are unambiguously numeric become numbers.
+      * Only these names are touched. An engine's free-text columns
+        ("Reasons", "Algorithm", "fixture") are left exactly as written, and
+        a fixture name that happens to look like a number is not mangled.
+      * Booleans and empty strings are NEVER coerced.
+      * A string that does not parse is left as the original string, so the
+        payload is never made worse by this pass.
+
+    Both engines and the API apply the same coercion, so the value a client
+    sees matches what the engine actually computed.
+    """
+    # Column names that are numeric in every engine that writes them. Kept
+    # explicit (rather than "anything that looks like a number") so a text
+    # column can never be silently converted.
+    numeric_keys = {
+        # over25 / over15 council stages
+        "Odds", "odds", "o25_odds", "dog_odds", "draw_odds", "win_odds",
+        "Votes", "GradeNum", "Score", "poisson_over_prob_num",
+        "Monte_Win_Prob", "Monte_Draw_Prob", "Super_Monte_Prob",
+        "Psych_Score", "Cat_Priority", "Value",
+        # aggregates / killswitches
+        "expected_total_corners", "corners_line", "pos_gap", "parity_diff",
+        "combined_gs_last_5", "poisson_over_prob", "poisson_under_prob",
+        # stats feeds
+        "total", "ft_score", "h_ft", "a_ft", "total_goals", "total_corners",
+        "dangerous_attacks", "shots_on_target", "possession",
+    }
+
+    if isinstance(rows, dict):
+        for row in rows.values():
+            _coerce_csv_row_types(row)
+        return rows
+    if not isinstance(rows, list):
+        return rows
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in numeric_keys:
+            if key not in row:
+                continue
+            val = row[key]
+            # Booleans coerce to 1/0 in Python and 'True' is not numeric —
+            # both are left strictly alone.
+            if isinstance(val, bool) or val is None:
+                continue
+            if isinstance(val, (int, float)):
+                continue
+            if not isinstance(val, str):
+                continue
+            text = val.strip()
+            if not text:
+                continue
+            try:
+                number = float(text)
+            except (TypeError, ValueError):
+                continue
+            # int(...) so a price/odds value reads as 1.41, not 1.41 float
+            # artifacts in JSON, matching what the in-memory engine wrote.
+            row[key] = int(number) if number.is_integer() and "." not in text \
+                and "e" not in text.lower() else number
+    return rows
+
+
 def _normalize_fixture_schema(payload):
     """
     Ensures case-insensitive compatibility between engines producing 'Fixture'
     and api/main.py expecting lowercase 'fixture'.
+
+    Also restores numeric types on rows that came back from a CSV — see
+    _coerce_csv_row_types for why that matters.
     """
     if isinstance(payload, list):
         for row in payload:
             if isinstance(row, dict) and "Fixture" in row and "fixture" not in row:
                 row["fixture"] = row["Fixture"]
+        return _coerce_csv_row_types(payload)
     elif isinstance(payload, dict):
         if "Fixture" in payload and "fixture" not in payload:
             payload["fixture"] = payload["Fixture"]
@@ -129,6 +218,9 @@ def _normalize_fixture_schema(payload):
             for row in payload["data"]:
                 if isinstance(row, dict) and "Fixture" in row and "fixture" not in row:
                     row["fixture"] = row["Fixture"]
+            _coerce_csv_row_types(payload["data"])
+        else:
+            _coerce_csv_row_types(payload)
     return payload
 
 
