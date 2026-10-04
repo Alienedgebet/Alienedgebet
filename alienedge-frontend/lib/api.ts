@@ -878,6 +878,11 @@ export interface Over15Stage3Pick extends FixtureRisk {
 }
 
 export interface Over15PsychologyPick extends FixtureRisk {
+  /**
+   * Added 2026-10-04 by PSYCHOLOGY/over15_psychology.py. Lets the row join to
+   * its fixture, which is how the Stats panel resolves the head-to-head record.
+   */
+  fixture_id?: string | number;
   Fixture: string;
   Base_Poisson: string;
   Base_Grade: string;
@@ -1196,6 +1201,8 @@ export interface UndersResponse {
 }
 
 export interface SOTPick extends FixtureRisk {
+  /** Added 2026-10-04 by Engine/sot_engine.py. Lets the row join to its fixture. */
+  fixture_id?: string | number;
   Fixture: string;
   Verdict: string;
   Proj_SOT: number;
@@ -1207,6 +1214,8 @@ export interface SOTPick extends FixtureRisk {
 }
 
 export interface FHVIPick extends FixtureRisk {
+  /** Added 2026-10-04 by Engine/fhvi_engine.py. Lets the row join to its fixture. */
+  fixture_id?: string | number;
   fixture: string;
   ht_score: string;
   ft_score: string;
@@ -1224,6 +1233,8 @@ export interface FHVIPick extends FixtureRisk {
 }
 
 export interface SHVIPick extends FixtureRisk {
+  /** Added 2026-10-04 by Engine/shvi_engine.py. Lets the row join to its fixture. */
+  fixture_id?: string | number;
   fixture: string;
   ht_score: string;
   ft_score: string;
@@ -1267,6 +1278,8 @@ export interface SHGGWinnerPick {
 }
 
 export interface SHMasterPick extends FixtureRisk {
+  /** Added 2026-10-04 by Engine/sh_master_vortex.py. Joins the row to its fixture. */
+  fixture_id?: string | number;
   fixture: string;
   league: string;
   shvi_score: number;

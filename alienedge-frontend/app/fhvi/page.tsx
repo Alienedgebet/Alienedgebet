@@ -66,7 +66,7 @@ export default function FHVIPage() {
       createPickStatsColumn<FHVIPick>({
         dna: dnaV2,
         date,
-        getFixtureId: () => null,
+        getFixtureId: (r) => r.fixture_id,
         getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
         getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
       }),

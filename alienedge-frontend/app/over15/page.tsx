@@ -244,7 +244,7 @@ export default function Over15Page() {
       createPickStatsColumn<Over15PsychologyPick>({
         dna: dnaV2,
         date,
-        getFixtureId: () => null,
+        getFixtureId: (r) => r.fixture_id,
         getHomeTeam: (r) => splitFixtureTeams(r.Fixture).home,
         getAwayTeam: (r) => splitFixtureTeams(r.Fixture).away,
       }),
