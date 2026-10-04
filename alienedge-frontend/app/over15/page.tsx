@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Flame } from "lucide-react";
 import type { AxiosResponse } from "axios";
 import {
@@ -9,19 +9,16 @@ import {
   type GGO15Pick,
   type Over15PsychologyPick,
   type Over15LegacyPick,
-  type Over15Stage3Pick,
+  type Over15GoldPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
-import { fmt } from "@/lib/utils";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
-import { MOCK_O15_PSYCH, MOCK_O15_S3 } from "@/lib/mock-chains";
+import { MOCK_O15_PSYCH } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
-import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
-import { sortO15 } from "@/lib/cross-engine-ranking";
 
 /**
  * Columns for the GG Over 1.5 twin head.
@@ -94,48 +91,68 @@ const psychologyColumns: PredictionColumn<Over15PsychologyPick>[] = [
   },
 ];
 
-const stage3Columns: PredictionColumn<Over15Stage3Pick>[] = [
+/**
+ * Columns for the "Over 1.5 Gold" block.
+ *
+ * These render the Gold engine's NESTED row shape ({teams, metrics, flags}) —
+ * identical to the Over 2.5 Gold block's columns, because it is the same row.
+ * The only difference is which page it is on and therefore how the Verify
+ * column grades it.
+ */
+const goldColumns: PredictionColumn<Over15GoldPick>[] = [
   {
-    key: "match",
-    header: "Match",
-    render: (r) => <FixtureRiskTag row={r} label={r.Match} className="font-medium text-text-primary" />,
+    key: "fixture",
+    header: "Fixture",
+    render: (r) => (
+      <span className="font-medium text-text-primary">
+        {r.teams.home.name} vs {r.teams.away.name}
+      </span>
+    ),
   },
-  { key: "poisson", header: "Poisson %", render: (r) => <ProbCell value={r["Poisson%"]} showBar={false} /> },
-  // Same CSV-string Odds hazard as the Over 2.5 stage-2 column — this market
-  // inherits the same engine output shape. `fmt` keeps a numeric string
-  // renderable and degrades an absent price to "—" rather than throwing.
-  { key: "odds", header: "Odds", align: "right", render: (r) => fmt(r.Odds, 2) },
-  { key: "grade", header: "Grade", render: (r) => <TierBadge tier={r.Grade} /> },
-  { key: "h2h", header: "H2H Record", render: (r) => r.H2H_Record },
-  { key: "picked", header: "Picked By", render: (r) => r.PickedBy },
+  { key: "league", header: "League", render: (r) => r.league },
   {
-    key: "fail",
-    header: "Failures",
-    className: "max-w-[200px] truncate",
-    render: (r) => r.Failures || "—",
+    key: "flags",
+    header: "Gold Flags",
+    className: "max-w-[260px]",
+    render: (r) => (
+      <div className="flex flex-wrap gap-1 text-2xs">
+        {Object.entries(r.flags)
+          .filter(([, v]) => v)
+          .map(([k]) => (
+            <span
+              key={k}
+              className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1 py-0.5 text-accent-amber"
+            >
+              {k.replace(/_/g, " ")}
+            </span>
+          ))}
+      </div>
+    ),
   },
+  {
+    key: "goals",
+    header: "Goals L5 (H/A)",
+    align: "right",
+    render: (r) => `${r.metrics.home_goals_last_5} / ${r.metrics.away_goals_last_5}`,
+  },
+  { key: "h2h", header: "H2H Analyzed", align: "right", render: (r) => r.metrics.h2h_matches_analyzed },
 ];
 
 export default function Over15Page() {
   const { date } = useSelectedDate();
-  // Default ON: Poisson% >= 55.6 AND Grade >= 5 is the ordering the full-history
-  // backtest supports (120 rows, 93.3% vs 72.8% for the rest, corrected
-  // p = 0.035, bootstrap 95% CI [+9.4, +31.6] pp). It applies to the "Over 1.5
-  // Gold" stage, which is the engine that emits those two fields.
-  // See lib/cross-engine-ranking.ts.
-  const [smartRank, setSmartRank] = useState(true);
 
-  const fetchStage3 = useMemo(
-    () => async (): Promise<AxiosResponse<Over15Stage3Pick[]>> => {
-      const response = await over15Api.getStage3(date);
-      if (smartRank && Array.isArray(response.data)) {
-        // Rebind .data rather than spreading the response: spreading widens the
-        // type to a fresh object literal and breaks the ChainStage contract.
-        response.data = sortO15(response.data);
-      }
-      return response;
-    },
-    [date, smartRank]
+  /**
+   * The Gold engine's rows.
+   *
+   * NOT re-sorted. The old block ran `sortO15`, which promotes rows by
+   * Poisson% >= 55.6 AND Grade >= 5 — a rule calibrated on 120 STAGE-3 rows.
+   * Gold rows have neither field (its schema is {teams, metrics, flags}), so
+   * the comparator cannot apply to them and must not be forced onto them.
+   * The engine's own ordering is the order it emitted.
+   */
+  const fetchGold = useMemo(
+    () => (): Promise<AxiosResponse<Over15GoldPick[]>> => over15Api.getGold(date),
+    [date]
   );
 
   // 1. Psychology (Verify -> Rest)
@@ -152,18 +169,18 @@ export default function Over15Page() {
     []
   );
 
-  // 2. Stage 3 Base (Verify -> Rest)
-  const stage3ColumnsWithVerify = useMemo(
+  // 2. Gold (Verify -> Rest)
+  const goldColumnsWithVerify = useMemo(
     () => [
-      createVerifyColumn<Over15Stage3Pick>(),
-      createIntelligentPassColumn<Over15Stage3Pick>({
+      createVerifyColumn<Over15GoldPick>(),
+      createIntelligentPassColumn<Over15GoldPick>({
         market: "over15",
-        getLabel: (r) => r.Match,
+        getLabel: (r) => `${r.teams.home.name} vs ${r.teams.away.name}`,
         date,
       }),
-      ...stage3Columns,
+      ...goldColumns,
     ],
-    []
+    [date]
   );
 
   const ggo15ColumnsWithVerify = useMemo(
@@ -221,13 +238,6 @@ export default function Over15Page() {
             the same engine before the 2026-09-30 fix, frozen for comparison.
           </p>
         </div>
-        <SignalRankToggle
-          active={smartRank}
-          onChange={setSmartRank}
-          activeLabel="Smart rank"
-          inactiveLabel="As served"
-          help="Picks the backtested combination to the top: Poisson% >= 55.6 AND Grade >= 5 (120 rows, 93.3% vs 72.8% for the rest, corrected p = 0.035, bootstrap 95% CI [+9.4, +31.6] pp). Applies to the Over 1.5 Gold stage. Re-check with: python3 signal_backtest.py --market o15"
-        />
       </div>
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
@@ -266,17 +276,30 @@ export default function Over15Page() {
         />
       </div>
 
-      {/* ── 4. Over 1.5 Gold ─────────────────────────────────────────── */}
+      {/* ── 4. Over 1.5 Gold ───────────────────────────────────────────
+          These are the SAME rows the Over 2.5 page shows under "Over 2.5
+          Gold" — both blocks read the one `over25_gold` payload, unfiltered
+          and unmodified, so the fixture list is identical by construction.
+
+          The Gold engine's only two hard filters are both Over 1.5
+          conditions (H2H 100% over 1.5, and both sides 8+ goals in the last
+          5), which is why it belongs on this page at all. Unlike the stage-3
+          block that held this slot before, it does not read the tier
+          ladder's output, so it is an independent opinion rather than a
+          downstream view of the engine above.
+
+          Verify grades Over 1.5 (2+ goals) here, because that is the page it
+          is rendered on. The Over 2.5 Gold block grades the same fixtures on
+          3+ goals. */}
       <div>
         <ChainStage
           title="Over 1.5 Gold"
-          description="Foundation base"
-          fetcher={fetchStage3}
-          deps={[date, smartRank]}
-          columns={stage3ColumnsWithVerify}
-          rowKey={(r, i) => `${r.Match}-${i}`}
-          emptyMessage="No stage 3 picks for this date."
-          fallbackData={MOCK_O15_S3}
+          description="Gold engine — independent Over 1.5 pick. H2H 100% over 1.5 + both sides 8+ goals in the last 5. Same rows as Over 2.5 Gold."
+          fetcher={fetchGold}
+          deps={[date]}
+          columns={goldColumnsWithVerify}
+          rowKey={(r, i) => `${r.fixture_id}-${i}`}
+          emptyMessage="No Gold picks for this date. This engine is deliberately ultra-selective — it requires H2H to be 100% over 1.5 AND both teams to have scored 8+ in their last 5, so it returns nothing on most days. An empty block here is a real result, not a failure."
           refreshMs={VERIFY_REFRESH_MS}
         />
       </div>
