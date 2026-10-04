@@ -16,6 +16,7 @@ import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
 import { fmt } from "@/lib/utils";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
@@ -199,9 +200,20 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
   );
 
   // 6. Council Stage 2 (Verify -> Rest)
+  // Over 2.5 Judges / Council Stage 2 (Verify -> DNA -> Rest)
+  // DNA added 2026-10-04, same placement and same by-label join as Probabilistic.
   const stage2ColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<Over25Stage2Pick>(), ...stage2Columns],
-    []
+    () => [
+      createVerifyColumn<Over25Stage2Pick>(),
+      createDnaColumnByLabel<Over25Stage2Pick>(
+        dnaV2?.market_factors,
+        "over25",
+        date,
+        (r) => r.fixture
+      ),
+      ...stage2Columns,
+    ],
+    [dnaV2, date]
   );
 
   // 4. FHVI duplicate display (Verify -> Intelligent Pass Count -> Rest)
@@ -220,9 +232,21 @@ export function Over25MarketPanel({ embedded = false }: { embedded?: boolean }) 
     [date]
   );
 
+  // Over 2.5 Probabilistic (Verify -> DNA -> Intelligent Pass Count -> Rest)
+  // DNA added 2026-10-04 so this block matches the WIN / GG / DRAW / UNDERS
+  // pattern: the badge sits immediately after Verify. This stage publishes the
+  // provider fixture id as `id`, not `fixture_id`, so it joins by fixture name —
+  // the same createDnaColumnByLabel path Corners used before DNA was removed
+  // there. 95% of these rows carry a fixture name; the rest render "—".
   const stage1ColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<Over25Stage1Pick>(),
+      createDnaColumnByLabel<Over25Stage1Pick>(
+        dnaV2?.market_factors,
+        "over25",
+        date,
+        (r) => r.fixture
+      ),
       createIntelligentPassColumn<Over25Stage1Pick>({
         market: "over25",
         getLabel: (r) => r.fixture,

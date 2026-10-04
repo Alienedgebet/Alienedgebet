@@ -14,17 +14,17 @@ import {
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import {
+  createDnaColumn,
+  createDnaColumnByLabel,
+} from "@/components/dna/DnaCountBadge";
+import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
 import { MOCK_O15_PSYCH } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
-import { useDnaV2 } from "@/lib/use-dna-v2";
-import {
-  createPickStatsColumn,
-  splitFixtureTeams,
-} from "@/components/dna/PickStatsCell";
 
 /**
  * Columns for the GG Over 1.5 twin head.
@@ -205,7 +205,8 @@ const vipColumns: PredictionColumn<Over15VipPick>[] = [
 
 export default function Over15Page() {
   const { date } = useSelectedDate();
-  // (2026-10-04) For the Stats column on the psychology block.
+  // (2026-10-04) For the DNA badge on this page's blocks — the same one-call
+  // pattern WIN / GG / DRAW / UNDERS already use.
   const { data: dnaV2 } = useDnaV2();
 
   /**
@@ -234,20 +235,18 @@ export default function Over15Page() {
     [date]
   );
 
-  // 1. Psychology (Verify -> Stats -> Rest)
-  // Stats (2026-10-04): last-five form + H2H history on demand. The psychology
-  // payload publishes no fixture_id, so form resolves by team name and H2H
-  // reports that it could not be checked — worded distinctly from "never met".
+  // 1. Psychology (Verify -> DNA -> Rest)
+  // DNA added 2026-10-04 to match WIN / GG / DRAW / UNDERS. This block publishes
+  // no fixture_id (0 of 225 rows), so it joins by fixture name.
   const psychologyColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<Over15PsychologyPick>(),
-      createPickStatsColumn<Over15PsychologyPick>({
-        dna: dnaV2,
+      createDnaColumnByLabel<Over15PsychologyPick>(
+        dnaV2?.market_factors,
+        "over15",
         date,
-        getFixtureId: (r) => r.fixture_id,
-        getHomeTeam: (r) => splitFixtureTeams(r.Fixture).home,
-        getAwayTeam: (r) => splitFixtureTeams(r.Fixture).away,
-      }),
+        (r) => r.Fixture
+      ),
       createIntelligentPassColumn<Over15PsychologyPick>({
         market: "over15",
         getLabel: (r) => r.Fixture,
@@ -255,13 +254,14 @@ export default function Over15Page() {
       }),
       ...psychologyColumns,
     ],
-    [date, dnaV2]
+    [dnaV2, date]
   );
 
-  // 2. Gold (Verify -> Rest)
+  // 2. Gold (Verify -> DNA -> Rest) — carries fixture_id, so it joins by id.
   const goldColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<Over15GoldPick>(),
+      createDnaColumn<Over15GoldPick>(dnaV2?.market_factors, "over15", date),
       createIntelligentPassColumn<Over15GoldPick>({
         market: "over15",
         getLabel: (r) => `${r.teams.home.name} vs ${r.teams.away.name}`,
@@ -269,13 +269,14 @@ export default function Over15Page() {
       }),
       ...goldColumns,
     ],
-    [date]
+    [dnaV2, date]
   );
 
-  // 3. Over 1.5 VIP (Verify -> Rest)
+  // 3. Over 1.5 VIP (Verify -> DNA -> Rest) — carries fixture_id.
   const vipColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<Over15VipPick>(),
+      createDnaColumn<Over15VipPick>(dnaV2?.market_factors, "over15", date),
       createIntelligentPassColumn<Over15VipPick>({
         market: "over15",
         getLabel: (r) => `${r.teams.home.name} vs ${r.teams.away.name}`,
@@ -283,12 +284,17 @@ export default function Over15Page() {
       }),
       ...vipColumns,
     ],
-    [date]
+    [dnaV2, date]
   );
 
+  // 4. GG Over 1.5 twin head (Verify -> DNA -> Rest) — carries fixture_id.
   const ggo15ColumnsWithVerify = useMemo(
-    () => [createVerifyColumn<GGO15Pick>(), ...ggo15Columns],
-    []
+    () => [
+      createVerifyColumn<GGO15Pick>(),
+      createDnaColumn<GGO15Pick>(dnaV2?.market_factors, "over15", date),
+      ...ggo15Columns,
+    ],
+    [dnaV2, date]
   );
 
   /**

@@ -6,14 +6,15 @@ import {
   foundationApi,
   underdogApi,
   winApi,
+  type DnaProfile,
   type WinApexPick,
   type WinForecastPick,
   type WinU2SPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
+import { fmt } from "@/lib/utils";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
-import { createPickStatsColumn } from "@/components/dna/PickStatsCell";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
@@ -24,6 +25,7 @@ import {
   type PredictionColumn,
 } from "@/components/predictions";
 import {
+  MOCK_DNA,
   MOCK_WIN_APEX,
   MOCK_WIN_FORECAST,
   MOCK_WIN_U2S,
@@ -46,158 +48,67 @@ const apexColumns: PredictionColumn<WinApexPick>[] = [
     render: (r) => (
       <FixtureRiskTag row={r} label={r.Fixture} className="font-medium text-text-primary" />
     ),
-    explain: (
-      <p>
-        <b>The match.</b> Home team vs away team, exactly as the provider lists
-        it. Nothing is scored from this — it exists so you can identify the row,
-        and so the DNA/SportyBet history card can look the fixture up.
-      </p>
-    ),
   },
-  {
-    key: "Target",
-    header: "Target",
-    render: (r) => <FixtureRiskTag row={r} label={r.Target} />,
-    explain: (
-      <p>
-        <b>Which side this row is betting on.</b> Every row is one bet on one
-        team, not a match-level opinion. A fixture can appear twice — once per
-        side — and when it does, each row is graded against its own team.
-      </p>
-    ),
-  },
+  { key: "Target", header: "Target", render: (r) => <FixtureRiskTag row={r} label={r.Target} /> },
   {
     key: "Category",
     header: "Category",
     render: (r) => <TierBadge tier={r.Category} />,
-    explain: (
-      <div className="space-y-2">
-        <p>
-          <b>The class of pick</b>, assigned after the full three-stage audit.
-          It reflects how the row survived, not how strong the team is.
-        </p>
-        <ul className="list-disc space-y-1 pl-4">
-          <li><b>VIP / strong</b> — cleared several independent gates.</li>
-          <li><b>Standard</b> — cleared the core gates.</li>
-          <li><b>Longshot</b> — survived on a weaker basis.</li>
-        </ul>
-        <p className="text-text-dim">
-          Category is an output of the audit chain, not an input to it.
-        </p>
-      </div>
-    ),
   },
   {
     key: "Cat_Priority",
     header: "Cat_Priority",
     align: "right",
     render: (r) => r.Cat_Priority,
-    explain: (
-      <p>
-        <b>Sort weight inside a category.</b> Rows are ordered by category
-        first, then this number, then the win probability. It is a tie-breaker
-        for presentation — a lower number means &ldquo;show me earlier&rdquo;, not &ldquo;more
-        likely&rdquo;.
-      </p>
-    ),
   },
   {
     key: "Monte_Win_Prob",
     header: "Monte_Win_Prob",
     render: (r) => <ProbCell value={r.Monte_Win_Prob} showBar={false} />,
-    explain: (
-      <div className="space-y-2">
-        <p>
-          <b>Simulated chance the target wins</b>, as a percentage. Produced by
-          a Monte Carlo run over a Poisson goal model built from each side&rsquo;s
-          scoring and conceding rates.
-        </p>
-        <p>
-          It is the model&rsquo;s own opinion <i>before</i> the later audit stages
-          apply. It is not a bookmaker&rsquo;s price and it is not a guarantee — it is
-          the raw input the rest of the chain builds on.
-        </p>
-      </div>
+  },
+  {
+    key: "Monte_Draw_Prob",
+    header: "Monte_Draw_Prob",
+    align: "right",
+    render: (r) => (
+      <span className="font-mono text-text-muted">
+        {Number(r.Monte_Draw_Prob).toFixed(1)}%
+      </span>
     ),
   },
-  // (2026-10-04) Monte_Draw_Prob and Lambda_Detail are NO LONGER RENDERED here.
-  //
-  // DISPLAY ONLY. Both remain in WinApexPick, are still emitted by
-  // AGGREGATOR/win_apex_aggregator.py, and Monte_Draw_Prob still drives the
-  // aggregator's own sort (final sort is by Cat_Priority, Monte_Win_Prob,
-  // Monte_Draw_Prob). Nothing about the model or the data changed — these two
-  // simply stopped being worth a column of screen space, and a visible draw
-  // number risked reading as a signal the pick was made on when it is not one.
-  //
-  // Safe to remove: no client-side ordering reads them. sortWin() in
-  // lib/cross-engine-ranking.ts keys on poisson_win_prob and win_odds only.
+  {
+    key: "Lambda_Detail",
+    header: "Lambda_Detail",
+    className: "max-w-[200px] truncate",
+    render: (r) => r.Lambda_Detail,
+  },
   {
     key: "Underdog_Risk",
     header: "Underdog_Risk",
     render: (r) => r.Underdog_Risk,
-    explain: (
-      <p>
-        <b>Risk flag for betting an outsider.</b> Set when the target is the
-        underdog. It marks how exposed this pick is to the classic trap — the
-        favourite wins the league but the outsider takes the points — so you can
-        discount the row accordingly. It does not change the pick; it labels it.
-      </p>
-    ),
   },
   {
     key: "Psych_Score",
     header: "Psych_Score",
     align: "right",
     render: (r) => String(r.Psych_Score),
-    explain: (
-      <p>
-        <b>Behavioural-model score</b> for the matchup. It blends things a
-        pure goal model cannot see: how each side performs under pressure,
-        momentum, and how the two styles interact.
-      </p>
-    ),
   },
   {
     key: "Psych_Logic",
     header: "Psych_Logic",
     className: "max-w-[220px] truncate",
     render: (r) => r.Psych_Logic || "—",
-    explain: (
-      <p>
-        <b>Why that score.</b> The short plain-English reason the behavioural
-        model gave for the number above — the triggers it actually fired on.
-        Read it with the score: the score says how strongly, the logic says on
-        what. It is truncated in the table; the full text is on the row itself.
-      </p>
-    ),
   },
   {
     key: "Chokehold_Status",
     header: "Chokehold_Status",
     render: (r) => r.Chokehold_Status || "—",
-    explain: (
-      <p>
-        <b>Opponent suppression check.</b> When it reads{" "}
-        <b>OPPONENT CHOKED</b>, the opponent&rsquo;s own attacking route was found to
-        be shut down by this matchup — the side has nowhere to create. This is
-        one of the gates that can <i>reject</i> a pick, so seeing it clear is not
-        neutral: it means that particular objection was tested and passed.
-      </p>
-    ),
   },
   {
     key: "Veto_Reason",
     header: "Veto_Reason",
     className: "max-w-[200px] truncate",
     render: (r) => r.Veto_Reason || "—",
-    explain: (
-      <p>
-        <b>What would have killed this pick.</b> The veto stage looks for
-        disqualifying conditions. A row only survives to appear here if the veto
-        did <i>not</i> fire — so this is usually empty. When it is not empty, the
-        row was kept anyway under a named exception, and this states which.
-      </p>
-    ),
   },
 ];
 
@@ -379,6 +290,78 @@ const forecastColumns: PredictionColumn<WinForecastPick>[] = [
   },
 ];
 
+// The DNA pillars are `number | null`, not `number` — schema v3 made a
+// pillar nullable because `null` ("never measured") and `0` ("measured and
+// terrible") are different facts, and collapsing them lied about the team.
+// These four renderers therefore go through `fmt`, which renders an absent
+// pillar as "—". Calling `.toFixed()` directly here is what threw
+//   `null is not an object (evaluating 'e.Market_Power_Scores.Win_Dominance.toFixed')`
+// and replaced the entire Win page with "Something went wrong" on 2026-10-04.
+//
+// `readPillar` also tolerates the WHOLE object being absent or null, because
+// this endpoint (/api/dna/{date}) returns engine output verbatim — it never
+// runs through the API's `ensure_defaults`, which only repairs top-level keys
+// and so can never reach a nested pillar.
+type DnaPillarKey =
+  | "Goal_Intent"
+  | "Win_Dominance"
+  | "BTTS_Friction"
+  | "Corner_Power";
+
+function readPillar(row: DnaProfile, key: DnaPillarKey): unknown {
+  const scores = (row as { Market_Power_Scores?: unknown })
+    .Market_Power_Scores;
+  if (!scores || typeof scores !== "object") return null;
+  return (scores as Record<string, unknown>)[key];
+}
+
+const dnaColumns: PredictionColumn<DnaProfile>[] = [
+  {
+    key: "team_name",
+    header: "Team",
+    // Team-level rows have no fixture identity, so no cup/friendly warning here.
+    render: (r) => (
+      <span className="font-medium text-text-primary">{r.team_name}</span>
+    ),
+  },
+  { key: "Archetype", header: "Archetype", render: (r) => r.Archetype },
+  {
+    key: "Goal_Intent",
+    header: "Goal Intent",
+    align: "right",
+    render: (r) => fmt(readPillar(r, "Goal_Intent"), 1),
+  },
+  {
+    key: "Win_Dominance",
+    header: "Win Dominance",
+    align: "right",
+    render: (r) => fmt(readPillar(r, "Win_Dominance"), 1),
+  },
+  {
+    key: "BTTS_Friction",
+    header: "BTTS Friction",
+    align: "right",
+    render: (r) => fmt(readPillar(r, "BTTS_Friction"), 1),
+  },
+  {
+    key: "Corner_Power",
+    header: "Corner Power",
+    align: "right",
+    render: (r) => fmt(readPillar(r, "Corner_Power"), 1),
+  },
+  {
+    key: "Tempo",
+    header: "Tempo",
+    align: "right",
+    render: (r) => r.Tactical_DNA.Tempo,
+  },
+  {
+    key: "Line_Height",
+    header: "Line Height",
+    render: (r) => r.Tactical_DNA.Line_Height,
+  },
+];
+
 export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
   const { date } = useSelectedDate();
   const { data: dnaV2 } = useDnaV2();
@@ -440,22 +423,11 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     [date, smartRankU2S]
   );
 
-  // 1. Win Apex (Verify -> DNA count -> Stats -> Intelligent Pass Count -> Rest)
+  // 1. Win Apex (Verify -> DNA -> Intelligent Pass Count -> Rest)
   const apexColumnsWithVerifyAndDna = useMemo(
     () => [
       createVerifyColumn<WinApexPick>(),
       createDnaColumn<WinApexPick>(dnaV2?.market_factors, "win", date),
-      // (2026-10-04) Match history on demand: last five per side + H2H. Pure
-      // display — see components/dna/PickStatsCell.tsx. `Fixture` is
-      // "Home vs Away" in this payload and Target is the bet side, so the card's
-      // home/away labels come from splitting Fixture on " vs ".
-      createPickStatsColumn<WinApexPick>({
-        dna: dnaV2,
-        date,
-        getFixtureId: (r) => r.fixture_id,
-        getHomeTeam: (r) => (r.Fixture ?? "").split(/\s+vs\.?\s+/)[0]?.trim() ?? null,
-        getAwayTeam: (r) => (r.Fixture ?? "").split(/\s+vs\.?\s+/)[1]?.trim() ?? null,
-      }),
       createIntelligentPassColumn<WinApexPick>({
         market: "win",
         getTeam: (r) => r.Target,
@@ -542,20 +514,18 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         refreshMs={VERIFY_REFRESH_MS}
       />
 
-      {/* (2026-10-04) The "DNA & Goal Intent Board" block was REMOVED here.
-          DISPLAY ONLY — no backend change of any kind.
-
-          Goal Intent is still very much alive: win_apex_aggregator.py reads
-          Goal_Intent + Tempo + Risk_Appetite to derive fav_side, which becomes
-          dna_align, and that gates whether a row is promoted to a pick at all.
-          None of that changed and none of it is exposed here on purpose — a
-          visible Goal Intent number invites reading it as the reason the pick
-          exists, when it is one of several gates and the published row is the
-          honest summary of all of them.
-
-          The full SportyBet-style history card (last 5 + H2H) remains
-          available per pick via the Stats column, which is the display that
-          carries no intelligence with it. */}
+      {/* Stage 2: DNA & Goal Intent Board */}
+      <ChainStage
+        title="DNA & Goal Intent Board"
+        description="Tactical DNA scores: Goal Intent, Win Dominance, BTTS Friction, Corner Power"
+        fetcher={() => foundationApi.getDNA(date)}
+        deps={[date]}
+        columns={dnaColumns}
+        rowKey={(r, i) => `${r.team_id}-${i}`}
+        emptyMessage="No DNA profiles for this date."
+        fallbackData={MOCK_DNA}
+        refreshMs={VERIFY_REFRESH_MS}
+      />
 
       {/* Stage 4: Underdog-to-Score Signal (U2S) — smart ranked */}
       <div>

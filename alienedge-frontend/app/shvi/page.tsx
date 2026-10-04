@@ -14,11 +14,6 @@ import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
-import { useDnaV2 } from "@/lib/use-dna-v2";
-import {
-  createPickStatsColumn,
-  splitFixtureTeams,
-} from "@/components/dna/PickStatsCell";
 import { ChainStage, TierBadge, ScoreBar, type PredictionColumn } from "@/components/predictions";
 import { MOCK_SH_8GOAL, MOCK_SH_GG, MOCK_SH_MASTER, MOCK_SHVI } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
@@ -139,20 +134,11 @@ const sh8GoalColumns: PredictionColumn<SH8GoalPick>[] = [
 
 export default function SHVIPage() {
   const { date } = useSelectedDate();
-  // (2026-10-04) For the Stats columns on all four SHVI blocks.
-  const { data: dnaV2 } = useDnaV2();
 
-  // 1. SHVI Streak Miner (Verify -> Stats -> Rest)
+  // 1. SHVI Streak Miner (Verify -> Rest)
   const shviColumnsWithVerify = useMemo(
     () => [
       createVerifyColumn<SHVIPick>(),
-      createPickStatsColumn<SHVIPick>({
-        dna: dnaV2,
-        date,
-        getFixtureId: (r) => r.fixture_id,
-        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
-        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
-      }),
       createIntelligentPassColumn<SHVIPick>({
         market: "shvi",
         getLabel: (r) => r.fixture,
@@ -160,58 +146,25 @@ export default function SHVIPage() {
       }),
       ...shviColumns,
     ],
-    [date, dnaV2]
+    []
   );
 
-  // 2. SH-GG Winner (Verify -> Stats -> Rest). Carries a real fixture_id, so
-  // this block gets form AND head-to-head.
+  // 2. SH-GG Winner (Verify -> Rest)
   const shGGWinnerColumnsWithVerify = useMemo(
-    () => [
-      createVerifyColumn<SHGGWinnerPick>(),
-      createPickStatsColumn<SHGGWinnerPick>({
-        dna: dnaV2,
-        date,
-        getFixtureId: (r) => r.fixture_id,
-        getHomeId: (r) => r.teams?.home?.id ?? null,
-        getAwayId: (r) => r.teams?.away?.id ?? null,
-        getHomeTeam: (r) => r.teams?.home?.name ?? null,
-        getAwayTeam: (r) => r.teams?.away?.name ?? null,
-      }),
-      ...shGGWinnerColumns,
-    ],
-    [date, dnaV2]
+    () => [createVerifyColumn<SHGGWinnerPick>(), ...shGGWinnerColumns],
+    []
   );
 
-  // 3. SH Master Vortex (Verify -> Stats -> Rest)
+  // 3. SH Master Vortex (Verify -> Rest)
   const shMasterColumnsWithVerify = useMemo(
-    () => [
-      createVerifyColumn<SHMasterPick>(),
-      createPickStatsColumn<SHMasterPick>({
-        dna: dnaV2,
-        date,
-        getFixtureId: (r) => r.fixture_id,
-        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
-        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
-      }),
-      ...shMasterColumns,
-    ],
-    [date, dnaV2]
+    () => [createVerifyColumn<SHMasterPick>(), ...shMasterColumns],
+    []
   );
 
-  // 4. SH 8-Goal Aggregator (Verify -> Stats -> Rest). Publishes Fixture_ID.
+  // 4. SH 8-Goal Aggregator (Verify -> Rest)
   const sh8GoalColumnsWithVerify = useMemo(
-    () => [
-      createVerifyColumn<SH8GoalPick>(),
-      createPickStatsColumn<SH8GoalPick>({
-        dna: dnaV2,
-        date,
-        getFixtureId: (r) => (r as { Fixture_ID?: string }).Fixture_ID ?? null,
-        getHomeTeam: (r) => splitFixtureTeams(r.Fixture).home,
-        getAwayTeam: (r) => splitFixtureTeams(r.Fixture).away,
-      }),
-      ...sh8GoalColumns,
-    ],
-    [date, dnaV2]
+    () => [createVerifyColumn<SH8GoalPick>(), ...sh8GoalColumns],
+    []
   );
 
   return (

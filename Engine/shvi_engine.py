@@ -337,11 +337,6 @@ def run_shvi_engine(target_date=None, verbose=False):
 
         # If it reaches here, BOTH teams have 100% 2H Activity!
         results[fid] = {
-            # (2026-10-04) ADDITIVE — `fid` already keys this dict. Published in
-            # the row so the pick can be joined to its provider fixture; the
-            # head-to-head panel needs it and the row previously carried only a
-            # "Home vs Away" string.
-            "fixture_id": fid,
             "fixture": f"{h_name} vs {a_name}",
             "ht_score": f"{h_ht}-{a_ht}",
             "ft_score": f"{h_ft}-{a_ft}",

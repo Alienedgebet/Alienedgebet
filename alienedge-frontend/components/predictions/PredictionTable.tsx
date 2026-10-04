@@ -1,8 +1,6 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useState } from "react";
-import { Info } from "lucide-react";
 import {
   Table,
   TableHeader,
@@ -11,13 +9,6 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 export interface PredictionColumn<T> {
@@ -26,14 +17,6 @@ export interface PredictionColumn<T> {
   align?: "left" | "right" | "center";
   className?: string;
   render: (row: T, index: number) => ReactNode;
-  /**
-   * Optional long-form explanation of what this column is and how it feeds the
-   * pick. When present the header becomes a button that opens it in a dialog.
-   *
-   * Opt-in on purpose: a column without it renders exactly as before, so adding
-   * this to the shared table cannot change any page that does not use it.
-   */
-  explain?: ReactNode;
 }
 
 interface PredictionTableProps<T> {
@@ -97,8 +80,6 @@ export function PredictionTable<T>({
   rowKey,
   emptyMessage = "No picks available for this date.",
 }: PredictionTableProps<T>) {
-  // Which column's long-form explanation is open, if any. Null = closed.
-  const [explaining, setExplaining] = useState<PredictionColumn<T> | null>(null);
   if (data.length === 0) {
     return (
       <div className="flex items-center justify-center py-10 text-center text-xs text-text-dim">
@@ -122,25 +103,7 @@ export function PredictionTable<T>({
                   col.className
                 )}
               >
-                {col.explain ? (
-                  <button
-                    type="button"
-                    onClick={() => setExplaining(col)}
-                    className={cn(
-                      "group inline-flex items-center gap-1 text-left normal-case transition-colors hover:text-text-primary",
-                      col.align === "right" && "flex-row-reverse"
-                    )}
-                    aria-label={`What ${typeof col.header === "string" ? col.header : col.key} means`}
-                  >
-                    {col.header}
-                    <Info
-                      className="h-3 w-3 shrink-0 opacity-45 transition-opacity group-hover:opacity-100"
-                      aria-hidden="true"
-                    />
-                  </button>
-                ) : (
-                  col.header
-                )}
+                {col.header}
               </TableHead>
             ))}
           </TableRow>
@@ -169,26 +132,6 @@ export function PredictionTable<T>({
           ))}
         </TableBody>
       </Table>
-
-      {explaining?.explain ? (
-        <Dialog open onOpenChange={(open) => !open && setExplaining(null)}>
-          <DialogContent className="max-w-lg">
-            <DialogHeader>
-              <DialogTitle>
-                {typeof explaining.header === "string"
-                  ? explaining.header
-                  : explaining.key}
-              </DialogTitle>
-              <DialogDescription className="text-text-secondary">
-                What this column is and how it feeds the pick.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="max-h-[65vh] overflow-y-auto text-xs leading-relaxed text-text-secondary">
-              {explaining.explain}
-            </div>
-          </DialogContent>
-        </Dialog>
-      ) : null}
     </div>
   );
 }

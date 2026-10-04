@@ -492,11 +492,6 @@ def run_o15_psychology_engine(target_date=None):
             else: tier = "🛑 AVOID / UNDER"
 
             processed_list.append({
-                # (2026-10-04) ADDITIVE — `fid` is already in scope two lines
-                # above (analyze_o15_tactics takes it). Lets the pick be joined to
-                # its provider fixture so the head-to-head panel can resolve it;
-                # this row previously carried only a "Home vs Away" string.
-                "fixture_id": fid,
                 "Fixture": fix_name,
                 "Base_Poisson": match["base_poisson"],
                 "Base_Grade": match["base_grade"],
