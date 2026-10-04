@@ -74,16 +74,31 @@ O15_T2 = "✅ O1.5 TIER 2 — SOLID"
 O15_T3 = "\U0001f4ca O1.5 TIER 3 — LEAN"
 O15_OUT = "⚪ O1.5 BELOW THRESHOLD"
 
-check("GG Tier 1 lock label is byte-exact", get_gg_tier(70.0, 4) == GG_T1_LOCK)
+check("GG Tier 1 lock label is byte-exact", get_gg_tier(70.0, 6) == GG_T1_LOCK)
 check("GG Tier 1 high-confidence label is byte-exact",
-      get_gg_tier(70.0, 3) == GG_T1_HIGH)
-check("GG Tier 2 label is byte-exact", get_gg_tier(55.0, 2) == GG_T2)
+      get_gg_tier(70.0, 5) == GG_T1_HIGH)
+check("GG Tier 2 label is byte-exact", get_gg_tier(55.0, 5) == GG_T2)
 check("GG Tier 3 label is byte-exact", get_gg_tier(40.0, 1) == GG_T3)
 check("GG below-threshold label is byte-exact", get_gg_tier(10.0, 0) == GG_OUT)
-check("O1.5 Tier 1 label is byte-exact", get_o15_tier(75.0) == O15_T1)
-check("O1.5 Tier 2 label is byte-exact", get_o15_tier(55.0) == O15_T2)
-check("O1.5 Tier 3 label is byte-exact", get_o15_tier(40.0) == O15_T3)
-check("O1.5 below-threshold label is byte-exact", get_o15_tier(10.0) == O15_OUT)
+check("O1.5 Tier 1 label is byte-exact", get_o15_tier(75.0, 5) == O15_T1)
+check("O1.5 Tier 2 label is byte-exact", get_o15_tier(55.0, 4) == O15_T2)
+check("O1.5 Tier 3 label is byte-exact", get_o15_tier(40.0, 0) == O15_T3)
+check("O1.5 below-threshold label is byte-exact", get_o15_tier(10.0, 0) == O15_OUT)
+
+# ── 1b. THE 2026-10-04 HIGH-CONFIDENCE LABELS ────────────────────────────────
+# Both ladders grew a "5 of 7" / "4 of 6" rung. Both consumers above regex on
+# "TIER 1" / "TIER 2", so these must still match those — otherwise the new
+# label silently empties the downstream board.
+GG_T1_HIGH = "🔥 GG TIER 1 — HIGH CONFIDENCE"
+O15_T1_HIGH = "🔥 O1.5 TIER 1 — HIGH CONFIDENCE"
+check("new GG high-confidence label is byte-exact",
+      get_gg_tier(70.0, 5) == "\U0001f525 GG TIER 1 — HIGH CONFIDENCE")
+check("new O1.5 high-confidence label is byte-exact",
+      get_o15_tier(75.0, 4) == "\U0001f525 O1.5 TIER 1 — HIGH CONFIDENCE")
+check("gg_forensics_audit's TIER 1 filter keeps the new GG label",
+      re.search("TIER 1", GG_T1_HIGH, re.IGNORECASE) is not None)
+check("over15_stage3's TIER 1|TIER 2 filter keeps the new O1.5 label",
+      re.search("TIER 1|TIER 2", O15_T1_HIGH, re.IGNORECASE) is not None)
 
 # ── 2. THE THREE CONSUMERS STILL MATCH THE LABELS ────────────────────────────
 # Engine/over15_stage3.py:167 — keeps "TIER 1|TIER 2" on the O1.5 column.
@@ -121,14 +136,29 @@ check("gg_precision_filter returns None for a non-tier label",
       _last3_from_tier(GG_OUT) is None)
 
 # ── 3. THE LADDERS ARE MONOTONE AND BOUNDED ──────────────────────────────────
+# Sweeps now run at a FIXED, satisfiable signal count. Holding signals at the
+# maximum isolates the score ladder; sweeping at a count that cannot satisfy
+# the gate would just read BELOW THRESHOLD for every score and prove nothing.
 check("GG tier never downgrades as the score rises",
-      [get_gg_tier(s, 4) for s in (0, 35, 50, 68, 100)] ==
+      [get_gg_tier(s, 7) for s in (0, 35, 50, 68, 100)] ==
       [GG_OUT, GG_T3, GG_T2, GG_T1_LOCK, GG_T1_LOCK])
 check("O1.5 tier never downgrades as the score rises",
-      [get_o15_tier(s) for s in (0, 38, 51, 69, 100)] ==
-      [O15_OUT, O15_T3, O15_T3, O15_T2, O15_T1])
+      [get_o15_tier(s, 6) for s in (0, 38, 52, 70, 100)] ==
+      [O15_OUT, O15_T3, O15_T2, O15_T1, O15_T1])
 check("GG Tier 1 requires the signals gate, not the score alone",
       get_gg_tier(90.0, 1) != GG_T1_LOCK)
+
+# The gate is strict in BOTH directions: a high score cannot buy Tier 1/2
+# without corroboration, and a perfect 7 of 7 cannot buy Tier 1 without a
+# high score. Both halves must hold or the ladder is decorative.
+check("a 90-point GG row with only 4 signals does NOT reach Tier 1 or 2",
+      get_gg_tier(90.0, 4) not in (GG_T1_LOCK, GG_T1_HIGH, GG_T2))
+check("a 75-point O1.5 row with only 3 signals does NOT reach Tier 1 or 2",
+      get_o15_tier(75.0, 3) not in (O15_T1, O15_T1_HIGH, O15_T2))
+check("a perfect 7 of 7 still needs the score floor for GG Tier 1",
+      get_gg_tier(10.0, 7) == GG_OUT)
+check("a perfect 6 of 6 still needs the score floor for O1.5 Tier 1",
+      get_o15_tier(10.0, 6) == O15_OUT)
 
 # ── 4. THE SCORERS STAY PURE AND BOUNDED ─────────────────────────────────────
 gg_args = dict(btts_prob=0.55, venue_btts_home=0.6, venue_btts_away=0.5,
@@ -137,8 +167,8 @@ gg_args = dict(btts_prob=0.55, venue_btts_home=0.6, venue_btts_away=0.5,
                lambda_home=1.4, lambda_away=1.3)
 gg_score, gg_fired, gg_bd = calculate_gg_score(**gg_args)
 check("calculate_gg_score returns a 0-100 score", 0.0 <= gg_score <= 100.0)
-check("calculate_gg_score returns an integer signal count 0-5",
-      isinstance(gg_fired, int) and 0 <= gg_fired <= 5)
+check("calculate_gg_score returns an integer signal count 0-7",
+      isinstance(gg_fired, int) and 0 <= gg_fired <= 7)
 check("calculate_gg_score returns a populated breakdown",
       isinstance(gg_bd, dict) and len(gg_bd) >= 8)
 check("calculate_gg_score is deterministic (no RNG, no clock)",
@@ -153,8 +183,13 @@ o15_args = dict(lambda_home=1.4, lambda_away=1.3, mc_over15_prob=0.78,
                 home_gk_liable=False, away_gk_liable=False,
                 h2h_o15_rate=0.6)
 try:
-    o15_score, o15_bd = calculate_o15_score(**o15_args)
+    # The breakdown is now the THIRD element: calculate_o15_score returns
+    # (total_score, signals_fired, breakdown) so the signal count can gate the
+    # tier without the caller re-deriving it from the breakdown.
+    o15_score, o15_fired, o15_bd = calculate_o15_score(**o15_args)
     check("calculate_o15_score returns a 0-100 score", 0.0 <= o15_score <= 100.0)
+    check("calculate_o15_score returns an integer signal count 0-6",
+          isinstance(o15_fired, int) and 0 <= o15_fired <= 6)
     check("calculate_o15_score returns a populated breakdown",
           isinstance(o15_bd, dict) and len(o15_bd) >= 5)
     check("calculate_o15_score is deterministic (no RNG, no clock)",
@@ -184,7 +219,7 @@ noisy.update(home_scored_total=99.0, away_scored_total=99.0,
 try:
     check("retired O1.5 terms have zero influence on the score",
           calculate_o15_score(**noisy)[0] == calculate_o15_score(**o15_args)[0])
-    _bd = calculate_o15_score(**o15_args)[1]
+    _bd = calculate_o15_score(**o15_args)[2]
     check("retired O1.5 columns are still emitted, pinned at 0.0",
           all(k in _bd and _bd[k] == 0.0 for k in O15_REMOVED_TERMS))
 except TypeError:
@@ -200,7 +235,7 @@ try:
     for price in (1.10, 1.40, 1.80, 2.20, None, "not-a-number"):
         try:
             bonuses.append(calculate_o15_score(**o15_args,
-                                               draw_odds=price)[1]["sig6_draw_odds_bonus"])
+                                               draw_odds=price)[2]["sig6_draw_odds_bonus"])
         except Exception:
             bonuses.append(None)
             check("calculate_o15_score never raises on a bad draw price", False)
@@ -230,7 +265,7 @@ try:
         span = O15_DRAW_PRICE_FLOOR - O15_DRAW_PRICE_CEIL
         expected = max(0.0, min(1.0, (O15_DRAW_PRICE_FLOOR - mid) / span)) \
             * O15_DRAW_WEIGHT
-        got = calculate_o15_score(**o15_args, draw_odds=mid)[1]["sig6_draw_odds_bonus"]
+        got = calculate_o15_score(**o15_args, draw_odds=mid)[2]["sig6_draw_odds_bonus"]
         # The breakdown is published at 1 decimal (round(x, 1)), so the
         # tolerance is the half-ulp of that scale (0.05) plus a hair — not 1e-6.
         # A wrong transform differs by ~2.6 points here, far outside this band.
@@ -305,6 +340,95 @@ check("GG score is bounded above by the sum of the weights",
                          away_gk_is_liability=True, home_gk_cpg=9.0,
                          away_gk_cpg=9.0, h2h_btts_rate=1.0,
                          lambda_home=9.0, lambda_away=9.0)[0] <= 100.0)
+
+# ── 7. THE 2026-10-04 MULTI-SIGNAL VALIDATION ARCHITECTURE ──────────────────
+# Both scorers grew independent fired/not-fired gates that move signals_fired
+# ONLY and never the score. That separation is the whole design: if a gate could
+# add points, a row could earn Tier 1 by inflating the score instead of by
+# accumulating corroboration. These pin both halves.
+_solo = dict(btts_prob=0.55, venue_btts_home=0.6, venue_btts_away=0.5,
+             home_gk_is_liability=True, away_gk_is_liability=True,
+             home_gk_cpg=1.2, away_gk_cpg=1.1, h2h_btts_rate=0.6,
+             lambda_home=1.4, lambda_away=1.3,
+             home_scored_total=9.0, away_scored_total=8.0,
+             home_conceded_total=6.0, away_conceded_total=5.0)
+
+# GG sig6: BOTH sides >= 8 scored. It must be an AND, not an OR — one prolific
+# attack says nothing about whether the other team can also score.
+check("GG sig6 fires when both sides clear 8 scored",
+      calculate_gg_score(**_solo)[2]["sig6_scoring_form"] is True)
+check("GG sig6 does NOT fire when only one side clears 8",
+      calculate_gg_score(**{**_solo, "away_scored_total": 7.0})[2]["sig6_scoring_form"] is False)
+check("GG sig6 boundary is inclusive at exactly 8 each",
+      calculate_gg_score(**{**_solo, "home_scored_total": 8.0,
+                            "away_scored_total": 8.0})[2]["sig6_scoring_form"] is True)
+
+# GG sig7: BOTH sides >= 5 conceded — the "cannot keep a clean sheet" half.
+check("GG sig7 fires when both sides concede 5+",
+      calculate_gg_score(**_solo)[2]["sig7_conceding_form"] is True)
+check("GG sig7 does NOT fire when one side is solid defensively",
+      calculate_gg_score(**{**_solo, "home_conceded_total": 4.0})[2]["sig7_conceding_form"] is False)
+
+# The strictness decision: ONE leaky keeper keeps its 60% POINTS but must NOT
+# pass the checkmark, otherwise a near-worthless signal (AUC 0.5110) hands a
+# free point toward a 6-of-7 gate.
+_one = {**_solo, "away_gk_is_liability": False}
+check("one leaky keeper still scores 60% of the GK points",
+      calculate_gg_score(**_one)[0] < calculate_gg_score(**_solo)[0])
+check("one leaky keeper does NOT pass the sig3 checkmark",
+      calculate_gg_score(**_one)[1] == calculate_gg_score(**_solo)[1] - 1)
+
+# Weightlessness: the new gates must not move the score at all.
+check("GG sig6/sig7 cannot change the GG score",
+      calculate_gg_score(**_solo)[0] ==
+      calculate_gg_score(**{**_solo, "home_scored_total": 0.0,
+                            "away_scored_total": 0.0,
+                            "home_conceded_total": 0.0,
+                            "away_conceded_total": 0.0})[0])
+check("GG omitting the new totals still scores (back-compatible default)",
+      calculate_gg_score(btts_prob=0.55, venue_btts_home=0.6,
+                         venue_btts_away=0.5, home_gk_is_liability=True,
+                         away_gk_is_liability=True, home_gk_cpg=1.2,
+                         away_gk_cpg=1.1, h2h_btts_rate=0.6,
+                         lambda_home=1.4, lambda_away=1.3)[1] == 5)
+
+# O1.5 gate6: COMBINED last-5 volume >= 16. Unlike GG sig6 this is a SUM, so an
+# uneven 16+0 satisfies it. Pinning that asymmetry prevents a future "fix" that
+# silently turns it into an AND and empties O1.5 Tier 1.
+check("O1.5 gate6 fires at a combined 16",
+      calculate_o15_score(**{**o15_args, "home_scored_total": 9.0,
+                             "away_scored_total": 7.0})[2]["gate6_volume"] is True)
+check("O1.5 gate6 does not fire at a combined 15",
+      calculate_o15_score(**{**o15_args, "home_scored_total": 8.0,
+                             "away_scored_total": 7.0})[2]["gate6_volume"] is False)
+check("O1.5 gate6 is a COMBINED sum, not an AND (16+0 passes)",
+      calculate_o15_score(**{**o15_args, "home_scored_total": 16.0,
+                             "away_scored_total": 0.0})[2]["gate6_volume"] is True)
+
+# All six O1.5 gates must be exported so a rejected row is auditable.
+_o15_bd = calculate_o15_score(**o15_args)[2]
+check("all six O1.5 gates are exported",
+      all(k in _o15_bd for k in ("gate1_simulation", "gate2_lambda",
+                                 "gate3_venue", "gate4_h2h", "gate5_market",
+                                 "gate6_volume")))
+check("O1.5 exports the signal count that drives the tier",
+      "signals_fired" in _o15_bd)
+check("the six O1.5 gates sum to the reported count",
+      sum(bool(_o15_bd[k]) for k in ("gate1_simulation", "gate2_lambda",
+                                     "gate3_venue", "gate4_h2h",
+                                     "gate5_market", "gate6_volume"))
+      == _o15_bd["signals_fired"])
+check("O1.5 gates cannot change the O1.5 score",
+      calculate_o15_score(**o15_args)[0] ==
+      calculate_o15_score(**{**o15_args, "home_scored_total": 0.0,
+                             "away_scored_total": 0.0})[0])
+
+# A missing draw price must not penalise the score. draw_bonus is neutral 0.0
+# when odds are absent, so the score with no odds must equal the score with a
+# long (non-decisive) price — not be lower, and not raise.
+check("absent draw odds is neutral on the O1.5 score, never a penalty",
+      calculate_o15_score(**o15_args, draw_odds=None)[0] ==
+      calculate_o15_score(**o15_args, draw_odds=2.50)[0])
 
 # ── 6. PHASE 3 WAS PROPOSED, MEASURED, AND REJECTED — keep it rejected ──────
 # Phase 3 planned to cap "proxy risk" rows out of GG Tier 1. The headline that

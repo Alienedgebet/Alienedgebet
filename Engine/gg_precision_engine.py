@@ -57,10 +57,30 @@ GG_TIER1_SCORE         = 68
 GG_TIER2_SCORE         = 50    
 GG_TIER3_SCORE         = 35    
 
+# ── GG SIGNAL GATES (2026-10-04) ────────────────────────────────────────────
+# Signals 6 and 7 are weightless checkmarks: they move signals_fired only.
+# Thresholds are totals across lastN_home / lastN_away (LAST_N_GAMES = 5), so
+# 8 scored == a 1.6/game attack and 5 conceded == 1.0/game conceded.
+# These must fire for BOTH sides — one strong attack cannot carry GG.
+GG_SIG6_MIN_SCORED    = 8      # sig6 — each side's last-5 goals scored
+GG_SIG7_MIN_CONCEDED  = 5      # sig7 — each side's last-5 goals conceded
+
 # ── OVER 1.5 TIER THRESHOLDS ─────────────────────────────────────────────────
 O15_TIER1_SCORE        = 70
 O15_TIER2_SCORE        = 52
 O15_TIER3_SCORE        = 38
+
+# ── OVER 1.5 SIGNAL GATES (2026-10-04) ──────────────────────────────────────
+# Six independent checkmarks. Like GG's 6 and 7 these are weightless: they
+# change signals_fired, never o15_score.
+O15_SIG1_MC_MIN        = 0.75   # simulation Over 1.5 probability
+O15_SIG2_LAMBDA_MIN    = 2.20   # combined expected goals
+O15_SIG3_VENUE_MIN     = 2.20   # combined venue goals average
+O15_SIG4_H2H_MIN       = 0.60   # head-to-head Over 1.5 rate
+O15_SIG5_DRAW_BONUS_MIN = 10.0  # short draw price (market expects decisiveness)
+O15_SIG6_VOLUME_MIN    = 16     # combined last-5 goals scored, BOTH sides
+# Note: this is the COMBINED volume, so it does not demand balance the way
+# GG sig6 does (GG requires each side >= 8; 15+1 satisfies this but not that).
 
 # ── KEEPER LIABILITY THRESHOLD ──────────────────────────────────────────────
 GK_LIABILITY_CPG       = 1.50   
@@ -787,6 +807,10 @@ def calculate_gg_score(
     h2h_btts_rate,         # float 0-1
     lambda_home,           # float, expected home goals
     lambda_away,           # float, expected away goals
+    home_scored_total=0.0, # float, goals scored in lastN_home  (sig6)
+    away_scored_total=0.0, # float, goals scored in lastN_away  (sig6)
+    home_conceded_total=0.0,  # float, goals conceded in lastN_home (sig7)
+    away_conceded_total=0.0,  # float, goals conceded in lastN_away (sig7)
 ):
     sig1_raw   = min(1.0, btts_prob / 0.60)
     sig1_score = sig1_raw * GG_W_MC_BTTS
@@ -801,13 +825,17 @@ def calculate_gg_score(
         sig3_score = GG_W_GK_VULN
         sig3_fired = True
     elif home_gk_is_liability or away_gk_is_liability:
+        # ONE leaky keeper scores 60% of the weight, but it does NOT pass the
+        # checkmark. The 7-signal architecture requires 6 of 7, so a single
+        # liability cannot be allowed to be a near-automatic point — and this
+        # is the weakest signal in the engine (AUC 0.5110, a coin flip).
         sig3_score = GG_W_GK_VULN * GG_ONE_LIABLE_FRACTION
-        sig3_fired = True
+        sig3_fired = False
     else:
         avg_cpg    = (home_gk_cpg + away_gk_cpg) / 2.0
         sig3_raw   = min(1.0, avg_cpg / GK_LIABILITY_CPG)
         sig3_score = sig3_raw * (GG_W_GK_VULN * GG_NEITHER_CPG_FRACTION)
-        sig3_fired = avg_cpg >= 1.0
+        sig3_fired = False
 
     sig4_raw   = min(1.0, h2h_btts_rate / 0.60)
     sig4_score = sig4_raw * GG_W_H2H_BTTS
@@ -819,9 +847,27 @@ def calculate_gg_score(
     sig5_score = dir_score * GG_W_DIRECTIONAL
     sig5_fired = lambda_home >= 1.0 and lambda_away >= 1.0
 
+    # ── sig6 / sig7 (2026-10-04) — STRICT RECENT-FORM GATES ──────────────────
+    # Both Teams To Score needs two independent facts at once, and neither one
+    # was being measured: that each side can actually SCORE right now (sig6),
+    # and that each side cannot keep a clean sheet (sig7). The Monte Carlo term
+    # can be strong on lambdas while the real last-5 form says otherwise, which
+    # is exactly the case these two catch.
+    #
+    # Deliberately WEIGHTLESS: they change only signals_fired, never the score.
+    # Tier 1 now demands 6 of 7, so these are the gates that carry the
+    # selectivity — adding points here would instead inflate the score and
+    # defeat the 6-of-7 requirement they exist to enforce.
+    sig6_fired = bool(home_scored_total   >= GG_SIG6_MIN_SCORED   and
+                      away_scored_total   >= GG_SIG6_MIN_SCORED)
+    sig7_fired = bool(home_conceded_total >= GG_SIG7_MIN_CONCEDED and
+                      away_conceded_total >= GG_SIG7_MIN_CONCEDED)
+
     total_score  = sig1_score + sig2_score + sig3_score + sig4_score + sig5_score
-    signals_fired = sum([sig1_fired, sig2_fired, sig3_fired,
-                         sig4_fired, sig5_fired])
+    # int() is load-bearing: sum() over numpy bool_ yields numpy.int64, which
+    # json.dump cannot serialise, and this count reaches the JSON feed.
+    signals_fired = int(sum([sig1_fired, sig2_fired, sig3_fired,
+                             sig4_fired, sig5_fired, sig6_fired, sig7_fired]))
 
     breakdown = {
         "sig1_mc_btts":          round(sig1_score, 1),
@@ -829,6 +875,9 @@ def calculate_gg_score(
         "sig3_gk_vuln":          round(sig3_score, 1),
         "sig4_h2h_btts":         round(sig4_score, 1),
         "sig5_directional":      round(sig5_score, 1),
+        # ── fired/not-fired checkmarks (bools, NOT points) ──
+        "sig6_scoring_form":     sig6_fired,
+        "sig7_conceding_form":   sig7_fired,
         "signals_fired":         signals_fired,
         "venue_btts_combined":   round(venue_btts_combined, 3),
         "h2h_btts_rate":         round(h2h_btts_rate, 3),
@@ -836,11 +885,19 @@ def calculate_gg_score(
     return round(total_score, 1), signals_fired, breakdown
 
 def get_gg_tier(gg_score, signals_fired):
-    if gg_score >= GG_TIER1_SCORE and signals_fired >= 4:
+    """7-signal ladder.
+
+    The signals gate is a floor, not a suggestion: Tier 1 requires 6 of 7 and
+    Tier 2 requires 5 of 7. Note the deliberate gap this creates — a fixture
+    with a very high score but only 4 signals lands on LEAN, skipping SOLID.
+    That is intended. Under the old 5-signal rules a 90-point row reached
+    Tier 1 on score alone; here the corroboration has to exist.
+    """
+    if gg_score >= GG_TIER1_SCORE and signals_fired >= 6:
         return "💎 GG TIER 1 — LOCK"
-    elif gg_score >= GG_TIER1_SCORE and signals_fired == 3:
+    elif gg_score >= GG_TIER1_SCORE and signals_fired == 5:
         return "🔥 GG TIER 1 — HIGH CONFIDENCE"
-    elif gg_score >= GG_TIER2_SCORE:
+    elif gg_score >= GG_TIER2_SCORE and signals_fired >= 5:
         return "✅ GG TIER 2 — SOLID"
     elif gg_score >= GG_TIER3_SCORE:
         return "📊 GG TIER 3 — LEAN"
@@ -908,8 +965,8 @@ def calculate_o15_score(
     league_weight,            # retained for signature compatibility; unused
     fatigue_home,             # retained for signature compatibility; unused
     fatigue_away,             # retained for signature compatibility; unused
-    home_scored_total,        # retained for signature compatibility; unused
-    away_scored_total,        # retained for signature compatibility; unused
+    home_scored_total,        # sig6 — LIVE: combined last-5 scoring volume
+    away_scored_total,        # sig6 — LIVE: combined last-5 scoring volume
     home_conceded_total,      # retained for signature compatibility; unused
     away_conceded_total,      # retained for signature compatibility; unused
     home_gk_cpg,              # retained for signature compatibility; unused
@@ -921,9 +978,12 @@ def calculate_o15_score(
 ):
     """100-Point Over 1.5 scorer.
 
+    Returns (total_score, signals_fired, breakdown). The middle element is new
+    in 2026-10-04 and is what get_o15_tier() gates on.
+
     Kept the full historical signature on purpose: callers build the argument
-    set by name, and a silent signature change is a contract break. The removed
-    arguments are accepted and deliberately ignored.
+    set by name, and a silent signature change is a contract break. The
+    arguments that are no longer scored are accepted and deliberately ignored.
     """
     combined_lambda = lambda_home + lambda_away
     sig1_raw   = min(1.0, combined_lambda / 2.5)
@@ -977,6 +1037,37 @@ def calculate_o15_score(
                    draw_bonus + h2h_bonus + intent_bonus)
     total_score = max(0.0, min(100.0, total_score))
 
+    # ── 6-SIGNAL VALIDATION (2026-10-04) ────────────────────────────────────
+    # The score alone was never evidence of anything: a high o15_score could be
+    # carried by one saturated term while five others said nothing. These six
+    # gates are the independent corroboration, and get_o15_tier() now refuses to
+    # hand out Tier 1 or Tier 2 without them.
+    #
+    # Like GG's sig6/sig7 they are WEIGHTLESS — they cannot change o15_score,
+    # only whether the score is trusted enough to be promoted.
+    #
+    # Naming: the pre-existing breakdown already owns "sig1_combined_lambda",
+    # "sig2_mc_over15", "sig3_venue_goals_avg" and "sig6_draw_odds_bonus", and
+    # those POINTS are the opposite gate to the gate number of the same name
+    # (existing sig1 is lambda; gate 1 here is the simulation). Renaming either
+    # side would break the published CSV schema and gg_supreme_vip. So the
+    # boolean gates live under a "gateN_" namespace and the point terms keep
+    # their original "sigN_" keys.
+    gate1_simulation = bool(mc_over15_prob  >= O15_SIG1_MC_MIN)
+    gate2_lambda     = bool(combined_lambda >= O15_SIG2_LAMBDA_MIN)
+    gate3_venue      = bool(combined_venue_avg >= O15_SIG3_VENUE_MIN)
+    gate4_h2h        = bool(h2h_val  >= O15_SIG4_H2H_MIN)
+    gate5_market     = bool(draw_bonus >= O15_SIG5_DRAW_BONUS_MIN)
+    gate6_volume     = bool(
+        (float(home_scored_total or 0.0) + float(away_scored_total or 0.0))
+        >= O15_SIG6_VOLUME_MIN
+    )
+
+    # int() is load-bearing — see the note in calculate_gg_score. This count is
+    # written straight into the JSON feed.
+    signals_fired = int(sum([gate1_simulation, gate2_lambda, gate3_venue,
+                             gate4_h2h,       gate5_market,  gate6_volume]))
+
     breakdown = {
         # ── live terms ──
         "sig1_combined_lambda":   round(sig1_score, 1),
@@ -985,6 +1076,14 @@ def calculate_o15_score(
         "sig6_draw_odds_bonus":   round(draw_bonus, 1),
         "h2h_matchup_bonus":      round(h2h_bonus, 1),
         "intent_ratio_bonus":     round(intent_bonus, 1),
+        # ── the 6 validation gates (bools, NOT points) ──
+        "gate1_simulation":       gate1_simulation,
+        "gate2_lambda":           gate2_lambda,
+        "gate3_venue":            gate3_venue,
+        "gate4_h2h":              gate4_h2h,
+        "gate5_market":           gate5_market,
+        "gate6_volume":           gate6_volume,
+        "signals_fired":          signals_fired,
         # ── removed terms: schema preserved, values pinned at 0.0 so a
         # consumer or chart reading them cannot mistake them for live inputs ──
         "sig4_league_weight":     0.0,
@@ -1000,12 +1099,21 @@ def calculate_o15_score(
         "draw_prob_implied":      (None if draw_prob is None
                                    else round(draw_prob, 4)),
     }
-    return round(total_score, 1), breakdown
+    return round(total_score, 1), signals_fired, breakdown
 
-def get_o15_tier(o15_score):
-    if o15_score >= O15_TIER1_SCORE:
+def get_o15_tier(o15_score, signals_fired):
+    """6-signal ladder.
+
+    signals_fired is a REQUIRED argument, not a defaulted one. With a default
+    a caller that forgets to pass it silently receives every row as Tier 1 on
+    score alone — the exact failure this architecture exists to prevent — and
+    the omission would never raise.
+    """
+    if o15_score >= O15_TIER1_SCORE and signals_fired >= 5:
         return "💎 O1.5 TIER 1 — LOCK"
-    elif o15_score >= O15_TIER2_SCORE:
+    elif o15_score >= O15_TIER1_SCORE and signals_fired == 4:
+        return "🔥 O1.5 TIER 1 — HIGH CONFIDENCE"
+    elif o15_score >= O15_TIER2_SCORE and signals_fired >= 4:
         return "✅ O1.5 TIER 2 — SOLID"
     elif o15_score >= O15_TIER3_SCORE:
         return "📊 O1.5 TIER 3 — LEAN"
@@ -1255,13 +1363,21 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 h2h_btts_rate        = h2h_btts_rate,
                 lambda_home          = lambda_home,
                 lambda_away          = lambda_away,
+                # sig6 / sig7 (2026-10-04): the last-5 volume totals computed
+                # above at lines ~1136-1139. Without these the two new gates
+                # default to 0.0 and can NEVER fire, which would silently cap
+                # GG Tier 1 at 5 of 7 and make LOCK unreachable.
+                home_scored_total    = home_scored_total,
+                away_scored_total    = away_scored_total,
+                home_conceded_total  = home_conceded_total,
+                away_conceded_total  = away_conceded_total,
             )
             gg_tier = get_gg_tier(gg_score, signals_fired)
 
             # ─────────────────────────────────────────────────────────────
             # OVER 1.5 SCORE
             # ─────────────────────────────────────────────────────────────
-            o15_score, o15_breakdown = calculate_o15_score(
+            o15_score, o15_signals_fired, o15_breakdown = calculate_o15_score(
                 lambda_home          = lambda_home,
                 lambda_away          = lambda_away,
                 mc_over15_prob       = over15_prob,
@@ -1281,7 +1397,7 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 h2h_o15_rate         = h2h_o15_rate,
                 draw_odds            = odds.get("d"),   # PHASE 1: was fetched
             )                            # and written to the CSV, never used
-            o15_tier = get_o15_tier(o15_score)
+            o15_tier = get_o15_tier(o15_score, o15_signals_fired)
 
             # ── DRAW SCORE (preserved) ────────────────────────────────────
             def count_draws(fx_list, tid):
@@ -1342,7 +1458,7 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                     f"{home_name} vs {away_name}"
                 )
                 print(
-                    f"    GG:  Score={gg_score} | Signals={signals_fired}/5 | "
+                    f"    GG:  Score={gg_score} | Signals={signals_fired}/7 | "
                     f"BTTS_MC={btts_prob:.1%} | "
                     f"VenBTTS_H={venue_btts_home:.1%} "
                     f"VenBTTS_A={venue_btts_away:.1%} | "
@@ -1352,7 +1468,7 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                     f"    GK:  Home={h_gk_note} | Away={a_gk_note}"
                 )
                 print(
-                    f"    O15: Score={o15_score} | "
+                    f"    O15: Score={o15_score} | Signals={o15_signals_fired}/6 | "
                     f"Lam={lambda_home:.2f}+{lambda_away:.2f}="
                     f"{lambda_home+lambda_away:.2f} | "
                     f"MC_O15={over15_prob:.1%} | "
@@ -1403,6 +1519,11 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 "sig3_gk_vuln":      gg_breakdown["sig3_gk_vuln"],
                 "sig4_h2h_btts":     gg_breakdown["sig4_h2h_btts"],
                 "sig5_directional":  gg_breakdown["sig5_directional"],
+                # sig6 / sig7 (2026-10-04): the two strict recent-form gates,
+                # exported as booleans so a reader can see WHY a row missed the
+                # 6-of-7 Tier 1 requirement instead of only seeing the count.
+                "sig6_scoring_form":   gg_breakdown["sig6_scoring_form"],
+                "sig7_conceding_form": gg_breakdown["sig7_conceding_form"],
                 "venue_btts_combined": gg_breakdown["venue_btts_combined"],
                 "composite_draw_score": round(comp_draw, 4),
                 "dmi":               round(dmi,    3),
@@ -1413,6 +1534,7 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 **base_record,
                 "o15_score":              o15_score,
                 "o15_tier":               o15_tier,
+                "o15_signals_fired":      o15_signals_fired,
                 "sig1_combined_lambda":   o15_breakdown["sig1_combined_lambda"],
                 "sig2_mc_over15":         o15_breakdown["sig2_mc_over15"],
                 "sig3_venue_goals_avg":   o15_breakdown["sig3_venue_goals_avg"],
@@ -1424,6 +1546,15 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 # (previously these existed only inside the scorer and were
                 #  folded into o15_score where they could not be inspected).
                 "sig6_draw_odds_bonus":   o15_breakdown["sig6_draw_odds_bonus"],
+                # The six validation gates (2026-10-04) + the count they sum to.
+                # get_o15_tier() refuses Tier 1 without 5 of 6, so these columns
+                # are what makes a rejected row auditable.
+                "gate1_simulation":       o15_breakdown["gate1_simulation"],
+                "gate2_lambda":           o15_breakdown["gate2_lambda"],
+                "gate3_venue":            o15_breakdown["gate3_venue"],
+                "gate4_h2h":              o15_breakdown["gate4_h2h"],
+                "gate5_market":           o15_breakdown["gate5_market"],
+                "gate6_volume":           o15_breakdown["gate6_volume"],
                 "draw_prob_implied":      o15_breakdown["draw_prob_implied"],
                 "h2h_matchup_bonus":      o15_breakdown["h2h_matchup_bonus"],
                 "intent_ratio_bonus":     o15_breakdown["intent_ratio_bonus"],
@@ -1463,10 +1594,14 @@ def run_gg_o15_engine(target_date=None, verbose=False):
         "⚪ GG BELOW THRESHOLD":          5,
     }
     tier_order_o15 = {
-        "💎 O1.5 TIER 1 — LOCK":   1,
-        "✅ O1.5 TIER 2 — SOLID":  2,
-        "📊 O1.5 TIER 3 — LEAN":   3,
-        "⚪ O1.5 BELOW THRESHOLD": 4,
+        # The HIGH CONFIDENCE label (2026-10-04) MUST be registered here. An
+        # unmapped label fillna(99)s and sorts to the BOTTOM of the board, so
+        # omitting it would quietly rank our best picks last.
+        "💎 O1.5 TIER 1 — LOCK":            1,
+        "🔥 O1.5 TIER 1 — HIGH CONFIDENCE": 2,
+        "✅ O1.5 TIER 2 — SOLID":           3,
+        "📊 O1.5 TIER 3 — LEAN":            4,
+        "⚪ O1.5 BELOW THRESHOLD":          5,
     }
 
     df_gg  = pd.DataFrame(gg_picks)
@@ -1480,8 +1615,11 @@ def run_gg_o15_engine(target_date=None, verbose=False):
 
     df_o15["tier_rank"] = df_o15["o15_tier"].map(tier_order_o15).fillna(99)
     df_o15 = df_o15.sort_values(
-        ["tier_rank", "o15_score"],
-        ascending=[True, False]
+        ["tier_rank", "o15_score", "o15_signals_fired"],
+        # NOTE: one `ascending` entry per sort key. o15_signals_fired is a third
+        # key, so this list MUST be length 3 — a two-entry list raises
+        # "Length of ascending must match length of by" at runtime.
+        ascending=[True, False, False]
     ).reset_index(drop=True)
 
     # ── GG PRINT ──────────────────────────────────────────────────────────
@@ -1495,6 +1633,7 @@ def run_gg_o15_engine(target_date=None, verbose=False):
         "home_gk_liable", "away_gk_liable",
         "sig1_mc_btts", "sig2_venue_btts", "sig3_gk_vuln",
         "sig4_h2h_btts", "sig5_directional",
+        "sig6_scoring_form", "sig7_conceding_form",
         "home_gk_note", "away_gk_note",
         "lambda_home", "lambda_away",
     ]
@@ -1516,12 +1655,14 @@ def run_gg_o15_engine(target_date=None, verbose=False):
         print(f"  OVER 1.5 PRECISION BOARD — {TARGET_DATE}")
         print(f"{'🔥'*50}")
     o15_show_cols = [
-        "fixture", "o15_tier", "o15_score",
+        "fixture", "o15_tier", "o15_score", "o15_signals_fired",
         "combined_lambda", "mc_over15_prob",
         "combined_venue_goals_avg", "league_weight",
         "sig1_combined_lambda", "sig2_mc_over15",
         "sig3_venue_goals_avg", "sig4_league_weight",
         "sig5_fatigue_penalty",
+        "gate1_simulation", "gate2_lambda", "gate3_venue",
+        "gate4_h2h", "gate5_market", "gate6_volume",
         "fatigue_home", "fatigue_away",
     ]
     for c in o15_show_cols:
@@ -1555,6 +1696,9 @@ def run_gg_o15_engine(target_date=None, verbose=False):
             "gg_score":           row.get("gg_score"),
             "gg_tier":            row.get("gg_tier"),
             "gg_signals_fired":   row.get("gg_signals_fired"),
+            # sig6 / sig7 (2026-10-04): which of the 7 checkmarks passed.
+            "sig6_scoring_form":  bool(row.get("sig6_scoring_form", False)),
+            "sig7_conceding_form": bool(row.get("sig7_conceding_form", False)),
             "mc_btts_prob":       row.get("mc_btts_prob"),
             "venue_btts_combined": row.get("venue_btts_combined"),
             "h2h_btts_rate":      row.get("h2h_btts_rate"),
@@ -1574,14 +1718,51 @@ def run_gg_o15_engine(target_date=None, verbose=False):
             ].values[0] if len(
                 df_o15[df_o15["fixture_id"] == row.get("fixture_id")]
             ) > 0 else None,
+            # O1.5 signal count + the six gates (2026-10-04). The count drives
+            # the tier, the gates explain it. Resolved per-fixture rather than
+            # from the row, because df_o15 is sorted independently of df_gg.
+            "o15_signals_fired": df_o15.loc[
+                df_o15["fixture_id"] == row.get("fixture_id"),
+                "o15_signals_fired"
+            ].values[0] if len(
+                df_o15[df_o15["fixture_id"] == row.get("fixture_id")]
+            ) > 0 else None,
+            "o15_gates": {
+                k: bool(df_o15.loc[
+                    df_o15["fixture_id"] == row.get("fixture_id"), k
+                ].values[0]) if len(
+                    df_o15[df_o15["fixture_id"] == row.get("fixture_id")]
+                ) > 0 else None
+                for k in ("gate1_simulation", "gate2_lambda", "gate3_venue",
+                          "gate4_h2h", "gate5_market", "gate6_volume")
+            },
         })
 
     json_path = os.path.join(
         OUTPUT_DIR, f"gg_o15_feed_{TARGET_DATE}.json"
     )
+
+    def _json_default(o):
+        """Coerce numpy scalars to plain Python at the JSON boundary.
+
+        Everything in `feed` is read back out of a pandas DataFrame, so any
+        integer column arrives as numpy.int64 and any float as numpy.float64.
+        json.dump rejects both. Coercing here fixes every such field at once —
+        including the pre-existing gg_score / mc_btts_prob — instead of
+        hand-casting each new column as it is added.
+        """
+        if isinstance(o, (np.integer,)):
+            return int(o)
+        if isinstance(o, (np.floating,)):
+            return float(o)
+        if isinstance(o, (np.bool_,)):
+            return bool(o)
+        raise TypeError(f"Object of type {o.__class__.__name__} "
+                        f"is not JSON serializable")
+
     with open(json_path, "w", encoding="utf-8") as f:
         import json
-        json.dump(feed, f, indent=2, ensure_ascii=False)
+        json.dump(feed, f, indent=2, ensure_ascii=False, default=_json_default)
 
     if verbose:
         print(f"\n  💾 GG picks saved  : {gg_csv_path}")
