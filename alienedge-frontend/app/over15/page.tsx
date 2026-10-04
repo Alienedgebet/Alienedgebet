@@ -10,6 +10,7 @@ import {
   type Over15PsychologyPick,
   type Over15LegacyPick,
   type Over15GoldPick,
+  type Over15VipPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
@@ -138,6 +139,65 @@ const goldColumns: PredictionColumn<Over15GoldPick>[] = [
   { key: "h2h", header: "H2H Analyzed", align: "right", render: (r) => r.metrics.h2h_matches_analyzed },
 ];
 
+/**
+ * Columns for the "Over 1.5 VIP" block.
+ *
+ * The goals column shows the SAMPLE SIZE next to the total, because the
+ * underlying window is the team's last five matches and thin-history teams come
+ * back short. "9 / 8 (3g)" is honest about what the number rests on; a bare
+ * "9 / 8" would read as a five-game average when it may be a two-game one.
+ */
+const vipColumns: PredictionColumn<Over15VipPick>[] = [
+  {
+    key: "fixture",
+    header: "Fixture",
+    render: (r) => (
+      <span className="font-medium text-text-primary">
+        {r.teams.home.name} vs {r.teams.away.name}
+      </span>
+    ),
+  },
+  {
+    key: "vip_tier",
+    header: "VIP Tier",
+    render: (r) => (r.vip_tier ? <TierBadge tier={r.vip_tier} /> : <span className="text-text-secondary">—</span>),
+  },
+  {
+    key: "goals",
+    header: "Goals L5 (H/A)",
+    align: "right",
+    render: (r) => {
+      const { home_goals_last_5: h, away_goals_last_5: a } = r.metrics;
+      if (h == null || a == null) return <span className="text-text-secondary">—</span>;
+      const n = Math.min(r.metrics.home_games_sampled ?? 5, r.metrics.away_games_sampled ?? 5);
+      return `${h} / ${a}${n < 5 ? ` (${n}g)` : ""}`;
+    },
+  },
+  {
+    key: "labels",
+    header: "Why VIP",
+    className: "max-w-[280px]",
+    render: (r) => (
+      <div className="flex flex-wrap gap-1 text-2xs">
+        {(r.pick_labels ?? []).map((l) => (
+          <span
+            key={l}
+            className="rounded border border-accent-amber/30 bg-accent-amber/10 px-1 py-0.5 text-accent-amber"
+          >
+            {l.replace(/^[^\w]+\s*/, "")}
+          </span>
+        ))}
+      </div>
+    ),
+  },
+  {
+    key: "reason",
+    header: "Rule",
+    className: "max-w-[220px] truncate text-2xs text-text-secondary",
+    render: (r) => r.vip_reason || "—",
+  },
+];
+
 export default function Over15Page() {
   const { date } = useSelectedDate();
 
@@ -152,6 +212,18 @@ export default function Over15Page() {
    */
   const fetchGold = useMemo(
     () => (): Promise<AxiosResponse<Over15GoldPick[]>> => over15Api.getGold(date),
+    [date]
+  );
+
+  /**
+   * The VIP rows.
+   *
+   * Not re-sorted client-side: /api/over15/vip already returns tier order, then
+   * strongest recent scoring within a tier. Sorting again here would discard
+   * that ordering without adding information.
+   */
+  const fetchVIP = useMemo(
+    () => (): Promise<AxiosResponse<Over15VipPick[]>> => over15Api.getVIP(date),
     [date]
   );
 
@@ -179,6 +251,20 @@ export default function Over15Page() {
         date,
       }),
       ...goldColumns,
+    ],
+    [date]
+  );
+
+  // 3. Over 1.5 VIP (Verify -> Rest)
+  const vipColumnsWithVerify = useMemo(
+    () => [
+      createVerifyColumn<Over15VipPick>(),
+      createIntelligentPassColumn<Over15VipPick>({
+        market: "over15",
+        getLabel: (r) => `${r.teams.home.name} vs ${r.teams.away.name}`,
+        date,
+      }),
+      ...vipColumns,
     ],
     [date]
   );
@@ -242,6 +328,40 @@ export default function Over15Page() {
 
       {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
       <QuickHistoryStrip />
+
+      {/* ── 2b. Over 1.5 VIP ──────────────────────────────────────────
+          Highest-precision block on the page, so it sits first.
+
+          Source: Engine/sh_gg_winner.py — the SAME rows as "Second Half Over1
+          B" on the SHVI page, read from the same store. Nothing is re-run.
+
+          That engine emits any fixture carrying at least one of five streaks,
+          which is ~99% of what it inspects, so raw it measures at exactly the
+          base rate. This block applies a filter measured on 571 settled
+          fixtures: it keeps 89 of 571 (84% discarded, 84 of 89 misses removed)
+          and those 89 went Over 1.5 94.4% of the time.
+
+          NOT PROVEN. Eighteen slices were tested, so one or two look good by
+          chance alone; the best z is ~+2.5 and none clears a Bonferroni
+          correction. Hence "VIP", not "LOCK". Re-validate as the sample grows.
+
+          Tiers rank by each side's last-5 goals (8/7/6). On the sample they did
+          NOT separate — all three landed at 100% on n=12/4/10 — so treat them
+          as a ranking label, not a claim that T1 is proven better than T3.
+          Tiers need Engine/sh_gg_winner.py's goals_last_5 fields, which only
+          exist from 2026-10-04; older dates show "—" rather than a guess. */}
+      <div>
+        <ChainStage
+          title="Over 1.5 VIP"
+          description="SH-GG Winner output, filtered and tiered for Over 1.5 — BOTH 2H GOAL + a supporting H2H streak, or 2+ streaks without the AWAY-win flag. Provisional: 94.4% on 89 settled fixtures, not yet statistically proven."
+          fetcher={fetchVIP}
+          deps={[date]}
+          columns={vipColumnsWithVerify}
+          rowKey={(r, i) => `${r.fixture_id}-${i}`}
+          emptyMessage="No VIP picks for this date. This filter is deliberately strict — it needs at least two independent streaks to agree, and drops the AWAY H2H WIN flag entirely because that flag measured 74% against an 84% base rate, i.e. it points the wrong way. An empty block here is a real result, not a failure."
+          refreshMs={VERIFY_REFRESH_MS}
+        />
+      </div>
 
       {/* ── 3. Over 1.5 Intelligence (the FIXED engine) ───────────────── */}
       <div>

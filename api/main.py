@@ -1752,6 +1752,136 @@ def get_over15_gold(date: str):
     return _settled(ensure_defaults(data, O15_GOLD_DEFAULTS), "o15", date)
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# OVER 1.5 VIP  —  Engine/sh_gg_winner.py, filtered and tiered for Over 1.5
+# ════════════════════════════════════════════════════════════════════════════
+# sh_gg_winner emits EVERY fixture that hits at least one of five streaks
+# (`if streaks:` in the engine), which on settled history is ~99% of what it
+# looks at — so unfiltered it measures at exactly the base rate and carries no
+# information at all. Measured over 571 settled fixtures (23 dates, base rate
+# 84.4% for full-match Over 1.5):
+#
+#   all its rows                      n=571   84.4%   lift +0.0
+#   VIP survivors (below)             n= 89   94.4%   lift +10.0
+#
+# The filter discards 482 of 571 rows (84%) and removes 84 of the 89 misses.
+# It exists to make the engine's output usable for Over 1.5 WITHOUT touching
+# how the engine decides anything — the rule set here is a reader of its flags,
+# not a second opinion bolted onto the engine.
+#
+# Rule A: BOTH 2H GOAL, plus at least one of {H2H GG, H2H O2.5, HOME WIN}
+# Rule B: 2+ streaks, and NOT AWAY H2H WIN
+#
+# AWAY H2H WIN is excluded deliberately and is the single most important part
+# of this filter: it predicts FEWER goals, not more. Measured alone it ran at
+# 74.2% against an 84.4% base (z=-2.22), and combined with H2H O2.5 it fell to
+# 61.5% (z=-2.27). Including it would make the "VIP" list worse than random.
+#
+# (The third candidate rule, "BOTH 2H GOAL + (GG or O2.5) and not AWAY win", is
+# a strict subset of Rule A, so it is already covered and is not duplicated.)
+#
+# HONESTY: the 94.4% is NOT proven. Eighteen slices were tested, so one or two
+# look good by chance alone; the best z is ~+2.5 and nothing clears a
+# Bonferroni correction. That is why this is called VIP and not LOCK.
+O15_VIP_RULE_A = "BOTH 2H GOAL + (H2H GG | H2H O2.5 | HOME WIN)"
+O15_VIP_RULE_B = "2+ streaks, NOT AWAY H2H WIN"
+# Ordered HIGHEST bar first — the label index is positional, not derived from
+# the cut value. Deriving it (e.g. cut - 6) silently inverts: 8 lands on T2.
+O15_VIP_TIER_CUTS = (8, 7, 6)   # each side's last-5 goals
+O15_VIP_TIER_LABELS = ("💎 VIP T1", "🥈 VIP T2", "🥉 VIP T3")
+
+
+def _o15_vip_reason(flags):
+    """Which VIP rule(s) this row satisfies, or None. Empty flags -> None."""
+    if not isinstance(flags, dict):
+        return None
+    both_2h = bool(flags.get("both_2h_goal_100_percent"))
+    home_win = bool(flags.get("home_h2h_win_100"))
+    away_win = bool(flags.get("away_h2h_win_100"))
+    h2h_gg = bool(flags.get("h2h_gg_100"))
+    h2h_o25 = bool(flags.get("h2h_o25_100"))
+    count = sum([both_2h, home_win, away_win, h2h_gg, h2h_o25])
+
+    rule_a = both_2h and (h2h_gg or h2h_o25 or home_win)
+    rule_b = count >= 2 and not away_win
+    if rule_a and rule_b:
+        return f"{O15_VIP_RULE_A}  +  {O15_VIP_RULE_B}"
+    if rule_a:
+        return O15_VIP_RULE_A
+    if rule_b:
+        return O15_VIP_RULE_B
+    return None
+
+
+def _o15_vip_tier(metrics):
+    """Tier on min(home,away) of last-5 goals. None when the metric is absent.
+
+    Returns None on any pre-2026-10-04 file, which predates the engine emitting
+    these fields. None renders as "—" rather than a guessed tier: a tier is a
+    claim about a team's recent output, and inventing one from no data is the
+    exact failure this route must not repeat.
+    """
+    if not isinstance(metrics, dict):
+        return None
+    hg, ag = metrics.get("home_goals_last_5"), metrics.get("away_goals_last_5")
+    try:
+        hg, ag = float(hg), float(ag)
+    except (TypeError, ValueError):
+        return None
+    lo = min(hg, ag)
+    for cut, label in zip(O15_VIP_TIER_CUTS, O15_VIP_TIER_LABELS):
+        if lo >= cut:
+            return label
+    return "UNTIERED"
+
+
+@app.get("/api/over15/vip/{date}", tags=["Over 1.5"])
+def get_over15_vip(date: str):
+    """The SH-GG Winner's rows, filtered and tiered for Over 1.5.
+
+    Reads the `sh_gg_winner` store directly — no engine run, no extra API calls.
+    Filtering happens HERE rather than in the frontend so the payload stays
+    small and the rule set stays testable in one place.
+
+    Settles "o15" (>= 2 goals WON): this is the Over 1.5 page, and the source
+    route /api/sh-gg-winner settles "shvi".
+    """
+    data, _ = store.load("sh_gg_winner", date, default=[])
+    if not isinstance(data, list):
+        return []
+    out = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        reason = _o15_vip_reason(row.get("flags"))
+        if not reason:
+            continue
+        metrics = row.get("metrics") or {}
+        out.append({
+            **row,
+            "vip_reason": reason,
+            "vip_tier": _o15_vip_tier(metrics),
+        })
+    # Tier order first, then strongest recent scoring — a fixed, explainable
+    # ranking rather than a score whose inputs the reader cannot see. Rows with
+    # no tier (pre-2026-10-04 files) sort last but are still shown.
+    order = {"💎 VIP T1": 1, "🥈 VIP T2": 2, "🥉 VIP T3": 3, "UNTIERED": 4,
+             None: 5}
+
+    def _sort_key(r):
+        m = r.get("metrics") or {}
+        vals = []
+        for k in ("home_goals_last_5", "away_goals_last_5"):
+            try:
+                vals.append(float(m.get(k)))
+            except (TypeError, ValueError):
+                vals.append(0.0)
+        return (order.get(r.get("vip_tier"), 5), -min(vals))
+
+    out.sort(key=_sort_key)
+    return _settled(out, "o15", date)
+
+
 @app.get("/api/over25/apex/{date}", tags=["Over 2.5"])
 def get_over25_apex(date: str):
     return _with_intelligent_pass(

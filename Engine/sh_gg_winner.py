@@ -87,6 +87,25 @@ def run_sh_gg_winner_engine(target_date):
     # -------------------------
     # ANALYSIS ENGINES (100% UNTOUCHED MATH)
     # -------------------------
+    def _was_home(fixture, team_id):
+        """Was `team_id` the home side in this fixture?
+
+        Extracted (2026-10-04) from the identical inline block in
+        check_h2h_strict, so there is exactly ONE home/away rule in this file.
+        A second copy is how the two start disagreeing. Order is preserved from
+        the original: an explicit meta.location wins; when it is blank the
+        second participant is assumed to be the away side.
+        """
+        for i, p in enumerate(fixture.get("participants", [])):
+            if str(p.get("id")) == str(team_id):
+                loc = p.get("meta", {}).get("location", "")
+                if loc == "away":
+                    return False
+                if loc == "":
+                    return i != 1
+                return True
+        return True
+
     def check_recent_form_math(team_id, team_name):
         """
         Checks last 5 matches using simple math (FT - HT > 0).
@@ -104,9 +123,17 @@ def run_sh_gg_winner_engine(target_date):
         resp = GET(f"/fixtures/between/{start}/{end}/{team_id}", params=params)
         matches = resp.get("data",[])
 
-        if not matches: return 0, 0 
+        if not matches: return 0, 0, 0, 0
 
         games_with_2h_activity = 0
+        # (2026-10-04) ADDITIVE: accumulate the team's own full-time goals over
+        # the same window. The numbers are already in hand here; they were simply
+        # discarded. They let the Over 1.5 VIP block rank its survivors by recent
+        # scoring volume without a second round of API calls. `goals_sampled` is
+        # returned alongside because this window is NOT guaranteed to hold 5
+        # matches — promoted or thin-history teams come back short, and a tier
+        # asserted off 2 games must say so rather than look like one off 5.
+        goals_sampled = 0
 
         for m in matches:
             (h_ht, a_ht), (h_ft, a_ft) = get_scores_ht_ft(m.get("scores",[]))
@@ -116,13 +143,15 @@ def run_sh_gg_winner_engine(target_date):
             a_goals_2h = a_ft - a_ht
             total_goals_2h = h_goals_2h + a_goals_2h
 
+            goals_sampled += h_ft if _was_home(m, team_id) else a_ft
+
             if total_goals_2h > 0:
                 games_with_2h_activity += 1
 
         total = len(matches)
         pct_activity = (games_with_2h_activity / total * 100) if total > 0 else 0
 
-        return pct_activity, total
+        return pct_activity, total, goals_sampled, total
 
     def check_h2h_strict(h_id, a_id):
         resp = GET(f"/fixtures/head-to-head/{h_id}/{a_id}", params={"include": "participants;scores", "per_page": 10, "order": "desc"})
@@ -138,17 +167,8 @@ def run_sh_gg_winner_engine(target_date):
             (past_h_ht, past_a_ht), (past_h_ft, past_a_ft) = get_scores_ht_ft(h.get("scores",[]))
             if past_h_ft is None: continue 
 
-            h_id_was_home = True 
-            parts = h.get("participants",[])
-            for i, p in enumerate(parts):
-                if str(p.get("id")) == str(h_id):
-                    loc = p.get("meta", {}).get("location", "")
-                    if loc == "away":
-                        h_id_was_home = False
-                    elif loc == "":
-                        if i == 1: h_id_was_home = False
-                    break
-            
+            h_id_was_home = _was_home(h, h_id)
+
             if h_id_was_home:
                 target_h_goals, target_a_goals = past_h_ft, past_a_ft
             else:
@@ -212,8 +232,8 @@ def run_sh_gg_winner_engine(target_date):
         h2h = check_h2h_strict(h_id, a_id)
 
         # 2. 2H Goals (Math Method)
-        h_2h_activity, h_total = check_recent_form_math(h_id, h_name)
-        a_2h_activity, a_total = check_recent_form_math(a_id, a_name)
+        h_2h_activity, h_total, h_goals, h_sampled = check_recent_form_math(h_id, h_name)
+        a_2h_activity, a_total, a_goals, a_sampled = check_recent_form_math(a_id, a_name)
 
         streaks =[]
 
@@ -250,7 +270,15 @@ def run_sh_gg_winner_engine(target_date):
                 "metrics": {
                     "home_2h_rate": h_2h_activity,
                     "away_2h_rate": a_2h_activity,
-                    "h2h_matches_analyzed": h2h["count"] if h2h else 0
+                    "h2h_matches_analyzed": h2h["count"] if h2h else 0,
+                    # (2026-10-04) ADDITIVE — consumed by the Over 1.5 VIP block
+                    # to rank its survivors. Absent on every file written before
+                    # this change, which is why the VIP tiers render as "—" on
+                    # historical dates rather than guessing.
+                    "home_goals_last_5": h_goals,
+                    "away_goals_last_5": a_goals,
+                    "home_games_sampled": h_sampled,
+                    "away_games_sampled": a_sampled,
                 }
             }
             results.append(match_payload)
