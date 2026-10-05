@@ -382,29 +382,67 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
     a_side = pd.to_numeric(complete["away_gg_count"], errors='coerce')
 
     # ── GATES — each a boolean Series over `complete` (same rows as before) ────
-    layers = [
-        # Layer 1: Probability Floor
-        (prob_num >= cfg["min_probability"]),
+    # ── THE USER'S RULE (2026-10-05) ─────────────────────────────────────────
+    # "Every match on the board must meet EVERY number I typed. A box I left
+    # empty must not filter anything."
+    #
+    # Each gate below is therefore OPTIONAL: it is added to the filter only when
+    # the caller actually supplied a bound for it. Previously all seven were
+    # always added, reading their value out of USER_FILTER -- so a Tipster board
+    # with one number typed in H2H still had six other rules (probability, last
+    # 3, table distance, home side, away side) filtering silently, and the
+    # public preset's opinions were being applied to a board that is meant to
+    # hold nothing but the user's own choices.
+    #
+    # A missing bound means "no opinion": it can neither pass nor block a row,
+    # and it is not counted as a satisfied gate.
+    layers = []
 
-        # Layer 3: SHORT TERM FORM (Now dynamic using User Config)
-        (h_last3.between(cfg["last3_gg_min"], cfg["last3_gg_max"])),
-        (a_last3.between(cfg["last3_gg_min"], cfg["last3_gg_max"])),
+    # Layer 1: Probability Floor
+    if cfg.get("min_probability") is not None:
+        layers.append(prob_num >= float(cfg["min_probability"]))
 
-        # Layer 4: H2H GG VOLUME
-        # An H2H threshold must refuse a pair with NO history outright, and a
-        # measured zero must not satisfy it either. h2h_cnt is None (never met),
-        # so the comparison is False on its own -- stated explicitly so the
-        # intent survives a future refactor.
-        (h2h_cnt is not None) & (h2h_cnt >= cfg["h2h_gg_min"]),
+    # Layer 3: SHORT TERM FORM. A half-typed range (only a min, or only a max)
+    # still filters on the side the user gave -- an absent side is unbounded.
+    if cfg.get("last3_gg_min") is not None or cfg.get("last3_gg_max") is not None:
+        for series in (h_last3, a_last3):
+            if cfg.get("last3_gg_min") is not None and cfg.get("last3_gg_max") is not None:
+                layers.append(series.between(float(cfg["last3_gg_min"]),
+                                             float(cfg["last3_gg_max"])))
+            elif cfg.get("last3_gg_min") is not None:
+                layers.append(series >= float(cfg["last3_gg_min"]))
+            else:
+                layers.append(series <= float(cfg["last3_gg_max"]))
 
-        # Layer 5: STANDINGS GATE (Distance Based)
-        valid_positions,
-        (pos_diff.between(cfg["pos_diff_min"], cfg["pos_diff_max"])),
+    # Layer 4: H2H GG VOLUME
+    # An H2H threshold must refuse a pair with NO history outright, and a
+    # measured zero must not satisfy it either. h2h_cnt is None (never met),
+    # so the comparison is False on its own -- stated explicitly so the
+    # intent survives a future refactor.
+    if cfg.get("h2h_gg_min") is not None:
+        layers.append((h2h_cnt is not None)
+                      & (h2h_cnt >= float(cfg["h2h_gg_min"])))
 
-        # Layer 6: HISTORICAL SIDE-BIAS (Home vs Away performance)
-        (h_side >= cfg["home_gg_side_min"]),
-        (a_side >= cfg["away_gg_side_min"]),
-    ]
+    # Layer 5: STANDINGS GATE (Distance Based)
+    if cfg.get("pos_diff_min") is not None or cfg.get("pos_diff_max") is not None:
+        # A row whose positions are unknown cannot satisfy a distance the user
+        # asked for, so it is excluded -- the same no-fabrication rule as the
+        # other gates. With no distance requested, an unknown position is fine.
+        dist_ok = pos_diff
+        if cfg.get("pos_diff_min") is not None and cfg.get("pos_diff_max") is not None:
+            dist_ok = dist_ok.between(float(cfg["pos_diff_min"]),
+                                      float(cfg["pos_diff_max"]))
+        elif cfg.get("pos_diff_min") is not None:
+            dist_ok = dist_ok >= float(cfg["pos_diff_min"])
+        else:
+            dist_ok = dist_ok <= float(cfg["pos_diff_max"])
+        layers.append(valid_positions & dist_ok)
+
+    # Layer 6: HISTORICAL SIDE-BIAS (Home vs Away performance)
+    if cfg.get("home_gg_side_min") is not None:
+        layers.append(h_side >= float(cfg["home_gg_side_min"]))
+    if cfg.get("away_gg_side_min") is not None:
+        layers.append(a_side >= float(cfg["away_gg_side_min"]))
 
     # ── LAYER 2: TOTAL PARITY LIMIT (additive activation) ────────────────────
     # This layer's operands (absolute integer H2H / conceded gaps — NOTE 2 in
@@ -443,15 +481,28 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
                 layers.append(odds_num <= float(max_gg_odds))
 
     # ── COMBINE: strict (all gates) or soft (one failure allowed) ─────────────
+    if not layers:
+        # Nothing was asked for, so nothing may filter. A board with every box
+        # empty must return the full slate it was given, not crash on layers[0]
+        # and not silently fall back to the public preset's rules.
+        print("   [i] No gate was requested — returning the full slate unfiltered.")
+        return complete.copy()
+
     if strict_mode:
         mask = layers[0]
         for cond in layers[1:]:
             mask = mask & cond
-    else:
+    elif len(layers) >= 2:
         # Soft mode — the same "Diamond in the Rough" rule the WIN tipster
         # filter already ships: allow exactly ONE gate to fail.
         mask_sum = sum(cond.astype(int) for cond in layers)
         mask = mask_sum >= (len(layers) - 1)
+    else:
+        # Soft mode with a SINGLE typed gate (2026-10-05). "Allow one failure"
+        # is meaningless when there is only one thing to fail -- it would let a
+        # match the user explicitly excluded through. A lone rule is therefore
+        # absolute: the user typed 5 in H2H, so a match with 4 does not appear.
+        mask = layers[0]
 
     df_filtered = complete[mask].copy()
 
@@ -479,9 +530,30 @@ def aggregate_picks(df):
 # ============================================================
 # 📦 THE BLACK BOX WRAPPER (date-aware — mirrors WIN / O2.5 filter entrypoints)
 # ============================================================
+def build_gate_config(cfg_overrides=None, use_preset=True):
+    """The gate values a filter run should actually apply.
+
+    PUBLIC  (use_preset=True)  — seeded with USER_FILTER, the app's shipped
+      opinionated preset. This is the default and the pipeline path.
+
+    TIPSTER (use_preset=False) — every gate starts unset. Only the numbers the
+      user actually typed survive, so a box they left empty cannot filter
+      anything and the public preset cannot decide rows they never asked about.
+
+    Lifted out of run_gg_precision_filter so the rule that decides who owns the
+    board is directly testable. It was previously inline and therefore only
+    observable through a full run, which is how it went unnoticed.
+    """
+    cfg = dict(USER_FILTER) if use_preset else {k: None for k in USER_FILTER}
+    for key, value in (cfg_overrides or {}).items():
+        if key in cfg and value is not None:
+            cfg[key] = value
+    return cfg
+
+
 def run_gg_precision_filter(target_date=None, cfg_overrides=None, max_parity=None,
                             strict_mode=True, min_gg_odds=None, max_gg_odds=None,
-                            persist=True):
+                            persist=True, use_public_preset=None):
     """Daily GG precision filter.
 
     ADDITIVE (2026-09-23) — every new argument defaults to the SHIPPED behaviour,
@@ -489,6 +561,11 @@ def run_gg_precision_filter(target_date=None, cfg_overrides=None, max_parity=Non
       * `cfg_overrides`  — merge user gate values over USER_FILTER (the Weekly
         drawer's MIN PROBABILITY / MIN HOME-AWAY GG / MIN H2H GG / MAX TABLE
         DISTANCE). Unknown keys are ignored; None never overwrites a default.
+      * `use_public_preset` (2026-10-05) — True seeds cfg from USER_FILTER, so the
+        app's opinionated preset applies. False leaves every gate unset, so ONLY
+        the caller's own numbers filter. The Weekly Tipster board passes False so
+        the public preset's rules cannot decide rows the user never asked about;
+        the shipped pipeline call omits it and is unchanged.
       * `max_parity`     — activates the documented Layer-2 total-parity gate
         (H2H_Parity + Concede_Parity <= max_parity) when the dated artifact
         carries operands; unevaluated otherwise.
@@ -515,12 +592,22 @@ def run_gg_precision_filter(target_date=None, cfg_overrides=None, max_parity=Non
         print("❌ Filter closed: no authoritative GG data found for this date.")
         return []
 
-    # 1b. Effective gate config = engine defaults + caller overrides
-    cfg = dict(USER_FILTER)
-    if cfg_overrides:
-        for key, value in cfg_overrides.items():
-            if key in cfg and value is not None:
-                cfg[key] = value
+    # 1b. Effective gate config.
+    #
+    # PUBLIC  — the app's own opinionated preset is applied, exactly as the
+    #           precomputed snapshot does, so the shipped default view is
+    #           unchanged byte for byte.
+    # TIPSTER — the board belongs to the user: ONLY the numbers they typed
+    #           exist. USER_FILTER is deliberately NOT seeded here. It used to
+    #           be, which is why a Tipster board with a single number typed in
+    #           still had six other gates filtering silently (probability, last
+    #           3, table distance, home side, away side) — the public preset's
+    #           opinions deciding rows the user never asked about.
+    if strict_mode is None:
+        strict_mode = True
+    use_preset = use_public_preset if use_public_preset is not None else strict_mode
+
+    cfg = build_gate_config(cfg_overrides, use_preset=use_preset)
 
     # 2. Filter
     print("🎯 Applying Precision Layers (Total Parity <= 4, Form constraints, Table Distance)...")

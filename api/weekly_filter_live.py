@@ -571,12 +571,33 @@ def _live_gg(dates, params):
     from FILTER.gg_precision_filter import run_gg_precision_filter
 
     overrides = params.get("overrides") or {}
-    preset_cfg, preset_strict = GG_PRESETS.get(
-        params.get("risk_level") or "banker", GG_PRESETS["banker"])
-    cfg_overrides = {GG_CFG_KEYS[k]: v for k, v in overrides.items() if k in GG_CFG_KEYS}
-    for key, value in preset_cfg.items():
-        cfg_overrides.setdefault(key, value)
-    strict_mode = bool(overrides["strict_mode"]) if "strict_mode" in overrides else preset_strict
+
+    # PUBLIC vs TIPSTER (2026-10-05).
+    #
+    # The preset is PUBLIC's opinion. It used to be merged on top of the user's
+    # boxes unconditionally, so on the TIPSTER board -- which belongs to the user
+    # -- the app's preset filled in every box the user left empty. That is why a
+    # board with a single number typed in H2H still had the preset's probability,
+    # last-3, table-distance and side rules silently deciding the output.
+    #
+    # TIPSTER now seeds NOTHING. Only the numbers the user actually typed are
+    # forwarded, and an empty box means that rule is off.
+    is_tipster = params.get("mode") in TIPSTER_MODES
+
+    if is_tipster:
+        cfg_overrides = {GG_CFG_KEYS[k]: v
+                         for k, v in overrides.items() if k in GG_CFG_KEYS}
+        # Strict mode stays the board's own switch; with no preset there is no
+        # preset value to inherit.
+        strict_mode = bool(overrides.get("strict_mode", True))
+    else:
+        preset_cfg, preset_strict = GG_PRESETS.get(
+            params.get("risk_level") or "banker", GG_PRESETS["banker"])
+        cfg_overrides = {GG_CFG_KEYS[k]: v
+                         for k, v in overrides.items() if k in GG_CFG_KEYS}
+        for key, value in preset_cfg.items():
+            cfg_overrides.setdefault(key, value)
+        strict_mode = bool(overrides["strict_mode"]) if "strict_mode" in overrides else preset_strict
     min_odds = overrides.get("min_gg_odds")
     max_odds = overrides.get("max_gg_odds")
     if min_odds is None and max_odds is None and params.get("odds_band"):
@@ -588,6 +609,7 @@ def _live_gg(dates, params):
             date, cfg_overrides=cfg_overrides,
             max_parity=overrides.get("max_parity"), strict_mode=strict_mode,
             min_gg_odds=min_odds, max_gg_odds=max_odds, persist=False,
+            use_public_preset=not is_tipster,
         ) or []
         rows.extend(_stamp(produced, date))
     return rows
