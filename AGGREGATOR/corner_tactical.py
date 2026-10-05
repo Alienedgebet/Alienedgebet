@@ -6,6 +6,13 @@ import math
 import logging
 import requests
 from datetime import datetime, timedelta, timezone
+
+# 2026-10-05: one shared, target-date-anchored history window. Nine engine
+# modules each hand-rolled `datetime.now() - 1 day`, which made "last 5" form
+# depend on WHEN the engine ran. See CORE/history_window.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from CORE.history_window import history_window_end  # noqa: E402
+
 from collections import defaultdict, Counter
 
 import numpy as np
@@ -98,8 +105,9 @@ def run_corner_engine_stage3(target_date=None):
         return {"data":[]}
 
     def get_team_history(team_id):
-        end_dt = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
-        start_dt = (datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat()
+        # 2026-10-05: target-date anchored. See CORE/history_window.py.
+        end_dt = history_window_end(target_date).isoformat()
+        start_dt = (history_window_end(target_date) - timedelta(days=LOOKBACK_DAYS)).isoformat()
         params = {
             "include": "statistics.type",
             "filters": "fixtureStates:5",

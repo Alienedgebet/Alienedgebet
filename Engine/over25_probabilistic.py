@@ -1,10 +1,18 @@
 import os
+import sys
 import time
 import json
 import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
+
+# 2026-10-05: one shared, target-date-anchored history window. Nine engine
+# modules each hand-rolled `datetime.now() - 1 day`, which made "last 5" form
+# depend on WHEN the engine ran. See CORE/history_window.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from CORE.history_window import history_window_end  # noqa: E402
+
 from dateutil import parser
 
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
@@ -135,7 +143,8 @@ def run_over25_stage1(target_date):
     # LEAGUE WEIGHTING
     # -------------------------
     def compute_league_over25_weight(league_id, num_fixtures=NUM_PAST_FIXTURES, scale=LEAGUE_SCALE):
-        end_dt = datetime.now(timezone.utc).date() - timedelta(days=1)
+        # 2026-10-05: target-date anchored. See CORE/history_window.py.
+        end_dt = history_window_end(target_date)
         start_dt = end_dt - timedelta(days=365*2)
         over_count, total_count, page = 0, 0, 1
         while total_count < num_fixtures:
@@ -207,7 +216,8 @@ def run_over25_stage1(target_date):
     # FETCHERS
     # -------------------------
     def fetch_last_finished_fixtures_for_team(team_id, max_needed=50):
-        end_dt = datetime.now(timezone.utc).date() - timedelta(days=1)
+        # 2026-10-05: target-date anchored. See CORE/history_window.py.
+        end_dt = history_window_end(target_date)
         start_dt = end_dt - timedelta(days=TEAM_LOOKBACK_DAYS)
         try:
             data = GET(f"/fixtures/between/{start_dt}/{end_dt}/{team_id}", params={"include":"participants;scores;state","filters":"fixtureStates:5","sortBy":"starting_at","order":"desc","per_page":max_needed})
