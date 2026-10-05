@@ -32,7 +32,7 @@ def run_sh_gg_winner_engine(target_date):
     # CONFIG (100% UNTOUCHED LOGIC)
     # -------------------------
     API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
-    MIN_H2H_GAMES = 2
+    MIN_H2H_GAMES = 5
     REQ_DELAY = 0.2
     
     # Dynamic Output Path
@@ -154,9 +154,18 @@ def run_sh_gg_winner_engine(target_date):
         return pct_activity, total, goals_sampled, total
 
     def check_h2h_strict(h_id, a_id):
-        resp = GET(f"/fixtures/head-to-head/{h_id}/{a_id}", params={"include": "participants;scores", "per_page": 10, "order": "desc"})
+        # fixtureStates:5 = FINISHED only (2026-10-05). No state filter was sent
+        # before, so unplayed meetings entered the sample and the unreadable ones
+        # were skipped further down -- quietly shrinking the real denominator.
+        resp = GET(f"/fixtures/head-to-head/{h_id}/{a_id}", params={
+            "include": "participants;scores",
+            "sortBy": "starting_at", "order": "desc",
+            "per_page": 10, "filters": "fixtureStates:5"})
         history = resp.get("data",[])
 
+        # Was 2. A pair that met twice was treated as a full H2H record, and the
+        # five "100%" flags below were published off that sample without ever
+        # saying how small it was. The user's rule is five.
         if len(history) < MIN_H2H_GAMES: return None
 
         history = history[:5]
