@@ -804,13 +804,14 @@ def calculate_gg_score(
     away_gk_is_liability,  # bool
     home_gk_cpg,           # float, home GK goals conceded per 90
     away_gk_cpg,           # float, away GK goals conceded per 90
-    h2h_btts_rate,         # float 0-1
+    h2h_btts_rate,         # float 0-1, or None when the pair has no H2H
     lambda_home,           # float, expected home goals
     lambda_away,           # float, expected away goals
     home_scored_total=0.0, # float, goals scored in lastN_home  (sig6)
     away_scored_total=0.0, # float, goals scored in lastN_away  (sig6)
     home_conceded_total=0.0,  # float, goals conceded in lastN_home (sig7)
     away_conceded_total=0.0,  # float, goals conceded in lastN_away (sig7)
+    h2h_sample_size=0,   # meetings the H2H rate came from (transparency)
 ):
     sig1_raw   = min(1.0, btts_prob / 0.60)
     sig1_score = sig1_raw * GG_W_MC_BTTS
@@ -837,9 +838,18 @@ def calculate_gg_score(
         sig3_score = sig3_raw * (GG_W_GK_VULN * GG_NEITHER_CPG_FRACTION)
         sig3_fired = False
 
-    sig4_raw   = min(1.0, h2h_btts_rate / 0.60)
-    sig4_score = sig4_raw * GG_W_H2H_BTTS
-    sig4_fired = h2h_btts_rate >= 0.40
+    # h2h_btts_rate is None when the pair has no H2H history (2026-10-05). An
+    # unmeasurable signal must be SILENT: it contributes no points and does not
+    # fire. It is not a zero, and it is certainly not a penalty -- before this,
+    # a never-met pair produced 0.0 and lost points for a match it never had.
+    if h2h_btts_rate is None:
+        sig4_raw   = 0.0
+        sig4_score = 0.0
+        sig4_fired = False
+    else:
+        sig4_raw   = min(1.0, h2h_btts_rate / 0.60)
+        sig4_score = sig4_raw * GG_W_H2H_BTTS
+        sig4_fired = h2h_btts_rate >= 0.40
 
     home_gap  = max(0.0, lambda_home - 1.0)
     away_gap  = max(0.0, lambda_away - 1.0)
@@ -880,7 +890,11 @@ def calculate_gg_score(
         "sig7_conceding_form":   sig7_fired,
         "signals_fired":         signals_fired,
         "venue_btts_combined":   round(venue_btts_combined, 3),
-        "h2h_btts_rate":         round(h2h_btts_rate, 3),
+        # None means "no H2H history". It is carried through as None so the
+        # board can say "no H2H" rather than showing a fabricated 0.0.
+        "h2h_btts_rate":         (None if h2h_btts_rate is None
+                                  else round(h2h_btts_rate, 3)),
+        "h2h_sample_size":      int(h2h_sample_size or 0),
     }
     return round(total_score, 1), signals_fired, breakdown
 
@@ -1261,7 +1275,13 @@ def run_gg_o15_engine(target_date=None, verbose=False):
 
             # ── VENUE BTTS RATES ──────────────────────────────────────────
             def btts_rate(fixtures_list):
-                if not fixtures_list: return 0.0
+                # An EMPTY sample returns None, never 0.0 (2026-10-05).
+                # "These teams have never met" and "they met five times and never
+                # both scored" were the same number, so a never-met pair was
+                # scored as real evidence against itself and pushed down the
+                # ladder. sig4 cannot fire on None, which is the honest outcome:
+                # there is no H2H evidence either way.
+                if not fixtures_list: return None
                 return round(
                     sum(1 for f in fixtures_list if is_btts(f)) /
                     len(fixtures_list), 3
@@ -1361,6 +1381,9 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 home_gk_cpg          = h_gk_cpg,
                 away_gk_cpg          = a_gk_cpg,
                 h2h_btts_rate        = h2h_btts_rate,
+                # How many meetings that rate came from, so the board can
+                # disclose a thin sample instead of implying five.
+                h2h_sample_size      = len(h2h or []),
                 lambda_home          = lambda_home,
                 lambda_away          = lambda_away,
                 # sig6 / sig7 (2026-10-04): the last-5 volume totals computed
@@ -1462,7 +1485,7 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                     f"BTTS_MC={btts_prob:.1%} | "
                     f"VenBTTS_H={venue_btts_home:.1%} "
                     f"VenBTTS_A={venue_btts_away:.1%} | "
-                    f"H2H_BTTS={h2h_btts_rate:.1%}"
+                    f"H2H_BTTS={(f'{h2h_btts_rate:.1%}' if h2h_btts_rate is not None else 'n/a')}"
                 )
                 print(
                     f"    GK:  Home={h_gk_note} | Away={a_gk_note}"

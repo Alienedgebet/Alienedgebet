@@ -45,6 +45,9 @@ def run_over25_stage3(target_date):
 
     # Rule Thresholds
     RULE_MIN_GAMES = 4
+    # A last-5 H2H claim is only made from a full sample (2026-10-05).
+    # Below this the pair is refused rather than graded off 1-2 meetings.
+    MIN_H2H_SAMPLE = 5
     RULE_MIN_ATTACK = 2.0
     RULE_MIN_DEFENSE = 2.0
     RULE_ODDS_MIN = 1.40
@@ -145,27 +148,36 @@ def run_over25_stage3(target_date):
         Force Python to look at EXACTLY the last 5 items.
         User Requested Rule: MUST have at least 3 Over 2.5 games in H2H history.
         """
-        resp = GET(f"/fixtures/head-to-head/{h_id}/{a_id}", 
-                   params={"include":"scores", "sortBy":"starting_at", "order":"desc", "per_page": 10})
-        
-        # HARD SLICE [0:5]
+        # fixtureStates:5 = FINISHED only (2026-10-05). No state filter was sent
+        # before, so unplayed fixtures entered the sample.
+        resp = GET(f"/fixtures/head-to-head/{h_id}/{a_id}",
+                   params={"include":"scores", "sortBy":"starting_at", "order":"desc",
+                           "per_page": 10, "filters": "fixtureStates:5"})
+
+        # HARD SLICE [0:5] -- capped at five, as the user requires.
         all_data = resp.get("data") or[]
-        last_5_games = all_data[:5] 
-        
+        last_5_games = all_data[:5]
+
         score_history =[]
         over_count = 0
-        
+
         for f in last_5_games:
             score_str = extract_final_score_string(f.get("scores",[]))
             total = get_total_goals(f.get("scores",[]))
-            
+
             score_history.append(score_str)
             if total >= 3:
                 over_count += 1
-                
-        # THE STRICT RULE PRESERVED: Must be 3 or more!
-        passed = (over_count >= 3)
-        return passed, over_count, score_history
+
+        # NO SAMPLE FLOOR EXISTED HERE (2026-10-05). "over_count >= 3" could only
+        # be true with 3 real meetings, but a pair that met ONCE and lost 0-1
+        # still passed a rule the docstring described as "at least 3 Over 2.5
+        # games in H2H history" on the strength of a single meeting, and an empty
+        # history produced over_count = 0 -> False without ever saying why.
+        # The threshold now additionally REQUIRES a full sample, so a thin pair
+        # cannot satisfy it and the caller can report the true denominator.
+        passed = (len(last_5_games) >= MIN_H2H_SAMPLE) and (over_count >= 3)
+        return passed, over_count, score_history, len(last_5_games)
 
     def get_fixture_details(fixture_id):
         resp = GET(f"/fixtures/{fixture_id}", params={"include":"league;participants;odds"})
@@ -219,11 +231,17 @@ def run_over25_stage3(target_date):
         # ----------------------------------------------------
         # THE STRICT H2H KILL SWITCH
         # ----------------------------------------------------
-        passed, count, history = check_strict_h2h_debug(h_id, a_id)
+        passed, count, history, sample = check_strict_h2h_debug(h_id, a_id)
         
         if not passed:
             print(f"[REJECTED] {match_name}")
-            print(f"   Reason: Only {count}/5 Overs in H2H History.")
+            # The REAL denominator. It used to print "x/5" whatever the sample
+            # was, so a pair with a single meeting was reported as if it had
+            # five.
+            if sample < MIN_H2H_SAMPLE:
+                print(f"   Reason: only {sample} H2H meeting(s) - a last-5 rule cannot be judged on a sample this thin.")
+            else:
+                print(f"   Reason: Only {count}/{sample} Overs in H2H History.")
             print(f"   Scores: {history}") 
             print("-" * 30)
             continue

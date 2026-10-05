@@ -33,7 +33,7 @@ def run_gold_over_25_engine(target_date):
     # -------------------------
     API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
     CHECK_DATE = target_date
-    MIN_H2H_GAMES = 2
+    MIN_H2H_GAMES = 5
     REQ_DELAY = 0.2
     # 2026-10-01 FIX — date-scope the artifact. This feed is read by the Apex
     # aggregator as its VIP list; an undated file means a run that matched
@@ -143,9 +143,20 @@ def run_gold_over_25_engine(target_date):
         return pct_activity, total, total_team_goals
 
     def check_h2h_strict(h_id, a_id):
-        resp = GET(f"/fixtures/head-to-head/{h_id}/{a_id}", params={"include": "participants;scores", "per_page": 10, "order": "desc"})
+        # fixtureStates:5 = FINISHED only (2026-10-05). This request previously
+        # sent no state filter, so SCHEDULED fixtures entered the sample and
+        # their absent scorelines were skipped by the `past_h_ft is None` guard
+        # below -- which shrank the real denominator without saying so. Now the
+        # provider only returns matches that actually have a result.
+        resp = GET(f"/fixtures/head-to-head/{h_id}/{a_id}", params={
+            "include": "participants;scores",
+            "sortBy": "starting_at", "order": "desc",
+            "per_page": 10, "filters": "fixtureStates:5"})
         history = resp.get("data",[])
 
+        # MIN_H2H_GAMES was 2, so a pair that met TWICE was graded with the same
+        # authority as one that met five, and neither the pick nor the board ever
+        # disclosed the difference. The user's rule is five.
         if len(history) < MIN_H2H_GAMES: return None
 
         history = history[:5]
