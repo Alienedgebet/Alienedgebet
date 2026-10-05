@@ -350,7 +350,25 @@ def load_authoritative_history(target_date):
 # THE DEADLY PRECISION FILTER (gate logic preserved — all 6 layers)
 # ============================================================
 def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
-                           min_gg_odds=None, max_gg_odds=None):
+                           min_gg_odds=None, max_gg_odds=None,
+                           user_gates=None):
+    """`user_gates` is the set of cfg keys THE USER TYPED.
+
+    WHY THIS EXISTS (2026-10-05)
+    ----------------------------
+    Soft mode allows exactly ONE gate to fail -- the "Diamond in the Rough".
+    That is fine for the app's own opinionated preset, but it silently cancelled
+    the user's own H2H threshold: in Public mode the preset seeds
+    min_probability, so a board with 5 typed in MIN H2H GG had TWO layers, and
+    "one failure allowed" spent the allowance on the H2H layer. Measured on the
+    2026-10-11 slate: strict returned 0 rows, soft returned 23 -- including
+    pairs whose real H2H GG count was 4, 3, 2, 1 and even 0 (never met).
+
+    A number the user typed is a REQUIREMENT, not a preference, so it is never
+    spendable. Only gates the app supplied on its own initiative may be traded
+    away by soft mode.
+    """
+    user_gates = set(user_gates or ())
     if df.empty: return df
 
     # ZERO-FABRICATION EXCLUSION: a row missing a real value for an EVALUATED gate
@@ -396,32 +414,59 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
     #
     # A missing bound means "no opinion": it can neither pass nor block a row,
     # and it is not counted as a satisfied gate.
+    # Each layer is (mask, spendable). `spendable` is True only for a gate the
+    # APP chose; a gate the user typed is a requirement and is never tradeable.
     layers = []
+    def _add(mask, key):
+        layers.append((mask, key not in user_gates))
 
     # Layer 1: Probability Floor
     if cfg.get("min_probability") is not None:
-        layers.append(prob_num >= float(cfg["min_probability"]))
+        _add(prob_num >= float(cfg["min_probability"]), "min_probability")
 
     # Layer 3: SHORT TERM FORM. A half-typed range (only a min, or only a max)
     # still filters on the side the user gave -- an absent side is unbounded.
     if cfg.get("last3_gg_min") is not None or cfg.get("last3_gg_max") is not None:
         for series in (h_last3, a_last3):
             if cfg.get("last3_gg_min") is not None and cfg.get("last3_gg_max") is not None:
-                layers.append(series.between(float(cfg["last3_gg_min"]),
-                                             float(cfg["last3_gg_max"])))
+                _add(series.between(float(cfg["last3_gg_min"]),
+                                    float(cfg["last3_gg_max"])), "last3_gg_min")
             elif cfg.get("last3_gg_min") is not None:
-                layers.append(series >= float(cfg["last3_gg_min"]))
+                _add(series >= float(cfg["last3_gg_min"]), "last3_gg_min")
             else:
-                layers.append(series <= float(cfg["last3_gg_max"]))
+                _add(series <= float(cfg["last3_gg_max"]), "last3_gg_max")
 
-    # Layer 4: H2H GG VOLUME
-    # An H2H threshold must refuse a pair with NO history outright, and a
-    # measured zero must not satisfy it either. h2h_cnt is None (never met),
-    # so the comparison is False on its own -- stated explicitly so the
-    # intent survives a future refactor.
+    # Layer 4: H2H GG VOLUME -- THE USER'S RULE, LITERALLY (2026-10-05).
+    #
+    # "Type 5 in H2H and bring me ONLY matches with 5. Not 4. And a pair that
+    #  never met must not appear at all -- they have no H2H."
+    #
+    # The threshold is a MINIMUM COUNT OUT OF A REAL SAMPLE, so a pair qualifies
+    # only when it can actually be judged: it must have met at least that many
+    # times AND those meetings must really exist.
+    #
+    #   * h2h_gg_count None  -> no parsable H2H at all ("no H2H") -> EXCLUDED.
+    #   * h2h_gg_total  0    -> never met -> EXCLUDED, and never scored as 0.
+    #   * count < threshold  -> EXCLUDED. A pair with 4 does not satisfy 5.
+    #
+    # h2h_gg_total is None on dated artifacts that predate the denominator
+    # column, so an unknown total is NOT treated as zero -- only a real 0 and a
+    # real missing count refuse the row. That keeps old snapshots honest instead
+    # of silently emptying the board.
     if cfg.get("h2h_gg_min") is not None:
-        layers.append((h2h_cnt is not None)
-                      & (h2h_cnt >= float(cfg["h2h_gg_min"])))
+        need = float(cfg["h2h_gg_min"])
+        total_num = (pd.to_numeric(complete["h2h_gg_total"], errors="coerce")
+                     if "h2h_gg_total" in complete.columns else None)
+        if need > 0:
+            # A positive threshold demands a real sample of at least that size,
+            # so "5 H2H" cannot be satisfied by a pair that only ever met twice.
+            h2h_ok = h2h_cnt.notna() & (h2h_cnt >= need)
+            if total_num is not None:
+                h2h_ok &= total_num.isna() | (total_num >= need)
+        else:
+            # A threshold of 0 is OFF, not "meet zero": it must not filter.
+            h2h_ok = pd.Series(True, index=complete.index)
+        _add(h2h_ok, "h2h_gg_min")
 
     # Layer 5: STANDINGS GATE (Distance Based)
     if cfg.get("pos_diff_min") is not None or cfg.get("pos_diff_max") is not None:
@@ -429,6 +474,7 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
         # asked for, so it is excluded -- the same no-fabrication rule as the
         # other gates. With no distance requested, an unknown position is fine.
         dist_ok = pos_diff
+        key = "pos_diff_min"
         if cfg.get("pos_diff_min") is not None and cfg.get("pos_diff_max") is not None:
             dist_ok = dist_ok.between(float(cfg["pos_diff_min"]),
                                       float(cfg["pos_diff_max"]))
@@ -436,13 +482,14 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
             dist_ok = dist_ok >= float(cfg["pos_diff_min"])
         else:
             dist_ok = dist_ok <= float(cfg["pos_diff_max"])
-        layers.append(valid_positions & dist_ok)
+            key = "pos_diff_max"
+        _add(valid_positions & dist_ok, key)
 
     # Layer 6: HISTORICAL SIDE-BIAS (Home vs Away performance)
     if cfg.get("home_gg_side_min") is not None:
-        layers.append(h_side >= float(cfg["home_gg_side_min"]))
+        _add(h_side >= float(cfg["home_gg_side_min"]), "home_gg_side_min")
     if cfg.get("away_gg_side_min") is not None:
-        layers.append(a_side >= float(cfg["away_gg_side_min"]))
+        _add(a_side >= float(cfg["away_gg_side_min"]), "away_gg_side_min")
 
     # ── LAYER 2: TOTAL PARITY LIMIT (additive activation) ────────────────────
     # This layer's operands (absolute integer H2H / conceded gaps — NOTE 2 in
@@ -463,7 +510,9 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
             print(f"   [!] Total-parity gate requested (<= {max_parity}) but this "
                   f"date's forensics artifact carries no operands — gate NOT evaluated.")
         else:
-            layers.append((h2h_par + con_par) <= float(max_parity))
+            # Additive drawer control (MAX TOTAL PARITY): a bound the user typed,
+            # so it is a requirement, not something soft mode may trade away.
+            layers.append(((h2h_par + con_par) <= float(max_parity), False))
 
     # ── GG (BTTS) ODDS CORRIDOR (additive activation) ─────────────────────────
     # Same rule: only evaluated when the caller supplies a bound AND this date's
@@ -476,9 +525,9 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
                   f"carries no gg_odds — gate NOT evaluated.")
         else:
             if min_gg_odds is not None:
-                layers.append(odds_num >= float(min_gg_odds))
+                layers.append((odds_num >= float(min_gg_odds), False))
             if max_gg_odds is not None:
-                layers.append(odds_num <= float(max_gg_odds))
+                layers.append((odds_num <= float(max_gg_odds), False))
 
     # ── COMBINE: strict (all gates) or soft (one failure allowed) ─────────────
     if not layers:
@@ -489,20 +538,31 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
         return complete.copy()
 
     if strict_mode:
-        mask = layers[0]
-        for cond in layers[1:]:
+        mask = layers[0][0]
+        for cond, _ in layers[1:]:
             mask = mask & cond
-    elif len(layers) >= 2:
-        # Soft mode — the same "Diamond in the Rough" rule the WIN tipster
-        # filter already ships: allow exactly ONE gate to fail.
-        mask_sum = sum(cond.astype(int) for cond in layers)
-        mask = mask_sum >= (len(layers) - 1)
     else:
-        # Soft mode with a SINGLE typed gate (2026-10-05). "Allow one failure"
-        # is meaningless when there is only one thing to fail -- it would let a
-        # match the user explicitly excluded through. A lone rule is therefore
-        # absolute: the user typed 5 in H2H, so a match with 4 does not appear.
-        mask = layers[0]
+        # Soft mode -- the "Diamond in the Rough": allow exactly ONE gate to fail.
+        #
+        # THE ALLOWANCE MAY ONLY BE SPENT ON A GATE THE APP CHOSE. A gate the
+        # user typed is mandatory and is ANDed in unconditionally, so Public
+        # mode's own preset can never buy a pass for a match that misses the
+        # user's number. This is what stops "5 H2H" from returning pairs with
+        # 4, 3, 2, 1 or 0 H2H GG.
+        spendable = [cond for cond, spend in layers if spend]
+        mandatory = [cond for cond, spend in layers if not spend]
+        for cond in mandatory:
+            mask = cond
+        if spendable:
+            if len(spendable) >= 2:
+                soft_ok = sum(cond.astype(int) for cond in spendable) >= (len(spendable) - 1)
+            else:
+                # A single app-chosen gate has nothing to trade against, so it
+                # stands alone rather than defaulting to "always passes".
+                soft_ok = spendable[0]
+            mask = mask & soft_ok if mandatory else soft_ok
+        elif not mandatory:
+            mask = pd.Series(True, index=complete.index)
 
     df_filtered = complete[mask].copy()
 
@@ -609,12 +669,18 @@ def run_gg_precision_filter(target_date=None, cfg_overrides=None, max_parity=Non
 
     cfg = build_gate_config(cfg_overrides, use_preset=use_preset)
 
+    # WHICH GATES DID THE USER ACTUALLY TYPE? Only these are mandatory. In Public
+    # mode the preset seeds min_probability on top of the user's boxes; those
+    # preset gates stay spendable by soft mode, the user's own stay absolute.
+    typed_gates = {k for k, v in (cfg_overrides or {}).items() if v is not None}
+
     # 2. Filter
     print("🎯 Applying Precision Layers (Total Parity <= 4, Form constraints, Table Distance)...")
     df_filtered = apply_precision_filter(df_all, cfg, strict_mode=strict_mode,
                                          max_parity=max_parity,
                                          min_gg_odds=min_gg_odds,
-                                         max_gg_odds=max_gg_odds)
+                                         max_gg_odds=max_gg_odds,
+                                         user_gates=typed_gates)
 
     if df_filtered.empty:
         print("🛑 Precision Check: No matches survived the deadly accuracy layers.")

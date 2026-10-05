@@ -74,9 +74,44 @@ def slate():
     } for i, (name, *r) in enumerate(spec)])
 
 
-def kept(df, cfg, **kw):
-    out = apply_precision_filter(df, cfg, strict_mode=kw.pop("strict_mode", True), **kw)
+def kept(df, cfg, typed=(), **kw):
+    """`typed` = the cfg keys the USER typed, mirroring what run_gg_precision_filter
+    derives from cfg_overrides. Gates outside this set are app-chosen and stay
+    spendable by soft mode."""
+    strict = kw.pop("strict_mode", True)
+    out = apply_precision_filter(df, cfg, strict_mode=strict,
+                                 user_gates=set(typed), **kw)
     return sorted(out["fixture"].tolist())
+
+
+def slate_with_denominator():
+    """Same slate, plus the REAL H2H sample size each pair actually has.
+
+    GG column: h2h_count, h2h_total, prob, home_side, away_side,
+               last3_home, last3_away, hpos, apos
+
+    F_NEVER has never met (count 0, total 0). F_THIN met twice and both were
+    GG -- count 2 of a real sample of 2, which is NOT the same as 2 of 5.
+    """
+    spec = [
+        # name      count total prob  hside aside l3h  l3a  hpos apos
+        ("F_FULL",  5, 5, 70, 3, 3, 2, 2, 3, 5),      # 5 of 5 -> qualifies for "5"
+        ("F_FOUR",  4, 5, 70, 3, 3, 2, 2, 3, 5),      # 4 of 5 -> must NOT qualify
+        ("F_THIN",  2, 2, 70, 3, 3, 2, 2, 3, 5),      # 2 of a real 2 -> must NOT qualify
+        ("F_NEVER", 0, 0, 70, 3, 3, 2, 2, 3, 5),      # never met -> must NOT qualify
+        ("F_NA",    None, None, 70, 3, 3, 2, 2, 3, 5),  # no parsable H2H at all
+    ]
+    return pd.DataFrame([{
+        "fixture_id": 200 + i,
+        "fixture": name,
+        "home_position": r[7], "away_position": r[8],
+        "h2h_goal_parity": 1, "concede_parity": 1,
+        "gg_prob_pct": r[2],
+        "home_gg_last3": r[5], "away_gg_last3": r[6],
+        "h2h_gg_count": r[0], "h2h_gg_total": r[1],
+        "home_gg_count": r[3], "away_gg_count": r[4],
+        "gg_odds": 2.0,
+    } for i, (name, *r) in enumerate(spec)])
 
 
 class ClearedBoardFiltersNothingTests(unittest.TestCase):
@@ -213,6 +248,101 @@ class ConfigOwnershipTests(unittest.TestCase):
     def test_unknown_key_is_ignored(self):
         cfg = build_gate_config({"not_a_real_gate": 99}, use_preset=False)
         self.assertNotIn("not_a_real_gate", cfg)
+
+
+class ExactH2HThresholdTests(unittest.TestCase):
+    """"Type 5 in H2H and bring me ONLY 5. Not 4. And nothing with no H2H."
+
+    REGRESSION (2026-10-05). Soft mode allows ONE gate to fail. In Public mode
+    the preset seeds min_probability alongside the user's H2H box, which gave
+    the allowance something to spend itself on -- and it spent it on the H2H
+    gate. On the real 2026-10-11 slate, strict returned 0 rows and soft returned
+    23, including pairs whose true H2H GG count was 4, 3, 2, 1 and 0.
+
+    A typed number is a REQUIREMENT. Only app-chosen gates are tradeable.
+    """
+
+    def setUp(self):
+        self.df = slate_with_denominator()
+
+    # -- the headline rule ------------------------------------------------
+    def test_five_returns_only_a_pair_with_five(self):
+        cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=False)
+        self.assertEqual(kept(self.df, cfg, strict_mode=True), ["F_FULL"])
+
+    def test_four_never_satisfies_five(self):
+        cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=False)
+        self.assertNotIn("F_FOUR", kept(self.df, cfg, strict_mode=True))
+
+    def test_a_pair_that_never_met_never_appears(self):
+        cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=False)
+        kept_rows = kept(self.df, cfg, strict_mode=True)
+        self.assertNotIn("F_NEVER", kept_rows)
+        self.assertNotIn("F_NA", kept_rows)
+
+    def test_a_thin_sample_cannot_masquerade_as_five(self):
+        """2 GG out of a REAL sample of 2 is not "5 H2H"."""
+        cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=False)
+        self.assertNotIn("F_THIN", kept(self.df, cfg, strict_mode=True))
+
+    # -- the actual defect: soft mode waiving a typed gate ------------------
+    def test_soft_mode_cannot_buy_a_pass_for_a_typed_h2h_threshold(self):
+        """THE REGRESSION. Public preset + user H2H, strict parity lock OFF."""
+        cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=True)
+        self.assertEqual(kept(self.df, cfg, typed={"h2h_gg_min"},
+                              strict_mode=False), ["F_FULL"])
+
+    def test_soft_mode_still_trades_away_the_apps_own_preset_gates(self):
+        """The Diamond in the Rough keeps working for app-chosen gates only.
+
+        Here the preset's OWN rules (probability, last-3, table distance, side)
+        are all spendable, so a row may still fail one of them -- but never the
+        user's H2H number, and never by having no H2H at all.
+        """
+        cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=True)
+        rows = kept(self.df, cfg, typed={"h2h_gg_min"}, strict_mode=False)
+        self.assertEqual(rows, ["F_FULL"])
+        for absent in ("F_FOUR", "F_THIN", "F_NEVER", "F_NA"):
+            self.assertNotIn(absent, rows)
+
+    def test_a_typed_threshold_survives_every_other_typed_gate(self):
+        """Typing a second rule must not let H2H<5 matches back in."""
+        cfg = build_gate_config({"h2h_gg_min": 5, "min_probability": 60.0},
+                                use_preset=False)
+        for strict in (True, False):
+            with self.subTest(strict_mode=strict):
+                # F_FULL is the only fixture at 70% AND 5/5 H2H, so both rules
+                # typed together must return exactly it -- never a 4 or a thin.
+                self.assertEqual(
+                    kept(self.df, cfg,
+                         typed={"h2h_gg_min", "min_probability"},
+                         strict_mode=strict), ["F_FULL"])
+
+    # -- thresholds that are legitimately satisfiable ---------------------
+    def test_two_returns_pairs_with_two_or_more(self):
+        cfg = build_gate_config({"h2h_gg_min": 2}, use_preset=False)
+        rows = kept(self.df, cfg, strict_mode=True)
+        self.assertEqual(rows, ["F_FOUR", "F_FULL", "F_THIN"])  # kept() sorts
+        self.assertNotIn("F_NEVER", rows)   # 0 is not >= 2
+        self.assertNotIn("F_NA", rows)      # no evidence at all
+
+    def test_zero_means_off_not_meet_zero(self):
+        """A 0 must switch the gate OFF, not demand every pair score >= 0.
+
+        F_NA is absent by a separate, older rule: the zero-fabrication dropna
+        removes any row with no real H2H value BEFORE gates are evaluated, so 4
+        of the 5 fixtures are gate-eligible here and all 4 must survive.
+        """
+        cfg = build_gate_config({"h2h_gg_min": 0}, use_preset=False)
+        self.assertEqual(len(kept(self.df, cfg, strict_mode=True)), 4)
+
+    def test_an_artifact_without_a_denominator_still_honours_the_count(self):
+        """Old dated CSVs carry no H2H_GG_TOTAL; that must not empty the board."""
+        df = self.df.drop(columns=["h2h_gg_total"])
+        cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=False)
+        rows = kept(df, cfg, strict_mode=True)
+        self.assertEqual(rows, ["F_FULL"])
+        self.assertNotIn("F_NA", rows)
 
 
 if __name__ == "__main__":

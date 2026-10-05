@@ -202,13 +202,45 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
     # INTERNAL FILTER 2: TIPSTER (RAW SLIDERS)
     # -------------------------
     def apply_over_tipster_filter(df, 
-                                  min_odds=1.40, max_odds=2.20, 
-                                  min_poisson=60, min_votes=6, 
-                                  max_pos_gap=10, min_h2h_overs=3,
-                                  min_home_goals=0, min_away_goals=0,
-                                  max_home_conceded=0, max_away_conceded=0,
+                                  min_odds=None, max_odds=None, 
+                                  min_poisson=None, min_votes=None, 
+                                  max_pos_gap=None, min_h2h_overs=None,
+                                  min_home_goals=None, min_away_goals=None,
+                                  max_home_conceded=None, max_away_conceded=None,
                                   strict_h2h_last3_over=False,
-                                  strict_both_overs_last3=False):
+                                  strict_both_overs_last3=False,
+                                  use_public_preset=True):
+        """THE USER'S RULE (2026-10-05)
+
+        "Every match on the board must meet EVERY number I typed. A box I left
+        empty must not filter anything."
+
+        Every threshold defaults to None = OFF. They previously defaulted to
+        1.40-2.20 odds, poisson 60, votes 6, position gap 10 and 3 H2H overs, and
+        the Weekly Tipster board could not run without them: _live_o25()
+        substituted O25_DEFAULT_BAND into an empty odds box, and this function
+        applied whatever it was handed. So a board with one number typed was
+        still filtered by five rules the user had never seen, and clearing the
+        odds control reinstated 1.50-1.85 rather than removing the limit.
+
+          use_public_preset=True  — the shipped preset's numbers (pipeline path).
+          use_public_preset=False — nothing seeded; only typed numbers filter.
+
+        A gate is applied only when its bound is not None. An absent bound can
+        neither pass nor block a row.
+        """
+        if use_public_preset:
+            if min_odds is None:      min_odds = 1.40
+            if max_odds is None:      max_odds = 2.20
+            if min_poisson is None:   min_poisson = 60
+            if min_votes is None:     min_votes = 6
+            if max_pos_gap is None:   max_pos_gap = 10
+            if min_h2h_overs is None: min_h2h_overs = 3
+            if min_home_goals is None:   min_home_goals = 0
+            if min_away_goals is None:   min_away_goals = 0
+            if max_home_conceded is None: max_home_conceded = 0
+            if max_away_conceded is None: max_away_conceded = 0
+
         df_filtered = df.copy()
         if df_filtered.empty: return df_filtered
 
@@ -216,17 +248,29 @@ def run_over25_filter_aggregator(target_date=None, mode="public", risk_level="ba
         df_filtered['votes_num'] = _extract_votes(df_filtered)
 
         pos_gap = df_filtered["pos_gap"] if "pos_gap" in df_filtered.columns else pd.Series(0, index=df_filtered.index)
-        h2h_overs = df_filtered["h2h_overs_last_5"] if "h2h_overs_last_5" in df_filtered.columns else pd.Series(min_h2h_overs, index=df_filtered.index)
+        h2h_overs = (df_filtered["h2h_overs_last_5"]
+                     if "h2h_overs_last_5" in df_filtered.columns
+                     else pd.Series(float("nan"), index=df_filtered.index))
 
-        cond = (
-            (df_filtered["poisson_num"] >= min_poisson) &
-            (df_filtered["votes_num"] >= min_votes) &
-            (pos_gap <= max_pos_gap) &
-            (h2h_overs >= min_h2h_overs)
-        )
+        # Every gate is optional. A missing column means the value was never
+        # measured, so with the gate OFF the row is simply not judged on it.
+        cond = pd.Series(True, index=df_filtered.index)
+        if min_poisson is not None:
+            cond = cond & (df_filtered["poisson_num"] >= float(min_poisson))
+        if min_votes is not None:
+            cond = cond & (df_filtered["votes_num"] >= float(min_votes))
+        if max_pos_gap is not None:
+            cond = cond & (pos_gap <= float(max_pos_gap))
+        if min_h2h_overs is not None:
+            # A row whose H2H overs were never measured cannot satisfy a rule the
+            # user typed about them, so it is excluded rather than assumed.
+            cond = cond & (h2h_overs >= float(min_h2h_overs))
 
         if "o25_odds" in df_filtered.columns:
-            cond = cond & (df_filtered["o25_odds"] >= min_odds) & (df_filtered["o25_odds"] <= max_odds)
+            if min_odds is not None:
+                cond = cond & (df_filtered["o25_odds"] >= float(min_odds))
+            if max_odds is not None:
+                cond = cond & (df_filtered["o25_odds"] <= float(max_odds))
 
         # ── RECENT GOAL FORM, PER SIDE ──────────────────────────────────────
         # 2026-09-30. Four real gates replacing the display-only L5/L3 toggle.

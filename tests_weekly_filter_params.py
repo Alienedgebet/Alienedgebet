@@ -346,8 +346,8 @@ check("an in-range odds value is passed through untouched",
       win_filter_params(min_odds=1.85)["overrides"]["min_odds"] == 1.85)
 check("unknown risk level falls back to the market default",
       win_filter_params(risk_level="wat")["risk_level"] == "balanced")
-check("unknown odds corridor falls back to the engine default band",
-      win_filter_params(odds_band="9.99-99.99")["odds_band"] == "1.40-1.90")
+check("unknown odds corridor yields NO band rather than a silent default (2026-10-05)",
+      win_filter_params(odds_band="9.99-99.99")["odds_band"] is None)
 check("unknown mode falls back to public", gg_filter_params(mode="wat")["mode"] == "public")
 check("any drawer value leaves the baseline path (never ignored)",
       not is_baseline(gg_filter_params(min_prob=61))
