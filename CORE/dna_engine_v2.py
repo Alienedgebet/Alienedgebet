@@ -19,6 +19,102 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 # ==============================================================================
 # 📦 THE BLACK BOX WRAPPER (CALLABLE BY THE MASTER API/SCHEDULER)
 # ==============================================================================
+# ══════════════════════════════════════════════════════════════════════════════
+# PROFILE REUSE GATES — module level so they can be unit-tested directly.
+#
+# The engine body below is one 1500-line function, so these two pure predicates
+# live out here and the inner scope simply calls them. Behaviour is identical;
+# what changes is that the rule deciding whether a cached profile may be served
+# can be pinned by tests instead of only being observable through a full run.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Schema version the engine stamps onto every profile it writes. Mirrors the
+# inner DNA_SCHEMA_VERSION below; kept here so tests can assert the gate against
+# the real value instead of a hardcoded copy that could drift.
+_DNA_SCHEMA_VERSION = 5
+
+
+# Freshness window for a cached profile. Mirrors the inner DNA_FRESHNESS_HOURS.
+_DNA_FRESHNESS_HOURS = 20
+
+
+def _is_profile_fresh(profile):
+    """
+    True if this cached profile was computed within DNA_FRESHNESS_HOURS
+    and can be reused with zero API calls. Legacy profiles (saved before
+    this fix, with no `computed_at`) are treated as NOT fresh so they
+    get exactly one freshness-check call the first time they're seen —
+    never deleted, never mass-rebuilt.
+
+    SCHEMA CHECK: a profile built before the current DNA_SCHEMA_VERSION is
+    also treated as stale even if its timestamp is recent, because it is
+    missing fields this version emits. Without this, every profile cached
+    before the Goal_Volume fields existed would be reused with zero API
+    calls and would never gain them.
+    """
+    if int(profile.get("schema", 1)) < _DNA_SCHEMA_VERSION:
+        return False
+    computed_at = profile.get("computed_at")
+    if not computed_at:
+        return False
+    try:
+        ts = datetime.fromisoformat(computed_at)
+    except (ValueError, TypeError):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts) < timedelta(hours=_DNA_FRESHNESS_HOURS)
+
+
+def _profile_is_displayable(profile):
+    """
+    True when a cached profile can actually RENDER, not merely exist.
+
+    WHY THIS EXISTS (measured 2026-10-05)
+    --------------------------------------
+    The reuse path compared ONLY the latest fixture id, so it stamped a fresh
+    `computed_at` onto ANY cached profile whose latest match had not moved --
+    including ones carrying no display data at all. That made a broken profile
+    indistinguishable from a good one, and made the condition self-perpetuating:
+    the "unchanged" stamp it received is exactly what the next run reads in order
+    to skip it again.
+
+    The global library proved it. Of 1825 cached profiles:
+
+        schema None (pre-versioning) ... 1470
+        schema 2 (before form_rows) .....  320
+        schema 5 (current) ..............  35   <- the only ones with rows
+
+    1683 profiles had `form_rows: []` and `Data_Coverage: None` while carrying
+    perfectly good pillar scores and 16 audit metrics -- the history WAS fetched
+    and parsed; only the display fields were missing. On a real slate that is why
+    one side of a fixture showed five results while the other showed "0 of 5
+    recorded" and an em-dash strip, fixture after fixture. The affected team
+    differs per fixture, which is what made it look random.
+
+    The schema bump to 5 was DESIGNED to force these to rebuild. This gate is what
+    makes that design actually work: a profile that cannot render is not
+    "unchanged", whatever its timestamp claims.
+
+    Deliberately conservative -- it reports a profile unusable only when a
+    rendering page would show nothing at all. A team genuinely short on finished
+    matches still legitimately renders 1-4 rows and stays reusable, so this cannot
+    start a rebuild loop.
+    """
+    if not isinstance(profile, dict):
+        return False
+    # No display strip: the SportyBet "Last 5 Matches" panel and every other
+    # consumer of form_rows would render nothing.
+    if not (profile.get("form_rows") or []):
+        return False
+    # Data_Coverage alone is deliberately NOT required. 107 cached profiles
+    # (schema 2, e.g. Crowborough Athletic) carry a full, correct form strip but
+    # predate the coverage record; demanding it would recycle teams that render
+    # perfectly well and spend provider calls for nothing. The empty strip is the
+    # defect that was actually reported, and it is what this gate keys on.
+    return True
+
+
 def run_dna_engine_v2(target_date):
     """
     AlienEdge Commercial DNA Identity Engine — v2
@@ -193,6 +289,11 @@ def run_dna_engine_v2(target_date):
     # feeds every pillar is NOT widened, so no pillar, archetype, clash or
     # downstream engine moves. This bump is what forces the rebuild.
     DNA_SCHEMA_VERSION = 5
+    # Drift guard: the module-level mirror exists only so tests can read the
+    # real value. If these ever disagree, the gate would be tested against a
+    # version the engine no longer writes.
+    assert DNA_SCHEMA_VERSION == _DNA_SCHEMA_VERSION, (
+        "module-level DNA_SCHEMA_VERSION drifted from the engine's")
 
     if not API_KEY:
         print("CRITICAL: SPORTMONKS_API_KEY is missing from environment variables!")
@@ -363,46 +464,6 @@ def run_dna_engine_v2(target_date):
         # Only worth returning if it actually adds rows the strip can use.
         return best if len(best) > have_rows else []
 
-    def _is_profile_fresh(profile):
-        """
-        True if this cached profile was computed within DNA_FRESHNESS_HOURS
-        and can be reused with zero API calls. Legacy profiles (saved before
-        this fix, with no `computed_at`) are treated as NOT fresh so they
-        get exactly one freshness-check call the first time they're seen —
-        never deleted, never mass-rebuilt.
-
-        SCHEMA CHECK: a profile built before the current DNA_SCHEMA_VERSION is
-        also treated as stale even if its timestamp is recent, because it is
-        missing fields this version emits. Without this, every profile cached
-        before the Goal_Volume fields existed would be reused with zero API
-        calls and would never gain them.
-        """
-        if int(profile.get("schema", 1)) < DNA_SCHEMA_VERSION:
-            return False
-        computed_at = profile.get("computed_at")
-        if not computed_at:
-            return False
-        try:
-            ts = datetime.fromisoformat(computed_at)
-        except (ValueError, TypeError):
-            return False
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - ts) < timedelta(hours=DNA_FRESHNESS_HOURS)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SCORE EXTRACTION — goals, halftime, results
-    # ─────────────────────────────────────────────────────────────────────────
-    # LIFTED VERBATIM from PSYCHOLOGY/over15_psychology.py (L113-168) so the
-    # two engines cannot disagree about what a scoreline means. Duplicated
-    # rather than imported on purpose: that engine is a standalone script
-    # with its own main(), and importing across engines couples their API
-    # call behaviour. What must NOT be duplicated is the LOGIC — a second
-    # hand-typed variant is how Over 1.5 ended up with two byte-identical
-    # engines that silently overwrote each other.
-    #
-    # No new API call: `scores` has been in the `include` list of
-    # get_team_history_stats() since v1. It was simply never read.
     def extract_goals_by_period(fx, period="FT"):
         home_g, away_g = None, None
         for entry in fx.get("scores", []):
@@ -1408,7 +1469,10 @@ def run_dna_engine_v2(target_date):
         cached = dna_profiles.get(tid_str)
 
         # ── PATH 1: fresh cache hit — zero API calls, same cost as before ──
-        if cached and _is_profile_fresh(cached):
+        # A recent timestamp is NOT sufficient on its own: a profile cached
+        # before the display fields existed can carry a fresh-looking stamp and
+        # still render an empty form strip. Reuse therefore requires BOTH.
+        if cached and _is_profile_fresh(cached) and _profile_is_displayable(cached):
             reused_fresh += 1
             count += 1
             continue
@@ -1425,7 +1489,12 @@ def run_dna_engine_v2(target_date):
         # The underlying data this team's DNA was computed from hasn't
         # moved, so recomputing would produce an identical result — just
         # bump the freshness timestamp instead of redoing the math.
+        # "Unchanged" describes the team's LATEST MATCH, not the profile's
+        # usefulness. An unchanged match must not license reuse of a profile that
+        # cannot render, or the stamp below re-arms the very skip that created
+        # the empty panel.
         if (cached is not None and latest_fixture_id is not None
+                and _profile_is_displayable(cached)
                 and cached.get("history", {}).get("last_fixture_id") == latest_fixture_id):
             cached["computed_at"] = datetime.now(timezone.utc).isoformat()
             dna_profiles[tid_str] = cached
