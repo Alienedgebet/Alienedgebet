@@ -554,8 +554,20 @@ def _settled(data, market_type: str = "win", date_str: Optional[str] = None):
         # settle_predictions(date_str=...) loads the archive layer itself and
         # keeps WON/LOST verdicts permanent; today (or undated) keeps the
         # live-feed behaviour unchanged.
+        #
+        # THE 00:00-00:30 EXCEPTION (measured 2026-10-05): the archiver timer
+        # fires at 00:30, so between midnight and then the PREVIOUS day has no
+        # archive yet. Returning [] there switched off the only remaining source
+        # and stranded every match that finished after midnight — 10 of 14 picks
+        # were stuck at PENDING with the badge reading "Awaiting Kickoff".
+        # The live feed is transient and on its own recovered only 1 of those 10
+        # (measured), so the real fix is the retention window in
+        # live_stage6_alerts._RETENTION_WINDOW_DAYS; this is the belt-and-braces
+        # half — cheap, and it costs one cached read only in the gap.
         if date_str and str(date_str) < _today():
-            live_db = []
+            archive_exists = os.path.exists(
+                os.path.join(OUTPUT_DIR, f"archive_{date_str}.json"))
+            live_db = [] if archive_exists else get_live_scores_cached()
         else:
             live_db = get_live_scores_cached()
         # date_str (the date of the picks being verified) is what activates
