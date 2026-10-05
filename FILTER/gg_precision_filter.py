@@ -212,11 +212,24 @@ def _load_forensics_enrichment(target_date):
 
     enrich = {}
     for _, r in j.iterrows():
-        rec = {"h2h_gg_count": None, "home_position": None, "away_position": None,
+        rec = {"h2h_gg_count": None, "h2h_gg_total": None, "h2h_gg_usable": False,
+               "home_position": None, "away_position": None,
                "h2h_goal_parity": None, "concede_parity": None}
         h2h = str(r.get("H2H_GG", "") or "").strip()
         if "/" in h2h:
             rec["h2h_gg_count"] = _to_int(h2h.split("/")[0])
+            # The REAL denominator, read from the auditor's new field. "0/5" and
+            # "no H2H" are different facts: the first is a measured zero over a
+            # full sample, the second is no history at all. Only the second must
+            # be refused outright, and it must be refused WITHOUT being scored
+            # as a zero -- that is how a never-met pair used to slip through.
+            rec["h2h_gg_total"] = _to_int(r.get("H2H_GG_TOTAL"))
+            rec["h2h_gg_usable"] = bool(r.get("H2H_GG_USABLE"))
+        else:
+            # No parsable ratio at all: there is no H2H evidence for this pair.
+            rec["h2h_gg_count"] = None
+            rec["h2h_gg_total"] = None
+            rec["h2h_gg_usable"] = False
         m = re.match(r"^(\d+)\s*v\s*(\d+)$", str(r.get("Ranks", "") or "").strip())
         if m:
             rec["home_position"] = int(m.group(1))
@@ -378,7 +391,11 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
         (a_last3.between(cfg["last3_gg_min"], cfg["last3_gg_max"])),
 
         # Layer 4: H2H GG VOLUME
-        (h2h_cnt >= cfg["h2h_gg_min"]),
+        # An H2H threshold must refuse a pair with NO history outright, and a
+        # measured zero must not satisfy it either. h2h_cnt is None (never met),
+        # so the comparison is False on its own -- stated explicitly so the
+        # intent survives a future refactor.
+        (h2h_cnt is not None) & (h2h_cnt >= cfg["h2h_gg_min"]),
 
         # Layer 5: STANDINGS GATE (Distance Based)
         valid_positions,

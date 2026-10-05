@@ -12,6 +12,12 @@ from datetime import datetime, timedelta, timezone
 
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 from dotenv import load_dotenv
+
+# The one honest H2H primitive (CORE/h2h_truth.py). Every engine derives the
+# number it DISPLAYS from the same sample it SCORED with, so a thin sample can
+# never be padded to look like a full one.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from CORE.h2h_truth import H2H_CAP, build_h2h_truth  # noqa: E402
 load_dotenv()
 
 # --- 2. DYNAMIC PATHS FOR SERVERS ---
@@ -161,9 +167,42 @@ def run_gg_forensic_aggregator(target_date):
                                     # now returned for the persisted Concede_Parity
         return gg_last_3, has_00, (total_gs / len(fixtures)), total_conc
 
-    def get_h2h_forensics(id1, id2):
-        data = GET_REQUEST(f"/fixtures/head-to-head/{id1}/{id2}", params={"include":"scores;participants", "per_page":5, "order":"desc"})
-        fixtures = data.get("data", [])[:5]
+    def _btts_verdict(fx):
+        """True/False for a readable BTTS result, or None when unreadable.
+
+        None means "we could not measure this", which build_h2h_truth drops from
+        the sample. Returning False for a scoreline-less fixture would count a
+        missing result as a real non-BTTS match.
+        """
+        hg, ag = extract_goals_v3(fx.get("scores", []))
+        if hg is None or ag is None:
+            return None
+        return hg > 0 and ag > 0
+
+    def get_h2h_forensics(id1, id2, exclude_fixture_id=None, target_date=None):
+        # fixtureStates:5 = FINISHED only (2026-10-05). This call previously sent
+        # no state filter, so SCHEDULED fixtures entered the "last 5" sample and
+        # their absent scorelines silently counted as non-BTTS results, dragging
+        # every rate down. It now matches gg_precision_engine and the DNA panel,
+        # which both already filtered to finished matches.
+        params = {"include": "scores;participants", "per_page": 10,
+                  "sortBy": "starting_at", "order": "desc",
+                  "filters": "fixtureStates:5"}
+        data = GET_REQUEST(f"/fixtures/head-to-head/{id1}/{id2}", params=params)
+
+        # The REAL sample size is what gets returned and displayed. It used to be
+        # discarded here and re-invented downstream as a literal "/5", so a pair
+        # that met ONCE printed "1/5" -- indistinguishable from one of a possible
+        # five -- and a pair that never met printed a confident "0/5".
+        truth = build_h2h_truth(
+            data.get("data", []),
+            lambda f: _btts_verdict(f),
+            cap=H2H_CAP,
+            reference_date=target_date,
+            exclude_fixture_id=exclude_fixture_id,
+        )
+        fixtures = [f for f in (data.get("data") or [])
+                    if isinstance(f, dict)][:H2H_CAP]
 
         def _location_of(f, tid):
             for p in f.get("participants", []) or []:
@@ -188,7 +227,9 @@ def run_gg_forensic_aggregator(target_date):
                 loc = _location_of(f, id1)
                 if loc == "home":   team1_goals += hg; team2_goals += ag
                 elif loc == "away": team1_goals += ag; team2_goals += hg
-        return gg_count, (total_diff / max(1, valid)), abs(team1_goals - team2_goals)
+        # gg_count stays the raw numerator every existing caller already reads;
+        # truth carries the sample size that was previously thrown away.
+        return gg_count, (total_diff / max(1, valid)), abs(team1_goals - team2_goals), truth
 
     def get_league_rank_verified(season_id, team_id):
         if not season_id: return 99
@@ -300,7 +341,8 @@ def run_gg_forensic_aggregator(target_date):
         # FORENSIC FETCH
         h_gg3, h_00, h_avg, h_conc = get_team_recent_forensics(hid)
         a_gg3, a_00, a_avg, a_conc = get_team_recent_forensics(aid)
-        h2h_gg, parity_gap, h2h_goal_gap = get_h2h_forensics(hid, aid)
+        h2h_gg, parity_gap, h2h_goal_gap, h2h_truth = get_h2h_forensics(
+            hid, aid, exclude_fixture_id=fid, target_date=c.get('date') or target_date)
         h_rank = get_league_rank_verified(sid, hid)
         a_rank = get_league_rank_verified(sid, aid)
         math_prob = run_independent_poisson(h_avg, a_avg)
@@ -322,7 +364,12 @@ def run_gg_forensic_aggregator(target_date):
             mark += 1; details.append(f"✅PosGap({pos_diff})")
             
         if parity_gap <= RULE_MAX_PARITY: mark += 1; details.append("✅Parity")
-        if h2h_gg >= RULE_MIN_H2H_GG: mark += 1; details.append("✅H2H")
+        # An unusable pair (never met) can never earn the H2H mark, and a
+        # pair with fewer meetings than the rule demands is refused rather
+        # than passed on a padded denominator.
+        if h2h_truth.meets_count(RULE_MIN_H2H_GG): mark += 1; details.append("✅H2H")
+        elif not h2h_truth.usable: details.append("❌NoH2H")
+        else: details.append(f"⚠️H2H thin({h2h_truth.total})")
         if not h_00 and not a_00: mark += 1; details.append("✅Active")
         if math_prob >= RULE_MIN_PROB: mark += 1; details.append(f"✅Math({int(math_prob)}%)")
 
@@ -335,7 +382,13 @@ def run_gg_forensic_aggregator(target_date):
             "Score": f"{mark}/6",
             "DNA_Intelligence": dna_verdict,
             "Poisson%": math_prob,
-            "H2H_GG": f"{h2h_gg}/5",
+            # The REAL denominator, never a padded one. "2/2 (thin)" tells the
+            # board this pair has only met twice; "0/5" no longer masquerades as
+            # evidence for a pair that has never met.
+            "H2H_GG": h2h_truth.display,
+            "H2H_GG_COUNT": h2h_truth.count,
+            "H2H_GG_TOTAL": h2h_truth.total,
+            "H2H_GG_USABLE": h2h_truth.usable,
             "DNA_Insight": dna_insight,
             "Ranks": f"{h_rank}v{a_rank}",
             "Forensic_Audit": " ".join(details),
