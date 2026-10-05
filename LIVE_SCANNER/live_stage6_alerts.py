@@ -138,6 +138,14 @@ MIN_CHAOS_FOR_FUSED            = 5.0
 # simply gone and the honest answer is "cannot verify", not "in progress".
 STALE_PENDING_AFTER_S = 48 * 3600
 
+# How many calendar days of finished results the retention layer keeps on the
+# board, counting back from today. It must be >= the archiver's own horizon
+# (alienedge-archiver.service re-tops-up "yesterday" AND "2 days ago"), because a
+# fixture is FILED UNDER ITS KICKOFF DATE: a 22:00 kickoff that ends at 00:05 is
+# written into the previous day's bucket, hours after the readers have already
+# moved to "today". Two days could not read that bucket back; three can.
+_RETENTION_WINDOW_DAYS = 3
+
 # ==============================================================================
 # THE STORM TRACK — three escalating gates instead of one
 # ==============================================================================
@@ -1040,10 +1048,12 @@ class SupremeOrchestrator:
             seen, so it has the best chance of holding a real score.
           * output/archive_{date}.json — the nightly archiver's record.
 
-        Today AND yesterday are consulted, because a European matchday runs
-        past midnight: a 22:00 kickoff finishes at 00:00+, so the fixture is
-        filed under the previous date while the user is still looking at
-        "today".
+        Retention spans a ROLLING WINDOW (today and the two days before), not
+        just today+yesterday, because a European matchday runs past midnight: a
+        22:00 kickoff finishes at 00:00+, and its result is filed under the
+        PREVIOUS date — a bucket that a two-day reader has already stopped
+        looking at. See _RETENTION_WINDOW_DAYS for the boundary race this
+        prevents.
 
         Rows match the shape the page already renders, with `is_finished` set
         so the client relabels them instead of showing a stale minute.
@@ -1089,9 +1099,29 @@ class SupremeOrchestrator:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        for date_str in (today, yesterday):
+        # A ROLLING WINDOW, not just today+yesterday.
+        #
+        # THE BOUNDARY RACE THAT MADE FINISHED MATCHES VANISH (2026-10-04/05):
+        # the write side files a fixture under its KICKOFF date, but this
+        # retention side only ever READ two buckets. A European matchday that
+        # kicks off at 22:00 finishes at 00:00+, so its result is written into
+        # the PREVIOUS day's snapshot bucket — but the moment the calendar rolls
+        # over, every reader moves to "today" and that newly written bucket is
+        # never read again until the 00:30 archiver happens to reconcile it.
+        # Measured that night: 10 of 14 finished picks sat at PENDING with the
+        # live feed, the snapshot and the archive all unable to serve them, and
+        # they snapped back only when archive_2026-10-04.json was written at
+        # 00:30. Retention now spans the same horizon the archiver itself uses
+        # (alienedge-archiver.service re-tops-up "yesterday" AND "2 days ago"),
+        # so a result can no longer be written into a bucket nobody reads.
+        #
+        # Cost: each extra day is one small local JSON read, already memoised by
+        # mtime/size in load_ft_snapshot. No provider call is added.
+        retention_dates = [
+            (datetime.now() - timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(_RETENTION_WINDOW_DAYS)
+        ]
+        for date_str in retention_dates:
             # FT snapshot first: it is captured at the moment of the finish.
             for loader, label in ((load_ft_snapshot, "FT snapshot"),
                                   (load_finished_archive, "finished archive")):
