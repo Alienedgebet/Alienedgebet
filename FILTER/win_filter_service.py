@@ -67,45 +67,96 @@ def apply_public_filter(df,
 # 2. THE TIPSTER FILTER (GOLDEN STANDARD)
 # ==============================================================================
 def apply_tipster_filter(df,
-                         min_odds=1.40,
-                         max_odds=2.00,
-                         min_overall_wins=0,
-                         min_venue_wins=0,
-                         min_h2h_wins=0,
-                         min_opp_conceded=0,
-                         min_opp_losses=0,
-                         min_parity_gap=0,
-                         min_even_count=0,
+                         min_odds=None,
+                         max_odds=None,
+                         min_overall_wins=None,
+                         min_venue_wins=None,
+                         min_h2h_wins=None,
+                         min_opp_conceded=None,
+                         min_opp_losses=None,
+                         min_parity_gap=None,
+                         min_even_count=None,
                          require_no_draw=None,
-                         strict_mode=True):
+                         strict_mode=True,
+                         use_public_preset=True):
     """
     Granular filter for professional tipsters.
+
+    THE USER'S RULE (2026-10-05)
+    ----------------------------
+    "Every match on the board must meet EVERY number I typed. A box I left empty
+    must not filter anything."
+
+    Every threshold therefore defaults to None = OFF, rather than to a number.
+    They previously defaulted to 1.40/2.00 odds plus a wall of zeros, and the
+    Weekly Tipster board could not turn the odds corridor off: _live_win()
+    substituted WIN_DEFAULT_BAND (1.40-1.90) into an empty box, and
+    apply_tipster_filter applied whatever it was given. A board with one number
+    typed was still filtered by seven rules the user had never seen.
+
+      use_public_preset=True  — the shipped preset's numbers are supplied by the
+                               CALLER (unchanged behaviour for the pipeline).
+      use_public_preset=False — nothing is seeded; only typed numbers filter.
+
+    A gate is added only when its bound is not None, so an absent bound can
+    neither pass nor block a row. A half-typed odds range filters only on the
+    side given; an absent side is unbounded rather than reverting to a default.
     """
+
+    # Preset seeding for the pipeline path: the caller historically relied on
+    # these defaults, so they are applied here rather than in the signature.
+    if use_public_preset:
+        if min_odds is None:     min_odds = 1.40
+        if max_odds is None:     max_odds = 2.00
+        if min_overall_wins is None: min_overall_wins = 0
+        if min_venue_wins is None:   min_venue_wins = 0
+        if min_h2h_wins is None:     min_h2h_wins = 0
+        if min_opp_conceded is None: min_opp_conceded = 0
+        if min_opp_losses is None:   min_opp_losses = 0
+        if min_parity_gap is None:   min_parity_gap = 0
+        if min_even_count is None:   min_even_count = 0
+
     df_filtered = df.copy()
     if df_filtered.empty: return df_filtered
 
-    conditions =[]
-    
-    # Check if columns exist before applying (Safety Layer)
-    conditions.append((df_filtered["win_odds"] >= min_odds) & (df_filtered["win_odds"] <= max_odds))
-    conditions.append(df_filtered["last_5_wins_overall"] >= min_overall_wins)
-    conditions.append(df_filtered["last_5_wins_at_venue"] >= min_venue_wins)
-    conditions.append(df_filtered["h2h_wins_last_5"] >= min_h2h_wins)
-    conditions.append(df_filtered["opp_last_5_conceded_raw"] >= min_opp_conceded)
-    conditions.append(df_filtered["opp_last_5_losses"] >= min_opp_losses)
-    conditions.append(df_filtered["parity_score"] >= min_parity_gap)
-    conditions.append(df_filtered["parity_even_count"] >= min_even_count)
+    conditions = []
 
-    if require_no_draw is not None:
+    # ODDS — both sides optional. An absent min or max is unbounded, so a user
+    # who types only a maximum is not silently given a 1.40 floor.
+    if min_odds is not None:
+        conditions.append(df_filtered["win_odds"] >= float(min_odds))
+    if max_odds is not None:
+        conditions.append(df_filtered["win_odds"] <= float(max_odds))
+
+    for column, bound in (("last_5_wins_overall", min_overall_wins),
+                          ("last_5_wins_at_venue", min_venue_wins),
+                          ("h2h_wins_last_5", min_h2h_wins),
+                          ("opp_last_5_conceded_raw", min_opp_conceded),
+                          ("opp_last_5_losses", min_opp_losses),
+                          ("parity_score", min_parity_gap),
+                          ("parity_even_count", min_even_count)):
+        if bound is not None and column in df_filtered.columns:
+            conditions.append(df_filtered[column] >= float(bound))
+
+    if require_no_draw is not None and "last_3_no_draw_BOTH" in df_filtered.columns:
         conditions.append(df_filtered["last_3_no_draw_BOTH"] == require_no_draw)
+
+    if not conditions:
+        # Nothing was asked for, so nothing may filter. Returns the full slate
+        # rather than crashing on an empty condition list.
+        return df_filtered
 
     if strict_mode:
         for cond in conditions:
             df_filtered = df_filtered[cond]
-    else:
+    elif len(conditions) >= 2:
         # Soft mode: allow 1 failure (The "Diamond in the Rough" feature)
         mask_sum = sum(cond.astype(int) for cond in conditions)
         df_filtered = df_filtered[mask_sum >= (len(conditions) - 1)]
+    else:
+        # A single typed gate is absolute. "Allow one failure" against one rule
+        # would permit exactly what the user excluded.
+        df_filtered = df_filtered[conditions[0]]
 
     return df_filtered
 

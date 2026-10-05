@@ -5482,20 +5482,26 @@ class TestWeeklyOver25FormWindowToggle(unittest.TestCase):
         """
         Adding four gates must not move the shipped result set.
 
-        The drawer defaults them to 0 and the filter SKIPS a 0 threshold
-        entirely. If 0 were compared against instead, a team with no recorded
-        goals would read as 0 and the result set would shift on a change that
-        is meant to be inert until the user types.
+        The drawer leaves them unset and the filter SKIPS an unset/0 threshold
+        entirely. If a threshold were compared against instead, a team with no
+        recorded goals would read as 0 and the result set would shift on a change
+        that is meant to be inert until the user types.
+
+        2026-10-05: the signature default moved from 0 to None so that "absent"
+        and "typed zero" are the same OFF state everywhere on the board (the
+        same rule WIN and O2.5 use). `if not thr` still skips both, which is the
+        behaviour this test exists to protect.
         """
         from pathlib import Path
         filt = (Path(__file__).parent / "FILTER" /
                 "over25_risk_filter.py").read_text()
         for key in ("min_home_goals", "min_away_goals",
                     "max_home_conceded", "max_away_conceded"):
-            self.assertIn(f"{key}=0", filt,
-                          f"{key} must default to 0, meaning OFF")
+            self.assertTrue(
+                f"{key}=0" in filt or f"{key}=None" in filt,
+                f"{key} must default to 0 or None, both meaning OFF")
         self.assertIn("if not thr or col not in df_filtered.columns:", filt,
-                      "a 0 threshold must SKIP the column, not compare it")
+                      "a 0/None threshold must SKIP the column, not compare it")
 
     def test_missing_goal_column_passes_rather_than_fails(self):
         """

@@ -159,7 +159,10 @@ def win_filter_params(
 ) -> dict:
     p = _normalise(mode, "win")
     p["risk_level"] = risk_level if risk_level in WIN_RISKS else "balanced"
-    p["odds_band"] = _band(odds_band, WIN_BANDS, WIN_DEFAULT_BAND)
+    # None means the user cleared the control: no odds band, no odds filter.
+    # It used to fall back to WIN_DEFAULT_BAND, which made "cleared" identical
+    # to "1.40-1.90" on every request (2026-10-05).
+    p["odds_band"] = _band(odds_band, WIN_BANDS, None)
     for key, bounds, caster in (("min_form_wins", _COUNT, _clamp_num),
                                 ("min_venue_wins", _COUNT, _clamp_num),
                                 ("min_h2h_wins", _COUNT, _clamp_num),
@@ -233,7 +236,8 @@ def o25_filter_params(
 ) -> dict:
     p = _normalise(mode, "o25")
     p["risk_level"] = risk_level if risk_level in O25_RISKS else "balanced"
-    p["odds_band"] = _band(odds_band, O25_BANDS, O25_DEFAULT_BAND)
+    # Same rule as WIN: a cleared control means no odds band (2026-10-05).
+    p["odds_band"] = _band(odds_band, O25_BANDS, None)
     for key, bounds, caster in (("min_poisson", _PROB, _clamp_num),
                                 ("min_votes", _VOTES, _clamp_int),
                                 ("max_pos_gap", _GAP, _clamp_num),
@@ -623,14 +627,27 @@ def _live_win(dates, params, risk_default="balanced"):
         kwargs = {engine_key: overrides[canonical]
                   for canonical, engine_key in WIN_TIPSTER_KWARGS.items()
                   if canonical in overrides}
-        # The corridor buttons are visible in Tipster mode too, so an untouched
-        # band must still narrow the slider result (the tipster filter's own
-        # min_odds/max_odds). Explicit drawer odds always win over the band.
+        # ODDS CORRIDOR ON THE TIPSTER BOARD (2026-10-05).
+        #
+        # It used to be applied unconditionally, and _band() substituted
+        # WIN_DEFAULT_BAND into an EMPTY box — so clearing the odds control did
+        # not remove the odds filter, it silently reinstated 1.40-1.90. The board
+        # could not be run without an odds limit at all, which is the opposite of
+        # what clearing a control means.
+        #
+        # Now the band narrows the result ONLY when the user actually selected
+        # one. A cleared box leaves odds unfiltered, and an explicit drawer
+        # value always wins over the band.
         if "min_odds" not in overrides and "max_odds" not in overrides and params.get("odds_band"):
             band_min, band_max = parse_band(params["odds_band"])
             if band_min is not None and band_max is not None:
                 kwargs.setdefault("min_odds", band_min)
                 kwargs.setdefault("max_odds", band_max)
+
+        # Only the user's own numbers gate the board: nothing is seeded from the
+        # public preset, so an empty box filters nothing.
+        kwargs["use_public_preset"] = False
+
         rows = []
         for date in dates:
             produced = run_win_filter_service(date, mode="tipster", persist=False, **kwargs) or []
@@ -713,12 +730,21 @@ def _run(dates, params, risk_default="balanced"):
         # user actually typed it. So one box means "this price and above",
         # exactly as labelled, and the corridor still caps the top when the
         # floor is left at its default.
+        # A selected corridor still applies. A CLEARED one does not: since
+        # _band() now yields None for an empty control, the whole block is
+        # skipped and odds go unfiltered rather than being reinstated at
+        # O25_DEFAULT_BAND (2026-10-05).
         if params.get("odds_band"):
             band_min, band_max = parse_band(params["odds_band"])
             if band_max is not None and "max_odds" not in overrides:
                 kwargs.setdefault("max_odds", band_max)
             if band_min is not None and "min_odds" not in overrides:
                 kwargs.setdefault("min_odds", band_min)
+
+        # Only the user's own numbers gate the board (2026-10-05). Nothing is
+        # seeded from the public preset, so an empty box filters nothing.
+        kwargs["use_public_preset"] = False
+
         rows = []
         for date in dates:
             produced = run_over25_filter_aggregator(date, mode="tipster",
