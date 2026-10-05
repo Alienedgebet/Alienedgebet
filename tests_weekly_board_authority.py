@@ -35,8 +35,11 @@ Pure unit tests over a synthetic frame. No network, no provider, no artifacts.
 
 import unittest
 
+from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 
+from CORE.history_window import history_window, history_window_end
 from FILTER.gg_precision_filter import (
     USER_FILTER,
     apply_precision_filter,
@@ -343,6 +346,83 @@ class ExactH2HThresholdTests(unittest.TestCase):
         rows = kept(df, cfg, strict_mode=True)
         self.assertEqual(rows, ["F_FULL"])
         self.assertNotIn("F_NA", rows)
+
+
+class HistoryWindowTests(unittest.TestCase):
+    """A prediction must not depend on WHEN the engine ran.
+
+    THE BUG (found 2026-10-05). Nine engine modules anchored their history
+    window to the wall clock:
+
+        end_dt = datetime.now(timezone.utc).date() - timedelta(days=1)
+
+    The pipeline runs at 18:00 to predict TOMORROW, so "now - 1 day" reached
+    past the target date and into the predicted fixture's own future. The same
+    fixture therefore produced different "last 5" form depending on when it ran,
+    which silently moves Tier 1/2 assignment. This is the test that would have
+    caught it.
+    """
+
+    def test_window_is_anchored_to_the_target_date_not_today(self):
+        self.assertEqual(history_window_end("2026-06-15").isoformat(), "2026-06-14")
+
+    def test_an_old_target_date_is_honoured_not_overwritten_by_today(self):
+        """The whole point: a 2025 fixture must not window to 2026."""
+        self.assertEqual(history_window_end("2025-01-10").isoformat(), "2025-01-09")
+
+    def test_the_window_never_contains_the_fixture_itself(self):
+        """A match's own kickoff must not be part of its own history."""
+        target = "2026-10-11"
+        end = history_window_end(target)
+        self.assertLess(end.isoformat(), target)
+
+    def test_window_bounds_are_ordered_and_correctly_spanned(self):
+        start, end = history_window("2026-10-11", lookback_days=30)
+        self.assertEqual(end, "2026-10-10")
+        self.assertEqual(start, "2026-09-10")
+        self.assertLess(start, end)
+
+    def test_accepts_a_datetime_as_well_as_a_string(self):
+        dt = datetime(2026, 6, 15, 18, 30)
+        self.assertEqual(history_window_end(dt).isoformat(), "2026-06-14")
+        self.assertEqual(history_window_end("2026-06-15T18:30:00").isoformat(),
+                         "2026-06-14")
+
+    def test_no_target_date_is_the_only_way_to_reach_the_wall_clock(self):
+        """None keeps the old behaviour for callers that genuinely mean 'now'."""
+        self.assertEqual(history_window_end(None),
+                         datetime.now(timezone.utc).date() - timedelta(days=1))
+
+    def test_no_engine_module_re_rolls_its_own_wall_clock_window(self):
+        """Guard against the bug coming back one hand-rolled line at a time.
+
+        A module may legitimately call history_window_end() (or use the wall
+        clock for something that is not a history window), but the exact
+        `datetime.now(...) - timedelta(days=1)` history-window idiom must not
+        reappear in any live engine module.
+        """
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).parent
+        offenders = []
+        # The pattern: a wall-clock "now" minus a day, used as a window bound.
+        pattern = re.compile(
+            r"datetime\.now\([^)]*\)\.date\(\)\s*-\s*timedelta\(days=", re.I)
+        for sub in ("Engine", "PSYCHOLOGY", "AGGREGATOR", "CORE", "FILTER",
+                    "INTELLIGENT_PASS"):
+            for path in (root / sub).rglob("*.py"):
+                if path.name == "history_window.py":
+                    continue
+                if any(part.startswith("_backup_") for part in path.parts):
+                    continue
+                for n, line in enumerate(path.read_text(
+                        encoding="utf-8", errors="ignore").splitlines(), 1):
+                    if pattern.search(line):
+                        offenders.append(f"{path.relative_to(root)}:{n}")
+        self.assertEqual(offenders, [],
+                         "wall-clock history windows reintroduced: "
+                         + ", ".join(offenders))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,13 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
+
+# 2026-10-05: one shared, target-date-anchored history window. Nine engine
+# modules each hand-rolled `datetime.now() - 1 day`, which made "last 5" form
+# depend on WHEN the engine ran. See CORE/history_window.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from CORE.history_window import history_window_end  # noqa: E402
+
 import math
 from collections import Counter, defaultdict
 from dotenv import load_dotenv
@@ -338,8 +345,9 @@ def fetch_fixtures_for_date(date_str):
         page += 1; sleep_short()
     return all_fx
 
-def fetch_last_finished_fixtures_for_team(team_id, max_needed=200):
-    end_dt   = datetime.now(timezone.utc).date() - timedelta(days=1)
+def fetch_last_finished_fixtures_for_team(team_id, max_needed=200, target_date=None):
+    # 2026-10-05: target-date anchored, not wall clock. See CORE/history_window.py.
+    end_dt   = history_window_end(target_date)
     start_dt = end_dt - timedelta(days=TEAM_LOOKBACK_DAYS)
     all_fx   = []; seen = set(); page = 1
     while True:
@@ -1534,7 +1542,7 @@ def run_unders_engine(target_date=None, verbose=False):
 
             for tid in (home_id, away_id):
                 if tid not in team_cache:
-                    try: team_cache[tid] = fetch_last_finished_fixtures_for_team(tid)
+                    try: team_cache[tid] = fetch_last_finished_fixtures_for_team(tid, target_date=target_date)
                     except Exception: team_cache[tid] = []
                     sleep_short()
 
