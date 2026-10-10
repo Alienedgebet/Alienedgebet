@@ -1,41 +1,23 @@
 import os
 import sys
 import time
+import json
+import math
 import requests
 import pandas as pd
 import numpy as np
-import json
 from datetime import datetime, timedelta, timezone
+from dateutil import parser
+from collections import defaultdict, Counter
 
-# 2026-10-05: one shared, target-date-anchored history window. Nine engine
-# modules each hand-rolled `datetime.now() - 1 day`, which made "last 5" form
-# depend on WHEN the engine ran. See CORE/history_window.py.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from CORE.history_window import history_window_end  # noqa: E402
-
-import math
-from collections import Counter
+# --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 from dotenv import load_dotenv
-
 load_dotenv()
 
-# ==============================================================================
-# CONFIGURATION & VS CODE PATHS
-# ==============================================================================
-API_KEY = os.getenv("SPORTMONKS_API_KEY")
-BASE_URL = "https://api.sportmonks.com/v3/football"
-
-# --- 🚨 FIXED FOR GOOGLE COLAB & VS CODE COMPATIBILITY 🚨 ---
-try:
-    # If running in VS Code / Local Machine
-    BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-    OUTPUT_DIR = os.path.join(os.path.dirname(BASE_DIR), "output")
-    DATA_DIR   = os.path.join(os.path.dirname(BASE_DIR), "data")
-except NameError:
-    # If running in Google Colab / Phone / Jupyter Notebook
-    BASE_DIR   = os.path.abspath("")
-    OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-    DATA_DIR   = os.path.join(BASE_DIR, "data")
+# --- 2. DYNAMIC PATHS FOR SERVERS ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(DATA_DIR,   exist_ok=True)
@@ -47,7 +29,7 @@ FATIGUE_WINDOW_DAYS = 30
 TARGET_DATE = None
 
 # Poisson / MC
-SIMULATION_SIZE = 5000           
+SIMULATION_SIZE = 5000
 MAX_GOALS_DISPLAY = 6
 POISSON_MAX_GOALS = 8
 
@@ -67,6 +49,38 @@ POISSON_MAX_GOALS = 8
 #     >= 0.58   n=  7   57.1%  CI[25.0,84.2]  overlaps base
 TIER1_COMPOSITE = 0.52
 TIER2_COMPOSITE = 0.45
+
+# ── ELITE DRAW TIER (user-requested) ─────────────────────────────────────
+# Sits ABOVE "Perfect Draw List". UNVALIDATED — unlike TIER1_COMPOSITE /
+# TIER2_COMPOSITE above, this exact combination has no measured precision on
+# real settled data yet. Treat picks in this tier as provisional until
+# tools/draw_precision_backtest.py has been re-run with these cutoffs and the
+# precision confirmed to clear the 26.2% base rate on a real sample.
+#
+# The original ask was "score is 100" (i.e. composite_draw_score == 1.0).
+# That threshold is unreachable by construction: the five composite weights
+# sum to exactly 1.0, so a perfect score requires poisson_draw_prob, dmi AND
+# parity to ALL be exactly 1.0 simultaneously -- and the backtest's own
+# measured ceiling across 1,394 real rows was 0.709. Gating a tier on 100
+# would recreate the exact dead-tier bug this file was already rebuilt to
+# fix (see TIER1_COMPOSITE's history above). Redirected into five
+# independent signals that must ALL agree instead of one impossible number:
+#   composite_draw_score >= ELITE_COMPOSITE_MIN   best VALIDATED cutoff on
+#                                                   record (n=16, 62.5%, CI
+#                                                   clears the 26.2% base)
+#   total_draws          >= ELITE_TOTAL_DRAWS_MIN  the user's own "7+ draws"
+#                                                   volume signal
+#   mc_draw_prob         >= ELITE_MC_DRAW_MIN      simulation independently
+#                                                   agrees with the composite
+#   mc_stability         == "Stable"               simulation result isn't
+#                                                   sampling jitter
+#   parity                >= ELITE_PARITY_MIN       teams genuinely closely
+#                                                   matched, not just both
+#                                                   high-scoring
+ELITE_COMPOSITE_MIN   = 0.55
+ELITE_TOTAL_DRAWS_MIN = 7
+ELITE_MC_DRAW_MIN     = 0.30
+ELITE_PARITY_MIN      = 0.70
 
 # A side needs at least this many usable last-N results before its scoring
 # rate means anything. Below this the attack average is 0 by default, both
@@ -89,16 +103,207 @@ SECTION1_POISSON_MIN = 0.40
 SECTION1_TOTAL_DRAWS_MIN = 5
 
 # ==============================================================================
+# LAMBDA SHRINKAGE MODEL (ported from Engine/unders_engine.py's proven fix,
+# upgraded to a REAL per-league prior instead of one flat global constant)
+# ==============================================================================
+# The previous model here was the SAME unshrunk form found independently in
+# three other engines this session (GG/O15, Win Forecast, pre-fix Unders):
+#     lambda = max(0.05, (raw_attack + opp_concede) / 2)
+# with NO shrinkage: a team's one-off 4-0 win was treated as a 4.0 goals/game
+# attack, exactly as loud as a 20-match record. Unders already proved the fix
+# (Phase 2, 2026-09-30): Empirical-Bayes shrinkage of the raw rate toward a
+# prior mean, weighted by a pseudo-match count, so a thin sample is pulled
+# toward the prior and a deep one is barely moved.
+#
+# ONE upgrade versus the Unders version this was ported from: the prior mean
+# here is a REAL per-league average-goals figure (measured the same direct
+# way compute_league_over25_weight() already measures league under-rates
+# below), not one flat constant shared by every league on earth. Unders'
+# own postmortem explicitly flagged this as the next thing to fix:
+#   "do not reintroduce [a league prior] without a real goals-per-team
+#    source" -- this is that real source, built the same direct-measurement
+#   way rather than the rejected inverse-Poisson transform.
+LAMBDA_PRIOR_STRENGTH = 6.0     # pseudo-matches of prior weight
+LAMBDA_PRIOR_FALLBACK = 1.35    # used ONLY if a league has no cached average yet
+LAMBDA_MIN = 0.05
+LAMBDA_MAX = 6.00
+LAMBDA_CLAMP_ALERT = 4.50       # health telemetry: lambda sitting near the ceiling
+
+LAMBDA_HEALTH_WARNINGS = []     # reset at the start of every run_draw_engine() call
+
+
+def compute_league_avg_goals(league_id, days_lookback=180):
+    """
+    Real per-team goals prior for a league, measured directly (total goals /
+    2 / matches) -- the same fixture-pull pattern compute_league_over25_weight()
+    already uses below, just tracking the raw average instead of a capped
+    under-rate. TTL-cached to disk exactly like that function, 7 days.
+    """
+    cache_file = os.path.join(DATA_DIR, "league_avg_goals_cache.json")
+    cache_data = {}
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                cache_data = json.load(f)
+        except Exception:
+            pass
+
+    now_utc = datetime.now(timezone.utc)
+    lid_str = str(league_id)
+
+    if lid_str in cache_data:
+        try:
+            last_updated = datetime.fromisoformat(cache_data[lid_str]["last_updated"])
+            if (now_utc - last_updated).days < 7:
+                return cache_data[lid_str]["avg_goals_per_team"]
+        except Exception:
+            pass
+
+    end_dt = now_utc.date() - timedelta(days=1)
+    start_dt = end_dt - timedelta(days=min(days_lookback, 180))
+
+    all_fx = []
+    seen = set()
+    page = 1
+    while True:
+        data = GET(f"/fixtures/between/{start_dt}/{end_dt}/{league_id}",
+                   params={"include": "scores", "per_page": 50, "page": page})
+        fx = data.get("data", [])
+        if not fx:
+            break
+        added_new = False
+        for f in fx:
+            fid = f.get("id")
+            if fid not in seen:
+                seen.add(fid); all_fx.append(f); added_new = True
+        if not added_new:
+            break
+        page += 1
+        sleep_short()
+
+    total_matches = 0
+    total_goals = 0
+    for fx in all_fx:
+        hg, ag = extract_final_goals_from_scores(fx.get("scores", []))
+        if hg is None or ag is None:
+            continue
+        total_matches += 1
+        total_goals += (hg + ag)
+
+    # Per-TEAM average (half of per-match average) -- this is the quantity
+    # shrunk_rate() blends each side's own attack/defense rate toward.
+    avg_goals_per_team = round((total_goals / total_matches) / 2.0, 4) if total_matches > 0 else LAMBDA_PRIOR_FALLBACK
+
+    cache_data[lid_str] = {
+        "avg_goals_per_team": avg_goals_per_team,
+        "sample_matches": total_matches,
+        "last_updated": now_utc.isoformat(),
+    }
+    try:
+        with open(cache_file, "w") as f:
+            json.dump(cache_data, f, indent=4)
+    except Exception:
+        pass
+
+    return avg_goals_per_team
+
+
+def shrunk_rate(goals, matches, prior_mean, prior_strength=LAMBDA_PRIOR_STRENGTH):
+    """
+    Empirical-Bayes shrinkage of an observed scoring rate toward a prior mean.
+        (goals + prior_strength * prior_mean) / (matches + prior_strength)
+    A team with a long record keeps close to its own rate; a team with one or
+    two matches is pulled hard toward the prior. Ported verbatim from
+    Engine/unders_engine.py's Phase 2 fix.
+    """
+    try:
+        goals = float(goals); matches = float(matches)
+    except (TypeError, ValueError):
+        return float(prior_mean)
+    if matches <= 0:
+        return float(prior_mean)
+    if not math.isfinite(goals) or not math.isfinite(matches):
+        return float(prior_mean)
+    return (goals + prior_strength * prior_mean) / (matches + prior_strength)
+
+
+def lambda_health_note(lh, la, base):
+    """Telemetry for a degenerate base rate driving lambda to the clamp
+    ceiling/floor -- ported verbatim from unders_engine.py."""
+    notes = []
+    for side, lam in (("home", lh), ("away", la)):
+        if lam >= LAMBDA_CLAMP_ALERT:
+            notes.append(f"{side} lambda {lam:.2f} at/over the clamp ceiling "
+                         f"({LAMBDA_CLAMP_ALERT:.2f})")
+        elif lam <= LAMBDA_MIN + 1e-9:
+            notes.append(f"{side} lambda {lam:.2f} at the floor")
+    if base is not None and (not math.isfinite(base) or base <= 0):
+        notes.append(f"base rate invalid: {base!r}")
+    return "; ".join(notes) if notes else None
+
+
+def build_lambdas(lastN_home, home_id, lastN_away, away_id, prior_mean):
+    """
+    Rebuild the scoring lambdas with shrinkage toward `prior_mean` (a real
+    per-league average-goals-per-team figure from compute_league_avg_goals(),
+    falling back to LAMBDA_PRIOR_FALLBACK only when a league has no cached
+    average yet). Ported from unders_engine.py's build_lambdas(), with the
+    flat global constant replaced by the per-league prior passed in.
+
+    Returns (lambda_home, lambda_away, detail).
+    """
+    base = prior_mean if prior_mean is not None else LAMBDA_PRIOR_FALLBACK
+    detail = {"lambda_base": round(base, 3)}
+
+    def side_attack_concede(fixtures_list, tid):
+        scored = 0.0
+        conceded = 0.0
+        n = 0
+        for f in fixtures_list or []:
+            tg, og = get_team_and_opponent_goals_from_fixture(f, tid)
+            if tg is None or og is None:
+                continue
+            scored += tg
+            conceded += og
+            n += 1
+        return scored, conceded, n
+
+    h_s, h_c, h_n = side_attack_concede(lastN_home, home_id)
+    a_s, a_c, a_n = side_attack_concede(lastN_away, away_id)
+
+    # Attack: own scoring, shrunk toward the league prior.
+    h_att = shrunk_rate(h_s, h_n, base)
+    a_att = shrunk_rate(a_s, a_n, base)
+    # Defence: opponent scoring against this team, shrunk the same way.
+    h_def = shrunk_rate(h_c, h_n, base)
+    a_def = shrunk_rate(a_c, a_n, base)
+
+    lambda_home = (h_att + a_def) / 2.0
+    lambda_away = (a_att + h_def) / 2.0
+
+    detail.update({
+        "lambda_home": round(lambda_home, 3),
+        "lambda_away": round(lambda_away, 3),
+        "lambda_home_n": h_n,
+        "lambda_away_n": a_n,
+    })
+    return (
+        max(LAMBDA_MIN, min(LAMBDA_MAX, lambda_home)),
+        max(LAMBDA_MIN, min(LAMBDA_MAX, lambda_away)),
+        detail,
+    )
+
+# ==============================================================================
 # TITANIUM HTTP HELPER (ANTI-CRASH & ANTI-RATE LIMIT)
 # ==============================================================================
 def GET(path, params=None):
     if params is None: params = {}
     params.setdefault("api_token", API_KEY)
     url = f"{BASE_URL}{path}"
-    
+
     max_retries = 5
     backoff = 2.0
-    
+
     for attempt in range(max_retries):
         try:
             r = requests.get(url, params=params, timeout=15)
@@ -115,7 +320,7 @@ def GET(path, params=None):
             # Network failure or timeout
             time.sleep(backoff)
             continue
-            
+
     # If it fails all 5 times, return empty data safely
     return {"data": []}
 
@@ -143,14 +348,13 @@ def fetch_fixtures_for_date(date_str):
                 all_fx.append(f)
                 added_new = True
 
-        if not added_new: break 
+        if not added_new: break
         page += 1
         sleep_short()
     return all_fx
 
-def fetch_last_finished_fixtures_for_team(team_id, max_needed=200, target_date=None):
-    # 2026-10-05: target-date anchored, not wall clock. See CORE/history_window.py.
-    end_dt = history_window_end(target_date)
+def fetch_last_finished_fixtures_for_team(team_id, max_needed=200):
+    end_dt = datetime.now(timezone.utc).date() - timedelta(days=1)
     start_dt = end_dt - timedelta(days=TEAM_LOOKBACK_DAYS)
     all_fx = []
     seen = set()
@@ -525,7 +729,7 @@ def estimate_fatigue_from_schedules(recent_fixtures, team_id, rotation_score):
 def compute_league_over25_weight(league_id, days_lookback=365):
     cache_file = os.path.join(DATA_DIR, "league_weights_over25_cache.json")
     cache_data = {}
-    
+
     if os.path.exists(cache_file):
         try:
             with open(cache_file, "r") as f:
@@ -575,11 +779,11 @@ def compute_league_over25_weight(league_id, days_lookback=365):
             continue
         total += 1
         if hg + ag >= 3: over += 1
-        
+
     weight = 0.0
     if total > 0:
         weight = round((over / total) * LEAGUE_SCALE, 4)
-        
+
     cache_data[lid_str] = {
         "weight": weight,
         "last_updated": now_utc.isoformat()
@@ -649,12 +853,15 @@ def run_draw_engine(target_date=None, verbose=False):
     if TARGET_DATE is None:
         TARGET_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Fresh lambda-health report per run (see LAMBDA_HEALTH_WARNINGS above).
+    LAMBDA_HEALTH_WARNINGS.clear()
+
     if verbose:
         print(f"\n{'='*100}")
         print(f"  ⚖️ ALIENEDGE DRAW ENGINE — {TARGET_DATE}")
         print(f"{'='*100}\n")
         print(f"Fetching fixtures for {TARGET_DATE} ...")
-        
+
     fixtures = fetch_fixtures_for_date(TARGET_DATE)
 
     if verbose:
@@ -662,8 +869,9 @@ def run_draw_engine(target_date=None, verbose=False):
     if not fixtures:
         return [], [], []
 
-    # league cache: tempo & standings & league weight
+    # league cache: tempo & standings & league weight & goals prior
     league_cache = {}
+    league_goals_cache = {}
     standings_cache = {}
     league_ids = {fx.get("league_id") for fx in fixtures if fx.get("league_id")}
     for lid in league_ids:
@@ -671,6 +879,10 @@ def run_draw_engine(target_date=None, verbose=False):
             league_cache[lid] = {"league_weight": compute_league_over25_weight(lid)}
         except Exception:
             league_cache[lid] = {"league_weight": 0.0}
+        try:
+            league_goals_cache[lid] = compute_league_avg_goals(lid)
+        except Exception:
+            league_goals_cache[lid] = LAMBDA_PRIOR_FALLBACK
         standings_cache[lid] = {}
         sleep_short()
 
@@ -699,7 +911,7 @@ def run_draw_engine(target_date=None, verbose=False):
             for tid in (home_id, away_id):
                 if tid not in team_cache:
                     try:
-                        team_cache[tid] = fetch_last_finished_fixtures_for_team(tid, target_date=TARGET_DATE)
+                        team_cache[tid] = fetch_last_finished_fixtures_for_team(tid)
                     except Exception:
                         team_cache[tid] = []
                     sleep_short()
@@ -810,10 +1022,23 @@ def run_draw_engine(target_date=None, verbose=False):
             home_analysis = analyze_team(home_id, lastN_home)
             away_analysis = analyze_team(away_id, lastN_away)
 
-            raw_home_attack = (home_personal_goals_total / max(1, len(lastN_home)))
-            raw_away_attack = (away_personal_goals_total / max(1, len(lastN_away)))
-            lambda_home = max(0.05, (raw_home_attack + away_concede_avg) / 2.0)
-            lambda_away = max(0.05, (raw_away_attack + home_concede_avg) / 2.0)
+            # ── LAMBDA (FIXED 2026-10-xx): shrinkage toward a real per-league
+            # goals prior, ported from unders_engine.py's proven Phase 2 fix.
+            # Replaces the old unshrunk form:
+            #     lambda_home = max(0.05, (raw_home_attack + away_concede_avg)/2)
+            # which let a single blowout swing a team's expected goals as hard
+            # as a full 5-match record. See the LAMBDA SHRINKAGE MODEL block
+            # near the top of this file for the full rationale.
+            league_prior = league_goals_cache.get(league_id, LAMBDA_PRIOR_FALLBACK)
+            lambda_home, lambda_away, lambda_detail = build_lambdas(
+                lastN_home, home_id, lastN_away, away_id, league_prior
+            )
+
+            _lam_note = lambda_health_note(lambda_home, lambda_away, league_prior)
+            if _lam_note:
+                LAMBDA_HEALTH_WARNINGS.append(f"{home_name} v {away_name}: {_lam_note}")
+                if verbose:
+                    print(f"   [lambda-health] {_lam_note}")
 
             # A side with too few usable results has an attack average of 0 by
             # default, which floors BOTH lambdas at 0.05 and yields
@@ -833,7 +1058,7 @@ def run_draw_engine(target_date=None, verbose=False):
 
             parity = parity_score(home_personal_goals_total, away_personal_goals_total, home_concede_avg, away_concede_avg)
             if home_analysis["tempo"] != away_analysis["tempo"]:
-                parity = round(parity * 0.80, 3) 
+                parity = round(parity * 0.80, 3)
 
             h_recent_lineups = [extract_starters_from_fixture(f, home_id) for f in lastN_home]
             a_recent_lineups = [extract_starters_from_fixture(f, away_id) for f in lastN_away]
@@ -917,6 +1142,12 @@ def run_draw_engine(target_date=None, verbose=False):
             # can never be promoted on a fabricated probability.
             if not history_ok:
                 tier = "Below Threshold"
+            elif (composite >= ELITE_COMPOSITE_MIN
+                  and total_draws >= ELITE_TOTAL_DRAWS_MIN
+                  and mc_draw is not None and mc_draw >= ELITE_MC_DRAW_MIN
+                  and mc_stability == "Stable"
+                  and parity >= ELITE_PARITY_MIN):
+                tier = "💎 ELITE DRAW LIST"
             elif composite >= TIER1_COMPOSITE or (
                     composite >= 0.50 and mc_draw is not None
                     and mc_draw >= 0.30 and parity >= 0.6 and dmi >= 0.45):
@@ -964,6 +1195,10 @@ def run_draw_engine(target_date=None, verbose=False):
                 "total_draws": total_draws,
                 "dmi": round(dmi, 3),
                 "parity": parity,
+                "lambda_home": round(lambda_home, 3),
+                "lambda_away": round(lambda_away, 3),
+                "lambda_base": lambda_detail.get("lambda_base"),
+                "lambda_warning": _lam_note,
                 "poisson_draw_prob": round(poisson_prob, 4) if poisson_prob is not None else None,
                 "mc_draw_prob": round(mc_draw, 4) if mc_draw is not None else None,
                 "composite_draw_score": round(composite, 4) if composite is not None else None,
@@ -1011,12 +1246,13 @@ def run_draw_engine(target_date=None, verbose=False):
 
     # ── TIER ORDER RENAMED ──
     tier_order = {
-        "Perfect Draw List": 1, 
-        "Weak Draw List": 2, 
-        "🛑 VETOED": 3, 
+        "💎 ELITE DRAW LIST": 0,
+        "Perfect Draw List": 1,
+        "Weak Draw List": 2,
+        "🛑 VETOED": 3,
         "Below Threshold": 99
     }
-    
+
     df["tier_rank"] = df["tier"].map(tier_order).fillna(99)
     df["section_rank"] = df["section"].map(lambda s: 0 if s == "Section 1" else 1)
     df = df.sort_values(by=["tier_rank", "section_rank", "composite_draw_score", "mc_draw_prob"], ascending=[True, True, False, False]).reset_index(drop=True)
@@ -1028,7 +1264,8 @@ def run_draw_engine(target_date=None, verbose=False):
     show_cols = [
         "fixture", "tier", "section", "draw_odds", "value_edge", "mc_spread", "mc_stability",
         "composite_draw_score", "poisson_draw_prob", "mc_draw_prob",
-        "dmi", "parity", "home_personal_goals_total", "away_personal_goals_total",
+        "dmi", "parity", "lambda_home", "lambda_away", "lambda_warning",
+        "home_personal_goals_total", "away_personal_goals_total",
         "home_concede_avg", "away_concede_avg", "home_draws", "away_draws", "h2h_draws", "total_draws",
         "fatigue_score", "veto_reason",
         "most_likely_draw_score", "most_likely_draw_pct", "mc_top1", "mc_top1_pct"
@@ -1037,6 +1274,18 @@ def run_draw_engine(target_date=None, verbose=False):
     for c in show_cols:
         if c not in df.columns:
             df[c] = None
+
+    if LAMBDA_HEALTH_WARNINGS:
+        print(f"\n  ⚠️  LAMBDA HEALTH: {len(LAMBDA_HEALTH_WARNINGS)} fixture(s) hit the "
+              f"lambda clamp/floor.")
+        for _w in LAMBDA_HEALTH_WARNINGS[:10]:
+            print(f"      - {_w}")
+        if len(LAMBDA_HEALTH_WARNINGS) > 10:
+            print(f"      ... and {len(LAMBDA_HEALTH_WARNINGS) - 10} more")
+        print("     A clamped lambda publishes a confident probability from a "
+              "poisoned input. Treat these fixtures as untrusted.")
+    elif verbose:
+        print("\n  ✅ Lambda health: no fixture hit the clamp or floor.")
 
     if verbose:
         print("\n=== Upgraded Draw Ranking (Tiered, Section 1 highlighted) ===\n")
@@ -1088,7 +1337,7 @@ def run_draw_engine(target_date=None, verbose=False):
     out_fn     = os.path.join(OUTPUT_DIR, f"ALIENEDGE_DRAW_PICKS_{TARGET_DATE}.csv")
     out_parity = os.path.join(OUTPUT_DIR, f"ALIENEDGE_PARITY_TEAM_LIST_{TARGET_DATE}.csv")
     out_draws  = os.path.join(OUTPUT_DIR, f"ALIENEDGE_AMATEURS_DRAW_LIST_{TARGET_DATE}.csv")
-    
+
     try:
         df.to_csv(out_fn, index=False)
         if verbose: print(f"\nSaved full ranked results to: {out_fn}")
@@ -1114,6 +1363,14 @@ def get_draw_predictions(target_date=None, verbose=False):
     """Call this from your aggregator to instantly receive the Draw picks."""
     draw_data, _, _ = run_draw_engine(target_date, verbose)
     return draw_data
+
+# ==============================================================================
+# CONFIGURATION (API key/base URL — placed after the helper functions that
+# reference them only by closure/global lookup at call time, so definition
+# order here does not matter at import time, matching the original file)
+# ==============================================================================
+API_KEY = os.getenv("SPORTMONKS_API_KEY")
+BASE_URL = "https://api.sportmonks.com/v3/football"
 
 # ==============================================================================
 # LOCAL TESTING
