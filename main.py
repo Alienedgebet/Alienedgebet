@@ -57,6 +57,7 @@ from Engine.underdog_engine import run_underdog_engine
 from Engine.master_underdog_audit import run_underdog_master_engine
 from CORE.handshake_logic import run_total_visibility_merger
 from Engine.win_forecast import run_win_forecast_engine
+from Engine.win_forecast_v2 import run_win_forecast_v2_engine
 from Engine.sh_gg_winner import run_sh_gg_winner_engine
 
 # --- PHASE B: THE PSYCHOLOGY LAYER ---
@@ -99,6 +100,7 @@ from Engine.shvi_engine import run_shvi_engine
 
 # --- PHASE H: WINS, UNDERDOGS & SH MASTER ---
 from AGGREGATOR.win_apex_aggregator import run_win_apex_aggregator
+from AGGREGATOR.win_v2_aggregator import run_win_v2_aggregator
 from Engine.sh_master_vortex import run_sh_master_vortex
 from AGGREGATOR.sh_8goal_aggregator import run_sh_gg_8goal_aggregator
 from AGGREGATOR.apex_ud_aggregator import run_apex_underdog_aggregator
@@ -236,6 +238,7 @@ _RECOVERY_SOURCES = {
     "corners_aggregator": ["SUPREME_EVOLUTION_OUTPUT_{date}.csv"],   # AGGREGATOR/corner4_aggregator.py:1072
     # ── WIN EMPIRE ──
     "win_forecast":       ["ranked_win_forecast_{date}.csv"],        # Engine/win_forecast.py:312
+    "win_forecast_v2":    ["ranked_win_forecast_v2_{date}.csv"],     # Engine/win_forecast_v2.py (EXPERIMENTAL)
     # ── UNDERDOG ──
     "underdog_base":      ["backtest_underdog_{date}.json",          # Engine/underdog_engine.py
                            "backtest_underdog_{date}.csv"],
@@ -439,6 +442,7 @@ def _mark_dependency_blocked(save_key, save_date, upstream_key, label):
 # upstream produced zero rows".
 ENGINE_UPSTREAM = {
     "win_apex":      ("win_psychology",    "Win Apex Aggregator"),
+    "win_v2_apex":   ("win_forecast_v2",   "Win v2 Aggregator (Experimental)"),
     "gg_forensics":  ("gg_o15",            "GG Forensic Aggregator"),
     "gg_supreme":    ("gg_psychology",     "Supreme GG VIP Aggregator"),
     "over25_apex":   ("over25_psychology", "Over 2.5 Apex Aggregator"),
@@ -603,7 +607,7 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
 CRITICAL_MARKET_KEYS = {
     "dna", "dna_v2", "dna_market_factors",
     "underdog_base", "underdog_audit", "calibration", "underdog_apex",
-    "win_forecast", "sh_gg_winner",
+    "win_forecast", "sh_gg_winner", "win_forecast_v2", "win_v2_apex",
     "corners_stage1", "corners_stage2", "corners_psychology",
     "corners_catalyst", "corners_aggregator",
     "gg_o15", "gg_forensics", "gg_psychology", "gg_supreme",
@@ -909,6 +913,13 @@ def alienedge_master_system(cli_date_override: str = None):
         "Win Forecast Base Engine", run_win_forecast_engine, target_date,
         save_key="win_forecast", save_date=d,
     )
+    # EXPERIMENTAL: v2 runs alongside v1 — separate save key, separate
+    # frontend stage. A v2 failure must never affect the v1 chain, which is
+    # why "win_forecast_v2" is deliberately NOT in _REQUIRED_WIN_PIPELINE_KEYS.
+    win_forecast_v2_result = _safe_exec(
+        "Win Forecast v2 Engine (Experimental)", run_win_forecast_v2_engine, target_date,
+        save_key="win_forecast_v2", save_date=d,
+    )
     _safe_exec("SH-GG Winner Engine", run_sh_gg_winner_engine, target_date, save_key="sh_gg_winner", save_date=d)
 
     flush_system_ram()
@@ -996,6 +1007,24 @@ def alienedge_master_system(cli_date_override: str = None):
         print("⛔ Win Psychology/Apex skipped: Win Forecast produced no usable rows.")
         _mark_dependency_blocked("win_psychology", d, "win_forecast", "Win Psychology Engine")
         _mark_dependency_blocked("win_apex", d, "win_forecast", "Win Apex Aggregator")
+
+    # EXPERIMENTAL: the v2 aggregator ranks the v2 engine's own output.
+    # Gated on the v2 engine exactly as win_apex is gated on win_forecast,
+    # so a starved v2 never publishes an empty-but-confident board.
+    if win_forecast_v2_result:
+        win_v2_apex_result = _safe_exec(
+            "Win v2 Aggregator (Experimental)", run_win_v2_aggregator, target_date,
+            save_key="win_v2_apex", save_date=None,
+        )
+        if win_v2_apex_result is not None:
+            store.save("win_v2_apex", d, win_v2_apex_result, guard=True)
+        else:
+            _mark_dependency_blocked("win_v2_apex", d, "win_forecast_v2",
+                                     "Win v2 Aggregator (Experimental)")
+    else:
+        print("⛔ Win v2 Aggregator skipped: Win Forecast v2 produced no usable rows.")
+        _mark_dependency_blocked("win_v2_apex", d, "win_forecast_v2",
+                                 "Win v2 Aggregator (Experimental)")
 
     _safe_exec("SH Master Vortex", run_sh_master_vortex, target_date, save_key="sh_master", save_date=d)
     _safe_exec("SH-GG 8-Goal Aggregator", run_sh_gg_8goal_aggregator, target_date, save_key="sh_8goal", save_date=d)
@@ -1182,6 +1211,8 @@ def _second_chance_runners(td: str):
         ("calibration", "Total Visibility Merger", run_total_visibility_merger, {}),
         ("underdog_apex", "Apex Underdog Aggregator", run_apex_underdog_aggregator, {}),
         ("win_forecast", "Win Forecast Base Engine", run_win_forecast_engine, {}),
+        ("win_forecast_v2", "Win Forecast v2 Engine (Experimental)", run_win_forecast_v2_engine, {}),
+        ("win_v2_apex", "Win v2 Aggregator (Experimental)", run_win_v2_aggregator, {}),
         ("sh_gg_winner", "SH-GG Winner Engine", run_sh_gg_winner_engine, {}),
         ("corners_stage1", "Corner Stage 1 (Miner)", run_corner_engine_stage1, {}),
         ("corners_stage2", "Corner Stage 2 (Refiner)", run_corner_engine_stage2, {}),
