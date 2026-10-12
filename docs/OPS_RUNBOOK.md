@@ -191,3 +191,22 @@ curl -s http://127.0.0.1:8000/health
 
 Frontend deploys itself: push to GitHub `main` → Vercel builds and deploys.
 Backend does NOT — it only changes when you run the commands above.
+
+---
+
+## 8. Load test (measured 2026-10-12)
+
+Real account, real signup, through nginx + TLS + the 2-worker uvicorn:
+
+| Scenario | Result |
+|---|---|
+| Sequential latency (10 samples/endpoint) | p50 **250–375ms**, p95 **<400ms** (live alerts 247ms … DNA 375ms) |
+| 60 mixed requests, 12 threads | **60/60 authenticated 200s**, ~23 req/s |
+| 100 mixed requests, 20 threads | **88/88 authenticated 200s**, 19 req/s, p50 1.0s / p95 2.5s under full burst |
+| Errors observed | **Zero application errors** in ~210 requests. (Initial runs showed “8 errors” — traced to my own test calling `/health` on `www.alienedge.tech`, where the *frontend* answers 404. The health endpoint lives on `api.alienedge.tech/health`.) |
+
+Verdict: comfortably sized for the first 100 users (evening use is a handful
+of concurrent readers; 20 simultaneous readers worst-case = ~1s p50).
+If concurrency ever grows past ~25, raise `--workers` in
+`alienedge-api.service` from 2 to 4 (watch RAM: +~130MB per worker) —
+not needed for launch.
