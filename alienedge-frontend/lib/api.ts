@@ -736,6 +736,72 @@ export interface WinRawPick extends FixtureRisk {
 }
 
 // ============================================================
+// WIN FORECAST v2 TYPES (EXPERIMENTAL — calibration_version
+// "none-identity-v0": probabilities are UNcalibrated and the two-lock
+// verdict thresholds are unvalidated starting defaults. See the HONESTY
+// LEDGER in Engine/win_forecast_v2.py before trusting any number.)
+// ============================================================
+export interface WinV2ForecastPick extends FixtureRisk {
+  fixture_id: string;
+  fixture: string;
+  league_id: string;
+  home_team: string;
+  away_team: string;
+  calibrated_home_probability: number;
+  calibrated_draw_probability: number;
+  calibrated_away_probability: number;
+  favoured_side: string;
+  favoured_probability: number;
+  home_market_odds: number;
+  draw_market_odds: number;
+  away_market_odds: number;
+  favoured_edge_pp: number;
+  favoured_ev: number;
+  model_confidence: string;
+  final_verdict: string;
+  model_version: string;
+}
+
+export interface WinV2ApexPick extends FixtureRisk {
+  fixture_id: string;
+  fixture: string;
+  home_team: string;
+  away_team: string;
+  league_id: string;
+  favoured_side: string;
+  favoured_probability: number;
+  model_confidence: string;
+  model_confidence_reason: string;
+  final_verdict: string;
+  apex_tier: string;
+  data_quality: string;
+  favoured_edge_pp: number;
+  favoured_ev: number;
+  home_fair_odds: number;
+  draw_fair_odds: number;
+  away_fair_odds: number;
+  home_market_odds: number;
+  draw_market_odds: number;
+  away_market_odds: number;
+  market_books: number;
+  calibrated_home_probability: number;
+  calibrated_draw_probability: number;
+  calibrated_away_probability: number;
+  home_edge_pp: number;
+  draw_edge_pp: number;
+  away_edge_pp: number;
+  lambda_home: number;
+  lambda_away: number;
+  league_goals_prior: number;
+  bookmaker_overround_pct: number;
+  score_matrix_tail_mass: number;
+  model_version: string;
+  calibration_version: string;
+  strength_model_version: string;
+  apex_rank: number;
+}
+
+// ============================================================
 // OVER 2.5 CHAIN TYPES
 // ============================================================
 export interface Over25Stage1Pick extends FixtureRisk {
@@ -2675,6 +2741,13 @@ export const ggApi = {
 
 export const winApi = {
   // getForecast moved to foundationApi.getWinForecast (Phase A engine)
+  // EXPERIMENTAL v2 engine + v2 aggregator — see Engine/win_forecast_v2.py
+  getV2Forecast: (date: string): Promise<AxiosResponse<WinV2ForecastPick[]>> =>
+    api.get(`/api/win/v2-forecast/${date}`),
+
+  getV2Apex: (date: string): Promise<AxiosResponse<WinV2ApexPick[]>> =>
+    cachedGet(`/api/win/v2-apex/${date}`),
+
   getU2S: (date: string): Promise<AxiosResponse<WinU2SPick[]>> =>
     api.get(`/api/win/u2s/${date}`),
 

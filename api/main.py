@@ -743,6 +743,33 @@ WIN_FORECAST_DEFAULTS = dict(
 WIN_RAW_DEFAULTS = {k: v for k, v in WIN_FORECAST_DEFAULTS.items()
                     if k not in ("poisson_win_prob", "poisson_draw_prob")}
 
+# WIN FORECAST v2 (EXPERIMENTAL) — Engine/win_forecast_v2.py +
+# AGGREGATOR/win_v2_aggregator.py. Fields mirror those modules' output
+# columns exactly; every row also carries model_version/calibration_version.
+WIN_V2_FORECAST_DEFAULTS = dict(
+    fixture_id="", fixture="", league_id="", home_team="", away_team="",
+    calibrated_home_probability=0, calibrated_draw_probability=0,
+    calibrated_away_probability=0, favoured_side="", favoured_probability=0,
+    home_market_odds=0, draw_market_odds=0, away_market_odds=0,
+    favoured_edge_pp=0, favoured_ev=0,
+    model_confidence="", final_verdict="", model_version="",
+)
+WIN_V2_APEX_DEFAULTS = dict(
+    fixture_id="", fixture="", home_team="", away_team="", league_id="",
+    favoured_side="", favoured_probability=0, model_confidence="",
+    model_confidence_reason="", final_verdict="", apex_tier="",
+    data_quality="", favoured_edge_pp=0, favoured_ev=0,
+    home_fair_odds=0, draw_fair_odds=0, away_fair_odds=0,
+    home_market_odds=0, draw_market_odds=0, away_market_odds=0,
+    market_books=0, calibrated_home_probability=0,
+    calibrated_draw_probability=0, calibrated_away_probability=0,
+    home_edge_pp=0, draw_edge_pp=0, away_edge_pp=0,
+    lambda_home=0, lambda_away=0, league_goals_prior=0,
+    bookmaker_overround_pct=0, score_matrix_tail_mass=0,
+    model_version="", calibration_version="", strength_model_version="",
+    apex_rank=0,
+)
+
 GG_PRECISION_DEFAULTS = dict(
     fixture_id="", fixture="", home_team="", away_team="", league_id="",
     lambda_home=0, lambda_away=0, combined_lambda=0, mc_btts_prob=0,
@@ -914,7 +941,7 @@ ALL_ENGINE_KEYS = [
     "over25_gold", "over25_apex", "over25_forecast", "over15_stage3",
     "over15_psychology", "over15_apex", "unders", "draw", "sot", "fhvi", "shvi",
     "u2s_psychology", "win_psychology", "win_apex", "sh_master", "sh_8goal",
-    "win_raw", "filter_gg",
+    "win_raw", "win_forecast_v2", "win_v2_apex", "filter_gg",
     "filter_win__safe", "filter_win__balanced", "filter_win__aggressive",
     "filter_over25__banker", "filter_over25__balanced", "filter_over25__aggressive",
 ]
@@ -1637,6 +1664,26 @@ def get_win_apex(date: str):
 @app.get("/api/win/raw/{date}", tags=["Win"])
 def get_win_raw(date: str):
     return read("win_raw", date, WIN_RAW_DEFAULTS, "win")
+
+
+# ── WIN FORECAST v2 (EXPERIMENTAL — see Engine/win_forecast_v2.py's
+# HONESTY LEDGER: calibration is identity, thresholds unvalidated) ──
+@app.get("/api/win/v2-forecast/{date}", tags=["Win"])
+def get_win_forecast_v2(date: str):
+    return read("win_forecast_v2", date, WIN_V2_FORECAST_DEFAULTS, "win")
+
+
+@app.get("/api/win/v2-apex/{date}", tags=["Win"])
+def get_win_v2_apex(date: str):
+    # Exact-date snapshot only — same contract as get_win_apex: a missing
+    # dated file is an honest empty list, never another date's data.
+    data, _generated_at = store.load("win_v2_apex", date, default=None)
+    if data is None:
+        data = []
+    rows = ensure_defaults(data, WIN_V2_APEX_DEFAULTS)
+    rows = _with_fixture_risk(rows, date)
+    rows = _settled(rows, "win", date)
+    return _with_intelligent_pass("win_v2_apex", rows, date)
 
 
 # ════════════════════════════════════════════════════════════════════════════

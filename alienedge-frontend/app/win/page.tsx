@@ -10,6 +10,8 @@ import {
   type WinApexPick,
   type WinForecastPick,
   type WinU2SPick,
+  type WinV2ApexPick,
+  type WinV2ForecastPick,
 } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useDnaV2 } from "@/lib/use-dna-v2";
@@ -290,6 +292,144 @@ const forecastColumns: PredictionColumn<WinForecastPick>[] = [
   },
 ];
 
+// ============================================================
+// WIN FORECAST v2 (EXPERIMENTAL) columns
+// ============================================================
+// The v2 engine reports probabilities as 0-1 fractions (its calibrated_*
+// columns are identity copies of the raw Dixon-Coles output — see the v2
+// HONESTY LEDGER). parseProbability() treats a bare number as ALREADY a
+// percentage, so every probability passed to ProbCell below is pre-formatted
+// as a "NN.N%" string, exactly like the v1 forecast rows.
+
+// Amber pill — keeps the EXPERIMENTAL marker visible on every v2 row,
+// independent of the shared TierBadge semantics (diamond/fire/...).
+const ExperimentalPill = ({ label }: { label: string }) => (
+  <span className="inline-flex items-center whitespace-nowrap rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-2xs font-semibold text-amber-300">
+    {label || "—"}
+  </span>
+);
+
+const pct = (v: number): string => `${(Number(v) * 100).toFixed(1)}%`;
+
+const v2ApexColumns: PredictionColumn<WinV2ApexPick>[] = [
+  {
+    key: "fixture",
+    header: "fixture",
+    render: (r) => (
+      <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />
+    ),
+  },
+  {
+    key: "apex_tier",
+    header: "apex_tier",
+    render: (r) => <ExperimentalPill label={r.apex_tier} />,
+  },
+  { key: "apex_rank", header: "rank", align: "right", render: (r) => r.apex_rank },
+  { key: "favoured_side", header: "favoured", render: (r) => r.favoured_side },
+  {
+    key: "favoured_probability",
+    header: "favoured_prob",
+    render: (r) => <ProbCell value={pct(r.favoured_probability)} showBar={false} />,
+  },
+  {
+    key: "favoured_edge_pp",
+    header: "edge_pp",
+    align: "right",
+    render: (r) => Number(r.favoured_edge_pp).toFixed(2),
+  },
+  {
+    key: "favoured_ev",
+    header: "ev",
+    align: "right",
+    render: (r) => `${(Number(r.favoured_ev) * 100).toFixed(1)}%`,
+  },
+  { key: "model_confidence", header: "confidence", render: (r) => r.model_confidence },
+  {
+    key: "final_verdict",
+    header: "final_verdict",
+    className: "max-w-[220px] truncate",
+    render: (r) => r.final_verdict || "—",
+  },
+  {
+    key: "home_market_odds",
+    header: "mkt_odds_1X2",
+    align: "right",
+    render: (r) =>
+      `${Number(r.home_market_odds).toFixed(2)} / ${Number(r.draw_market_odds).toFixed(2)} / ${Number(r.away_market_odds).toFixed(2)}`,
+  },
+  {
+    key: "market_books",
+    header: "books",
+    align: "right",
+    render: (r) => String(r.market_books),
+  },
+  {
+    key: "calibration_version",
+    header: "calibration",
+    render: (r) => r.calibration_version || "—",
+  },
+];
+
+const v2ForecastColumns: PredictionColumn<WinV2ForecastPick>[] = [
+  {
+    key: "fixture",
+    header: "fixture",
+    render: (r) => (
+      <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />
+    ),
+  },
+  {
+    key: "calibrated_home_probability",
+    header: "P(home)",
+    render: (r) => <ProbCell value={pct(r.calibrated_home_probability)} showBar={false} />,
+  },
+  {
+    key: "calibrated_draw_probability",
+    header: "P(draw)",
+    align: "right",
+    render: (r) => pct(r.calibrated_draw_probability),
+  },
+  {
+    key: "calibrated_away_probability",
+    header: "P(away)",
+    align: "right",
+    render: (r) => pct(r.calibrated_away_probability),
+  },
+  { key: "favoured_side", header: "favoured", render: (r) => r.favoured_side },
+  {
+    key: "home_market_odds",
+    header: "mkt_1X2",
+    align: "right",
+    render: (r) =>
+      `${Number(r.home_market_odds).toFixed(2)} / ${Number(r.draw_market_odds).toFixed(2)} / ${Number(r.away_market_odds).toFixed(2)}`,
+  },
+  {
+    key: "favoured_edge_pp",
+    header: "edge_pp",
+    align: "right",
+    render: (r) => Number(r.favoured_edge_pp).toFixed(2),
+  },
+  {
+    key: "favoured_ev",
+    header: "ev",
+    align: "right",
+    render: (r) => `${(Number(r.favoured_ev) * 100).toFixed(1)}%`,
+  },
+  { key: "model_confidence", header: "confidence", render: (r) => r.model_confidence },
+  {
+    key: "final_verdict",
+    header: "final_verdict",
+    className: "max-w-[220px] truncate",
+    render: (r) => r.final_verdict || "—",
+  },
+  {
+    key: "model_version",
+    header: "model_version",
+    className: "max-w-[240px] truncate",
+    render: (r) => r.model_version || "—",
+  },
+];
+
 // The DNA pillars are `number | null`, not `number` — schema v3 made a
 // pillar nullable because `null` ("never measured") and `0` ("measured and
 // terrible") are different facts, and collapsing them lied about the team.
@@ -469,6 +609,20 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
     [date]
   );
 
+  // 6/7. Win Forecast v2 (EXPERIMENTAL) — Verify column + the model's own
+  // columns. Deliberately NO intelligent-pass column: that ledger grades the
+  // production "win" market, and tagging v2 rows with it would borrow a
+  // validation record the v2 engine has not earned.
+  const v2ApexColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<WinV2ApexPick>(), ...v2ApexColumns],
+    [date]
+  );
+
+  const v2ForecastColumnsWithVerify = useMemo(
+    () => [createVerifyColumn<WinV2ForecastPick>(), ...v2ForecastColumns],
+    [date]
+  );
+
   return (
     <div
       data-embedded={embedded || undefined}
@@ -562,6 +716,30 @@ export function WinMarketPanel({ embedded = false }: { embedded?: boolean }) {
         rowKey={(r, i) => `${r.fixture_id}-${r.side}-${i}`}
         emptyMessage="No forecast data for this date."
         fallbackData={MOCK_WIN_FORECAST}
+        refreshMs={VERIFY_REFRESH_MS}
+      />
+
+      {/* Stage 6: Win Forecast v2 · Apex — EXPERIMENTAL, visible second option */}
+      <ChainStage
+        title="Win Forecast v2 · Apex (Experimental)"
+        description="Opponent-adjusted Dixon-Coles board ranked by the engine's own verdicts — UNVALIDATED: calibration is identity (raw = calibrated), lock thresholds are starting defaults"
+        fetcher={() => winApi.getV2Apex(date)}
+        deps={[date]}
+        columns={v2ApexColumnsWithVerify}
+        rowKey={(r, i) => `${r.fixture_id}-${i}`}
+        emptyMessage="No v2 apex picks for this date — the experimental engine has not run yet."
+        refreshMs={VERIFY_REFRESH_MS}
+      />
+
+      {/* Stage 7: Win Forecast v2 · Model Output — EXPERIMENTAL */}
+      <ChainStage
+        title="Win Forecast v2 · Model Output (Experimental)"
+        description="Full v2 model board: Dixon-Coles probabilities, market edge and EV per fixture — UNVALIDATED experimental engine, do not treat VALUE CONFIRMED as a proven signal"
+        fetcher={() => winApi.getV2Forecast(date)}
+        deps={[date]}
+        columns={v2ForecastColumnsWithVerify}
+        rowKey={(r, i) => `${r.fixture_id}-${i}`}
+        emptyMessage="No v2 forecast data for this date — the experimental engine has not run yet."
         refreshMs={VERIFY_REFRESH_MS}
       />
 
