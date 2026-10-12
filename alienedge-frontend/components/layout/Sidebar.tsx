@@ -16,7 +16,6 @@ import {
   Hourglass,
   Inbox,
   LayoutDashboard,
-  LifeBuoy,
   Loader2,
   LogOut,
   Radio,
@@ -381,26 +380,16 @@ export function Sidebar() {
         </nav>
 
         <div className="shrink-0 border-t border-border px-4 py-3 space-y-2">
-          <div className="flex items-center gap-1.5 text-2xs">
-            <Link
-              href="/support"
-              onClick={() => close()}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 font-medium text-text-dim hover:text-text-primary hover:bg-white/5"
-            >
-              <LifeBuoy size={13} /> Support
-            </Link>
-            <span className="text-text-dim/40" aria-hidden>|</span>
-            <Link
-              href="/responsible-gambling"
-              onClick={() => close()}
-              className="flex items-center gap-1.5 rounded-md px-2 py-1.5 font-medium text-text-dim hover:text-text-primary hover:bg-white/5"
-            >
-              <Shield size={13} /> Responsible use
-            </Link>
-          </div>
+          {/* Sign-out is the ONLY control in the sidebar aside from picks. Per
+              the agreed layout, legal links (Support / Terms / Privacy /
+              Cookies / Responsible use) live at the bottom of the dashboard
+              page, not up here - so the navigation stays dedicated to picks. */}
           <button
             type="button"
-            onClick={() => { close(); void logout(); }}
+            onClick={() => {
+              close();
+              void logout();
+            }}
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-2xs font-semibold text-text-secondary hover:text-red-300 hover:bg-red-500/10"
             aria-label="Sign out of AlienEdge"
           >
