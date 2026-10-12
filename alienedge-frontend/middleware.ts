@@ -7,9 +7,21 @@ import type { NextRequest } from "next/server";
  */
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  // Public routes (landing, legal, support, password-reset flow) must match
+  // lib/public-paths.ts exactly — if this list drifts, public pages bounce
+  // to /login or protected pages leak. The BACKEND auth middleware remains
+  // the real security check; this is only the fast UX gate.
   if (
+    pathname === "/" ||
     pathname === "/login" ||
     pathname === "/signup" ||
+    pathname === "/forgot-password" ||
+    pathname === "/reset-password" ||
+    pathname === "/support" ||
+    pathname === "/terms" ||
+    pathname === "/privacy" ||
+    pathname === "/responsible-gambling" ||
+    pathname === "/cookies" ||
     pathname === "/sw.js" ||
     pathname === "/manifest.webmanifest" ||
     pathname.startsWith("/icons/") ||
