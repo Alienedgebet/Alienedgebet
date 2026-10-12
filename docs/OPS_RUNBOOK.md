@@ -47,8 +47,14 @@ tail -50 /var/www/backend/output/pipeline_scheduler.log
 **First suspect after any outage or disk incident: the watchdog script.**
 `alienedge-pipeline.service` executes `/var/www/backend/run_pipeline_watchdog.sh`
 — if that file is missing the service dies instantly with **exit 127**.
-On 2026-10-12 the file was missing from disk and a stale **skip-worktree**
-flag hid the deletion from `git status`. Check for BOTH:
+On 2026-10-12 the file was missing from disk and a **skip-worktree** flag hid
+the deletion from `git status`. ROOT CAUSE: this repo uses **sparse-checkout**
+(`git sparse-checkout list`) — tracked files outside the sparse set carry
+skip-worktree bits and are removed from disk whenever the working tree is
+re-materialised (which is what the hosting outage did). Any file the RUNTIME
+needs must be inside the sparse set; `run_pipeline_watchdog.sh`, `ops/` and
+`docs/` were added to it on 2026-10-12 for exactly this reason. Check for
+BOTH symptoms:
 
 ```bash
 ls -la /var/www/backend/run_pipeline_watchdog.sh          # exists?
