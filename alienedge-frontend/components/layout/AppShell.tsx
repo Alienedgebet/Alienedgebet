@@ -6,6 +6,7 @@ import { Sidebar } from "@/components/layout/Sidebar";
 import { TopBar } from "@/components/layout/TopBar";
 import { RightPanelLazy } from "@/components/layout/RightPanelLazy";
 import { NavigationProgressBar } from "@/components/layout/NavigationProgressBar";
+import { isPublicPath } from "@/lib/public-paths";
 
 interface AppShellProps {
   children: ReactNode;
@@ -13,7 +14,9 @@ interface AppShellProps {
 
 export function AppShell({ children }: AppShellProps) {
   const pathname = usePathname();
-  if (pathname === "/login" || pathname === "/signup") return <>{children}</>;
+  // Public pages (landing, legal, support, reset flow, auth) render their own
+  // header/footer — never inside the sidebar/topbar/right-panel chrome.
+  if (isPublicPath(pathname)) return <>{children}</>;
   return (
     <>
       <NavigationProgressBar />

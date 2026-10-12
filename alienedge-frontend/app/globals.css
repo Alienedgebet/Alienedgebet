@@ -468,3 +468,11 @@ body {
 .auth-panel-forgot { display: flex; justify-content: flex-end; margin: -2px 0 10px; }
 .auth-panel-forgot a { color: #7182aa; font-size: .78rem; font-weight: 600; text-decoration: none; }
 .auth-panel-forgot a:hover { color: #67e8f9; }
+
+/* ── Mobile pass (2026-10-12) ───────────────────────────────────────────── */
+/* iOS Safari auto-zooms any input below 16px, which reflows the page and
+   hides the field behind the keyboard. Force 16px on small screens only —
+   desktop keeps its tighter .92rem typography. */
+@media (max-width: 640px) {
+  .auth-input-shell input { font-size: 16px; }
+}
