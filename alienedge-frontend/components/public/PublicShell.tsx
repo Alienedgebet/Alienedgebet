@@ -53,10 +53,7 @@ export function PublicShell({
           <span>© {new Date().getFullYear()} AlienEdge — mathematical decision support.</span>
           <nav className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
             <Link href="/support" className="hover:text-text-primary">Support</Link>
-            <Link href="/terms" className="hover:text-text-primary">Terms</Link>
-            <Link href="/privacy" className="hover:text-text-primary">Privacy</Link>
             <Link href="/responsible-gambling" className="hover:text-text-primary">Responsible use</Link>
-            <Link href="/cookies" className="hover:text-text-primary">Cookies</Link>
           </nav>
         </div>
       </footer>

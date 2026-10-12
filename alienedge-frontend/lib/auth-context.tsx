@@ -90,12 +90,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   async function logout() {
+    // Sign out must never leave a ghost session behind: revoke the server
+    // cookie first, then navigate in a way that cannot render stale UI.
+    // A full document navigation (not a client-side replace) rehydrates
+    // AuthProvider from nothing, so even if the logout POST fails mid-flight
+    // the user CANNOT stay on a protected route with dead state.
     try {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     } finally {
       userRef.current = null;
       setUserState(null);
       setSessionError(null);
+      window.location.replace("/login");
     }
   }
 
