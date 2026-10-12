@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Activity, ArrowRight, BarChart3, BrainCircuit, CalendarRange, Dna,
-  Gauge, Radar, ShieldCheck, Sparkles, Target,
+  Radar, ShieldCheck, Sparkles, Target,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 
@@ -97,8 +97,8 @@ export default function Home() {
               Sign in
             </Link>
           </div>
-          <p className="mt-4 flex items-center gap-2 text-xs text-text-dim">
-            <ShieldCheck size={13} className="text-accent-green" /> Private sessions, no advertising trackers, 18+.
+          <p className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-dim">
+            <span className="flex items-center gap-1.5"><ShieldCheck size={13} className="text-accent-green" /> Private sessions · No ad trackers · 18+ · Fresh data every morning</span>
           </p>
         </div>
       </section>
@@ -118,35 +118,6 @@ export default function Home() {
               <p className="text-xs sm:text-sm text-text-secondary leading-relaxed">{desc}</p>
             </div>
           ))}
-        </div>
-      </section>
-
-      {/* ── How it works ── */}
-      <section className="mx-auto max-w-6xl px-4 sm:px-6 pb-14">
-        <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-text-dim mb-5">Fresh data, every morning</h2>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {STEPS.map(({ n, t, d }) => (
-            <div key={n} className="rounded-xl border border-white/10 bg-[#0c1220]/60 p-5">
-              <p className="font-mono text-accent-green text-xs mb-2">{n}</p>
-              <p className="font-bold text-sm mb-1">{t}</p>
-              <p className="text-xs text-text-secondary leading-relaxed">{d}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* ── Honesty note ── */}
-      <section className="mx-auto max-w-6xl px-4 sm:px-6 pb-16">
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-5 flex items-start gap-3">
-          <Gauge size={18} className="text-amber-300 mt-0.5 shrink-0" />
-          <div className="text-sm text-amber-100/90">
-            <p className="font-semibold mb-1">Transparency by design</p>
-            <p className="text-xs sm:text-sm leading-relaxed">
-              Models that are still being validated carry a visible <strong>EXPERIMENTAL</strong>{" "}
-              badge on every row, and each prediction records the exact model and calibration version
-              that produced it. You always know what you are looking at.
-            </p>
-          </div>
         </div>
       </section>
 
