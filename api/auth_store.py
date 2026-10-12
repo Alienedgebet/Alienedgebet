@@ -29,6 +29,8 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
         CREATE TABLE IF NOT EXISTS rate_limits (bucket TEXT PRIMARY KEY,window_start INTEGER NOT NULL,request_count INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS password_resets (token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(user_id),created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,used_at INTEGER);
+        CREATE INDEX IF NOT EXISTS password_resets_user_idx ON password_resets(user_id);
         """)
     try: os.chmod(DB_PATH, 0o600)
     except OSError: pass
@@ -78,6 +80,62 @@ def revoke_session(token: str | None) -> None:
     if token:
         init_db()
         with _db() as conn: conn.execute("DELETE FROM sessions WHERE token_hash=?", (_token_hash(token),))
+RESET_TOKEN_TTL_SECONDS = 3600  # 1 hour — short enough to limit exposure
+
+# ── PASSWORD RESET (2026-10-12) ────────────────────────────────────────────
+# Single-use, expiring, hashed-at-rest tokens. Only the SHA-256 of the token
+# is stored, so a database leak cannot be replayed into a password change.
+# A successful reset revokes EVERY session for that user: whoever asked for
+# the reset is presumed to be the only person who should still be logged in.
+def create_password_reset(email: str) -> str | None:
+    """Issue a reset token for the account with this email. Returns the raw
+    token (store it nowhere but the email), or None when no such account —
+    the CALLER must treat both outcomes identically so the endpoint never
+    reveals whether an email is registered."""
+    init_db()
+    normalized = _normalize_email(email)
+    with _db() as conn:
+        row = conn.execute("SELECT user_id FROM users WHERE email=? AND disabled=0", (normalized,)).fetchone()
+        if row is None:
+            return None
+        token, now = secrets.token_urlsafe(32), int(time.time())
+        conn.execute("DELETE FROM password_resets WHERE user_id=?", (row["user_id"],))
+        conn.execute("INSERT INTO password_resets(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)",
+                     (_token_hash(token), row["user_id"], now, now + RESET_TOKEN_TTL_SECONDS))
+        return token
+
+
+def consume_password_reset(token: str) -> str | None:
+    """Validate a reset token and burn it. Returns the user_id on success,
+    None when the token is unknown, expired, or already used. Burning
+    happens in the same statement that validates, so a token can never be
+    used twice — not even by two simultaneous requests."""
+    if not token:
+        return None
+    init_db()
+    now = int(time.time())
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT user_id FROM password_resets WHERE token_hash=? AND used_at IS NULL AND expires_at>?",
+                           (_token_hash(token), now)).fetchone()
+        if row is None:
+            conn.execute("COMMIT")
+            return None
+        conn.execute("UPDATE password_resets SET used_at=? WHERE token_hash=?", (now, _token_hash(token)))
+        conn.execute("COMMIT")
+        return row["user_id"]
+
+
+def set_password(user_id: str, password: str) -> None:
+    """Replace the password hash and revoke every existing session for the
+    user — a reset means every other device is presumed compromised."""
+    init_db()
+    new_hash = hash_password(password)  # raises ValueError if too short
+    with _db() as conn:
+        conn.execute("UPDATE users SET password_hash=? WHERE user_id=?", (new_hash, user_id))
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
+
 def check_rate_limit(bucket: str, limit: int, window_seconds: int) -> bool:
     init_db(); now, key = int(time.time()), hashlib.sha256(bucket.encode()).hexdigest(); start = now - now % max(1, window_seconds)
     with _db() as conn:

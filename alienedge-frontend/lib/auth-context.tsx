@@ -131,7 +131,20 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const { user, loading, sessionError, retrySession } = useAuth();
   const router = useRouter();
   const pathname = usePathname() || "";
-  const isAuthPage = pathname === "/login" || pathname === "/signup";
+  // Routes an unauthenticated visitor may see. The landing page, the legal
+  // pages, support and the password-reset flow are intentionally public;
+  // everything else stays behind the login gate.
+  const isAuthPage =
+    pathname === "/" ||
+    pathname === "/login" ||
+    pathname === "/signup" ||
+    pathname === "/forgot-password" ||
+    pathname === "/reset-password" ||
+    pathname === "/support" ||
+    pathname === "/terms" ||
+    pathname === "/privacy" ||
+    pathname === "/responsible-gambling" ||
+    pathname === "/cookies";
 
   useEffect(() => {
     // Redirect only after a definitive unauthenticated response. Transient
