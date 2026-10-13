@@ -171,6 +171,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
   const runFilter = () => {
     setLoading(true);
     setError(null);
+    setRows([]); // Clear stale results immediately so user sees loading state, not old data
 
     const payload = {
       mode,
