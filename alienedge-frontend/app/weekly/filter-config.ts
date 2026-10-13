@@ -48,12 +48,18 @@ export const GG_FILTER_CONFIG: MarketFilterConfig = {
   fields: [
     { key: "min_prob", label: "Min Probability %", type: "number", defaultValue: 60 },
     { key: "max_parity", label: "Max Total Parity (H2H + Concede)", type: "number", defaultValue: 4 },
-    { key: "min_home_gg5", label: "Min Home GG (Last 5)", type: "number", defaultValue: 3 },
-    { key: "min_away_gg5", label: "Min Away GG (Last 5)", type: "number", defaultValue: 3 },
+    // Historical side bias (Layer 6 in apply_precision_filter) — full season GG tendency
+    { key: "min_home_gg5", label: "Min Home GG Side (Season)", type: "number", defaultValue: 3 },
+    { key: "min_away_gg5", label: "Min Away GG Side (Season)", type: "number", defaultValue: 3 },
     { key: "min_h2h_gg", label: "Min H2H GG Count", type: "number", defaultValue: 3 },
     { key: "pos_diff_max", label: "Max Table Distance", type: "number", defaultValue: 10 },
+    // Short-term form gates (Layer 3 in apply_precision_filter) — last 3 matches both sides
+    { key: "last3_gg_min", label: "Min GG Last 3 (Both Sides)", type: "number", defaultValue: 0 },
+    { key: "last3_gg_max", label: "Max GG Last 3 (Both Sides)", type: "number", defaultValue: 0 },
+    // ONE odds box: a floor with no ceiling. Set 1.50 and you get every pick at 1.50 and above.
+    // The Max Odds box is gone — it shadowed the Target Odds Corridor, because the drawer's
+    // 1.85 was always sent as an override and therefore suppressed the preset the user had clicked.
     { key: "min_gg_odds", label: "Min GG Odds", type: "number", step: 0.01, defaultValue: 1.50 },
-    { key: "max_gg_odds", label: "Max GG Odds", type: "number", step: 0.01, defaultValue: 2.20 },
     { key: "strict_mode", label: "Strict Parity Lock", type: "checkbox", defaultValue: true },
   ],
   priorityKeys: [
