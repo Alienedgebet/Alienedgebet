@@ -233,11 +233,59 @@ os.makedirs(SB, exist_ok=True)
 pd.DataFrame([
     {"fixture_id": 1, "league_id": 7, "home_team": "A", "away_team": "B",
      "gg_tier": "GG TIER 1", "mc_btts_prob": 0.72, "venue_btts_home": 1.0,
-     "venue_btts_away": 1.0, "parity": 0.5, "gg_odds": 1.55},
+     "venue_btts_away": 1.0, "parity": 0.5, "gg_odds": 1.55,
+     # Weekly drawer columns (2026-10-13): fixture 1 clears every new gate.
+     "home_last3_gg": 3, "away_last3_gg": 3,
+     "home_scored_total": 8.0, "away_scored_total": 8.0},
     {"fixture_id": 2, "league_id": 7, "home_team": "C", "away_team": "D",
      "gg_tier": "GG TIER 1", "mc_btts_prob": 0.71, "venue_btts_home": 1.0,
-     "venue_btts_away": 1.0, "parity": 0.5, "gg_odds": 2.45},
+     "venue_btts_away": 1.0, "parity": 0.5, "gg_odds": 2.45,
+     # Fixture 2 FAILS every new gate: no GG in last 3 either side, 2 goals each.
+     "home_last3_gg": 0, "away_last3_gg": 0,
+     "home_scored_total": 2.0, "away_scored_total": 2.0},
 ]).to_csv(os.path.join(SB, "ALIENEDGE_GG_PICKS_2026-01-01.csv"), index=False)
+# A second date whose single fixture carries the drawer columns as BLANK CELLS
+# (pandas reads them as float NaN). Before the fix `int(nan)` crashed the whole
+# request with `cannot convert float NaN to integer`; now it degrades to the
+# tier proxy exactly like a legacy artifact that never had the column.
+pd.DataFrame([
+    {"fixture_id": 3, "league_id": 7, "home_team": "E", "away_team": "F",
+     "gg_tier": "GG TIER 1", "mc_btts_prob": 0.73, "venue_btts_home": 1.0,
+     "venue_btts_away": 1.0, "parity": 0.5, "gg_odds": 1.70,
+     "home_last3_gg": float("nan"), "away_last3_gg": float("nan"),
+     "home_scored_total": float("nan"), "away_scored_total": float("nan")},
+]).to_csv(os.path.join(SB, "ALIENEDGE_GG_PICKS_2026-01-02.csv"), index=False)
+pd.DataFrame([
+    {"fixture_id": 3, "league_id": 7, "Fixture": "E vs F", "Score": "6/6",
+     "DNA_Intelligence": "ADVANTAGE", "Poisson%": 70.0, "H2H_GG": "4/5",
+     "DNA_Insight": "x", "Ranks": "4v9", "Forensic_Audit": "x",
+     "H2H_Parity": 2, "Concede_Parity": 1},
+]).to_csv(os.path.join(SB, "JUDGED_GG_PICKS_2026-01-02.csv"), index=False)
+# A third date mixing one fixture WITH real goals values and one WITHOUT: the
+# bound is then genuinely evaluated, and the value-less row must be EXCLUDED
+# (zero-fabrication), not waved through.
+pd.DataFrame([
+    {"fixture_id": 4, "league_id": 7, "home_team": "G", "away_team": "H",
+     "gg_tier": "GG TIER 1", "mc_btts_prob": 0.72, "venue_btts_home": 1.0,
+     "venue_btts_away": 1.0, "parity": 0.5, "gg_odds": 1.60,
+     "home_last3_gg": 2, "away_last3_gg": 2,
+     "home_scored_total": 9.0, "away_scored_total": 7.0},
+    {"fixture_id": 5, "league_id": 7, "home_team": "I", "away_team": "J",
+     "gg_tier": "GG TIER 1", "mc_btts_prob": 0.72, "venue_btts_home": 1.0,
+     "venue_btts_away": 1.0, "parity": 0.5, "gg_odds": 1.60,
+     "home_last3_gg": 2, "away_last3_gg": 2,
+     "home_scored_total": float("nan"), "away_scored_total": float("nan")},
+]).to_csv(os.path.join(SB, "ALIENEDGE_GG_PICKS_2026-01-03.csv"), index=False)
+pd.DataFrame([
+    {"fixture_id": 4, "league_id": 7, "Fixture": "G vs H", "Score": "6/6",
+     "DNA_Intelligence": "ADVANTAGE", "Poisson%": 70.0, "H2H_GG": "4/5",
+     "DNA_Insight": "x", "Ranks": "4v9", "Forensic_Audit": "x",
+     "H2H_Parity": 2, "Concede_Parity": 1},
+    {"fixture_id": 5, "league_id": 7, "Fixture": "I vs J", "Score": "6/6",
+     "DNA_Intelligence": "ADVANTAGE", "Poisson%": 70.0, "H2H_GG": "4/5",
+     "DNA_Insight": "x", "Ranks": "4v9", "Forensic_Audit": "x",
+     "H2H_Parity": 2, "Concede_Parity": 1},
+]).to_csv(os.path.join(SB, "JUDGED_GG_PICKS_2026-01-03.csv"), index=False)
 pd.DataFrame([
     {"fixture_id": 1, "league_id": 7, "Fixture": "A vs B", "Score": "6/6",
      "DNA_Intelligence": "ADVANTAGE", "Poisson%": 70.0, "H2H_GG": "4/5",
@@ -271,6 +319,45 @@ try:
           names(sandbox_query(min_gg_odds=1.50, max_gg_odds=2.00)) == ["A"])
     check("sandbox: GG odds corridor 1.50-2.60 keeps both",
           names(sandbox_query(min_gg_odds=1.50, max_gg_odds=2.60)) == ["A", "C"])
+    # ── 2026-10-13: the four Weekly drawer gates must CONTROL the board ──────
+    check("sandbox: HOME GG Last-3 toggle drops the fixture with 0 in last 3",
+          names(sandbox_query(mode="tipster", home_last3_gg=True)) == ["A"])
+    check("sandbox: AWAY GG Last-3 toggle drops the fixture with 0 in last 3",
+          names(sandbox_query(mode="tipster", away_last3_gg=True)) == ["A"])
+    check("sandbox: MIN HOME Goals Last 5 = 5 keeps the 8-goal fixture only",
+          names(sandbox_query(mode="tipster", min_home_goals5=5)) == ["A"])
+    check("sandbox: MIN AWAY Goals Last 5 = 5 keeps the 8-goal fixture only",
+          names(sandbox_query(mode="tipster", min_away_goals5=5)) == ["A"])
+    check("sandbox: all four drawer gates ON exclude the weak fixture entirely",
+          names(sandbox_query(mode="tipster", home_last3_gg=True, away_last3_gg=True,
+                              min_home_goals5=5, min_away_goals5=5)) == ["A"])
+    check("sandbox: a goals bound no fixture clears returns nothing (not everything)",
+          names(sandbox_query(mode="tipster", min_home_goals5=99)) == [])
+    # Blank drawer columns (NaN) must not crash — they degrade to the tier proxy.
+    def nan_date_query(**kwargs):
+        wl._CACHE.clear()
+        return quiet(wl.live_query, "gg", ["2026-01-02"], gg_filter_params(**kwargs))
+    try:
+        nan_rows = nan_date_query(mode="tipster", home_last3_gg=True)
+        check("sandbox: NaN last-3 columns do not crash the request (tier proxy)",
+              names(nan_rows) == ["E"])
+        nan_goals = nan_date_query(mode="tipster", min_home_goals5=5)
+        check("sandbox: all-NaN goals columns → gate honestly SKIPPED (row survives, "
+              "same honest-skip semantics as the parity gate)",
+              names(nan_goals) == ["E"])
+    finally:
+        wl._CACHE.clear()
+    def mixed_date_query(**kwargs):
+        wl._CACHE.clear()
+        return quiet(wl.live_query, "gg", ["2026-01-03"], gg_filter_params(**kwargs))
+    try:
+        check("sandbox: baseline on the mixed date keeps both fixtures",
+              names(mixed_date_query()) == ["G", "I"])
+        check("sandbox: evaluated goals bound EXCLUDES the row with no value "
+              "(zero-fabrication, never a silent pass)",
+              names(mixed_date_query(mode="tipster", min_home_goals5=5)) == ["G"])
+    finally:
+        wl._CACHE.clear()
 finally:
     gpf.OUTPUT_DIR = _real_output_dir
     wl._CACHE.clear()
@@ -349,6 +436,15 @@ check("unknown risk level falls back to the market default",
 check("unknown odds corridor yields NO band rather than a silent default (2026-10-05)",
       win_filter_params(odds_band="9.99-99.99")["odds_band"] is None)
 check("unknown mode falls back to public", gg_filter_params(mode="wat")["mode"] == "public")
+# 2026-10-13: a copy of the GG drawer block once lived in win_filter_params and
+# referenced names that function never declared, so EVERY WIN request died with
+# `NameError: name 'home_last3_gg' is not defined` (Win page + Win Cross-Check).
+check("win_filter_params accepts the full WIN drawer without crashing (NameError fix)",
+      "overrides" in win_filter_params(min_form_wins=2, min_odds=1.4, strict_mode=False))
+check("win_filter_params forwards NO GG drawer keys (they belong to gg_filter_params)",
+      not any(k in win_filter_params()["overrides"]
+              for k in ("home_last3_gg", "away_last3_gg",
+                        "min_home_goals5", "min_away_goals5")))
 check("any drawer value leaves the baseline path (never ignored)",
       not is_baseline(gg_filter_params(min_prob=61))
       and not is_baseline(win_filter_params(mode="tipster"))
