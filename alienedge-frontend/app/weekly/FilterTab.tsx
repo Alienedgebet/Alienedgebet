@@ -146,12 +146,15 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
   // WIN filter has no soft/strict branch at all — still impossible, so it is
   // now disabled and says why).
   //
-  // This returns a reason only in Public mode, so a control is disabled exactly
-  // when the engine genuinely cannot enforce it and never otherwise.
+  // Check field-level `alwaysDisabled` first (the box has data the engine cannot
+  // serve in its current state, e.g. a gate with no source column), then fall
+  // back to mode-level unsupported rules so a control is disabled exactly when
+  // the engine genuinely cannot enforce it — and never otherwise.
   const unsupportedReason = (key: string): string | undefined =>
-    mode === "public"
+    config.fields.find((f) => f.key === key)?.alwaysDisabled ??
+    (mode === "public"
       ? config.publicUnsupported?.find((u) => u.key === key)?.reason
-      : undefined;
+      : undefined);
   
   // Data State — starts empty; real results are fetched on mount and on every
   // control change (mock only ever appears if NEXT_PUBLIC_DEMO_MODE is set).

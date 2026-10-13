@@ -6,6 +6,9 @@ export interface FilterFieldDef {
   placeholder?: string;
   step?: number;
   defaultValue?: any;
+  /** Field cannot be enforced by the engine in the current mode (e.g. missing
+      data columns) — render it greyed out with the reason rather than live. */
+  alwaysDisabled?: string;
 }
 
 export interface MarketFilterConfig {
@@ -54,10 +57,21 @@ export const GG_FILTER_CONFIG: MarketFilterConfig = {
     // H2H GG Count — minimum H2H matches where both teams scored
     { key: "min_h2h_gg", label: "Min H2H GG Count", type: "number", defaultValue: 3 },
     { key: "pos_diff_max", label: "Max Table Distance", type: "number", defaultValue: 10 },
-    // Short-term form gates (Layer 3) — last 3 matches both sides
-    { key: "last3_gg_min", label: "Min GG Last 3 (Both Sides)", type: "number", defaultValue: 0 },
-    { key: "last3_gg_max", label: "Max GG Last 3 (Both Sides)", type: "number", defaultValue: 0 },
-    // Home/Away Last 5 Total Goals — for teams scoring 8+ goals as guarantee they'll score
+    // Short-term form — per-side On/Off toggles (Layer 3, 2026-10-13).
+    // Replaces the confusing "Min GG Last 3 / Max GG Last 3" number range, which
+    // applied one bound to BOTH sides. Two independent boxes now mirror the
+    // Strict Parity Lock style:
+    //   * ON  = that side must have had a Both-To-Score match in its own last 3
+    //   * OFF = no recent-form requirement on that side
+    //
+    // WORKS: the engine now carries per-side last-3 BTTS counters
+    // (home_last3_gg / away_last3_gg), so home and away are judged independently.
+    { key: "home_last3_gg", label: "Home Team Must Have GG in Last 3", type: "checkbox", defaultValue: false },
+    { key: "away_last3_gg", label: "Away Team Must Have GG in Last 3", type: "checkbox", defaultValue: false },
+    // Home/Away Last 5 Total Goals — teams scoring 8+ goals tend to score & concede,
+    // supporting GG. WORKS: the engine now exports last-5 scored totals
+    // (home_scored_total / away_scored_total) into the GG artifacts, so the gate
+    // filters instead of silently skipping.
     { key: "min_home_goals5", label: "Min Home Goals Last 5", type: "number", defaultValue: 0 },
     { key: "min_away_goals5", label: "Min Away Goals Last 5", type: "number", defaultValue: 0 },
     // ONE odds box: a floor with no ceiling. Set 1.50 and you get every pick at 1.50 and above.

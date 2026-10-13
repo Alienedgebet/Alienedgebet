@@ -329,9 +329,17 @@ GG_CFG_KEYS = {
     "min_away_gg5": "away_gg_side_min",
     "min_h2h_gg": "h2h_gg_min",
     "pos_diff_max": "pos_diff_max",
-    # Short-term form gates (Layer 3 in apply_precision_filter)
-    "last3_gg_min": "last3_gg_min",
-    "last3_gg_max": "last3_gg_max",
+    # Short-term form gates (Layer 3 in apply_precision_filter).
+    #
+    # 2026-10-13: `last3_gg_min` / `last3_gg_max` retired. Replaced by two
+    # independent On/Off toggles that the engine now satisfies with REAL
+    # per-side data:
+    #   * home_last3_gg  -> gate `home_gg_last3 >= 1`
+    #                     ("Home team has a GG in its own last 3 matches")
+    #   * away_last3_gg  -> gate `away_gg_last3 >= 1`
+    #                     ("Away team has a GG in its own last 3 matches")
+    "home_last3_gg": "home_last3_gg",
+    "away_last3_gg": "away_last3_gg",
     # Home/Away last 5 total goals
     "min_home_goals5": "min_home_goals5",
     "min_away_goals5": "min_away_goals5",
