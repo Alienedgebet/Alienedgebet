@@ -332,6 +332,9 @@ GG_CFG_KEYS = {
     # Short-term form gates (Layer 3 in apply_precision_filter)
     "last3_gg_min": "last3_gg_min",
     "last3_gg_max": "last3_gg_max",
+    # Home/Away last 5 total goals
+    "min_home_goals5": "min_home_goals5",
+    "min_away_goals5": "min_away_goals5",
 }
 
 # Public-mode narrowing: drawer key -> (row field, comparison).
@@ -396,6 +399,8 @@ GG_NARROW = {
     "min_h2h_gg": ("h2h_gg_count", "min"),
     "pos_diff_max": ("table_distance", "max"),
     "min_gg_odds": ("gg_odds", "min"),
+    "min_home_goals5": ("home_goals_scored_last_5", "min"),
+    "min_away_goals5": ("away_goals_scored_last_5", "min"),
 }
 
 # Drawer controls that CANNOT be honoured in Public mode.
