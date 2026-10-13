@@ -122,6 +122,11 @@ def gg_filter_params(
     min_gg_odds: Optional[float] = None,
     max_gg_odds: Optional[float] = None,
     strict_mode: Optional[bool] = None,
+    # 2026-10-13: per-side last-3 GG toggles + last-5 goals thresholds.
+    home_last3_gg: Optional[bool] = None,
+    away_last3_gg: Optional[bool] = None,
+    min_home_goals5: Optional[float] = None,
+    min_away_goals5: Optional[float] = None,
 ) -> dict:
     p = _normalise(mode, "gg")
     p["risk_level"] = risk_level if risk_level in GG_RISKS else "banker"
@@ -139,6 +144,16 @@ def gg_filter_params(
             p["overrides"][key] = clamped
     if strict_mode is not None:
         p["overrides"]["strict_mode"] = bool(strict_mode)
+    # 2026-10-13: per-side last-3 GG toggles (bool) and last-5 goals thresholds
+    # (numeric, clamped to the same _COUNT bounds as the side-bias gates).
+    if home_last3_gg is not None:
+        p["overrides"]["home_last3_gg"] = bool(home_last3_gg)
+    if away_last3_gg is not None:
+        p["overrides"]["away_last3_gg"] = bool(away_last3_gg)
+    for key in ("min_home_goals5", "min_away_goals5"):
+        clamped = _clamp_num(locals()[key], _COUNT)
+        if clamped is not None:
+            p["overrides"][key] = clamped
     return p
 
 
@@ -178,6 +193,16 @@ def win_filter_params(
         p["overrides"]["require_no_draw"] = bool(require_no_draw)
     if strict_mode is not None:
         p["overrides"]["strict_mode"] = bool(strict_mode)
+    # 2026-10-13: per-side last-3 GG toggles (bool) and last-5 goals thresholds
+    # (numeric, clamped to the same _COUNT bounds as the side-bias gates).
+    if home_last3_gg is not None:
+        p["overrides"]["home_last3_gg"] = bool(home_last3_gg)
+    if away_last3_gg is not None:
+        p["overrides"]["away_last3_gg"] = bool(away_last3_gg)
+    for key in ("min_home_goals5", "min_away_goals5"):
+        clamped = _clamp_num(locals()[key], _COUNT)
+        if clamped is not None:
+            p["overrides"][key] = clamped
     return p
 
 
