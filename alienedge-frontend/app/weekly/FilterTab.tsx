@@ -321,10 +321,14 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
           ))}
         </div>
 
-        {/* Risk Profile (Public presets) + Odds Corridor (ALL modes) */}
-        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 rounded-xl bg-black/30 p-4 border border-white/5">
-          {/* Risk Selection — public presets (the engines' own risk profiles) */}
-          {mode === "public" && (
+        {/* ─────────────────────────────────────────────────────────────────
+            PUBLIC MODE: Algorithm Risk Profile + Target Odds Corridor
+            TIPSTER/ADVANCED MODE: Mathematical Precision Thresholds (drawer)
+            ───────────────────────────────────────────────────────────────── */}
+        {mode === "public" ? (
+          // PUBLIC MODE: Show presets only
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 rounded-xl bg-black/30 p-4 border border-white/5">
+            {/* Risk Selection — public presets (the engines' own risk profiles) */}
             <div>
               <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
                 Algorithm Risk Profile
@@ -347,13 +351,35 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
                 ))}
               </div>
             </div>
-          )}
 
-          {/* Odds Band Selection — available in EVERY mode (additive: the
-              corridor previously vanished in Tipster/Advanced) */}
-          <div>
+            {/* Odds Band Selection — public preset corridors */}
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
+                Target Odds Corridor
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {config.oddsBands.map((band) => (
+                  <button
+                    key={band}
+                    onClick={() => setOddsBand(band)}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 font-mono text-xs font-bold transition-all",
+                      oddsBand === band
+                        ? "border-indigo-500/50 bg-indigo-950/50 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.2)]"
+                        : "border-white/10 bg-white/5 text-slate-400 hover:text-white"
+                    )}
+                  >
+                    @{band}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          // TIPSTER/ADVANCED MODE: Show only odds corridor inline (tipster has own odds in drawer)
+          <div className="mt-4 rounded-xl bg-black/30 p-4 border border-white/5">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
-              Target Odds Corridor
+              Odds Corridor (Tipster)
             </span>
             <div className="flex flex-wrap gap-2">
               {config.oddsBands.map((band) => (
@@ -372,18 +398,22 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
               ))}
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Collapsible Advanced Parameters */}
-        <div className="mt-4 border-t border-white/10 pt-3">
-          <button
-            onClick={() => setShowAdvanced(!showAdvanced)}
-            className="flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-cyan-300 transition-colors"
-          >
-            <SlidersHorizontal className="h-3.5 w-3.5 text-cyan-400" />
-            <span>{showAdvanced ? "Hide" : "Show"} Mathematical Precision Thresholds</span>
-            {showAdvanced ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-          </button>
+        {/* ─────────────────────────────────────────────────────────────────
+            TIPSTER/ADVANCED MODE ONLY: Mathematical Precision Thresholds drawer
+            Public mode uses presets only — no drawer needed.
+            ───────────────────────────────────────────────────────────────── */}
+        {mode !== "public" && (
+          <div className="mt-4 border-t border-white/10 pt-3">
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-cyan-300 transition-colors"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5 text-cyan-400" />
+              <span>{showAdvanced ? "Hide" : "Show"} Mathematical Precision Thresholds</span>
+              {showAdvanced ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            </button>
 
           {/* ADDITIVE: one-click return to the engine's own defaults. The
               backend treats a request with no drawer values as the shipped
@@ -481,6 +511,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
             </div>
           )}
         </div>
+        )}
 
         {/* Action Button */}
         <div className="mt-5 flex items-center justify-between border-t border-white/10 pt-4">
