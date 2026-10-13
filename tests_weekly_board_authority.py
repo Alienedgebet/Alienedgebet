@@ -623,5 +623,65 @@ class Last5GoalsGateTests(unittest.TestCase):
         self.assertEqual(kept, ["Match 0", "Match 1"])  # gate skipped, nothing lost
 
 
+
+
+class ApiDrawerForwardingTests(unittest.TestCase):
+    """Regression: the API parameter parser must forward the new drawer keys.
+
+    The Weekly board sends drawer values directly in the request body;
+    api/weekly_filter_live.gg_filter_params() must accept and forward them
+    into p["overrides"], otherwise the engine never sees them (that is why
+    the last-3 toggles and goals boxes appeared live but controlled nothing).
+    """
+
+    def setUp(self):
+        from api.weekly_filter_live import gg_filter_params
+        self.gg_filter_params = gg_filter_params
+
+    def test_last3_toggle_keys_forwarded(self):
+        p = self.gg_filter_params(mode="tipster", home_last3_gg=True,
+                                  away_last3_gg=False)
+        self.assertEqual(p["overrides"].get("home_last3_gg"), True)
+        self.assertEqual(p["overrides"].get("away_last3_gg"), False)
+
+    def test_goals_keys_forwarded_as_numbers(self):
+        p = self.gg_filter_params(mode="tipster", min_home_goals5=5,
+                                  min_away_goals5=3)
+        self.assertEqual(p["overrides"].get("min_home_goals5"), 5.0)
+        self.assertEqual(p["overrides"].get("min_away_goals5"), 3.0)
+
+    def test_none_values_not_forwarded(self):
+        p = self.gg_filter_params(mode="tipster", home_last3_gg=None,
+                                  min_home_goals5=None)
+        self.assertNotIn("home_last3_gg", p["overrides"])
+        self.assertNotIn("min_home_goals5", p["overrides"])
+
+    def test_old_keys_still_forward(self):
+        p = self.gg_filter_params(mode="tipster", min_h2h_gg=5, max_parity=4,
+                                  min_prob=70, min_gg_odds=1.8)
+        self.assertEqual(p["overrides"]["min_h2h_gg"], 5)
+        self.assertEqual(p["overrides"]["max_parity"], 4)
+        self.assertEqual(p["overrides"]["min_prob"], 70.0)
+        self.assertEqual(p["overrides"]["min_gg_odds"], 1.8)
+
+    def test_all_keys_together(self):
+        p = self.gg_filter_params(mode="tipster", min_h2h_gg=5, max_parity=4,
+                                  min_prob=70, min_gg_odds=1.8,
+                                  home_last3_gg=True, away_last3_gg=False,
+                                  min_home_goals5=6, min_away_goals5=4,
+                                  strict_mode=True)
+        o = p["overrides"]
+        self.assertEqual(o["min_h2h_gg"], 5)
+        self.assertEqual(o["max_parity"], 4)
+        self.assertEqual(o["min_prob"], 70.0)
+        self.assertEqual(o["min_gg_odds"], 1.8)
+        self.assertEqual(o["home_last3_gg"], True)
+        self.assertEqual(o["away_last3_gg"], False)
+        self.assertEqual(o["min_home_goals5"], 6.0)
+        self.assertEqual(o["min_away_goals5"], 4.0)
+        self.assertEqual(o["strict_mode"], True)
+
+
+
 if __name__ == "__main__":
     unittest.main()
