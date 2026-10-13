@@ -609,6 +609,9 @@ def _live_gg(dates, params):
         # Strict mode stays the board's own switch; with no preset there is no
         # preset value to inherit.
         strict_mode = bool(overrides.get("strict_mode", True))
+        # Tipster mode: NO odds band — only explicit min_gg_odds from drawer
+        min_odds = overrides.get("min_gg_odds")
+        max_odds = None
     else:
         preset_cfg, preset_strict = GG_PRESETS.get(
             params.get("risk_level") or "banker", GG_PRESETS["banker"])
@@ -617,10 +620,11 @@ def _live_gg(dates, params):
         for key, value in preset_cfg.items():
             cfg_overrides.setdefault(key, value)
         strict_mode = bool(overrides["strict_mode"]) if "strict_mode" in overrides else preset_strict
-    min_odds = overrides.get("min_gg_odds")
-    max_odds = overrides.get("max_gg_odds")
-    if min_odds is None and max_odds is None and params.get("odds_band"):
-        min_odds, max_odds = parse_band(params["odds_band"])
+        # Public mode: odds band applies if no explicit drawer odds
+        min_odds = overrides.get("min_gg_odds")
+        max_odds = overrides.get("max_gg_odds")
+        if min_odds is None and max_odds is None and params.get("odds_band"):
+            min_odds, max_odds = parse_band(params["odds_band"])
 
     rows = []
     for date in dates:

@@ -376,27 +376,11 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
             </div>
           </div>
         ) : (
-          // TIPSTER/ADVANCED MODE: Show only odds corridor inline (tipster has own odds in drawer)
+          // TIPSTER/ADVANCED MODE: No odds corridor buttons — tipster uses min_gg_odds in drawer only
           <div className="mt-4 rounded-xl bg-black/30 p-4 border border-white/5">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
-              Odds Corridor (Tipster)
+              Tipster Mode — use Mathematical Precision Thresholds drawer for all controls
             </span>
-            <div className="flex flex-wrap gap-2">
-              {config.oddsBands.map((band) => (
-                <button
-                  key={band}
-                  onClick={() => setOddsBand(band)}
-                  className={cn(
-                    "rounded-lg border px-3 py-2 font-mono text-xs font-bold transition-all",
-                    oddsBand === band
-                      ? "border-indigo-500/50 bg-indigo-950/50 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.2)]"
-                      : "border-white/10 bg-white/5 text-slate-400 hover:text-white"
-                  )}
-                >
-                  @{band}
-                </button>
-              ))}
-            </div>
           </div>
         )}
 
