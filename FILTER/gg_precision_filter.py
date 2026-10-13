@@ -148,6 +148,15 @@ def _load_authoritative_engine(target_date):
         tier = r.get("gg_tier")
         tier = str(tier) if pd.notna(tier) else None
         last3 = _last3_from_tier(tier)
+
+        # 2026-10-13: the engine now exports per-side last-3 BTTS counts
+        # (`home_last3_gg` / `away_last3_gg`) and last-5 goals totals
+        # (`home_scored_total` / `away_scored_total`) for the Weekly drawer
+        # gates. Use the engine's real per-side values when the artifact
+        # carries them (new runs); otherwise fall back to the tier proxy
+        # (`last3`) for legacy artifacts.
+        _eng_last3_h = r.get("home_last3_gg")
+        _eng_last3_a = r.get("away_last3_gg")
         rows.append({
             "fixture_id":      fid,
             "league_id":       _to_int(r.get("league_id")),
@@ -155,8 +164,10 @@ def _load_authoritative_engine(target_date):
             "away_team":       r.get("away_team"),
             "tier":            tier,
             "gg_prob_pct":     round(btts * 100.0, 2) if btts is not None else None,
-            "home_gg_last3":   last3,
-            "away_gg_last3":   last3,
+            "home_gg_last3":   int(_eng_last3_h) if _eng_last3_h not in (None, "nan") else last3,
+            "away_gg_last3":   int(_eng_last3_a) if _eng_last3_a not in (None, "nan") else last3,
+            "home_goals_scored_last_5": _to_float(r.get("home_scored_total")),
+            "away_goals_scored_last_5": _to_float(r.get("away_scored_total")),
             "h2h_gg_count":    None,   # from forensics enrichment join (fixture_id)
             "home_position":   None,   # from forensics enrichment join (fixture_id)
             "away_position":   None,   # from forensics enrichment join (fixture_id)
@@ -267,8 +278,9 @@ def _enrich(df, enrich):
 # USER FLEXIBILITY CONFIG (Deadly Accuracy Layer)
 # ============================================================
 USER_FILTER = {
-    "last3_gg_min": 2,           # Must have at least 2 GG in last 3 matches
-    "last3_gg_max": 3,           # 🟢 UPGRADED: No longer hardcoded to 3 in the logic
+    # last3_gg_min / last3_gg_max retired (2026-10-13): replaced by the independent
+    # "Home Team Must Have GG in Last 3" / "Away Team Must Have GG in Last 3"
+    # On/Off toggles below.
     "h2h_gg_min": 3,             # History must show high H2H GG frequency
     "pos_diff_min": 1,           # 🟢 UPGRADED: Minimum table positions apart
     "pos_diff_max": 10,          # 🟢 UPGRADED: Maximum table positions apart
@@ -424,17 +436,25 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
     if cfg.get("min_probability") is not None:
         _add(prob_num >= float(cfg["min_probability"]), "min_probability")
 
-    # Layer 3: SHORT TERM FORM. A half-typed range (only a min, or only a max)
-    # still filters on the side the user gave -- an absent side is unbounded.
-    if cfg.get("last3_gg_min") is not None or cfg.get("last3_gg_max") is not None:
-        for series in (h_last3, a_last3):
-            if cfg.get("last3_gg_min") is not None and cfg.get("last3_gg_max") is not None:
-                _add(series.between(float(cfg["last3_gg_min"]),
-                                    float(cfg["last3_gg_max"])), "last3_gg_min")
-            elif cfg.get("last3_gg_min") is not None:
-                _add(series >= float(cfg["last3_gg_min"]), "last3_gg_min")
-            else:
-                _add(series <= float(cfg["last3_gg_max"]), "last3_gg_max")
+    # Layer 3: SHORT-TERM FORM — PER-SIDE TOGGLES (2026-10-13)
+    #
+    # Replaces the old `last3_gg_min` / `last3_gg_max` range logic. That UI was
+    # conceptually wrong for this control: it labelled two number boxes "MIN GG
+    # Last 3" / "MAX GG Last 3" (a range applied to BOTH sides at once), but the
+    # user meant "HOME must have GG in last 3" / "AWAY must have GG in last 3".
+    #
+    # Two independent On/Off toggles now exist in the Weekly drawer:
+    #   * Home Team Must Have GG in Last 3  →  home_gg_last3 >= 1
+    #   * Away Team Must Have GG in Last 3  →  away_gg_last3 >= 1
+    #
+    # Toggle ON means that side must have had at least one Both-To-Score match
+    # in its last 3 matches — a genuine recent-form requirement. The engine now
+    # carries per-side last-3 BTTS counters, so the two toggles act independently
+    # (home is judged on home's own last 3, away on away's own last 3).
+    if cfg.get("home_last3_gg"):
+        _add(h_last3 >= 1, "home_last3_gg")
+    if cfg.get("away_last3_gg"):
+        _add(a_last3 >= 1, "away_last3_gg")
 
     # Layer 4: H2H GG VOLUME -- THE USER'S RULE, LITERALLY (2026-10-05).
     #
@@ -493,12 +513,25 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
 
     # Layer 7: HOME/AWAY LAST 5 TOTAL GOALS — teams scoring 8+ goals are likely to score
     # and concede, supporting GG. These are optional user gates.
+    #
+    # Guard against artifacts that carry the columns but no real data: an empty
+    # numeric column would otherwise turn the gate into a silent "reject everything"
+    # rule. We print a message and skip the gate instead — matching how Layer 2
+    # handles missing parity operands.
     if cfg.get("min_home_goals5") is not None and "home_goals_scored_last_5" in complete.columns:
         h_goals5 = pd.to_numeric(complete["home_goals_scored_last_5"], errors="coerce")
-        _add(h_goals5 >= float(cfg["min_home_goals5"]), "min_home_goals5")
+        if h_goals5.isna().all():
+            print("   [!] Home-goals gate requested but this date's artifact has no "
+                  "real last-5 scored values — gate NOT evaluated.")
+        else:
+            _add(h_goals5 >= float(cfg["min_home_goals5"]), "min_home_goals5")
     if cfg.get("min_away_goals5") is not None and "away_goals_scored_last_5" in complete.columns:
         a_goals5 = pd.to_numeric(complete["away_goals_scored_last_5"], errors="coerce")
-        _add(a_goals5 >= float(cfg["min_away_goals5"]), "min_away_goals5")
+        if a_goals5.isna().all():
+            print("   [!] Away-goals gate requested but this date's artifact has no "
+                  "real last-5 scored values — gate NOT evaluated.")
+        else:
+            _add(a_goals5 >= float(cfg["min_away_goals5"]), "min_away_goals5")
 
     # ── LAYER 2: TOTAL PARITY LIMIT (additive activation) ────────────────────
     # This layer's operands (absolute integer H2H / conceded gaps — NOTE 2 in
@@ -618,7 +651,11 @@ def build_gate_config(cfg_overrides=None, use_preset=True):
     """
     cfg = dict(USER_FILTER) if use_preset else {k: None for k in USER_FILTER}
     for key, value in (cfg_overrides or {}).items():
-        if key in cfg and value is not None:
+        if value is not None:
+            # The user's typed value survives. We no longer require the key to
+            # sit in USER_FILTER — drawer gates like min_home_goals5 /
+            # home_last3_gg live outside USER_FILTER and must not be silently
+            # dropped (that was why the Goals Last 5 boxes were dead).
             cfg[key] = value
     return cfg
 

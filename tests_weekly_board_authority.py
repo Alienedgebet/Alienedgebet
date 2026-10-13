@@ -49,7 +49,14 @@ from FILTER.gg_precision_filter import (
 
 def tipster_board():
     """A cfg with EVERY gate unset -- what a cleared Tipster board means."""
-    return {k: None for k in USER_FILTER}
+    return {
+        **{k: None for k in USER_FILTER},
+        # 2026-10-13: the new per-side Last-3 GG toggles are OFF (unset) and
+        # the Goals Last 5 thresholds are unset by default; a cleared Tipster
+        # board must not carry any of them either.
+        "home_last3_gg": None, "away_last3_gg": None,
+        "min_home_goals5": None, "min_away_goals5": None,
+    }
 
 
 def slate():
@@ -124,9 +131,7 @@ class ClearedBoardFiltersNothingTests(unittest.TestCase):
     def test_preset_defaults_do_not_leak_into_a_tipster_board(self):
         """F2 passes the preset but has h2h=2; an empty board must still keep it."""
         cfg = tipster_board()
-        for gate in ("min_probability", "last3_gg_min", "last3_gg_max",
-                     "pos_diff_min", "pos_diff_max",
-                     "home_gg_side_min", "away_gg_side_min"):
+        for gate in ("min_probability", "home_last3_gg", "away_last3_gg", "pos_diff_min", "pos_diff_max", "home_gg_side_min", "away_gg_side_min", "min_home_goals5", "min_away_goals5"):
             self.assertIsNone(cfg[gate], f"{gate} must be unset on a cleared board")
 
 
@@ -225,12 +230,15 @@ class ConfigOwnershipTests(unittest.TestCase):
 
     def test_tipster_config_does_not_carry_any_preset_rule(self):
         cfg = build_gate_config({"h2h_gg_min": 5}, use_preset=False)
-        for gate in ("min_probability", "last3_gg_min", "last3_gg_max",
-                     "pos_diff_min", "pos_diff_max",
-                     "home_gg_side_min", "away_gg_side_min"):
-            self.assertIsNone(cfg[gate],
-                              f"{gate} leaked from the public preset")
-
+        # Non-preset tipster configs are built only from USER_FILTER plus the
+        # user overrides. Assert that every key present that is not the explicit
+        # user override is unset — a preset opinion cannot leak into a tipster
+        # board. (The last-3 toggles and Goals Last 5 thresholds are NOT preset
+        # rules, so they are absent rather than leaked.)
+        for gate, value in cfg.items():
+            if gate == "h2h_gg_min":
+                continue
+            self.assertIsNone(value, f"{gate} leaked from the public preset")
     def test_cleared_tipster_board_has_no_active_gate_at_all(self):
         cfg = build_gate_config({}, use_preset=False)
         self.assertEqual({k for k, v in cfg.items() if v is not None}, set())
@@ -248,9 +256,18 @@ class ConfigOwnershipTests(unittest.TestCase):
         cfg = build_gate_config({"h2h_gg_min": None}, use_preset=True)
         self.assertEqual(cfg["h2h_gg_min"], USER_FILTER["h2h_gg_min"])
 
-    def test_unknown_key_is_ignored(self):
-        cfg = build_gate_config({"not_a_real_gate": 99}, use_preset=False)
-        self.assertNotIn("not_a_real_gate", cfg)
+    def test_unknown_drawer_keys_are_now_honored(self):
+        """Drawer gates live outside USER_FILTER (forwarded via GG_CFG_KEYS);
+        they must be honored — that is exactly why the previously dead Home/
+        Away Goals Last 5 boxes now work."""
+        cfg = build_gate_config({"min_home_goals5": 5}, use_preset=False)
+        self.assertIn("min_home_goals5", cfg)
+        self.assertEqual(cfg["min_home_goals5"], 5)
+        # And the new per-side last-3 toggles flow through the same path.
+        cfg = build_gate_config({"home_last3_gg": True, "away_last3_gg": True},
+                                use_preset=False)
+        self.assertEqual(cfg["home_last3_gg"], True)
+        self.assertEqual(cfg["away_last3_gg"], True)
 
 
 class ExactH2HThresholdTests(unittest.TestCase):
@@ -423,6 +440,187 @@ class HistoryWindowTests(unittest.TestCase):
         self.assertEqual(offenders, [],
                          "wall-clock history windows reintroduced: "
                          + ", ".join(offenders))
+
+
+
+
+class PerSideLast3ToggleTests(unittest.TestCase):
+    """Regression tests for the 2026-10-13 per-side Last-3 GG On/Off toggles.
+
+    `last3_home` / `last3_away` = how many of the side's own last 3 matches
+    were Both-To-Score. Toggle ON enforces `side_gg_last3 >= 1`."""
+
+    def _slate(self, rows):
+        """rows: list of (name, home_last3, away_last3) — all other columns
+        are irrelevant for this gate and default to non-blocking."""
+        data = []
+        for i, (name, hl3, al3) in enumerate(rows):
+            data.append({
+                "fixture_id": 300 + i,
+                "fixture": f"Match {i}",
+                "h2h_goal_parity": 1, "concede_parity": 1,
+                "gg_prob_pct": 70.0,
+                "home_gg_last3": hl3, "away_gg_last3": al3,
+                "h2h_gg_count": 5, "h2h_gg_total": 5, "h2h_gg_usable": True,
+                "home_position": 3, "away_position": 5,
+                "home_gg_count": 3, "away_gg_count": 3,
+                "gg_odds": 2.0,
+            })
+        return pd.DataFrame(data)
+
+    def test_home_toggle_keeps_only_home_side_recent_form(self):
+        """Home toggle ON keeps rows where HOME has GG in its own last 3,
+        ignoring the away side."""
+        cfg = tipster_board()
+        cfg["home_last3_gg"] = True
+        df = self._slate([
+            ("H0", 1, 0),  # home OK, away 0 -> kept
+            ("H1", 0, 1),  # home 0, away OK -> dropped
+            ("H2", 1, 1),  # both OK -> kept
+            ("H3", 0, 0),  # both 0 -> dropped
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0", "Match 2"])
+
+    def test_away_toggle_keeps_only_away_side_recent_form(self):
+        """Away toggle ON keeps rows where AWAY has GG in its own last 3."""
+        cfg = tipster_board()
+        cfg["away_last3_gg"] = True
+        df = self._slate([
+            ("A0", 0, 1),  # away OK, home 0 -> kept
+            ("A1", 1, 0),  # away 0, home OK -> dropped
+            ("A2", 1, 1),  # both OK -> kept
+            ("A3", 0, 0),  # both 0 -> dropped
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0", "Match 2"])
+
+    def test_both_toggles_must_both_pass(self):
+        """With both toggles ON, a row needs GG on BOTH sides."""
+        cfg = tipster_board()
+        cfg["home_last3_gg"] = True
+        cfg["away_last3_gg"] = True
+        df = self._slate([
+            ("B0", 1, 1),  # both OK -> kept
+            ("B1", 1, 0),  # away missing -> dropped
+            ("B2", 0, 1),  # home missing -> dropped
+            ("B3", 0, 0),  # both missing -> dropped
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0"])
+
+    def test_toggles_off_do_not_filter(self):
+        """With both toggles OFF, no row is filtered by recent form."""
+        cfg = tipster_board()  # defaults are False
+        df = self._slate([
+            ("C0", 0, 0),
+            ("C1", 1, 1),
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0", "Match 1"])
+
+    def test_toggle_is_mandatory_not_tradeable(self):
+        """A typed toggle is a hard requirement; it cannot be spent to save
+        another gate, so a row failing it is dropped regardless of other gates."""
+        # The typed-gates set is derived from cfg_overrides by run_gg_precision_filter.
+        typed_gates = {k for k, v in ({"home_last3_gg": True}).items() if v is not None}
+        self.assertEqual(typed_gates, {"home_last3_gg"})
+        # And apply_precision_filter enforces home >= 1 as a hard gate: a row
+        # with 0 home last-3 GG is dropped even though the away side is fine.
+        cfg = tipster_board()
+        cfg["home_last3_gg"] = True
+        df = self._slate([("D0", 0, 1)])  # home 0 -> dropped
+        out = apply_precision_filter(df, cfg)
+        self.assertEqual(out["fixture"].tolist(), [])
+
+class Last5GoalsGateTests(unittest.TestCase):
+    """Regression tests for the Home/Away Goals Last 5 drawer gates.
+
+    The engine now exports `home_scored_total` / `away_scored_total` as
+    `home_goals_scored_last_5` / `away_goals_scored_last_5`, so these gates
+    filter instead of silently skipping."""
+
+    def _slate(self, rows):
+        """rows: list of (name, home_goals5, away_goals5) — other columns
+        default to non-blocking for these tests."""
+        data = []
+        for i, (name, hg, ag) in enumerate(rows):
+            data.append({
+                "fixture_id": 400 + i,
+                "fixture": f"Match {i}",
+                "h2h_goal_parity": 1, "concede_parity": 1,
+                "gg_prob_pct": 70.0,
+                "home_gg_last3": 1, "away_gg_last3": 1,
+                "h2h_gg_count": 5, "h2h_gg_total": 5, "h2h_gg_usable": True,
+                "home_position": 3, "away_position": 5,
+                "home_gg_count": 3, "away_gg_count": 3,
+                "gg_odds": 2.0,
+                "home_goals_scored_last_5": hg,
+                "away_goals_scored_last_5": ag,
+            })
+        return pd.DataFrame(data)
+
+    def test_home_goals_gate(self):
+        """Home gate >= 4 keeps only rows where the home side scored >= 4
+        in its last 5 matches."""
+        cfg = tipster_board()
+        cfg["min_home_goals5"] = 4
+        df = self._slate([
+            ("G0", 4, 0),  # home OK -> kept
+            ("G1", 3, 0),  # home < 4 -> dropped
+            ("G2", 5, 0),  # home OK -> kept
+            ("G3", 0, 0),  # home < 4 -> dropped
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0", "Match 2"])
+
+    def test_away_goals_gate(self):
+        """Away gate >= 3 keeps only rows where the away side scored >= 3
+        in its last 5 matches."""
+        cfg = tipster_board()
+        cfg["min_away_goals5"] = 3
+        df = self._slate([
+            ("A0", 0, 3),  # away OK -> kept
+            ("A1", 0, 2),  # away < 3 -> dropped
+            ("A2", 0, 4),  # away OK -> kept
+            ("A3", 0, 0),  # away < 3 -> dropped
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0", "Match 2"])
+
+    def test_both_goals_gates(self):
+        """With both goals gates, a row needs BOTH sides to meet."""
+        cfg = tipster_board()
+        cfg["min_home_goals5"] = 4
+        cfg["min_away_goals5"] = 3
+        df = self._slate([
+            ("B0", 4, 3),  # both OK -> kept
+            ("B1", 4, 2),  # away < 3 -> dropped
+            ("B2", 3, 3),  # home < 4 -> dropped
+            ("B3", 3, 2),  # both < -> dropped
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0"])
+
+    def test_goals_gate_skips_when_no_real_data(self):
+        """If the columns exist but carry no real values, the gate prints a
+        message and does NOT turn into a 'reject everything' rule."""
+        cfg = tipster_board()
+        cfg["min_home_goals5"] = 4
+        df = self._slate([
+            ("S0", None, None),
+            ("S1", None, None),
+        ])
+        out = apply_precision_filter(df, cfg)
+        kept = out["fixture"].tolist()
+        self.assertEqual(kept, ["Match 0", "Match 1"])  # gate skipped, nothing lost
 
 
 if __name__ == "__main__":

@@ -1233,6 +1233,14 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 if not is_team_home(f, away_id)
             ][:LAST_N_GAMES]
 
+            # ── PER-SIDE LAST-3 BTTS (2026-10-13) ───────────────────────────
+            # For the Weekly "Home/Away GG Last 3" On/Off toggles. Counts how
+            # many of each side's last 3 matches were Both-To-Score.
+            last3_home = (lastN_home or [])[:3]
+            last3_away = (lastN_away or [])[:3]
+            home_last3_gg = sum(1 for f in last3_home if is_btts(f))
+            away_last3_gg = sum(1 for f in last3_away if is_btts(f))
+
             # ── H2H ──────────────────────────────────────────────────────
             try:
                 h2h = fetch_last_h2h(home_id, away_id, n=LAST_N_GAMES)
@@ -1562,6 +1570,16 @@ def run_gg_o15_engine(target_date=None, verbose=False):
                 "composite_draw_score": round(comp_draw, 4),
                 "dmi":               round(dmi,    3),
                 "parity":            parity,
+                # ── RECENT-FORM CARRY-THROUGH (2026-10-13) ───────────────────
+                # Per-side last-3 Both-To-Score counts (for the Home/Away
+                # "GG Last 3" On/Off toggles) and last-5 goals-scored totals
+                # (for the Home/Away "Goals Last 5" drawer gates). These were
+                # previously only visible as boolean sig6/sig7 checkmarks;
+                # exporting the raw values makes the drawer gates actionable.
+                "home_last3_gg":       home_last3_gg,
+                "away_last3_gg":       away_last3_gg,
+                "home_scored_total":   home_scored_total,
+                "away_scored_total":   away_scored_total,
             }
 
             o15_row = {
