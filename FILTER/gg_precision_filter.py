@@ -493,14 +493,12 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
 
     # Layer 7: HOME/AWAY LAST 5 TOTAL GOALS — teams scoring 8+ goals are likely to score
     # and concede, supporting GG. These are optional user gates.
-    if cfg.get("min_home_goals5") is not None:
-        h_goals5 = pd.to_numeric(complete.get("home_goals_scored_last_5"), errors="coerce")
-        if h_goals5 is not None:
-            _add(h_goals5 >= float(cfg["min_home_goals5"]), "min_home_goals5")
-    if cfg.get("min_away_goals5") is not None:
-        a_goals5 = pd.to_numeric(complete.get("away_goals_scored_last_5"), errors="coerce")
-        if a_goals5 is not None:
-            _add(a_goals5 >= float(cfg["min_away_goals5"]), "min_away_goals5")
+    if cfg.get("min_home_goals5") is not None and "home_goals_scored_last_5" in complete.columns:
+        h_goals5 = pd.to_numeric(complete["home_goals_scored_last_5"], errors="coerce")
+        _add(h_goals5 >= float(cfg["min_home_goals5"]), "min_home_goals5")
+    if cfg.get("min_away_goals5") is not None and "away_goals_scored_last_5" in complete.columns:
+        a_goals5 = pd.to_numeric(complete["away_goals_scored_last_5"], errors="coerce")
+        _add(a_goals5 >= float(cfg["min_away_goals5"]), "min_away_goals5")
 
     # ── LAYER 2: TOTAL PARITY LIMIT (additive activation) ────────────────────
     # This layer's operands (absolute integer H2H / conceded gaps — NOTE 2 in
