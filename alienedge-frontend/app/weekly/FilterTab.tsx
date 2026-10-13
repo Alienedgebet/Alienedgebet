@@ -452,9 +452,7 @@ export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) 
 
           {showAdvanced && (
             <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-              {mode === "public"
-                ? "Public Presets: the engine applies its own risk profile first, then narrows the survivors with the thresholds below. Every box below is enforced. A threshold of 0 means off."
-                : "Tipster / Forensic Aggregator: every threshold below is passed straight into the engine's own gates."}
+              Tipster / Forensic Aggregator: every threshold below is passed straight into the engine's own gates.
             </p>
           )}
 
