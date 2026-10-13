@@ -193,16 +193,13 @@ def win_filter_params(
         p["overrides"]["require_no_draw"] = bool(require_no_draw)
     if strict_mode is not None:
         p["overrides"]["strict_mode"] = bool(strict_mode)
-    # 2026-10-13: per-side last-3 GG toggles (bool) and last-5 goals thresholds
-    # (numeric, clamped to the same _COUNT bounds as the side-bias gates).
-    if home_last3_gg is not None:
-        p["overrides"]["home_last3_gg"] = bool(home_last3_gg)
-    if away_last3_gg is not None:
-        p["overrides"]["away_last3_gg"] = bool(away_last3_gg)
-    for key in ("min_home_goals5", "min_away_goals5"):
-        clamped = _clamp_num(locals()[key], _COUNT)
-        if clamped is not None:
-            p["overrides"][key] = clamped
+    # NOTE (2026-10-13): the GG drawer's last-3 toggles / last-5 goals thresholds
+    # (home_last3_gg, away_last3_gg, min_home_goals5, min_away_goals5) belong to
+    # gg_filter_params ONLY. A copy of that block once lived here and referenced
+    # names this function never declared, so every WIN request died with
+    # `NameError: name 'home_last3_gg' is not defined` — including the Win
+    # Cross-Check route, which delegates here. The WIN drawer has its own
+    # form/venue/h2h controls and no GG gates, so nothing is forwarded.
     return p
 
 

@@ -155,8 +155,15 @@ def _load_authoritative_engine(target_date):
         # gates. Use the engine's real per-side values when the artifact
         # carries them (new runs); otherwise fall back to the tier proxy
         # (`last3`) for legacy artifacts.
-        _eng_last3_h = r.get("home_last3_gg")
-        _eng_last3_a = r.get("away_last3_gg")
+        #
+        # NaN (a blank CSV cell) is ABSENT, not a value: pandas reads an empty
+        # cell as float('nan'), and `nan not in (None, "nan")` is True — the
+        # old check therefore reached `int(nan)` and crashed the whole request
+        # with `cannot convert float NaN to integer`. `_to_int` maps NaN / "nan"
+        # / None all to None, so one malformed row degrades to the tier proxy
+        # exactly like an artifact that never had the column.
+        _eng_last3_h = _to_int(r.get("home_last3_gg"))
+        _eng_last3_a = _to_int(r.get("away_last3_gg"))
         rows.append({
             "fixture_id":      fid,
             "league_id":       _to_int(r.get("league_id")),
@@ -164,8 +171,8 @@ def _load_authoritative_engine(target_date):
             "away_team":       r.get("away_team"),
             "tier":            tier,
             "gg_prob_pct":     round(btts * 100.0, 2) if btts is not None else None,
-            "home_gg_last3":   int(_eng_last3_h) if _eng_last3_h not in (None, "nan") else last3,
-            "away_gg_last3":   int(_eng_last3_a) if _eng_last3_a not in (None, "nan") else last3,
+            "home_gg_last3":   _eng_last3_h if _eng_last3_h is not None else last3,
+            "away_gg_last3":   _eng_last3_a if _eng_last3_a is not None else last3,
             "home_goals_scored_last_5": _to_float(r.get("home_scored_total")),
             "away_goals_scored_last_5": _to_float(r.get("away_scored_total")),
             "h2h_gg_count":    None,   # from forensics enrichment join (fixture_id)
