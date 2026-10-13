@@ -329,6 +329,9 @@ GG_CFG_KEYS = {
     "min_away_gg5": "away_gg_side_min",
     "min_h2h_gg": "h2h_gg_min",
     "pos_diff_max": "pos_diff_max",
+    # Short-term form gates (Layer 3 in apply_precision_filter)
+    "last3_gg_min": "last3_gg_min",
+    "last3_gg_max": "last3_gg_max",
 }
 
 # Public-mode narrowing: drawer key -> (row field, comparison).
@@ -383,6 +386,18 @@ O25_NARROW = {
         ("home_overs_last_3", "away_overs_last_3"), "all_min", 3),
 }
 
+# GG public-mode narrowing: drawer key -> (row field, comparison).
+# Mirrors the gates in apply_precision_filter that are evaluated in Public mode.
+GG_NARROW = {
+    "min_prob": ("gg_prob_pct", "min"),
+    "max_parity": ("total_parity", "max"),
+    "min_home_gg5": ("home_gg_last5", "min"),
+    "min_away_gg5": ("away_gg_last5", "min"),
+    "min_h2h_gg": ("h2h_gg_count", "min"),
+    "pos_diff_max": ("table_distance", "max"),
+    "min_gg_odds": ("gg_odds", "min"),
+}
+
 # Drawer controls that CANNOT be honoured in Public mode.
 #
 # `strict_mode` is a parameter of apply_tipster_filter ONLY
@@ -403,8 +418,8 @@ PUBLIC_UNSUPPORTED = {
 # "win") here, so the contract suite can assert every drawer box is reachable
 # in EVERY mode rather than in some mode. GG has no entry: _live_gg has no mode
 # branch and forwards its whole control set in all three.
-NARROW_SPEC = {"o25": "O25_NARROW", "win": "WIN_NARROW"}
-TIPSTER_SPEC = {"o25": "O25_TIPSTER_KWARGS", "win": "WIN_TIPSTER_KWARGS"}
+NARROW_SPEC = {"o25": "O25_NARROW", "win": "WIN_NARROW", "gg": "GG_NARROW"}
+TIPSTER_SPEC = {"o25": "O25_TIPSTER_KWARGS", "win": "WIN_TIPSTER_KWARGS", "gg": "GG_CFG_KEYS"}
 
 # GG risk presets. The GG engine has no risk table of its own, so the presets
 # are expressed ONLY with values/mechanisms that already exist in this repo:
@@ -616,6 +631,11 @@ def _live_gg(dates, params):
             use_public_preset=not is_tipster,
         ) or []
         rows.extend(_stamp(produced, date))
+    
+    # In Public mode, apply drawer narrowing on top of preset-filtered rows
+    # (same pattern as _live_win and _live_o25)
+    if not is_tipster:
+        rows = narrow_rows(rows, "gg", overrides)
     return rows
 
 
