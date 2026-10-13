@@ -560,8 +560,12 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
         # 4, 3, 2, 1 or 0 H2H GG.
         spendable = [cond for cond, spend in layers if spend]
         mandatory = [cond for cond, spend in layers if not spend]
-        for cond in mandatory:
-            mask = cond
+        if mandatory:
+            mask = mandatory[0]
+            for cond in mandatory[1:]:
+                mask = mask & cond
+        else:
+            mask = pd.Series(True, index=complete.index)
         if spendable:
             if len(spendable) >= 2:
                 soft_ok = sum(cond.astype(int) for cond in spendable) >= (len(spendable) - 1)
@@ -569,9 +573,8 @@ def apply_precision_filter(df, cfg, strict_mode=True, max_parity=None,
                 # A single app-chosen gate has nothing to trade against, so it
                 # stands alone rather than defaulting to "always passes".
                 soft_ok = spendable[0]
-            mask = mask & soft_ok if mandatory else soft_ok
-        elif not mandatory:
-            mask = pd.Series(True, index=complete.index)
+            mask = mask & soft_ok
+        # If no spendable and no mandatory, mask stays as initialized
 
     df_filtered = complete[mask].copy()
 
