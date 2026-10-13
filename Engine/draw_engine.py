@@ -10,6 +10,15 @@ from datetime import datetime, timedelta, timezone
 from dateutil import parser
 from collections import defaultdict, Counter
 
+# --- target-date-anchored history window (see CORE/history_window.py) ---
+# Restored from the weekly/history-window fix (c4d71bc, 2026-10-05): the engine
+# must NOT derive its history bound from the live wall clock (now minus one day),
+# otherwise "last 5" form depends on WHEN the engine ran and a prediction reads
+# matches that did not exist when the fixture was predicted. Only
+# CORE/history_window may reach the wall clock, and only via history_window_end.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from CORE.history_window import history_window_end  # noqa: E402
+
 # --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
 from dotenv import load_dotenv
 load_dotenv()
@@ -353,8 +362,8 @@ def fetch_fixtures_for_date(date_str):
         sleep_short()
     return all_fx
 
-def fetch_last_finished_fixtures_for_team(team_id, max_needed=200):
-    end_dt = datetime.now(timezone.utc).date() - timedelta(days=1)
+def fetch_last_finished_fixtures_for_team(team_id, max_needed=200, target_date=None):
+    end_dt = history_window_end(target_date)
     start_dt = end_dt - timedelta(days=TEAM_LOOKBACK_DAYS)
     all_fx = []
     seen = set()
@@ -911,7 +920,7 @@ def run_draw_engine(target_date=None, verbose=False):
             for tid in (home_id, away_id):
                 if tid not in team_cache:
                     try:
-                        team_cache[tid] = fetch_last_finished_fixtures_for_team(tid)
+                        team_cache[tid] = fetch_last_finished_fixtures_for_team(tid, target_date=TARGET_DATE)
                     except Exception:
                         team_cache[tid] = []
                     sleep_short()
