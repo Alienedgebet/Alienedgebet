@@ -1275,6 +1275,27 @@ export interface UndersResponse {
 export interface LiveUndersPick extends UndersPick {
   is_live: boolean;
   fixture_status: "live" | "incoming";
+  // Per-line verification payloads attached by GET /api/live/unders:
+  // `verification` grades the U2.5 line (total <= 2 wins),
+  // `verification_u35` grades the U3.5 line (total <= 3 wins).
+  // A single shared payload would mis-grade the U3.5 table on the U2.5
+  // line (a 3-goal finish is U3.5 WON but U2.5 LOST).
+  verification?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+  };
+  verification_u35?: {
+    status: "SCHEDULED" | "LIVE" | "FINISHED";
+    score?: string;
+    minute?: number | string | null;
+    verdict: "PENDING" | "IN_PLAY" | "WON" | "LOST";
+    badge_text: string;
+    note?: string;
+  };
   formation_home?: string | null;
   formation_away?: string | null;
   home_archetype?: string | null;
