@@ -1247,7 +1247,7 @@ export interface UndersPick extends FixtureRisk {
   fatigue_home: number;
   fatigue_away: number;
   // Hard tier gates: a fixture must clear all three to earn any tier.
-  gates_passed?: boolean;
+  gates_passed?: boolean | null;
   gate_reasons?: string;
   gate_home_scored?: number;
   gate_away_scored?: number;
