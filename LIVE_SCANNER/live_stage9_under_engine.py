@@ -812,7 +812,9 @@ def _score_fixture(fixture, danger_rows, prematch_audit, dna_cache, clash_cache,
         "gate_away_conceded": gate_detail.get("gate_away_conceded"),
         "gate_h2h": gate_detail.get("gate_h2h", "n/a"),
         # Live-specific fields (extra context on the same row)
-        "is_live": True,
+        # is_live is now the REAL match state: the frontend LIVE badge reads
+        # this field, and incoming (not-started) picks must not show it.
+        "is_live": fixture_status == "live",
         "fixture_status": fixture_status,
         "formation_home": home_formation or None,
         "formation_away": away_formation or None,
@@ -872,8 +874,44 @@ def run_live_under_engine():
     clash_cache = _as_rows(_load_json(STYLE_CLASHES_FILE, []))
     history_cache = _load_json(HISTORY_CACHE_FILE, {})
 
-    picks = []
+    # ── CANDIDATE SET: board ∪ prematch-audit upcoming ──────────────────────
+    # The orchestrator board only ever carries IN-PLAY matches — plus retained
+    # finished rows on idle cycles. On an idle afternoon this engine therefore
+    # saw ZERO candidates and the "incoming" half of the feature could never
+    # fire, even with official lineups already published for the evening slate.
+    # prematch_team_audit.json (the same cycle-maintained file the admission
+    # gate below already reads) also tracks today's NOT_STARTED fixtures with
+    # state/lineup/formation, so merge them into the candidate set:
+    #   - board rows win on fixture_id collision;
+    #   - each audit-only row is synthesised into the minimal fixture shape
+    #     _score_fixture consumes (id / name / is_live / is_not_started).
+    # Still zero provider calls — both files are already on disk.
+    candidates = []
+    seen_ids = set()
     for fixture in matches:
+        if not isinstance(fixture, dict):
+            continue
+        fid = fixture.get("id") or fixture.get("fixture_id")
+        if fid is not None:
+            seen_ids.add(str(fid))
+        candidates.append(fixture)
+    if isinstance(prematch_audit, dict):
+        for fid, row in prematch_audit.items():
+            if not isinstance(row, dict) or str(fid) in seen_ids:
+                continue
+            if row.get("is_finished"):
+                continue  # settled — never a live-under candidate
+            candidates.append({
+                "id": str(fid),
+                "name": row.get("fixture", ""),
+                "is_live": bool(row.get("is_live")),
+                "is_not_started": bool(
+                    row.get("is_upcoming") or row.get("state") == "NOT_STARTED"
+                ),
+            })
+
+    picks = []
+    for fixture in candidates:
         if not isinstance(fixture, dict):
             continue
         # Skip finished fixtures
