@@ -170,7 +170,7 @@ export default function DrawPage() {
         error={result.error}
         columns={drawColumnsWithVerifyAndDna}
         rowKey={(r, i) => `${r.fixture_id}-${i}`}
-        emptyMessage="No draw picks for this date."
+        emptyMessage="No draw list for today."
       />
 
       {/* ── 4. BRANCH 2: No 3 Goal in a Roll & Asian Handicap 2.5 ───── */}
