@@ -73,7 +73,8 @@ OUTPUT_FILE = os.path.join(DATA_DIR, "stage9_live_unders.json")
 # light entry would silently break.
 S9_HISTORY_FILE = os.path.join(DATA_DIR, "stage9_history_cache.json")
 S9_HISTORY_TTL = 6 * 3600       # same refresh cadence as Stage 4's HISTORY_TTL
-S9_BACKFILL_MAX_PER_RUN = 12    # ~80 teams warm up over ~7 cycles, quota-safe
+S9_BACKFILL_MAX_PER_RUN = 30    # a full incoming slate (~78 teams) warms in ~3 cycles, quota-safe
+LIVE_UNDERS_SAVE_KEY = "live_unders"  # dated snapshots via output_store, same as pre-match "unders"
 
 # ── Configuration ───────────────────────────────────────────────────────────
 LAST_N_GAMES = 5       # last N finished fixtures per team for form gates
@@ -283,7 +284,10 @@ def _missing_history_teams(candidates, danger_rows, prematch_audit, history_cach
     """Team ids among the scored candidates that have no cached history.
 
     Uses the same danger/prematch resolution as _score_fixture so it never
-    asks for teams whose fixture would not be scored anyway.
+    asks for teams whose fixture would not be scored anyway. Falls back to
+    the prematch audit's team ids when Stage 4 never audited the fixture
+    (no danger row) — those teams otherwise sat in "pending" forever because
+    they were never even queued for backfill.
     """
     missing = set()
     for fixture in candidates:
@@ -293,10 +297,11 @@ def _missing_history_teams(candidates, danger_rows, prematch_audit, history_cach
         danger_row = next(
             (r for r in danger_rows if str(r.get("fixture_id")) == fid), None)
         pm_row = prematch_audit.get(fid) if isinstance(prematch_audit, dict) else None
-        if not danger_row:
-            continue
-        d_home = danger_row.get("home_team") or {}
-        d_away = danger_row.get("away_team") or {}
+        if danger_row is not None:
+            d_home = danger_row.get("home_team") or {}
+            d_away = danger_row.get("away_team") or {}
+        else:
+            d_home, d_away = {}, {}
         home_id = d_home.get("id") or (pm_row or {}).get("home", {}).get("team_id")
         away_id = d_away.get("id") or (pm_row or {}).get("away", {}).get("team_id")
         for tid in (home_id, away_id):
@@ -334,11 +339,12 @@ def _backfill_s9_histories(missing_ids, history_cache):
         rows = resp.get("data") if isinstance(resp, dict) else None
         if not rows:
             # Empty or failed pull — do NOT cache it as "team has no history"
-            # (Stage 4's principle); stop this run so a suspended window is
-            # not hammered and the team retries next cycle instead.
-            print(f"[Stage 9] history backfill: stopping on team {tid} "
+            # (Stage 4's principle). Skip to the NEXT team instead of stopping
+            # the whole run, so one dead team no longer starves the other ~29.
+            # The team retries next cycle.
+            print(f"[Stage 9] history backfill: skipping team {tid} "
                   f"({'no data' if rows is None else 'empty'})")
-            break
+            continue
         history_cache[str(tid)] = {"at": time.time(), "data": rows}
         fetched += 1
     if fetched:
@@ -360,13 +366,18 @@ def _clear_gates(history_cache, home_id, away_id):
     Returns (passed, reasons, detail) where passed is:
       True  — gates evaluated and cleared
       False — gates evaluated and at least one hard condition failed
-      None  — gates NOT evaluable yet (team history not cached); the pick is
-              neither promoted nor killed, and the UI shows "pending".
+      None  — gates NOT evaluable yet (ZERO usable history on a side); the
+              pick is neither promoted nor killed, and the UI shows "pending".
+
+    THIN HISTORY: 1-4 usable games (instead of 5) are evaluated honestly on
+    what exists, with "(thin history n=X)" appended to the reasons and n
+    exposed in detail. Zero history stays None — we never fake confidence.
     """
     h_sc, h_cc, h_n = _compute_last5_form(history_cache, home_id)
     a_sc, a_cc, a_n = _compute_last5_form(history_cache, away_id)
     reasons = []
     detail = {}
+    thin_flags = []
     if h_n == 0:
         if _has_history_entry(history_cache, home_id):
             reasons.append("home has no completed match history")
@@ -376,6 +387,8 @@ def _clear_gates(history_cache, home_id, away_id):
         detail["gate_home_scored"] = h_sc
         detail["gate_home_conceded"] = h_cc
         detail["gate_home_n"] = h_n
+        if h_n < LAST_N_GAMES:
+            thin_flags.append(f"home thin history n={h_n}")
         if h_sc is not None and h_sc > GATE_MAX_SCORED:
             reasons.append(f"home scored {h_sc:.0f} > {GATE_MAX_SCORED}")
         if h_cc is not None and h_cc > GATE_MAX_CONCEDED:
@@ -389,13 +402,19 @@ def _clear_gates(history_cache, home_id, away_id):
         detail["gate_away_scored"] = a_sc
         detail["gate_away_conceded"] = a_cc
         detail["gate_away_n"] = a_n
+        if a_n < LAST_N_GAMES:
+            thin_flags.append(f"away thin history n={a_n}")
         if a_sc is not None and a_sc > GATE_MAX_SCORED:
             reasons.append(f"away scored {a_sc:.0f} > {GATE_MAX_SCORED}")
         if a_cc is not None and a_cc > GATE_MAX_CONCEDED:
             reasons.append(f"away conceded {a_cc:.0f} > {GATE_MAX_CONCEDED}")
     if not reasons:
+        if thin_flags:
+            reasons.extend(thin_flags)
         return True, reasons, detail
-    hard_fail = [r for r in reasons if "pending" not in r]
+    hard_fail = [r for r in reasons if "pending" not in r and "thin history" not in r]
+    if thin_flags and not hard_fail:
+        reasons.extend(thin_flags)
     return (False if hard_fail else None), reasons, detail
 
 
@@ -699,17 +718,20 @@ def _poisson_u35_prob(lam):
     return p
 
 
-def _get_u25_tier(score, signals_fired, gates_passed):
+def _get_u25_tier(score, signals_fired, gates_passed, gate_reasons=""):
     """Assign U2.5 tier using the same structure as the pre-match engine.
 
     gates_passed=False kills the pick (existing behaviour). gates_passed=None
     means the form gates are not evaluable yet (history still backfilling):
     the score tier is kept but marked provisional instead of being killed for
-    data the engine simply does not have yet.
+    data the engine simply does not have yet. Thin history (1-4 games) is
+    evaluated honestly and marked "(thin history)".
     """
     if gates_passed is False:
         return "🚫 U2.5 GATE FAIL"
     suffix = "" if gates_passed else " (gates pending)"
+    if gates_passed and isinstance(gate_reasons, str) and "thin history" in gate_reasons:
+        suffix = " (thin history)"
     if score >= U25_TIER1_SCORE and signals_fired >= 4:
         tier = "🛡️ U2.5 TIER 1 — LOCK"
     elif score >= U25_TIER2_SCORE:
@@ -721,14 +743,17 @@ def _get_u25_tier(score, signals_fired, gates_passed):
     return tier + suffix
 
 
-def _get_u35_tier(score, gates_passed):
+def _get_u35_tier(score, gates_passed, gate_reasons=""):
     """Assign U3.5 tier using the same structure as the pre-match engine.
 
-    Same three-state contract as _get_u25_tier (see above).
+    Same three-state contract as _get_u25_tier (see above), including the
+    "(thin history)" mark for 1-4 game evaluations.
     """
     if gates_passed is False:
         return "🚫 U3.5 GATE FAIL"
     suffix = "" if gates_passed else " (gates pending)"
+    if gates_passed and isinstance(gate_reasons, str) and "thin history" in gate_reasons:
+        suffix = " (thin history)"
     if score >= U35_TIER1_SCORE:
         tier = "🧱 U3.5 TIER 1 — LOCK"
     elif score >= U35_TIER2_SCORE:
@@ -908,8 +933,9 @@ def _score_fixture(fixture, danger_rows, prematch_audit, dna_cache, clash_cache,
     u35_signals_fired = formation_fired + dna_fired
 
     # ── TIERS ────────────────────────────────────────────────────────────────
-    u25_tier = _get_u25_tier(u25_score, u25_signals_fired, gates_passed)
-    u35_tier = _get_u35_tier(u35_score, gates_passed)
+    gate_reasons_preview = "; ".join(gate_reasons) if gate_reasons else ""
+    u25_tier = _get_u25_tier(u25_score, u25_signals_fired, gates_passed, gate_reasons_preview)
+    u35_tier = _get_u35_tier(u35_score, gates_passed, gate_reasons_preview)
 
     # ── BUILD PICK ROW (same structure as UndersPick) ──────────────────────
     home_name = (d_home.get("team_name")
@@ -1107,11 +1133,68 @@ def run_live_under_engine():
         "picks": picks,
     }
 
-    # Atomic write
+    # Atomic write (live file — current live/incoming only, same as before)
     tmp = OUTPUT_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=1, ensure_ascii=False, default=str)
     os.replace(tmp, OUTPUT_FILE)
+
+    # ── DATED SNAPSHOT (5-day history, same as pre-match "unders") ──────────
+    # The live file above is overwritten every cycle and finished fixtures
+    # vanish the next cycle. Pre-match solves this with dated snapshots:
+    # output_store.save("unders", date, ...) -> output/cache/unders__{date}.json,
+    # one file per date that the date picker reads back. Live mirrors it:
+    # output/cache/live_unders__{date}.json accumulates the day's universe —
+    # current picks upserted, previously-seen fixtures that have since finished
+    # retained with fixture_status="finished" + finished_date. Same collapse
+    # guard as pre-match so a thin cycle can never wipe a good snapshot.
+    try:
+        sys.path.insert(0, BASE_DIR) if BASE_DIR not in sys.path else None
+        import output_store as _live_store
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        prev_data, _ = _live_store.load(LIVE_UNDERS_SAVE_KEY, today_str, default=[])
+        prev_rows = prev_data if isinstance(prev_data, list) else []
+        prev_by_id = {str(r.get("fixture_id")): r for r in prev_rows
+                       if isinstance(r, dict) and r.get("fixture_id") not in (None, "")}
+        current_ids = {str(p.get("fixture_id")) for p in picks
+                        if isinstance(p, dict) and p.get("fixture_id") not in (None, "")}
+        merged = [dict(p) for p in picks if isinstance(p, dict)]
+        retained = 0
+        for fid, old in prev_by_id.items():
+            if fid in current_ids:
+                continue  # still live/incoming — current row wins
+            row = dict(old)
+            # Only retain fixtures that actually finished; a fixture missing
+            # from candidates for any other reason (e.g. lineup withdrawn)
+            # stays out rather than freezing a stale pick as history.
+            finished = False
+            try:
+                pm = prematch_audit.get(fid) if isinstance(prematch_audit, dict) else None
+                if isinstance(pm, dict) and pm.get("is_finished"):
+                    finished = True
+            except Exception:
+                finished = False
+            if not finished:
+                for m in matches:
+                    if not isinstance(m, dict):
+                        continue
+                    mid = str(m.get("id") or m.get("fixture_id") or "")
+                    if mid == fid and m.get("is_finished"):
+                        finished = True
+                        break
+            if not finished:
+                continue
+            row["fixture_status"] = "finished"
+            row["is_live"] = False
+            row.setdefault("finished_date", today_str)
+            merged.append(row)
+            retained += 1
+        _live_store.save(LIVE_UNDERS_SAVE_KEY, today_str, merged, guard=True)
+        print(f"[Stage 9] dated snapshot: {len(merged)} rows "
+              f"({len(picks)} current + {retained} retained finished) "
+              f"-> {LIVE_UNDERS_SAVE_KEY}__{today_str}")
+    except Exception as exc:
+        print(f"[Stage 9] dated snapshot failed (live file still written): {exc}")
 
     print(f"[Stage 9] Live Under Engine: {len(picks)} under picks written to {OUTPUT_FILE}")
     return payload

@@ -1274,7 +1274,11 @@ export interface UndersResponse {
  */
 export interface LiveUndersPick extends UndersPick {
   is_live: boolean;
-  fixture_status: "live" | "incoming";
+  // "finished" rows come from the dated snapshots (output/cache/live_unders__{date}.json)
+  // — same 5-day history pattern as pre-match — so users can study how the
+  // engine read a match after FT. They render dimmed, never as actionable.
+  fixture_status: "live" | "incoming" | "finished";
+  finished_date?: string;
   // Per-line verification payloads attached by GET /api/live/unders:
   // `verification` grades the U2.5 line (total <= 2 wins),
   // `verification_u35` grades the U3.5 line (total <= 3 wins).
@@ -3142,9 +3146,14 @@ export const liveApi = {
   getDashboard: (): Promise<AxiosResponse<LiveDashboardResult[]>> =>
     api.get("/api/live/dashboard"),
 
-  /** Stage 9 — LIVE Under picks (Stage 9 live under engine). */
-  getLiveUnders: (): Promise<AxiosResponse<LiveUndersResponse>> =>
-    api.get("/api/live/unders"),
+  /**
+   * Stage 9 — LIVE Under picks (Stage 9 live under engine).
+   * Pass a date (YYYY-MM-DD) for that day's frozen snapshot incl. finished
+   * picks — same 5-day history pattern as pre-match getUnders(date).
+   * Omit it for today's live/incoming view.
+   */
+  getLiveUnders: (date?: string): Promise<AxiosResponse<LiveUndersResponse>> =>
+    api.get(date ? `/api/live/unders/${date}` : "/api/live/unders"),
 };
 
 export const userRulesApi = {
