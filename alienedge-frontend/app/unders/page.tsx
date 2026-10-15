@@ -286,24 +286,26 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
       </div>
 
       {/* ── 5. INCOMING MATCH UNDER LIST (Stage 9) ───────────────────── */}
-      {livePicks.length > 0 && (
-        <div>
-          <ChainBranch
-            title="Incoming Match Under List"
-            description={
-              livePicks.some((p) => p.fixture_status === "live")
-                ? "Live match + incoming fixtures with official lineups"
-                : "Incoming fixtures with official lineups awaiting kickoff"
-            }
-            data={livePicks}
-            loading={liveResult.loading}
-            error={liveResult.error}
-            columns={[liveColumn, ...u25Columns.slice(1), ...u35Columns.slice(1)]}
-            rowKey={(r) => String(r.fixture_id)}
-            emptyMessage="No incoming/live picks at the moment."
-          />
-        </div>
-      )}
+      {/* Always rendered — even at 0 picks — so the section, its loading /
+          empty state and its errors are visible. Hiding it on
+          livePicks.length > 0 made the whole engine silently disappear on
+          quiet hours, which read as "the engine is broken/offline". */}
+      <div>
+        <ChainBranch
+          title="Incoming Match Under List"
+          description={
+            livePicks.some((p) => p.fixture_status === "live")
+              ? "Live match + incoming fixtures with official lineups"
+              : "Incoming fixtures with official lineups awaiting kickoff"
+          }
+          data={livePicks}
+          loading={liveResult.loading}
+          error={liveResult.error}
+          columns={[liveColumn, ...u25Columns.slice(1), ...u35Columns.slice(1)]}
+          rowKey={(r) => String(r.fixture_id)}
+          emptyMessage="No incoming/live picks at the moment."
+        />
+      </div>
     </div>
   );
 }
