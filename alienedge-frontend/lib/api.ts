@@ -1265,12 +1265,15 @@ export interface UndersResponse {
 /**
  * Stage 9 — LIVE Under picks.
  *
- * Same shape as UndersPick but with `is_live: true` so the frontend can
- * distinguish them from pre-match picks and badge them as LIVE. Also carries
- * formation_home / formation_away for transparency.
+ * Same shape as UndersPick but with `is_live` carrying the REAL match state:
+ * true only for in-play fixtures, false for incoming (not-started) ones, so
+ * the LIVE badge never lights up on a fixture that hasn't kicked off.
+ * `fixture_status` is the authoritative live/incoming discriminator and also
+ * drives the LIVE/INCOMING count badges. Also carries formation_home /
+ * formation_away for transparency.
  */
 export interface LiveUndersPick extends UndersPick {
-  is_live: true;
+  is_live: boolean;
   fixture_status: "live" | "incoming";
   formation_home?: string | null;
   formation_away?: string | null;
