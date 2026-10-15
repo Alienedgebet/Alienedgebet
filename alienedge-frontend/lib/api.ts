@@ -1254,6 +1254,7 @@ export interface UndersPick extends FixtureRisk {
   gate_home_conceded?: number;
   gate_away_conceded?: number;
   gate_h2h?: string;
+  is_live?: boolean;
 }
 
 export interface UndersResponse {
