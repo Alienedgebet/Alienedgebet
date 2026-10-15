@@ -294,25 +294,46 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
         />
       </div>
 
-      {/* ── 5. INCOMING MATCH UNDER LIST (Stage 9) ───────────────────── */}
+      {/* ── 5. INCOMING UNDER 2.5 (Stage 9) ──────────────────────────── */}
       {/* Always rendered — even at 0 picks — so the section, its loading /
           empty state and its errors are visible. Hiding it on
           livePicks.length > 0 made the whole engine silently disappear on
-          quiet hours, which read as "the engine is broken/offline". */}
+          quiet hours, which read as "the engine is broken/offline".
+          Split from the old combined "Incoming Match Under List" into
+          separate U2.5 / U3.5 tables — same shape as the pre-match pack
+          above — each with Verify + DNA columns. */}
       <div>
         <ChainBranch
-          title="Incoming Match Under List"
+          title="Incoming Under 2.5"
           description={
             livePicks.some((p) => p.fixture_status === "live")
-              ? "Live match + incoming fixtures with official lineups"
-              : "Incoming fixtures with official lineups awaiting kickoff"
+              ? "Live + incoming fixtures with official lineups — U2.5 view"
+              : "Incoming fixtures with official lineups — U2.5 view"
           }
           data={livePicks}
           loading={liveResult.loading}
           error={liveResult.error}
-          columns={[liveColumn, ...u25Columns.slice(1), ...u35Columns.slice(1)]}
-          rowKey={(r) => String(r.fixture_id)}
-          emptyMessage="No incoming/live picks at the moment."
+          columns={u25ColumnsWithVerifyAndDna}
+          rowKey={(r) => String((r as LiveUndersPick).fixture_id)}
+          emptyMessage="No incoming/live U2.5 picks at the moment."
+        />
+      </div>
+
+      {/* ── 6. INCOMING UNDER 3.5 (Stage 9) ──────────────────────────── */}
+      <div>
+        <ChainBranch
+          title="Incoming Under 3.5"
+          description={
+            livePicks.some((p) => p.fixture_status === "live")
+              ? "Live + incoming fixtures with official lineups — U3.5 view"
+              : "Incoming fixtures with official lineups — U3.5 view"
+          }
+          data={livePicks}
+          loading={liveResult.loading}
+          error={liveResult.error}
+          columns={u35ColumnsWithVerifyAndDna}
+          rowKey={(r) => String((r as LiveUndersPick).fixture_id)}
+          emptyMessage="No incoming/live U3.5 picks at the moment."
         />
       </div>
     </div>
