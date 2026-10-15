@@ -39,6 +39,7 @@ import math
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 # ── Path setup so imports work whether run directly or from the scanner ──────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,6 +59,21 @@ STYLE_CLASHES_FILE = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
 HISTORY_CACHE_FILE = os.path.join(DATA_DIR, "danger_history_cache.json")
 # NOT "live_predictions.json" — that belongs to Code 1 / Stage 1.
 OUTPUT_FILE = os.path.join(DATA_DIR, "stage9_live_unders.json")
+
+# ── Stage 9's OWN light per-team history cache ──────────────────────────────
+# The form gates and lambda need each team's last-5 completed fixtures, which
+# live in Stage 4's danger_history_cache.json — but that cache only holds the
+# teams Stage 4 happened to fetch, so on a quiet afternoon every incoming
+# fixture failed the gates with "no completed match history" (data missing,
+# not bad form — the exact dishonesty Stage 4's own comments refuse to make).
+# Stage 9 therefore backfills the missing teams itself, bounded per cycle,
+# through the SAME paced/429-aware GET Stage 3 uses. The rows land in a
+# SEPARATE file on purpose: this cache carries only scores/participants/
+# state_id, while Stage 4's reader needs lineups/statistics payloads that a
+# light entry would silently break.
+S9_HISTORY_FILE = os.path.join(DATA_DIR, "stage9_history_cache.json")
+S9_HISTORY_TTL = 6 * 3600       # same refresh cadence as Stage 4's HISTORY_TTL
+S9_BACKFILL_MAX_PER_RUN = 12    # ~80 teams warm up over ~7 cycles, quota-safe
 
 # ── Configuration ───────────────────────────────────────────────────────────
 LAST_N_GAMES = 5       # last N finished fixtures per team for form gates
@@ -232,20 +248,130 @@ def _compute_last5_form(history_cache, team_id):
     return scored_total, conceded_total, count
 
 
+def _has_history_entry(history_cache, team_id):
+    """True when the cache holds an entry for the team at all.
+
+    Distinguishes 'never fetched' (gates cannot be evaluated yet) from
+    'fetched, nothing usable in it' (gates legitimately see no history).
+    """
+    tid = str(team_id)
+    entry = history_cache.get(tid) or history_cache.get(_safe_int(team_id))
+    return isinstance(entry, dict)
+
+
+def _load_s9_history():
+    """Load Stage 9's own light history cache, dropping expired entries."""
+    data = _load_json(S9_HISTORY_FILE, {})
+    if not isinstance(data, dict):
+        return {}
+    now = time.time()
+    return {
+        k: v for k, v in data.items()
+        if isinstance(v, dict) and (now - v.get("at", 0)) < S9_HISTORY_TTL
+    }
+
+
+def _save_s9_history(cache):
+    """Atomically persist Stage 9's light history cache."""
+    tmp = S9_HISTORY_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, default=str)
+    os.replace(tmp, S9_HISTORY_FILE)
+
+
+def _missing_history_teams(candidates, danger_rows, prematch_audit, history_cache):
+    """Team ids among the scored candidates that have no cached history.
+
+    Uses the same danger/prematch resolution as _score_fixture so it never
+    asks for teams whose fixture would not be scored anyway.
+    """
+    missing = set()
+    for fixture in candidates:
+        if not isinstance(fixture, dict) or fixture.get("is_finished"):
+            continue
+        fid = str(fixture.get("id") or fixture.get("fixture_id") or "")
+        danger_row = next(
+            (r for r in danger_rows if str(r.get("fixture_id")) == fid), None)
+        pm_row = prematch_audit.get(fid) if isinstance(prematch_audit, dict) else None
+        if not danger_row:
+            continue
+        d_home = danger_row.get("home_team") or {}
+        d_away = danger_row.get("away_team") or {}
+        home_id = d_home.get("id") or (pm_row or {}).get("home", {}).get("team_id")
+        away_id = d_away.get("id") or (pm_row or {}).get("away", {}).get("team_id")
+        for tid in (home_id, away_id):
+            if tid is not None and not _has_history_entry(history_cache, tid):
+                missing.add(str(tid))
+    return missing
+
+
+def _backfill_s9_histories(missing_ids, history_cache):
+    """Fetch light last-N fixtures for teams lacking history, bounded per run.
+
+    Goes through Stage 3's paced, 429-aware GET (shared provider gate) and
+    stops early on any acquisition failure so a suspended provider window
+    never gets hammered. Returns the updated cache (also persisted).
+    """
+    if not missing_ids:
+        return history_cache
+    try:
+        from LIVE_SCANNER.live_stage3_incoming import GET as _GET
+    except Exception as exc:
+        print(f"[Stage 9] history backfill unavailable: {exc}")
+        return history_cache
+    end_dt = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    start_dt = (datetime.now(timezone.utc).date() - timedelta(days=150)).isoformat()
+    fetched = 0
+    for tid in sorted(missing_ids)[:S9_BACKFILL_MAX_PER_RUN]:
+        resp = _GET(
+            f"/fixtures/between/{start_dt}/{end_dt}/{tid}",
+            params={
+                "include": "scores;participants",
+                "filter": "fixtureStates:5",
+                "per_page": 50,
+            },
+        )
+        rows = resp.get("data") if isinstance(resp, dict) else None
+        if not rows:
+            # Empty or failed pull — do NOT cache it as "team has no history"
+            # (Stage 4's principle); stop this run so a suspended window is
+            # not hammered and the team retries next cycle instead.
+            print(f"[Stage 9] history backfill: stopping on team {tid} "
+                  f"({'no data' if rows is None else 'empty'})")
+            break
+        history_cache[str(tid)] = {"at": time.time(), "data": rows}
+        fetched += 1
+    if fetched:
+        try:
+            _save_s9_history(history_cache)
+            print(f"[Stage 9] history backfill: cached {fetched} team(s) "
+                  f"({len(missing_ids) - fetched} remaining)")
+        except Exception as exc:
+            print(f"[Stage 9] history cache save failed: {exc}")
+    return history_cache
+
+
 def _clear_gates(history_cache, home_id, away_id):
     """Apply the defensive-form gates.
 
     GATE 1: neither team scored more than GATE_MAX_SCORED in last 5
     GATE 2: neither team conceded more than GATE_MAX_CONCEDED in last 5
 
-    Returns (passed: bool, reasons: list, detail: dict).
+    Returns (passed, reasons, detail) where passed is:
+      True  — gates evaluated and cleared
+      False — gates evaluated and at least one hard condition failed
+      None  — gates NOT evaluable yet (team history not cached); the pick is
+              neither promoted nor killed, and the UI shows "pending".
     """
     h_sc, h_cc, h_n = _compute_last5_form(history_cache, home_id)
     a_sc, a_cc, a_n = _compute_last5_form(history_cache, away_id)
     reasons = []
     detail = {}
     if h_n == 0:
-        reasons.append("home has no completed match history")
+        if _has_history_entry(history_cache, home_id):
+            reasons.append("home has no completed match history")
+        else:
+            reasons.append("home history pending — gates not yet evaluable")
     else:
         detail["gate_home_scored"] = h_sc
         detail["gate_home_conceded"] = h_cc
@@ -255,7 +381,10 @@ def _clear_gates(history_cache, home_id, away_id):
         if h_cc is not None and h_cc > GATE_MAX_CONCEDED:
             reasons.append(f"home conceded {h_cc:.0f} > {GATE_MAX_CONCEDED}")
     if a_n == 0:
-        reasons.append("away has no completed match history")
+        if _has_history_entry(history_cache, away_id):
+            reasons.append("away has no completed match history")
+        else:
+            reasons.append("away history pending — gates not yet evaluable")
     else:
         detail["gate_away_scored"] = a_sc
         detail["gate_away_conceded"] = a_cc
@@ -264,7 +393,10 @@ def _clear_gates(history_cache, home_id, away_id):
             reasons.append(f"away scored {a_sc:.0f} > {GATE_MAX_SCORED}")
         if a_cc is not None and a_cc > GATE_MAX_CONCEDED:
             reasons.append(f"away conceded {a_cc:.0f} > {GATE_MAX_CONCEDED}")
-    return (len(reasons) == 0, reasons, detail)
+    if not reasons:
+        return True, reasons, detail
+    hard_fail = [r for r in reasons if "pending" not in r]
+    return (False if hard_fail else None), reasons, detail
 
 
 # ── FORMATION & ARCHETYPE DETECTION ────────────────────────────────────────────
@@ -568,31 +700,44 @@ def _poisson_u35_prob(lam):
 
 
 def _get_u25_tier(score, signals_fired, gates_passed):
-    """Assign U2.5 tier using the same structure as the pre-match engine."""
-    if not gates_passed:
+    """Assign U2.5 tier using the same structure as the pre-match engine.
+
+    gates_passed=False kills the pick (existing behaviour). gates_passed=None
+    means the form gates are not evaluable yet (history still backfilling):
+    the score tier is kept but marked provisional instead of being killed for
+    data the engine simply does not have yet.
+    """
+    if gates_passed is False:
         return "🚫 U2.5 GATE FAIL"
+    suffix = "" if gates_passed else " (gates pending)"
     if score >= U25_TIER1_SCORE and signals_fired >= 4:
-        return "🛡️ U2.5 TIER 1 — LOCK"
+        tier = "🛡️ U2.5 TIER 1 — LOCK"
     elif score >= U25_TIER2_SCORE:
-        return "✅ U2.5 TIER 2 — SOLID"
+        tier = "✅ U2.5 TIER 2 — SOLID"
     elif score >= U25_TIER3_SCORE:
-        return "📊 U2.5 TIER 3 — LEAN"
+        tier = "📊 U2.5 TIER 3 — LEAN"
     else:
-        return "⚪ U2.5 BELOW THRESHOLD"
+        tier = "⚪ U2.5 BELOW THRESHOLD"
+    return tier + suffix
 
 
 def _get_u35_tier(score, gates_passed):
-    """Assign U3.5 tier using the same structure as the pre-match engine."""
-    if not gates_passed:
+    """Assign U3.5 tier using the same structure as the pre-match engine.
+
+    Same three-state contract as _get_u25_tier (see above).
+    """
+    if gates_passed is False:
         return "🚫 U3.5 GATE FAIL"
+    suffix = "" if gates_passed else " (gates pending)"
     if score >= U35_TIER1_SCORE:
-        return "🧱 U3.5 TIER 1 — LOCK"
+        tier = "🧱 U3.5 TIER 1 — LOCK"
     elif score >= U35_TIER2_SCORE:
-        return "✅ U3.5 TIER 2 — SOLID"
+        tier = "✅ U3.5 TIER 2 — SOLID"
     elif score >= U35_TIER3_SCORE:
-        return "📊 U3.5 TIER 3 — LEAN"
+        tier = "📊 U3.5 TIER 3 — LEAN"
     else:
-        return "⚪ U3.5 BELOW THRESHOLD"
+        tier = "⚪ U3.5 BELOW THRESHOLD"
+    return tier + suffix
 
 
 # ── MAIN SCORING ───────────────────────────────────────────────────────────────
@@ -872,7 +1017,15 @@ def run_live_under_engine():
     prematch_audit = _load_json(PREMATCH_FILE, {})  # dict keyed by fixture_id
     dna_cache = _load_json(DNA_PROFILES_FILE, {})
     clash_cache = _as_rows(_load_json(STYLE_CLASHES_FILE, []))
-    history_cache = _load_json(HISTORY_CACHE_FILE, {})
+    # Form gates + lambda read this merged view: Stage 4's heavy cache wins on
+    # overlap, Stage 9's own light cache covers the teams Stage 4 never fetched
+    # (backfilled below, bounded per run).
+    s9_history = _load_s9_history()
+    stage4_history = _load_json(HISTORY_CACHE_FILE, {})
+    if isinstance(stage4_history, dict):
+        history_cache = {**s9_history, **stage4_history}
+    else:
+        history_cache = s9_history
 
     # ── CANDIDATE SET: board ∪ prematch-audit upcoming ──────────────────────
     # The orchestrator board only ever carries IN-PLAY matches — plus retained
@@ -909,6 +1062,21 @@ def run_live_under_engine():
                     row.get("is_upcoming") or row.get("state") == "NOT_STARTED"
                 ),
             })
+
+    # ── HISTORY BACKFILL (bounded, paced) ────────────────────────────────────
+    # Warm the light per-team history cache for candidates the merged view
+    # cannot evaluate yet, so the form gates and lambda flip from "pending" to
+    # real reads over the next few cycles instead of failing every pick.
+    # Backfill writes into Stage 9's LIGHT cache only — never into the merged
+    # view — so Stage 4's heavy entries are never duplicated to disk here.
+    missing = _missing_history_teams(candidates, danger_rows, prematch_audit,
+                                     history_cache)
+    if missing:
+        s9_history = _backfill_s9_histories(missing, s9_history)
+        if isinstance(stage4_history, dict):
+            history_cache = {**s9_history, **stage4_history}
+        else:
+            history_cache = s9_history
 
     picks = []
     for fixture in candidates:
