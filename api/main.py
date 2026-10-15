@@ -3223,6 +3223,30 @@ def get_live_dashboard():
     return _read_json(os.path.join(OUTPUT_DIR, "live_dashboard.json"), [])
 
 
+@app.get("/api/live/unders", tags=["Live"])
+def get_live_unders():
+    """
+    Live under picks from Stage 9 (Live Under Engine).
+
+    Returns picks written by LIVE_SCANNER/live_stage9_under_engine.py to
+    stage9_live_unders.json. Each pick carries ``is_live: true`` and
+    ``fixture_status: "live" | "incoming"`` so the frontend can display
+    them in a dedicated "Incoming Match Under List" section below the
+    pre-match picks.
+
+    The file is written atomically per cycle; a missing or stale file returns
+    an empty list so the frontend degrades gracefully to pre-match picks only.
+    """
+    data = _read_json(os.path.join(DATA_DIR, "stage9_live_unders.json"), {})
+    if not isinstance(data, dict):
+        return {"generated_at": None, "engines": 0, "picks": []}
+    return {
+        "generated_at": data.get("generated_at"),
+        "engines": data.get("engines", 0),
+        "picks": data.get("picks", []),
+    }
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # FILTER ENDPOINTS — two paths, one contract.
 #

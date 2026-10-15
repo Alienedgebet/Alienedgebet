@@ -211,6 +211,18 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.warning(f"[Stage 8 Live Prediction] skipped: {e}")
 
+# ── 8. STAGE 9: LIVE UNDER ENGINE ────────────────────────────────────────
+        # Read-only and zero API calls: it consumes the board Stage 6 just
+        # wrote, plus the on-disk data the live cycle already maintains
+        # (danger_audit, prematch_team_audit, DNA profiles, style clashes,
+        # history cache). Produces stage9_live_unders.json for the API.
+        try:
+            from LIVE_SCANNER.live_stage9_under_engine import (
+                run_live_under_engine)
+            run_live_under_engine()
+        except Exception as e:
+            logging.warning(f"[Stage 9 Live Under Engine] skipped: {e}")
+
         # ── 7. STAGE 2: REMOVED ─────────────────────────────────────────────
         # The live validator (live_stage2_verification.py) no longer runs. Its
         # module is kept on disk so it stays reversible and its contract tests

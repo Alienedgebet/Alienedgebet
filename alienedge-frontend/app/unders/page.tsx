@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { TrendingDown } from "lucide-react";
-import { specialsApi, type UndersPick } from "@/lib/api";
+import { specialsApi, liveApi, type UndersPick, type LiveUndersPick } from "@/lib/api";
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi, VERIFY_REFRESH_MS } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
@@ -16,7 +16,20 @@ import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortUnders } from "@/lib/cross-engine-ranking";
 
+const liveColumn: PredictionColumn<UndersPick> = {
+  key: "live_badge",
+  header: "",
+  className: "w-[50px]",
+  render: (r) =>
+    r.is_live ? (
+      <span className="inline-flex items-center gap-1 rounded bg-accent-red/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-accent-red">
+        LIVE
+      </span>
+    ) : null,
+};
+
 const u25Columns: PredictionColumn<UndersPick>[] = [
+  liveColumn,
   {
     key: "fixture",
     header: "Fixture",
@@ -81,6 +94,7 @@ const u25Columns: PredictionColumn<UndersPick>[] = [
 ];
 
 const u35Columns: PredictionColumn<UndersPick>[] = [
+  liveColumn,
   {
     key: "fixture",
     header: "Fixture",
@@ -136,6 +150,20 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
     refreshMs: VERIFY_REFRESH_MS,
   });
 
+  // Stage 9 — LIVE + INCOMING under picks. Polls at the same cadence as the
+  // live scanner cycle so a pick that flips tier mid-match is reflected promptly.
+  // These picks are rendered in a SEPARATE section below the pre-match picks,
+  // with its own headline: "Incoming Match Under List".
+  const liveResult = useApi(
+    () => liveApi.getLiveUnders(),
+    [],
+    { refreshMs: 45_000, cacheKey: "live:unders" },
+  );
+
+  const prematchU25 = result.data?.u25 ?? [];
+  const prematchU35 = result.data?.u35 ?? [];
+  const livePicks = (liveResult.data?.picks ?? []) as LiveUndersPick[];
+
   // Under 2.5 (Verify -> DNA -> Rest)
   const u25ColumnsWithVerifyAndDna = useMemo(
     () => [
@@ -165,18 +193,17 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
   // only when useApi flagged them (demo explicitly enabled). API failures
   // surface through ChainBranch's error state below.
   const live = result.data;
-  const payload = live;
   const isMock = result.isMock;
 
   // The same measured rule drives both lists, but each falls back to its OWN
   // score column so the non-qualifying block still has a sensible order.
   const orderedU25 = useMemo(
-    () => (smartRank && payload?.u25 ? sortUnders(payload.u25, "u25_score") : payload?.u25 ?? []),
-    [payload, smartRank]
+    () => (smartRank && prematchU25.length ? sortUnders(prematchU25, "u25_score") : prematchU25),
+    [prematchU25, smartRank],
   );
   const orderedU35 = useMemo(
-    () => (smartRank && payload?.u35 ? sortUnders(payload.u35, "u35_score") : payload?.u35 ?? []),
-    [payload, smartRank]
+    () => (smartRank && prematchU35.length ? sortUnders(prematchU35, "u35_score") : prematchU35),
+    [prematchU35, smartRank],
   );
 
   return (
@@ -195,7 +222,17 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
               Unders Intelligence
             </h1>
             <p className="text-[11px] text-text-secondary">
-              Defensive Under Empire — composite analysis covering Under 2.5 &amp; Under 3.5
+              Defensive Under Empire — composite analysis covering Under 2.5 &amp; Under 3.5{" "}
+              {livePicks.length > 0 && (
+                <span className="ml-2 inline-flex items-center gap-1 rounded bg-accent-red/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-accent-red">
+                  {livePicks.filter((p) => p.fixture_status === "live").length} LIVE
+                </span>
+              )}
+              {livePicks.filter((p) => p.fixture_status === "incoming").length > 0 && (
+                <span className="ml-1 inline-flex items-center gap-1 rounded bg-accent-orange/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-accent-orange">
+                  {livePicks.filter((p) => p.fixture_status === "incoming").length} INCOMING
+                </span>
+              )}
             </p>
           </div>
         </div>
@@ -247,6 +284,26 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           emptyMessage="No Under 3.5 picks for this date."
         />
       </div>
+
+      {/* ── 5. INCOMING MATCH UNDER LIST (Stage 9) ───────────────────── */}
+      {livePicks.length > 0 && (
+        <div>
+          <ChainBranch
+            title="Incoming Match Under List"
+            description={
+              livePicks.some((p) => p.fixture_status === "live")
+                ? "Live match + incoming fixtures with official lineups"
+                : "Incoming fixtures with official lineups awaiting kickoff"
+            }
+            data={livePicks}
+            loading={liveResult.loading}
+            error={liveResult.error}
+            columns={[liveColumn, ...u25Columns.slice(1), ...u35Columns.slice(1)]}
+            rowKey={(r) => String(r.fixture_id)}
+            emptyMessage="No incoming/live picks at the moment."
+          />
+        </div>
+      )}
     </div>
   );
 }
