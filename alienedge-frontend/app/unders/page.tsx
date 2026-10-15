@@ -50,6 +50,15 @@ const u25Columns: PredictionColumn<UndersPick>[] = [
     render: (r) =>
       r.gates_passed === false ? (
         <span className="text-danger-600">🚫 {r.gate_reasons || "failed"}</span>
+      ) : r.gates_passed == null ? (
+        // Stage 9 live picks: form history is still backfilling, so the gates
+        // are honestly "not evaluable yet" — neither promoted nor killed.
+        <span
+          className="text-muted-foreground"
+          title={r.gate_reasons || "form history still loading"}
+        >
+          ⏳ pending
+        </span>
       ) : (
         <span className="text-muted-foreground">✓ all passed</span>
       ),
