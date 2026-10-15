@@ -43,7 +43,7 @@ import {
   WIN_ODDS_MAX,
   DRAW_SCORE_MIN,
   DRAW_H2H_MIN,
-  UNDERS_LAMBDA_MIN,
+  UNDERS_LAMBDA_MAX,
   UNDERS_MC_PROB_MIN,
 } from "../lib/cross-engine-ranking";
 
@@ -163,7 +163,7 @@ console.log("cross-engine-ranking (real data)");
     const base = hitRate(rows);
     pass(`${market} (unproven)`, sel.length > 0 && hit > base,
       `n=${sel.length} hit=${hit.toFixed(1)}% > base ${base.toFixed(1)}%  ` +
-      `lambda>=${UNDERS_LAMBDA_MIN} & mc_u25_prob>=${UNDERS_MC_PROB_MIN}`);
+      `lambda<=${UNDERS_LAMBDA_MAX} & mc_u25_prob>=${UNDERS_MC_PROB_MIN}`);
   }
 }
 {

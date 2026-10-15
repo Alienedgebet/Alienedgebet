@@ -100,9 +100,9 @@ export const DRAW_H2H_MIN = 1;
 /**
  * U25 / U35 — REAL LIFT, BUT NOT YET PROVEN. Marked tentative in the UI.
  *
- * U25: combined_lambda >= 2.4 AND mc_u25_prob >= 0.565
+ * U25: combined_lambda <= 2.4 AND mc_u25_prob >= 0.565
  *   -> 46 rows, 65.2% vs 43.1% (+22.2pp), CI [+6.8, +36.8], LODO 6-8 of 7-8
- * U35: combined_lambda >= 2.4 AND mc_u25_prob >= 0.565
+ * U35: combined_lambda <= 2.4 AND mc_u35_prob >= 0.565
  *   -> 46 rows, 89.1% vs 65.5% (+23.6pp), CI [+13.5, +32.0], LODO 7/7-8
  *
  * Both fail Bonferroni (8.98 and 1.28) because 2,436 and 2,035 cut-points were
@@ -110,8 +110,14 @@ export const DRAW_H2H_MIN = 1;
  * large and the CI excludes zero, but at n=46 across 15 days this is a
  * candidate, not a law. It is offered as a reversible display-only toggle and
  * labelled UNPROVEN rather than presented as evidence-backed.
+ *
+ * FIX 2026-10-15: combined_lambda is expected-total-goals (lambda_home + lambda_away).
+ * For UNDER picks, LOWER lambda is better (fewer expected goals => more likely under).
+ * The original code used `>=` (atLeast), which selected HIGH-lambda fixtures — the
+ * wrong direction for unders. Changed to `<=` (atMost) to select LOW-lambda fixtures.
+ * This matches signal sig2_fired = combined_lambda <= 2.4 in unders_engine.py.
  */
-export const UNDERS_LAMBDA_MIN = 2.4;
+export const UNDERS_LAMBDA_MAX = 2.4;
 export const UNDERS_MC_PROB_MIN = 0.565;
 
 /** CORNERS — borrowed from calibration. */
@@ -460,12 +466,17 @@ export function sortDraw<T extends object>(rows: T[]): T[] {
 /* -------------------------- U25 / U35 -------------------------- */
 
 /**
- * The unders rule, shared by both markets: `combined_lambda >= 2.4 AND
+ * The unders rule, shared by both markets: `combined_lambda <= 2.4 AND
  * mc_u25_prob >= 0.565`. It is deliberately NOT marked proven — see the
  * UNDERS_* constants.
+ *
+ * FIX 2026-10-15: was `combined_lambda >= UNDERS_LAMBDA_MIN` (>= atLeast),
+ * which selected high-expected-goals fixtures — the wrong direction for
+ * under markets. Now uses `atMost` (<= UNDERS_LAMBDA_MAX) to select
+ * low-expected-goals fixtures, matching the engine's sig2_fired logic.
  */
 export function undersQualifies(row: Record<string, unknown>): boolean {
-  return atLeast(row.combined_lambda, UNDERS_LAMBDA_MIN) &&
+  return atMost(row.combined_lambda, UNDERS_LAMBDA_MAX) &&
     atLeast(row.mc_u25_prob, UNDERS_MC_PROB_MIN);
 }
 
