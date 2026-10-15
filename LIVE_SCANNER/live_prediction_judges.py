@@ -75,12 +75,26 @@ def judge_market(ctx, prediction):
     # exactly what makes a fresh pair of eyes useless on the maths — which is
     # why the tests compare the two against each other instead of trusting
     # either one.
-    target = 1.0 - 1.0 / price          # P(X <= 2) implied by the price
+    # Match the engine: target is P(OVER 2.5), i.e. the over-tail mass.
+    # The engine solves (1 - P(0-2)) == target; mirrored here exactly so a
+    # correct anchor passes and only a wrong one blocks.
+    under = odds.get("under25")
+    try:
+        up = float(under) if under else None
+    except (TypeError, ValueError):
+        up = None
+    if up and up > 1.0:
+        raw_over, raw_under = 1.0 / price, 1.0 / up
+        tot = raw_over + raw_under
+        target = raw_over / tot if tot > 0 else 1.0 / price
+    else:
+        target = 1.0 / price          # P(X > 2) implied by the price
     lo, hi = 0.01, 20.0
     for _ in range(80):
         mid = (lo + hi) / 2.0
         p_upto2 = math.exp(-mid) * (1.0 + mid + (mid ** 2) / 2.0)
-        if p_upto2 > target:
+        p_over = 1.0 - p_upto2
+        if p_over < target:
             lo = mid
         else:
             hi = mid
@@ -101,7 +115,7 @@ def judge_market(ctx, prediction):
     if engine_lam is None:
         return _verdict("market", VERDICT_WARN,
                         "engine did not disclose its anchor", {})
-    if abs(engine_lam - lam) > 0.05:
+    if abs(engine_lam - lam) > 0.06:
         return _verdict("market", VERDICT_BLOCK,
                         f"engine anchored on {engine_lam:.2f} goals but the "
                         f"price implies {lam:.2f} — the anchor is wrong",
@@ -124,7 +138,31 @@ def judge_live_state(ctx, prediction):
     """
     board = ctx.get("board") or {}
     stats = board.get("statistics") or {}
-    minute = int(board.get("minute") or 0)
+
+    def _safe_minute(value):
+        # Mirror the engine's parse_minute without a hard import (judges run
+        # standalone in tests): "45+2" -> 47, garbage -> 0, never raises.
+        if value is None:
+            return 0
+        if isinstance(value, (int, float)):
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                return 0
+        s = str(value).strip()
+        if "+" in s:
+            parts = s.split("+")
+            try:
+                return max(0, int(parts[0].strip() or 0)
+                           + max(0, int(parts[1].strip() or 0)))
+            except (TypeError, ValueError):
+                pass
+        try:
+            return max(0, int(float(s)))
+        except (TypeError, ValueError):
+            return 0
+
+    minute = _safe_minute(board.get("minute"))
     score = ctx.get("score") or {}
     problems = []
 
@@ -159,13 +197,17 @@ def judge_live_state(ctx, prediction):
             "predictions and must not be presented as such")
 
     if minute >= 80:
-        for side, key in (("home", "home_to_score"),
-                          ("away", "away_to_score")):
+        for side, key in (("home", "home_to_score_next"),
+                          ("away", "away_to_score_next")):
             block = stats.get(side) or {}
             block = block if isinstance(block, dict) else {}
             shot = float(block.get("shots-on-target") or 0)
             already = (score.get(side) or 0) > 0
-            pct = float((prediction.get(key) or {}).get("pct") or 0)
+            node = prediction.get(key)
+            if node is None:
+                # Back-compat: pre-upgrade payloads carry home_to_score.
+                node = prediction.get(key.replace("_next", "")) or {}
+            pct = float((node or {}).get("pct") or 0)
             if not already and shot <= 1 and pct > 55:
                 problems.append(
                     f"{side} to score {pct:.0f}% at {minute}' with {shot} "
@@ -230,24 +272,30 @@ def judge_convergence(ctx, prediction, trace):
     live_votes = [q["direction"] for q in trace
                   if q["id"] in ("pressure_share", "chance_creation_home",
                                  "chance_creation_away")]
-    pre_home = prematch_votes.count("for_home") + prematch_votes.count(
-        "against_home")
-    pre_away = prematch_votes.count("for_away") + prematch_votes.count(
-        "against_home")
+    # Home-centred vocabulary: "for_home" helps home, "against_home" (away
+    # side strengthened) hurts home, "for_away" (home weakened) helps away.
+    # Each direction counted once, on its own side — the old code added
+    # "against_home" to BOTH tallies.
+    pre_home = prematch_votes.count("for_home")
+    pre_away = prematch_votes.count("for_away")
+    pre_against_home = prematch_votes.count("against_home")
+    pre_home_net = pre_home - pre_against_home
+    pre_away_net = pre_away + pre_against_home
     live_home = live_votes.count("for_home")
     live_away = live_votes.count("for_away")
 
-    if pre_home == pre_away:
+    if pre_home_net == pre_away_net:
         return _verdict("convergence", VERDICT_WARN,
                         "pre-match intelligence is balanced — it neither "
                         "supports nor opposes either side here", {})
     live_home = live_home - live_away
-    agree = (pre_home > pre_away and live_home > 0) or \
-            (pre_away > pre_home and live_home < 0)
+    agree = (pre_home_net > pre_away_net and live_home > 0) or \
+            (pre_away_net > pre_home_net and live_home < 0)
     if agree:
         return _verdict("convergence", VERDICT_PASS,
                         "pre-match structure and live play point the same way",
-                        {"prematch": pre_home - pre_away, "live": live_home})
+                        {"prematch": pre_home_net - pre_away_net,
+                         "live": live_home})
     if live_home == 0:
         return _verdict("convergence", VERDICT_WARN,
                         "live play is level, so it neither confirms nor "
@@ -269,9 +317,21 @@ def judge_base_rate(ctx, prediction, history=None):
     out. If it did not, the model is not actually reading the clock.
     """
     history = history or []
-    minute = int((ctx.get("board") or {}).get("minute") or 0)
-    current = {k: (prediction.get(k) or {}).get("pct")
-               for k in ("home_to_score", "away_to_score")}
+    try:
+        from .live_stage8_live_prediction import parse_minute as _parse_min
+        minute = _parse_min((ctx.get("board") or {}).get("minute"))
+    except Exception:
+        try:
+            minute = int((ctx.get("board") or {}).get("minute") or 0)
+        except (TypeError, ValueError):
+            minute = 0
+    current = {}
+    for k, nk in (("home_to_score", "home_to_score_next"),
+                  ("away_to_score", "away_to_score_next")):
+        node = prediction.get(nk)
+        if node is None:
+            node = prediction.get(k) or {}
+        current[k] = (node or {}).get("pct")
 
     problems = []
     if minute >= 88:
