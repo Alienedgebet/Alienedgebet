@@ -6,7 +6,7 @@ import { specialsApi, liveApi, type UndersPick, type LiveUndersPick } from "@/li
 import { useSelectedDate } from "@/lib/date-context";
 import { useApi, VERIFY_REFRESH_MS } from "@/lib/use-api";
 import { useDnaV2 } from "@/lib/use-dna-v2";
-import { createDnaColumn } from "@/components/dna/DnaCountBadge";
+import { createDnaColumn, createDnaColumnByLabel } from "@/components/dna/DnaCountBadge";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
@@ -198,6 +198,48 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
     [dnaV2, date]
   );
 
+  // Stage 9 live tables — same shape as pre-match but Verify reads the
+  // per-line payload the backend attaches in get_live_unders():
+  //   verification     = U2.5 verdict (total <= 2 wins)
+  //   verification_u35 = U3.5 verdict (total <= 3 wins)
+  // A shared `verification` column would grade the U3.5 table on the U2.5
+  // line (a 3-goal finish is a U3.5 WON but a U2.5 LOST). DNA matches by
+  // fixture LABEL as well as id: Stage 9 picks come from the live scanner
+  // while the DNA snapshot is keyed by the pre-match pipeline, so an id
+  // miss falls back to the fixture name instead of a dead "–" badge.
+  const liveU25Columns = useMemo(
+    () => [
+      createVerifyColumn<LiveUndersPick>("verification"),
+      createDnaColumnByLabel<LiveUndersPick>(
+        dnaV2?.market_factors,
+        "unders",
+        date,
+        (r) => r.fixture
+      ),
+      createIntelligentPassColumn<LiveUndersPick>({
+        market: "unders",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...u25Columns,
+    ],
+    [dnaV2, date]
+  );
+
+  const liveU35Columns = useMemo(
+    () => [
+      createVerifyColumn<LiveUndersPick>("verification_u35"),
+      createDnaColumnByLabel<LiveUndersPick>(
+        dnaV2?.market_factors,
+        "unders",
+        date,
+        (r) => r.fixture
+      ),
+      ...u35Columns,
+    ],
+    [dnaV2, date]
+  );
+
   // Real data stays real; real empty stays real empty; demo rows appear
   // only when useApi flagged them (demo explicitly enabled). API failures
   // surface through ChainBranch's error state below.
@@ -313,7 +355,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           data={livePicks}
           loading={liveResult.loading}
           error={liveResult.error}
-          columns={u25ColumnsWithVerifyAndDna}
+          columns={liveU25Columns}
           rowKey={(r) => String((r as LiveUndersPick).fixture_id)}
           emptyMessage="No incoming/live U2.5 picks at the moment."
         />
@@ -331,7 +373,7 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           data={livePicks}
           loading={liveResult.loading}
           error={liveResult.error}
-          columns={u35ColumnsWithVerifyAndDna}
+          columns={liveU35Columns}
           rowKey={(r) => String((r as LiveUndersPick).fixture_id)}
           emptyMessage="No incoming/live U3.5 picks at the moment."
         />

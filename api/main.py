@@ -3231,8 +3231,15 @@ def get_live_unders():
     Returns picks written by LIVE_SCANNER/live_stage9_under_engine.py to
     stage9_live_unders.json. Each pick carries ``is_live: true`` and
     ``fixture_status: "live" | "incoming"`` so the frontend can display
-    them in a dedicated "Incoming Match Under List" section below the
-    pre-match picks.
+    them in dedicated Incoming U2.5 / U3.5 tables below the pre-match picks.
+
+    Each row carries TWO verification payloads because one fixture grades
+    two different lines: ``verification`` (U2.5: total <= 2 wins) and
+    ``verification_u35`` (U3.5: total <= 3 wins). The Incoming U2.5 table
+    reads ``verification``; the Incoming U3.5 table reads
+    ``verification_u35``. Incoming (not-started) fixtures correctly settle
+    to SCHEDULED/PENDING ("— / Awaiting Kickoff") until kickoff, then flip
+    to LIVE/IN_PLAY and finally WON/LOST — same lifecycle as pre-match.
 
     The file is written atomically per cycle; a missing or stale file returns
     an empty list so the frontend degrades gracefully to pre-match picks only.
@@ -3240,10 +3247,45 @@ def get_live_unders():
     data = _read_json(os.path.join(DATA_DIR, "stage9_live_unders.json"), {})
     if not isinstance(data, dict):
         return {"generated_at": None, "engines": 0, "picks": []}
+    raw_picks = data.get("picks", [])
+    if not isinstance(raw_picks, list):
+        raw_picks = []
+    try:
+        today = _today()
+        # One fixture, two lines: settle the same rows twice under each
+        # market key, then merge both verdicts onto each row. _settled()
+        # returns NEW dicts so the two passes never clobber each other.
+        u25_settled = {
+            str(r.get("fixture_id")): r.get("verification")
+            for r in _settled(
+                ensure_defaults([dict(r) for r in raw_picks if isinstance(r, dict)],
+                                UNDERS_DEFAULTS), "u25", today)
+            if isinstance(r, dict)
+        }
+        u35_settled = {
+            str(r.get("fixture_id")): r.get("verification")
+            for r in _settled(
+                ensure_defaults([dict(r) for r in raw_picks if isinstance(r, dict)],
+                                UNDERS_DEFAULTS), "u35", today)
+            if isinstance(r, dict)
+        }
+        picks = []
+        for r in raw_picks:
+            if not isinstance(r, dict):
+                continue
+            row = dict(r)
+            fid = str(row.get("fixture_id"))
+            if row.get("verification") is None and fid in u25_settled:
+                row["verification"] = u25_settled[fid]
+            row["verification_u35"] = u35_settled.get(fid)
+            picks.append(row)
+    except Exception:
+        print(f"[LIVE UNDERS VERIFY WARNING] {traceback.format_exc()}")
+        picks = raw_picks
     return {
         "generated_at": data.get("generated_at"),
         "engines": data.get("engines", 0),
-        "picks": data.get("picks", []),
+        "picks": picks,
     }
 
 
