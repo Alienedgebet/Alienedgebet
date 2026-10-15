@@ -2088,6 +2088,15 @@ def get_draw(date: str):
     draws_raw = raw[0] if isinstance(raw, list) and len(raw) > 0 else []
     parity_raw = raw[1] if isinstance(raw, list) and len(raw) > 1 else []
     amateurs_raw = raw[2] if isinstance(raw, list) and len(raw) > 2 else []
+    # Only surface 1st-priority ("💎 ELITE DRAW LIST") and 2nd-priority
+    # ("Perfect Draw List") picks to the frontend. Weak Draw List, VETOED,
+    # and Below-Threshold picks remain in storage for analytics/backtests
+    # but are hidden from the production UI.
+    ALLOWED_DRAW_TIERS = {"💎 ELITE DRAW LIST", "Perfect Draw List"}
+    draws_raw = [
+        p for p in draws_raw
+        if isinstance(p, dict) and p.get("tier") in ALLOWED_DRAW_TIERS
+    ]
     return {
         "draws": _with_intelligent_pass(
             "draw",
