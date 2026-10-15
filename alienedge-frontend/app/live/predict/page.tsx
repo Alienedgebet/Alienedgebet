@@ -258,16 +258,18 @@ export default function LivePredictPage() {
 
               <div>
                 <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/45">
-                  To score
+                  To score next
                 </h3>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <Market
-                    label={`${p.predictions.home_to_score.team} to score`}
-                    value={p.predictions.home_to_score.pct}
+                    label={`${(p.predictions.home_to_score_next ?? p.predictions.home_to_score).team} to score next`}
+                    value={(p.predictions.home_to_score_next ?? p.predictions.home_to_score).pct}
+                    hint="One more from now — a 1-0 leader at 40% means 40% for a second."
                   />
                   <Market
-                    label={`${p.predictions.away_to_score.team} to score`}
-                    value={p.predictions.away_to_score.pct}
+                    label={`${(p.predictions.away_to_score_next ?? p.predictions.away_to_score).team} to score next`}
+                    value={(p.predictions.away_to_score_next ?? p.predictions.away_to_score).pct}
+                    hint="One more from now — a 1-0 leader at 40% means 40% for a second."
                   />
                 </div>
               </div>

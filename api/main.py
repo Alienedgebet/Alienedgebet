@@ -3091,10 +3091,11 @@ def get_live_prediction(fixture_id: str):
     """
     Instant live prediction for one fixture, judged before it is published.
 
-    Win / draw / away, "<team> to score" for each side, over 2.5 and under 3.5.
-    Every figure carries the trace of questions that produced it, and the five
-    judges must clear the result before any number is shown. A blocked fixture
-    returns NO predictions rather than a confident guess.
+    Win / draw / away, "<team> to score next" for each side (one more goal
+    from now — a 1-0 leader showing 40% means 40% for a second), over 2.5
+    and under 3.5. Every figure carries the trace of questions that produced
+    it, and the five judges must clear the result before any number is shown.
+    A blocked fixture returns NO predictions rather than a confident guess.
     """
     from LIVE_SCANNER.live_stage8_live_prediction import predict
     return predict(fixture_id)

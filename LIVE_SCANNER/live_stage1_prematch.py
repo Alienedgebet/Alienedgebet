@@ -410,13 +410,18 @@ def normalize_odd_value(value):
 def get_fixture_odds_safe(fixture_id):
     raw_data = GET(f"/odds/pre-match/fixtures/{fixture_id}")
     odds_list = raw_data.get("data",[])
-    result = {"home_win": None, "away_win": None, "o25": None}
+    # Draw + under captured alongside (same response, zero extra API calls):
+    # the live engine needs the draw price to split goals honestly and the
+    # under price to de-vig the over-2.5 anchor (1/over alone keeps the vig).
+    result = {"home_win": None, "draw": None, "away_win": None,
+              "o25": None, "u25": None}
     for o in odds_list:
         if o.get("market_id") == MARKET_ID_1X2:
             label = str(o.get("label", "")).lower()
             val = normalize_odd_value(o.get("value"))
             if not val: continue
             if "1" in label or "home" in label: result["home_win"] = val
+            elif "x" in label or "draw" in label: result["draw"] = val
             elif "2" in label or "away" in label: result["away_win"] = val
             
     for o in odds_list:
@@ -424,9 +429,11 @@ def get_fixture_odds_safe(fixture_id):
         if not desc: desc = str(o.get("name", "")).lower()
         if mid == MARKET_ID_OU or (("goals" in desc or "over/under" in desc) and not any(x in desc for x in["corner", "card", "asian", "handicap"])):
             label, total = str(o.get("label", "")).lower(), str(o.get("total", ""))
-            if "over" in label and "2.5" in total:
+            if "2.5" in total:
                 val = normalize_odd_value(o.get("value"))
-                if val: result["o25"] = val
+                if not val: continue
+                if "over" in label: result["o25"] = val
+                elif "under" in label: result["u25"] = val
     return result
 
 def calculate_gk_vulnerability_pro(master_gk, today_ids, all_lineup_data, squad_map):
@@ -893,8 +900,10 @@ def run_prematch_engine():
                         "formations": {str(k): str(v) for k, v in (formations or {}).items()},
                         "admit_reason": admit.get("admit_reason"),
                         "odds_home_win": odds_data['home_win'],
+                        "odds_draw": odds_data.get('draw'),
                         "odds_away_win": odds_data['away_win'],
                         "odds_o25": odds_data['o25'],
+                        "odds_u25": odds_data.get('u25'),
                         "picks": [dict(p) for p in match_picks] if match_picks else [],
                         "killer_rules": kp if kp else [],
                         "combined_miss": int(h['miss'] + a['miss']),

@@ -2988,6 +2988,10 @@ export interface LivePrediction {
     home_win: number;
     draw: number;
     away_win: number;
+    /** One more goal from now (a 1-0 leader at 40% = 40% for a second). */
+    home_to_score_next: { team: string; pct: number };
+    away_to_score_next: { team: string; pct: number };
+    /** Kept for back-compat; identical to the _next fields. */
     home_to_score: { team: string; pct: number };
     away_to_score: { team: string; pct: number };
     over_2_5: number;
@@ -2998,7 +3002,7 @@ export interface LivePrediction {
   judges: LivePredictionJudge[] | null;
   verdict: "PASS" | "WARN" | "BLOCK" | null;
   model?: {
-    anchor: "market_price" | "live_observation";
+    anchor: "market_price" | "market_price_devigged" | "live_observation";
     anchor_total_goals: number;
     minutes_remaining: number;
     [k: string]: unknown;
