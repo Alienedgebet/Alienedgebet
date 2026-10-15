@@ -1261,6 +1261,38 @@ export interface UndersResponse {
   u35: UndersPick[];
 }
 
+/**
+ * Stage 9 — LIVE Under picks.
+ *
+ * Same shape as UndersPick but with `is_live: true` so the frontend can
+ * distinguish them from pre-match picks and badge them as LIVE. Also carries
+ * formation_home / formation_away for transparency.
+ */
+export interface LiveUndersPick extends UndersPick {
+  is_live: true;
+  fixture_status: "live" | "incoming";
+  formation_home?: string | null;
+  formation_away?: string | null;
+  home_archetype?: string | null;
+  away_archetype?: string | null;
+  home_goal_intent?: number | null;
+  away_goal_intent?: number | null;
+  combined_goal_intent?: number | null;
+  combined_box_dominance?: number | null;
+  market_signal?: string | null;
+  home_attack_index?: number | null;
+  away_attack_index?: number | null;
+  minute?: number;
+  score?: string;
+  live_signals_detail?: Record<string, string>;
+}
+
+export interface LiveUndersResponse {
+  generated_at: number | null;
+  engines: number;
+  picks: LiveUndersPick[];
+}
+
 export interface SOTPick extends FixtureRisk {
   Fixture: string;
   Verdict: string;
@@ -3084,6 +3116,10 @@ export const liveApi = {
 
   getDashboard: (): Promise<AxiosResponse<LiveDashboardResult[]>> =>
     api.get("/api/live/dashboard"),
+
+  /** Stage 9 — LIVE Under picks (Stage 9 live under engine). */
+  getLiveUnders: (): Promise<AxiosResponse<LiveUndersResponse>> =>
+    api.get("/api/live/unders"),
 };
 
 export const userRulesApi = {
