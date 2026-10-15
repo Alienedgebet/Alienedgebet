@@ -884,6 +884,10 @@ UNDERS_DEFAULTS = dict(
     away_gk_cpg=0, home_gk_note="", away_gk_note="", fatigue_home=0,
     fatigue_away=0,
 )
+# Dated Stage 9 snapshots: output/cache/live_unders__{date}.json, written by
+# LIVE_SCANNER/live_stage9_under_engine.py every cycle (same output_store as
+# pre-match "unders"). MUST match LIVE_UNDERS_SAVE_KEY in that engine.
+LIVE_UNDERS_SNAPSHOT_KEY = "live_unders"
 SOT_DEFAULTS = dict(
     Fixture="", Verdict="STANDARD", Proj_SOT=0, **{"Poisson_Over_8.5": "0%"},
     Consistency="", Game_Script="", Momentum="", **{"1x2_Home_Odd": 0},
@@ -3223,10 +3227,50 @@ def get_live_dashboard():
     return _read_json(os.path.join(OUTPUT_DIR, "live_dashboard.json"), [])
 
 
+def _settle_live_unders_rows(raw_picks, date_str):
+    """Attach per-line Verify payloads to Stage 9 rows.
+
+    One fixture grades two lines: ``verification`` (U2.5: total <= 2 wins)
+    and ``verification_u35`` (U3.5: total <= 3 wins). _settled() returns NEW
+    dicts so the two passes never clobber each other.
+    """
+    if not isinstance(raw_picks, list):
+        raw_picks = []
+    try:
+        u25_settled = {
+            str(r.get("fixture_id")): r.get("verification")
+            for r in _settled(
+                ensure_defaults([dict(r) for r in raw_picks if isinstance(r, dict)],
+                                UNDERS_DEFAULTS), "u25", date_str)
+            if isinstance(r, dict)
+        }
+        u35_settled = {
+            str(r.get("fixture_id")): r.get("verification")
+            for r in _settled(
+                ensure_defaults([dict(r) for r in raw_picks if isinstance(r, dict)],
+                                UNDERS_DEFAULTS), "u35", date_str)
+            if isinstance(r, dict)
+        }
+        picks = []
+        for r in raw_picks:
+            if not isinstance(r, dict):
+                continue
+            row = dict(r)
+            fid = str(row.get("fixture_id"))
+            if row.get("verification") is None and fid in u25_settled:
+                row["verification"] = u25_settled[fid]
+            row["verification_u35"] = u35_settled.get(fid)
+            picks.append(row)
+        return picks
+    except Exception:
+        print(f"[LIVE UNDERS VERIFY WARNING] {traceback.format_exc()}")
+        return raw_picks
+
+
 @app.get("/api/live/unders", tags=["Live"])
 def get_live_unders():
     """
-    Live under picks from Stage 9 (Live Under Engine).
+    Live under picks from Stage 9 (Live Under Engine) — TODAY's view.
 
     Returns picks written by LIVE_SCANNER/live_stage9_under_engine.py to
     stage9_live_unders.json. Each pick carries ``is_live: true`` and
@@ -3243,48 +3287,46 @@ def get_live_unders():
 
     The file is written atomically per cycle; a missing or stale file returns
     an empty list so the frontend degrades gracefully to pre-match picks only.
+
+    For HISTORY (past dates incl. finished picks) use
+    GET /api/live/unders/{date} — same shape, served from the dated
+    output_store snapshots the engine writes every cycle.
     """
     data = _read_json(os.path.join(DATA_DIR, "stage9_live_unders.json"), {})
     if not isinstance(data, dict):
         return {"generated_at": None, "engines": 0, "picks": []}
     raw_picks = data.get("picks", [])
-    if not isinstance(raw_picks, list):
-        raw_picks = []
-    try:
-        today = _today()
-        # One fixture, two lines: settle the same rows twice under each
-        # market key, then merge both verdicts onto each row. _settled()
-        # returns NEW dicts so the two passes never clobber each other.
-        u25_settled = {
-            str(r.get("fixture_id")): r.get("verification")
-            for r in _settled(
-                ensure_defaults([dict(r) for r in raw_picks if isinstance(r, dict)],
-                                UNDERS_DEFAULTS), "u25", today)
-            if isinstance(r, dict)
-        }
-        u35_settled = {
-            str(r.get("fixture_id")): r.get("verification")
-            for r in _settled(
-                ensure_defaults([dict(r) for r in raw_picks if isinstance(r, dict)],
-                                UNDERS_DEFAULTS), "u35", today)
-            if isinstance(r, dict)
-        }
-        picks = []
-        for r in raw_picks:
-            if not isinstance(r, dict):
-                continue
-            row = dict(r)
-            fid = str(row.get("fixture_id"))
-            if row.get("verification") is None and fid in u25_settled:
-                row["verification"] = u25_settled[fid]
-            row["verification_u35"] = u35_settled.get(fid)
-            picks.append(row)
-    except Exception:
-        print(f"[LIVE UNDERS VERIFY WARNING] {traceback.format_exc()}")
-        picks = raw_picks
+    picks = _settle_live_unders_rows(raw_picks, _today())
     return {
         "generated_at": data.get("generated_at"),
         "engines": data.get("engines", 0),
+        "picks": picks,
+    }
+
+
+@app.get("/api/live/unders/{date}", tags=["Live"])
+def get_live_unders_by_date(date: str):
+    """
+    Stage 9 live under picks for one DATE — the 5-day history view.
+
+    Same row shape as GET /api/live/unders (both ``verification`` and
+    ``verification_u35`` attached), served from the dated snapshot
+    ``output/cache/live_unders__{date}.json`` the engine accumulates every
+    cycle. Finished fixtures stay in their date's snapshot with
+    ``fixture_status="finished"`` + ``finished_date`` so users can study how
+    the engine read them — exactly like pre-match GET /api/unders/{date}.
+
+    A date with no snapshot yet returns an honest empty list. Historical
+    verdicts settle from output/archive_{date}.json + the FT snapshot, so
+    WON/LOST is permanent even after the fixture leaves the live feed.
+    """
+    raw, generated_at = store.load(LIVE_UNDERS_SNAPSHOT_KEY, date, default=[])
+    if not isinstance(raw, list):
+        raw = []
+    picks = _settle_live_unders_rows(raw, date)
+    return {
+        "generated_at": generated_at,
+        "engines": len(picks),
         "picks": picks,
     }
 

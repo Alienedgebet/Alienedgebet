@@ -159,19 +159,31 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
     refreshMs: VERIFY_REFRESH_MS,
   });
 
-  // Stage 9 — LIVE + INCOMING under picks. Polls at the same cadence as the
-  // live scanner cycle so a pick that flips tier mid-match is reflected promptly.
-  // These picks are rendered in a SEPARATE section below the pre-match picks,
-  // with its own headline: "Incoming Match Under List".
+  // Stage 9 — LIVE + INCOMING under picks, date-driven like pre-match.
+  // Today: 45s polling of the live file so a pick that flips tier mid-match
+  // is reflected promptly. Past dates: the frozen dated snapshot
+  // (output/cache/live_unders__{date}.json) incl. finished picks — the same
+  // 5-day history pattern as specialsApi.getUnders(date) above. Finished rows
+  // settle from archive_{date} so WON/LOST is permanent.
   const liveResult = useApi(
-    () => liveApi.getLiveUnders(),
-    [],
-    { refreshMs: 45_000, cacheKey: "live:unders" },
+    () => liveApi.getLiveUnders(date),
+    [date],
+    { refreshMs: 45_000, cacheKey: `live:unders:${date}` },
   );
 
   const prematchU25 = result.data?.u25 ?? [];
   const prematchU35 = result.data?.u35 ?? [];
   const livePicks = (liveResult.data?.picks ?? []) as LiveUndersPick[];
+  // Finished rows render in the history sections below, never mixed into the
+  // actionable incoming tables.
+  const liveCurrent = useMemo(
+    () => livePicks.filter((p) => p.fixture_status !== "finished"),
+    [livePicks]
+  );
+  const liveFinished = useMemo(
+    () => livePicks.filter((p) => p.fixture_status === "finished"),
+    [livePicks]
+  );
 
   // Under 2.5 (Verify -> DNA -> Rest)
   const u25ColumnsWithVerifyAndDna = useMemo(
@@ -274,14 +286,19 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
             </h1>
             <p className="text-[11px] text-text-secondary">
               Defensive Under Empire — composite analysis covering Under 2.5 &amp; Under 3.5{" "}
-              {livePicks.length > 0 && (
+              {liveCurrent.length > 0 && (
                 <span className="ml-2 inline-flex items-center gap-1 rounded bg-accent-red/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-accent-red">
-                  {livePicks.filter((p) => p.fixture_status === "live").length} LIVE
+                  {liveCurrent.filter((p) => p.fixture_status === "live").length} LIVE
                 </span>
               )}
-              {livePicks.filter((p) => p.fixture_status === "incoming").length > 0 && (
+              {liveCurrent.filter((p) => p.fixture_status === "incoming").length > 0 && (
                 <span className="ml-1 inline-flex items-center gap-1 rounded bg-accent-orange/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-accent-orange">
-                  {livePicks.filter((p) => p.fixture_status === "incoming").length} INCOMING
+                  {liveCurrent.filter((p) => p.fixture_status === "incoming").length} INCOMING
+                </span>
+              )}
+              {liveFinished.length > 0 && (
+                <span className="ml-1 inline-flex items-center gap-1 rounded bg-white/5 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-text-secondary">
+                  {liveFinished.length} SETTLED
                 </span>
               )}
             </p>
@@ -343,16 +360,17 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
           quiet hours, which read as "the engine is broken/offline".
           Split from the old combined "Incoming Match Under List" into
           separate U2.5 / U3.5 tables — same shape as the pre-match pack
-          above — each with Verify + DNA columns. */}
+          above — each with Verify + DNA columns. Finished rows live in
+          sections 7-8 below (5-day history), never mixed into actionable. */}
       <div>
         <ChainBranch
           title="Incoming Under 2.5"
           description={
-            livePicks.some((p) => p.fixture_status === "live")
+            liveCurrent.some((p) => p.fixture_status === "live")
               ? "Live + incoming fixtures with official lineups — U2.5 view"
               : "Incoming fixtures with official lineups — U2.5 view"
           }
-          data={livePicks}
+          data={liveCurrent}
           loading={liveResult.loading}
           error={liveResult.error}
           columns={liveU25Columns}
@@ -366,16 +384,47 @@ export function UndersMarketPanel({ embedded = false }: { embedded?: boolean }) 
         <ChainBranch
           title="Incoming Under 3.5"
           description={
-            livePicks.some((p) => p.fixture_status === "live")
+            liveCurrent.some((p) => p.fixture_status === "live")
               ? "Live + incoming fixtures with official lineups — U3.5 view"
               : "Incoming fixtures with official lineups — U3.5 view"
           }
-          data={livePicks}
+          data={liveCurrent}
           loading={liveResult.loading}
           error={liveResult.error}
           columns={liveU35Columns}
           rowKey={(r) => String((r as LiveUndersPick).fixture_id)}
           emptyMessage="No incoming/live U3.5 picks at the moment."
+        />
+      </div>
+
+      {/* ── 7. FINISHED UNDER 2.5 — 5-DAY HISTORY (Stage 9) ──────────── */}
+      {/* Same U2.5 columns incl. Verify WON/LOST + DNA. Finished rows stay in
+          their date's snapshot so users can study how the engine read them —
+          exactly like the pre-match history above. Dimmed, never actionable. */}
+      <div className="opacity-80">
+        <ChainBranch
+          title="Finished Under 2.5 — history"
+          description="Settled Stage 9 picks for this date — study how the engine read them"
+          data={liveFinished}
+          loading={liveResult.loading}
+          error={liveResult.error}
+          columns={liveU25Columns}
+          rowKey={(r) => String((r as LiveUndersPick).fixture_id)}
+          emptyMessage="No settled Stage 9 U2.5 picks for this date yet."
+        />
+      </div>
+
+      {/* ── 8. FINISHED UNDER 3.5 — 5-DAY HISTORY (Stage 9) ──────────── */}
+      <div className="opacity-80">
+        <ChainBranch
+          title="Finished Under 3.5 — history"
+          description="Settled Stage 9 picks for this date — study how the engine read them"
+          data={liveFinished}
+          loading={liveResult.loading}
+          error={liveResult.error}
+          columns={liveU35Columns}
+          rowKey={(r) => String((r as LiveUndersPick).fixture_id)}
+          emptyMessage="No settled Stage 9 U3.5 picks for this date yet."
         />
       </div>
     </div>
