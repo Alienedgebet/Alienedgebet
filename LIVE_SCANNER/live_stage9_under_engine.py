@@ -59,6 +59,10 @@ STYLE_CLASHES_FILE = os.path.join(DATA_DIR, "fixture_style_clashes_v2.json")
 HISTORY_CACHE_FILE = os.path.join(DATA_DIR, "danger_history_cache.json")
 # NOT "live_predictions.json" — that belongs to Code 1 / Stage 1.
 OUTPUT_FILE = os.path.join(DATA_DIR, "stage9_live_unders.json")
+# Persistent finished-results layer (written continuously by live_cache
+# and nightly by the archiver) — the timing-independent source of truth
+# for "did this fixture finish?" (see _finished_fixture_ids).
+FT_SNAPSHOT_FILE = os.path.join(DATA_DIR, "ft_result_snapshot.json")
 
 # ── Stage 9's OWN light per-team history cache ──────────────────────────────
 # The form gates and lambda need each team's last-5 completed fixtures, which
@@ -1020,6 +1024,89 @@ def _score_fixture(fixture, danger_rows, prematch_audit, dna_cache, clash_cache,
 
 # ── RUN FUNCTION ───────────────────────────────────────────────────────────────
 
+def _finished_fixture_ids(board_rows, prematch_audit, today_str):
+    """Every fixture known-finished from the on-disk sources, as a set of str ids.
+
+    Sources (all read-only, zero provider calls):
+      * the orchestrator board rows with is_finished=True
+      * the prematch audit rows with is_finished=True
+      * data/ft_result_snapshot.json fixtures for today_str — settlement's own
+        persistent record, written continuously by live_cache the moment a
+        finish is observed, INDEPENDENT of the stage order below.
+
+    The FT snapshot is what breaks the timing deadlock the old retention had:
+    Stage 1 culls finished fixtures from the audit BEFORE this engine runs, and
+    Stage 6 (which writes the board's finished rows) runs AFTER it — so at the
+    cycle a pick left the list, neither the audit nor the board could confirm
+    finished-ness, and the row was dropped forever (measured 2026-10-16: 0
+    retained in EVERY cycle; the day's list decayed 19 → 2).
+    """
+    finished = set()
+    for m in board_rows or []:
+        if isinstance(m, dict) and m.get("is_finished"):
+            fid = m.get("id") or m.get("fixture_id")
+            if fid not in (None, ""):
+                finished.add(str(fid))
+    if isinstance(prematch_audit, dict):
+        for fid, row in prematch_audit.items():
+            if isinstance(row, dict) and row.get("is_finished"):
+                if fid not in (None, ""):
+                    finished.add(str(fid))
+    try:
+        with open(FT_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            ft = json.load(f)
+        day = (ft.get("fixtures") or {}).get(today_str) or {}
+        for fid in day.keys():
+            finished.add(str(fid))
+    except Exception:
+        pass  # snapshot absent/unreadable — the other two sources still apply
+    return finished
+
+
+def _merge_snapshot_rows(picks, prev_rows, finished_ids, today_str):
+    """Merge this cycle's picks into the day's dated snapshot — STICKY FINISHED.
+
+    Returns (merged_rows, retained_count).
+
+    Rules:
+      * Current live/incoming picks always win (a fixture still in the list is
+        never duplicated by its older row).
+      * A previous row already marked fixture_status="finished" is kept
+        UNCONDITIONALLY — finished is a terminal state and needs no
+        re-confirmation. This is the stickiness the old code lacked: it
+        re-checked the audit/board every cycle, and one missed confirmation
+        (guaranteed by the stage order, see _finished_fixture_ids) dropped the
+        row forever.
+      * A previous live/incoming row whose fixture_id is in `finished_ids` is
+        promoted to finished and kept (the moment a fixture settles, it stays
+        in the day's history for Verify and study).
+      * A previous row that left the list WITHOUT finishing (e.g. its lineup
+        was withdrawn) is still dropped — freezing a stale never-played pick
+        into history would be dishonest.
+    """
+    picks = [p for p in picks if isinstance(p, dict)]
+    current_ids = {str(p.get("fixture_id")) for p in picks
+                   if p.get("fixture_id") not in (None, "")}
+    kept = []
+    seen_kept = set()
+    for old in prev_rows or []:
+        if not isinstance(old, dict):
+            continue
+        fid = str(old.get("fixture_id") or "")
+        if not fid or fid in current_ids or fid in seen_kept:
+            continue  # current row wins; duplicate ids collapse to one
+        row = dict(old)
+        if row.get("fixture_status") != "finished":
+            if fid not in finished_ids:
+                continue  # vanished for a real reason — stays out of history
+            row["fixture_status"] = "finished"
+            row["is_live"] = False
+            row.setdefault("finished_date", today_str)
+        kept.append(row)
+        seen_kept.add(fid)
+    return picks + kept, len(kept)
+
+
 def run_live_under_engine():
     """
     Run the Stage 9 live under engine.
@@ -1154,41 +1241,14 @@ def run_live_under_engine():
         today_str = datetime.now(timezone.utc).date().isoformat()
         prev_data, _ = _live_store.load(LIVE_UNDERS_SAVE_KEY, today_str, default=[])
         prev_rows = prev_data if isinstance(prev_data, list) else []
-        prev_by_id = {str(r.get("fixture_id")): r for r in prev_rows
-                       if isinstance(r, dict) and r.get("fixture_id") not in (None, "")}
-        current_ids = {str(p.get("fixture_id")) for p in picks
-                        if isinstance(p, dict) and p.get("fixture_id") not in (None, "")}
-        merged = [dict(p) for p in picks if isinstance(p, dict)]
-        retained = 0
-        for fid, old in prev_by_id.items():
-            if fid in current_ids:
-                continue  # still live/incoming — current row wins
-            row = dict(old)
-            # Only retain fixtures that actually finished; a fixture missing
-            # from candidates for any other reason (e.g. lineup withdrawn)
-            # stays out rather than freezing a stale pick as history.
-            finished = False
-            try:
-                pm = prematch_audit.get(fid) if isinstance(prematch_audit, dict) else None
-                if isinstance(pm, dict) and pm.get("is_finished"):
-                    finished = True
-            except Exception:
-                finished = False
-            if not finished:
-                for m in matches:
-                    if not isinstance(m, dict):
-                        continue
-                    mid = str(m.get("id") or m.get("fixture_id") or "")
-                    if mid == fid and m.get("is_finished"):
-                        finished = True
-                        break
-            if not finished:
-                continue
-            row["fixture_status"] = "finished"
-            row["is_live"] = False
-            row.setdefault("finished_date", today_str)
-            merged.append(row)
-            retained += 1
+        # STICKY FINISHED retention (see _merge_snapshot_rows): finished rows
+        # stay in the day's snapshot unconditionally; newly-finished picks are
+        # promoted from board + audit + the FT result snapshot, so the stage
+        # order (1 culls the audit before us, 6 writes the board after us)
+        # can never silently drop the day's history again.
+        finished_ids = _finished_fixture_ids(matches, prematch_audit, today_str)
+        merged, retained = _merge_snapshot_rows(
+            picks, prev_rows, finished_ids, today_str)
         _live_store.save(LIVE_UNDERS_SAVE_KEY, today_str, merged, guard=True)
         print(f"[Stage 9] dated snapshot: {len(merged)} rows "
               f"({len(picks)} current + {retained} retained finished) "

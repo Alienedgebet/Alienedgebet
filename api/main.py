@@ -3295,7 +3295,29 @@ def get_live_unders():
     data = _read_json(os.path.join(DATA_DIR, "stage9_live_unders.json"), {})
     if not isinstance(data, dict):
         return {"generated_at": None, "engines": 0, "picks": []}
-    raw_picks = data.get("picks", [])
+    raw_picks = [p for p in data.get("picks", []) if isinstance(p, dict)]
+    # TODAY'S RETAINED FINISHED ROWS (sticky-finished snapshot merge, Stage 9).
+    # The live file only carries the current cycle's live/incoming picks — a
+    # fixture that finished used to leave it within one cycle, which is why
+    # the incoming list "lost all its finished matches" and Verify had nothing
+    # to grade (2026-10-16: the day's list decayed 19 → 2). The dated snapshot
+    # now keeps finished rows unconditionally, so merge today's in here: the
+    # list accumulates (seen-before stays, only new ones join) and Verify
+    # grades the finished rows from the live feed / FT snapshot while today's
+    # archive does not exist yet (written at 00:30 by the archiver).
+    try:
+        today_snapshot, _ = store.load(
+            LIVE_UNDERS_SNAPSHOT_KEY, _today(), default=[])
+    except Exception:
+        today_snapshot = []
+    current_ids = {str(r.get("fixture_id")) for r in raw_picks
+                   if r.get("fixture_id") not in (None, "")}
+    for r in (today_snapshot if isinstance(today_snapshot, list) else []):
+        if not isinstance(r, dict) or r.get("fixture_status") != "finished":
+            continue
+        if str(r.get("fixture_id")) in current_ids:
+            continue  # the live file's current row wins
+        raw_picks.append(dict(r))
     picks = _settle_live_unders_rows(raw_picks, _today())
     return {
         "generated_at": data.get("generated_at"),

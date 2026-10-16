@@ -211,18 +211,6 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.warning(f"[Stage 8 Live Prediction] skipped: {e}")
 
-# ── 8. STAGE 9: LIVE UNDER ENGINE ────────────────────────────────────────
-        # Read-only and zero API calls: it consumes the board Stage 6 just
-        # wrote, plus the on-disk data the live cycle already maintains
-        # (danger_audit, prematch_team_audit, DNA profiles, style clashes,
-        # history cache). Produces stage9_live_unders.json for the API.
-        try:
-            from LIVE_SCANNER.live_stage9_under_engine import (
-                run_live_under_engine)
-            run_live_under_engine()
-        except Exception as e:
-            logging.warning(f"[Stage 9 Live Under Engine] skipped: {e}")
-
         # ── 7. STAGE 2: REMOVED ─────────────────────────────────────────────
         # The live validator (live_stage2_verification.py) no longer runs. Its
         # module is kept on disk so it stays reversible and its contract tests
@@ -244,6 +232,22 @@ def live_scanner_master_loop():
             orchestrator.run_single_cycle()
         except Exception as e:
             logging.error(f"[Stage 6 Orchestrator] Error: {e}")
+
+        # ── 8. STAGE 9: LIVE UNDER ENGINE (AFTER STAGE 6 ON PURPOSE) ────────
+        # Read-only and zero API calls: it consumes the board Stage 6 just
+        # WROTE THIS CYCLE (moving it after Stage 6 removes the one-cycle-stale
+        # board it used to read — the staleness that, together with Stage 1's
+        # audit culling, made its finished-row retention structurally dead on
+        # 2026-10-16), plus the on-disk data the live cycle already maintains
+        # (danger_audit, prematch_team_audit, DNA profiles, style clashes,
+        # history cache, FT result snapshot). Produces
+        # stage9_live_unders.json + the dated snapshot for the API.
+        try:
+            from LIVE_SCANNER.live_stage9_under_engine import (
+                run_live_under_engine)
+            run_live_under_engine()
+        except Exception as e:
+            logging.warning(f"[Stage 9 Live Under Engine] skipped: {e}")
 
         # ── 7. BACK-OFF DECISION, ON THE CORRECT SIGNAL ────────────────────
         # Decided on CONFIRMED rate-limit pressure, never on whether the feeds
