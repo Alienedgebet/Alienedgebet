@@ -30,6 +30,12 @@ def _verdict(name, verdict, reason, detail=None):
             "detail": detail or {}}
 
 
+# D3: headroom (percentage points) above the model-implied time-aware ceiling
+# before the late-match base_rate judge blocks. Keeps the judge independent
+# and clock-aware without weakening it.
+BASE_RATE_LATE_HEADROOM_PCT = 10.0
+
+
 # ── JUDGE 1 — MARKET ───────────────────────────────────────────────────────
 def judge_market(ctx, prediction):
     """
@@ -335,10 +341,24 @@ def judge_base_rate(ctx, prediction, history=None):
 
     problems = []
     if minute >= 88:
-        for side in ("home_to_score", "away_to_score"):
-            if float(current.get(side) or 0) > 25:
+        # D3: time-aware ceiling instead of a hard 25% cutoff. The ceiling is
+        # derived from the model's OWN per-team lambda for the remaining time
+        # (undoing pace inflation so the price+time view is the reference),
+        # plus a small headroom. Block only if the published pct substantially
+        # exceeds what the model's own clock math says is credible.
+        lam = prediction.get("_lambda") or {}
+        pace = float(lam.get("pace") or 1.0)
+        for side, key in (("home_to_score", "home"), ("away_to_score", "away")):
+            pct = float(current.get(side) or 0)
+            lam_rem = float(lam.get(key) or 0.0)
+            # Unpaced base lambda: what price + time alone imply for remaining
+            # time, before pace multiplier inflates it.
+            base_lam = lam_rem / max(pace, 0.55) if lam_rem > 0 else 0.0
+            ceiling = 100.0 * (1.0 - math.exp(-base_lam)) + BASE_RATE_LATE_HEADROOM_PCT
+            if pct > ceiling:
                 problems.append(
-                    f"{side} still {current[side]}% with the match over")
+                    f"{side} still {pct:.0f}% at {minute}' — ceiling "
+                    f"{ceiling:.0f}% from the model's own time-remaining math")
 
     for prior in history[-5:]:
         if prior.get("fixture_id") != ctx.get("fixture_id"):
