@@ -72,6 +72,20 @@ KEEPER_SHIFT_WEIGHT = 0.06
 ABSENCE_SHIFT_WEIGHT = 0.04
 DNA_PILLAR_SHIFT_WEIGHT = 0.05
 
+# ── A1 Live-state integration constants ──────────────────────────────────────
+# Two independent, de-correlated live signals are blended WITH the market split
+# (never instead of it) when a price exists:
+#   * Intensity signal (total match goal propensity): total_xg + SOT -> tempo
+#     factor on remaining_frac, capped and shrinkage-priored.
+#   * Direction signal (which side more likely to score): h_xg/a_xg share and
+#     h_pressure/a_pressure share, inverse-variance weighted, capped at a small
+#     ceiling so correlated xG/pressure cannot double-count.
+LIVE_DIRECTION_SHIFT_CAP = 0.08      # max share shift from live direction signal
+LIVE_INTENSITY_MIN = 0.70            # tempo factor floor
+LIVE_INTENSITY_MAX = 1.60            # tempo factor ceiling
+LIVE_INTENSITY_PRIOR = 1.0           # shrinkage prior for intensity tempo
+DA_CONFIRM_DISAGREE = 0.30           # DA/xG run-rate disagreement threshold
+
 # Fallback anchor, used only when a fixture has NO prematch price.
 #
 # WHY THIS EXISTS: Code 1 admits a fixture to the prematch board only once the
@@ -374,6 +388,26 @@ def _team_timing_factor(ctx):
         return 1.0
     avg_ht = sum(rates) / len(rates)
     factor = avg_ht / LEAGUE_HT_GOAL_SHARE
+    # B2: archetype timing adjustment — bounded, disclosed, coverage-gated.
+    # Two defensive sides → slightly fewer early goals; two attacking sides →
+    # slightly more. Mixed → no change. Capped inside [0.9, 1.1] multiplier so
+    # archetype can never overturn the timing view from data.
+    arch_adj = 0.0
+    home_arch = (dna.get("home") or {}).get("archetype") or ""
+    away_arch = (dna.get("away") or {}).get("archetype") or ""
+    home_cov = (dna.get("home") or {}).get("coverage_pct") or 0
+    away_cov = (dna.get("away") or {}).get("coverage_pct") or 0
+    if home_cov >= 0.7 and away_cov >= 0.7 and home_arch and away_arch:
+        _defensive_kw = ("defensive", "low block", "deep", "compact",
+                         "sit in", "park the bus", "counter-attack",
+                         "counter attack")
+        home_def = any(k in home_arch.lower() for k in _defensive_kw)
+        away_def = any(k in away_arch.lower() for k in _defensive_kw)
+        if home_def and away_def:
+            arch_adj = -0.05
+        elif not home_def and not away_def:
+            arch_adj = +0.05
+        factor = factor * (1.0 + arch_adj)
     return max(0.7, min(1.4, factor))
 
 
@@ -766,29 +800,57 @@ def _structural_shift(ctx, trace):
 
     # Both keepers flagged = no edge either way. Symmetry must cancel, or two
     # identical liabilities would manufacture a preference out of nothing.
+    danger = ctx.get("danger") or {}
     if home_gk_bad and not away_gk_bad:
         # Home keeper is the liability -> away benefits -> home share DOWN.
-        shift -= KEEPER_SHIFT_WEIGHT
-        supporting.append("keeper_liability_home")
+        # C1: scale by vulnerability magnitude, not just binary DANGER.
+        h_gk = danger.get("home_team") or {}
+        if h_gk.get("gk_leak_available") is False:
+            pass  # missing data: no shift, trace already records available=False
+        else:
+            vuln = float(h_gk.get("vulnerability_pct") or 0)
+            magnitude = max(0.0, min(1.0, vuln / 100.0))
+            shift -= KEEPER_SHIFT_WEIGHT * magnitude
+            supporting.append("keeper_liability_home")
     elif away_gk_bad and not home_gk_bad:
         # Away keeper is the liability -> home benefits -> home share UP.
-        shift += KEEPER_SHIFT_WEIGHT
-        supporting.append("keeper_liability_away")
+        a_gk = danger.get("away_team") or {}
+        if a_gk.get("gk_leak_available") is False:
+            pass  # missing data: no shift
+        else:
+            vuln = float(a_gk.get("vulnerability_pct") or 0)
+            magnitude = max(0.0, min(1.0, vuln / 100.0))
+            shift += KEEPER_SHIFT_WEIGHT * magnitude
+            supporting.append("keeper_liability_away")
 
     # Absences: symmetric in the home-centred vocabulary. "for_home" always
     # helps home (home share UP), "against_home" always hurts home (DOWN),
-    # regardless of which side's absence row produced it: a home absence row
-    # saying "for_home" means home's absences helped home; an away absence
-    # row saying "for_home" means the away side's absences helped home.
+    # regardless of which side's absence row produced it.
+    # C2: scale with count and importance (sub-linear, diminishing returns)
+    # instead of a fixed ±0.04 per side.
     for side in ("home", "away"):
         q = next((x for x in trace if x["id"] == f"absences_{side}"), None)
         if not (q and q["available"]):
             continue
+        team = danger.get(f"{side}_team") or {}
+        missing = team.get("missing_details") or []
+        count = len(missing)
+        if count == 0:
+            continue
+        # Sub-linear count scaling: sqrt(count)/sqrt(5) maxes at 1.0 for 5+
+        count_factor = min((count ** 0.5) / 2.236, 1.0)
+        # Importance from player worth; fall back to moderate weight if unknown
+        worth_sum = sum(float(m.get("worth") or 0) for m in missing)
+        if worth_sum > 0:
+            worth_factor = min(worth_sum / 25.0, 1.0)
+        else:
+            worth_factor = 0.5  # unknown worth -> moderate weight
+        magnitude = min(count_factor * worth_factor, 1.0)
         if q["direction"] == "for_home":
-            shift += ABSENCE_SHIFT_WEIGHT
+            shift += ABSENCE_SHIFT_WEIGHT * magnitude
             supporting.append(q["id"])
         elif q["direction"] == "against_home":
-            shift -= ABSENCE_SHIFT_WEIGHT
+            shift -= ABSENCE_SHIFT_WEIGHT * magnitude
             supporting.append(q["id"])
 
     # ── DNA PILLAR EDGES ──────────────────────────────────────────────────
@@ -808,7 +870,19 @@ def _structural_shift(ctx, trace):
             if home_s is None or away_s is None:
                 continue
             diff = (home_s - away_s) / 100.0
-            contribution = diff * 0.30
+            # B2: scale by clash margin/edge confidence rather than flat 0.30.
+            # Clear margin = full weight; Tight = half; Neutral/none = none.
+            margin = (e.get("margin") or "").title()
+            edge = (e.get("edge") or "").title()
+            if edge == "Neutral":
+                confidence = 0.0
+            elif margin == "Clear":
+                confidence = 1.0
+            elif margin == "Tight":
+                confidence = 0.5
+            else:
+                confidence = 0.0
+            contribution = diff * 0.30 * confidence
             pillar_delta += contribution
             if abs(contribution) > 0.001:
                 supporting.append(f"dna_pillar_{pillar}")
@@ -816,7 +890,17 @@ def _structural_shift(ctx, trace):
         bf = edges.get("BTTS_Friction") or {}
         if bf.get("home") is not None and bf.get("away") is not None:
             bf_diff = (bf["home"] - bf["away"]) / 100.0
-            bf_contrib = bf_diff * 0.15
+            bf_margin = (bf.get("margin") or "").title()
+            bf_edge = (bf.get("edge") or "").title()
+            if bf_edge == "Neutral":
+                bf_confidence = 0.0
+            elif bf_margin == "Clear":
+                bf_confidence = 1.0
+            elif bf_margin == "Tight":
+                bf_confidence = 0.5
+            else:
+                bf_confidence = 0.0
+            bf_contrib = bf_diff * 0.15 * bf_confidence
             pillar_delta += bf_contrib
             if abs(bf_contrib) > 0.001:
                 supporting.append("dna_pillar_BTTS_Friction")
@@ -910,6 +994,49 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
                               ctx["odds"].get("away"))
         if share is not None:
             split_method = "two_way"
+    # A1: live direction signal blended WITH the market split (never instead
+    # of it). Only when a price set the share; xG/pressure are de-correlated
+    # via inverse-variance weighting and capped so correlated stats don't
+    # double-count. If both signals are stale/missing, market share stands.
+    if share is not None:
+        h_xg = float(board.get("h_xg") or 0.0)
+        a_xg = float(board.get("a_xg") or 0.0)
+        h_press = float(board.get("h_pressure") or 0.0)
+        a_press = float(board.get("a_pressure") or 0.0)
+        live_share = None
+        live_weight = 0.0
+        # xG-share component (quality of chances created)
+        total_xg = h_xg + a_xg
+        if total_xg > 0.05:
+            xg_share = h_xg / total_xg
+            # weight by total xG volume (more chances = more reliable)
+            live_share = xg_share
+            live_weight = min(total_xg / 3.0, 0.5)
+        # pressure-share component (territorial control)
+        total_press = h_press + a_press
+        if total_press > 0:
+            press_share = h_press / total_press
+            press_weight = min(total_press / 100.0, 0.5)
+            if live_share is None:
+                live_share = press_share
+                live_weight = press_weight
+            else:
+                # blend two correlated signals; downweight pressure to avoid
+                # double-counting with xG
+                combined_w = min(live_weight + press_weight * 0.5, 0.5)
+                live_share = (live_share * live_weight +
+                              press_share * press_weight * 0.5) / combined_w
+                live_weight = combined_w
+        if live_share is not None and live_weight > 0:
+            # apply only a fraction of the live signal, capped at cap
+            shift_live = (live_share - share) * min(live_weight, 1.0)
+            shift_live = max(-LIVE_DIRECTION_SHIFT_CAP,
+                             min(LIVE_DIRECTION_SHIFT_CAP, shift_live))
+            if abs(shift_live) > 0.001:
+                share = max(0.05, min(0.95, share + shift_live))
+                supporting.append("live_direction")
+                if split_method in ("three_way_fit", "two_way"):
+                    split_method = split_method + "+live"
     if share is None:
         # Without a 1X2 price the split comes from who is actually creating
         # chances, which is the best available evidence about the same question.
@@ -921,10 +1048,19 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
         else:
             h_press = float(board.get("h_pressure") or 0.0)
             a_press = float(board.get("a_pressure") or 0.0)
-            share = (h_press / (h_press + a_press)
-                     if (h_press + a_press) > 0 else 0.5)
-            split_method = "live_pressure"
-        share = max(0.15, min(0.85, share))
+            if (h_press + a_press) > 0:
+                share = h_press / (h_press + a_press)
+                split_method = "live_pressure"
+            # else: leave share as None — no live statistics to split on
+            # honestly; treating missing as zero would fabricate a 50/50 split.
+        if share is not None:
+            share = max(0.15, min(0.85, share))
+    if share is None:
+        # No price and no live statistics — cannot determine split honestly.
+        # Return INSUFFICIENT rather than fabricating a number (A2).
+        return {**base, "status": "INSUFFICIENT",
+                "error": "no price and no live statistics to split goals on",
+                "predictions": None, "judges": None, "verdict": "BLOCK"}
     shift, supporting = _structural_shift(ctx, trace)
     share = max(0.05, min(0.95, share + shift))
 
@@ -953,6 +1089,30 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
         pace = max(0.55, min(2.4, pace))
         pace_note = (f"shrunk pace (obs {observed:.2f} vs exp "
                      f"{expected_so_far:.2f})")
+        # A1: intensity tempo factor from total xG + SOT — separate from,
+        # and additive to, pace. Adjusts how much goal expectation remains;
+        # capped and shrinkage-priored so a single event can't swing the match.
+        h_sot = float(board.get("h_sot") or 0.0)
+        a_sot = float(board.get("a_sot") or 0.0)
+        intensity_obs = observed + 0.1 * (h_sot + a_sot)  # SOT weighted lower
+        tempo = ((intensity_obs + LIVE_INTENSITY_PRIOR) /
+                 (expected_so_far + LIVE_INTENSITY_PRIOR)
+                 if (expected_so_far + LIVE_INTENSITY_PRIOR) > 0 else 1.0)
+        # A1: dangerous attacks as confirmatory cross-check only — if DA
+        # run-rate strongly disagrees with xG/SOT intensity, pull tempo
+        # toward neutral (reduce confidence). Never a direct probability input
+        # (avoids double-counting with xG/SOT).
+        h_da = float(board.get("h_dangerous_attacks") or 0.0)
+        a_da = float(board.get("a_dangerous_attacks") or 0.0)
+        total_da = h_da + a_da
+        if total_da > 0 and intensity_obs > 0:
+            da_per_xg = total_da / max(intensity_obs, 0.01)
+            if da_per_xg < DA_CONFIRM_DISAGREE or da_per_xg > (1.0 / DA_CONFIRM_DISAGREE):
+                tempo = 1.0 + (tempo - 1.0) * 0.5
+                pace_note += "; DA/xG disagreement — confidence reduced"
+        tempo = max(LIVE_INTENSITY_MIN, min(LIVE_INTENSITY_MAX, tempo))
+        remaining_frac = remaining_frac * tempo
+        pace_note = pace_note + f"; intensity tempo {tempo:.2f}"
 
     lam_home = total_goals * share * remaining_frac * pace
     lam_away = total_goals * (1.0 - share) * remaining_frac * pace
@@ -1012,6 +1172,9 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
     judge_payload = dict(predictions)
     judge_payload["_anchor"] = {"anchor_total_goals": round(total_goals, 4),
                                 "anchor_source": anchor}
+    judge_payload["_lambda"] = {"home": round(lam_home, 4),
+                                "away": round(lam_away, 4),
+                                "pace": round(pace, 3)}
     try:
         from .live_prediction_judges import run_judges
         panel = run_judges(ctx, judge_payload, trace, history)
@@ -1026,10 +1189,10 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
             "predictions": predictions,
             "judges": panel["judges"], "verdict": panel["verdict"],
             "blocked_by": panel.get("blocked_by", []),
-            "dna_available": ctx.get("dna", {}).get("available", False),
-            "home_archetype": (ctx.get("dna", {}) or {}).get("home", {}).get(
+            "dna_available": (ctx.get("dna") or {}).get("available", False),
+            "home_archetype": ((ctx.get("dna") or {}).get("home") or {}).get(
                 "archetype"),
-            "away_archetype": (ctx.get("dna", {}) or {}).get("away", {}).get(
+            "away_archetype": ((ctx.get("dna") or {}).get("away") or {}).get(
                 "archetype"),
             "overall_structural_edge": ((ctx.get("dna", {}) or {}).get(
                 "clash") or {}).get("overall_edge"),
