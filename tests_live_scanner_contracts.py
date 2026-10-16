@@ -1672,6 +1672,103 @@ class FinishedRowRetentionTests(unittest.TestCase):
         self.assertIn("predictions", entry)
 
 # ═══════════════════════════════════════════════════════════════════════════
+# STAGE 9 — STICKY FINISHED RETENTION (the day's list must ACCUMULATE)
+# ═══════════════════════════════════════════════════════════════════════════
+class Stage9StickyRetentionTests(unittest.TestCase):
+    """Regression guard for the 2026-10-16 incoming-under-list disappearance.
+
+    The old retention re-confirmed finished-ness at the ONE cycle a pick left
+    the list — but Stage 1 culls finished fixtures from the audit BEFORE
+    Stage 9 runs, and Stage 6 (which writes the board's finished rows) ran
+    AFTER it, so confirmation never arrived: measured 0 retained in every
+    cycle that day and the day's list decayed 19 → 2 rows. Finished is a
+    terminal state: once a row is finished it must stay unconditionally.
+    """
+
+    def _s9(self):
+        from LIVE_SCANNER import live_stage9_under_engine as s9
+        return s9
+
+    def test_finished_fixture_is_promoted_and_retained(self):
+        s9 = self._s9()
+        picks = [{"fixture_id": "1", "fixture_status": "incoming"}]
+        prev = [
+            {"fixture_id": "1", "fixture_status": "incoming"},  # still current
+            {"fixture_id": "2", "fixture_status": "incoming"},  # now finished
+            {"fixture_id": "3", "fixture_status": "finished"},  # already retained
+        ]
+        merged, retained = s9._merge_snapshot_rows(
+            picks, prev, {"2", "3"}, "2026-10-16")
+        by_id = {str(r.get("fixture_id")): r for r in merged}
+        self.assertEqual(set(by_id), {"1", "2", "3"})
+        self.assertEqual(by_id["2"]["fixture_status"], "finished")
+        self.assertEqual(by_id["2"]["finished_date"], "2026-10-16")
+        self.assertEqual(by_id["3"]["fixture_status"], "finished")
+        self.assertEqual(retained, 2)
+
+    def test_finished_row_is_sticky_without_any_confirmation(self):
+        # Once finished, a row survives even when NO source can confirm it
+        # anymore (board evicted it, audit culled it) — the stickiness the
+        # old per-cycle re-confirmation lacked.
+        s9 = self._s9()
+        prev = [{"fixture_id": "9", "fixture_status": "finished",
+                 "finished_date": "2026-10-16"}]
+        merged, retained = s9._merge_snapshot_rows([], prev, set(),
+                                                    "2026-10-16")
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["fixture_status"], "finished")
+        self.assertEqual(merged[0]["finished_date"], "2026-10-16")
+        self.assertEqual(retained, 1)
+
+    def test_pick_that_vanished_without_finishing_is_still_dropped(self):
+        # A lineup withdrawn before kickoff must NOT be frozen into history as
+        # a stale never-played pick — retention stays honest.
+        s9 = self._s9()
+        prev = [{"fixture_id": "5", "fixture_status": "incoming"}]
+        merged, retained = s9._merge_snapshot_rows([], prev, set(),
+                                                    "2026-10-16")
+        self.assertEqual(merged, [])
+        self.assertEqual(retained, 0)
+
+    def test_current_pick_wins_over_retained_row(self):
+        s9 = self._s9()
+        picks = [{"fixture_id": "1", "fixture_status": "live",
+                  "u25_score": 80}]
+        prev = [{"fixture_id": "1", "fixture_status": "finished"}]
+        merged, retained = s9._merge_snapshot_rows(picks, prev, {"1"},
+                                                    "2026-10-16")
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["fixture_status"], "live")
+        self.assertEqual(merged[0]["u25_score"], 80)
+        self.assertEqual(retained, 0)
+
+    def test_duplicate_prev_rows_collapse_to_one(self):
+        s9 = self._s9()
+        prev = [{"fixture_id": "7", "fixture_status": "finished"},
+                {"fixture_id": "7", "fixture_status": "incoming"}]
+        merged, retained = s9._merge_snapshot_rows([], prev, {"7"},
+                                                    "2026-10-16")
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(retained, 1)
+
+    def test_finished_ids_come_from_board_audit_and_are_order_independent(self):
+        # The FT snapshot layer is read inside _finished_fixture_ids from the
+        # real data path; here we pin the board + audit sources, which must
+        # never disagree with each other, and that non-finished rows are not
+        # promoted.
+        s9 = self._s9()
+        board = [{"id": "10", "is_finished": True},
+                 {"id": "11", "is_finished": False}]
+        audit = {"12": {"is_finished": True},
+                 "13": {"is_finished": False}}
+        ids = s9._finished_fixture_ids(board, audit, "2099-01-01")
+        self.assertIn("10", ids)   # board finished
+        self.assertIn("12", ids)   # audit finished
+        self.assertNotIn("11", ids)
+        self.assertNotIn("13", ids)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # CODE 3C — ALERT PRUNING (stale + legacy rows must stop being shown)
 # ═══════════════════════════════════════════════════════════════════════════
 class AlertPruningTests(unittest.TestCase):
