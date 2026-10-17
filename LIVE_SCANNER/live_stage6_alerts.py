@@ -917,8 +917,11 @@ class SupremeOrchestrator:
                     break
 
         minute = self.extract_minute(fx)
-        if not minute or minute <= 0:
-            return None
+        # Never drop a live fixture just because its minute is unreadable;
+        # minute 0 means "clock not yet readable" — the fixture stays on the
+        # board so it isn't silently removed from the live view.
+        if not minute:
+            minute = 0
 
         self.update_market_settlement(f_id, fx)
         # The scoreline at this instant, captured once and handed to
@@ -2356,29 +2359,72 @@ class SupremeOrchestrator:
 
     # ── MINUTE EXTRACTOR ─────────────────────────────────────────────────
     def extract_minute(self, fx):
-        found = [0]
-        if fx.get("time") and isinstance(fx.get("time"), dict):
-            found.append(int(fx["time"].get("minute", 0)))
-        if isinstance(fx.get("state"), dict):
-            found.append(int(fx.get("state").get("minute", 0)))
-        for p in fx.get("periods", []):
+        """Authoritative live minute from the provider's own match clock.
+
+        Priority:
+          1. in-play periods[].minutes (the real match clock, e.g. 80' 7")
+          2. state.minute / time.minute if the provider reports them
+          3. event minutes (factual match data, more reliable than wall-clock)
+          4. wall-clock elapsed from kickoff ONLY as a last resort, and never
+             allowed to override a real period clock — delays, stoppage and HT
+             make wall-clock diverge from the match clock, which is what made
+             a match read "14' at 45'".
+        Returns 0 (never raises) when nothing is readable. Callers must not
+        drop a fixture just because its minute is unreadable.
+        """
+        found = []
+
+        # 1. The provider's own period clock — authoritative while in play.
+        for p in fx.get("periods", []) or []:
+            if not isinstance(p, dict):
+                continue
             period_time = p.get("time") if isinstance(p.get("time"), dict) else {}
-            m = (period_time.get("minute") or p.get("minute")
-                 or p.get("minutes") or p.get("length"))
-            if m:
-                try: found.append(int(m))
-                except (TypeError, ValueError): pass
+            m = period_time.get("minute") or p.get("minute") or p.get("minutes") or p.get("length")
+            if m is not None:
+                try:
+                    found.append(int(m))
+                except (TypeError, ValueError):
+                    pass
+
+        # 2. state.minute / time.minute if the provider reports them.
+        if isinstance(fx.get("state"), dict):
+            m = fx["state"].get("minute")
+            if m is not None:
+                try:
+                    found.append(int(m))
+                except (TypeError, ValueError):
+                    pass
+        if fx.get("time") and isinstance(fx.get("time"), dict):
+            m = fx["time"].get("minute")
+            if m is not None:
+                try:
+                    found.append(int(m))
+                except (TypeError, ValueError):
+                    pass
+
+        # 3. Event minutes — factual match data, more reliable than wall-clock.
         if fx.get("events"):
-            emins = [int(e.get("minute",0))
-                     for e in fx["events"] if e.get("minute")]
-            if emins: found.append(max(emins))
-        if fx.get("starting_at_timestamp"):
-            now_ts  = int(datetime.now(timezone.utc).timestamp())
-            elapsed = (now_ts - int(fx["starting_at_timestamp"])) // 60
-            if 0 < elapsed <= 50:     found.append(elapsed)
-            elif 60 < elapsed <= 110: found.append(elapsed - 15)
-            elif elapsed > 110:       found.append(90)
-        return max(found)
+            for e in fx["events"]:
+                if isinstance(e, dict) and e.get("minute"):
+                    try:
+                        found.append(int(e["minute"]))
+                    except (TypeError, ValueError):
+                        pass
+
+        real = max(found) if found else None
+
+        # 4. Wall-clock elapsed from kickoff — last resort only. Never overrides
+        #    a real period clock.
+        if real is None and fx.get("starting_at_timestamp"):
+            try:
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+                elapsed = (now_ts - int(fx["starting_at_timestamp"])) // 60
+                if elapsed > 0:
+                    found.append(elapsed)
+            except (TypeError, ValueError, OSError):
+                pass
+
+        return max(found) if found else 0
 
     # ── LIVE SCORE FETCH ─────────────────────────────────────────────────
     def fetch_live_scores(self):
