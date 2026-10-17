@@ -998,6 +998,14 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
     # of it). Only when a price set the share; xG/pressure are de-correlated
     # via inverse-variance weighting and capped so correlated stats don't
     # double-count. If both signals are stale/missing, market share stands.
+    #
+    # `supporting` is not created until _structural_shift() returns below, so
+    # this block records its contribution in a flag instead of appending —
+    # appending here raised UnboundLocalError (HTTP 500) on every genuinely
+    # live fixture with xG/pressure + odds, which the frontend then masked as
+    # "No live match found". Fixed 2026-10-17; see the regression test in
+    # tests_live_scanner_contracts.py.
+    live_direction_fired = False
     if share is not None:
         h_xg = float(board.get("h_xg") or 0.0)
         a_xg = float(board.get("a_xg") or 0.0)
@@ -1034,7 +1042,7 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
                              min(LIVE_DIRECTION_SHIFT_CAP, shift_live))
             if abs(shift_live) > 0.001:
                 share = max(0.05, min(0.95, share + shift_live))
-                supporting.append("live_direction")
+                live_direction_fired = True
                 if split_method in ("three_way_fit", "two_way"):
                     split_method = split_method + "+live"
     if share is None:
@@ -1062,6 +1070,8 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
                 "error": "no price and no live statistics to split goals on",
                 "predictions": None, "judges": None, "verdict": "BLOCK"}
     shift, supporting = _structural_shift(ctx, trace)
+    if live_direction_fired:
+        supporting.append("live_direction")
     share = max(0.05, min(0.95, share + shift))
 
     # PACE: is the match running hotter than the price implied? Compare the
