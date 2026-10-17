@@ -48,6 +48,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 BOARD_FILE = os.path.join(OUTPUT_DIR, "orchestrator_board.json")
+LIVE_INPLAY_FILE = os.path.join(DATA_DIR, "live_inplay_cache.json")
 DANGER_FILE = os.path.join(DATA_DIR, "danger_audit.json")
 PREMATCH_FILE = os.path.join(DATA_DIR, "prematch_team_audit.json")
 # DNA intelligence files — the rich pre-match layer Stage 8 was blind to.
@@ -80,10 +81,17 @@ DNA_PILLAR_SHIFT_WEIGHT = 0.05
 #   * Direction signal (which side more likely to score): h_xg/a_xg share and
 #     h_pressure/a_pressure share, inverse-variance weighted, capped at a small
 #     ceiling so correlated xG/pressure cannot double-count.
+#
+# Evidence-once rule (2026-10-17): the live xG observation drives ONE
+# multiplier. pace and tempo are blended into a single `live_factor` by
+# inverse-variance weighting so correlated xG/SOT cannot square the effect.
 LIVE_DIRECTION_SHIFT_CAP = 0.08      # max share shift from live direction signal
 LIVE_INTENSITY_MIN = 0.70            # tempo factor floor
 LIVE_INTENSITY_MAX = 1.60            # tempo factor ceiling
 LIVE_INTENSITY_PRIOR = 1.0           # shrinkage prior for intensity tempo
+# DA/xG run-rate disagreement band (per-minute rates, NOT raw counts —
+# raw DA/xG is 20-35 in every realistic case so a raw threshold always
+# fires; fixed 2026-10-17).
 DA_CONFIRM_DISAGREE = 0.30           # DA/xG run-rate disagreement threshold
 
 # Fallback anchor, used only when a fixture has NO prematch price.
@@ -109,6 +117,13 @@ SHOT_TO_GOAL_RATE = 0.30       # goals per shot on target
 # Pace shrinkage: (observed+a)/(expected+a) — a lone 0.4 xG shot @10' no
 # longer swings the whole match 33%.
 PACE_PRIOR_STRENGTH = 1.2
+# Board h_xg/a_xg are a Stage-6 ACTIVITY INDEX (weighted shots+box+DA+corners),
+# not provider xG in goals — typical 48' reads ~12 vs ~1.0 true xG. Scale to
+# goal units before comparing to the market anchor (calibrated 2026-10-17
+# from Everton-Chelsea 48': index 12.75 vs anchor-implied ~1.0 by then).
+# Without this, pace reads ~2.4 capped on every fixture and the engine is
+# permanently "hot".
+LIVE_XG_INDEX_SCALE = 0.08
 
 
 def _live_anchor_goals(board, stats, played):
@@ -120,8 +135,8 @@ def _live_anchor_goals(board, stats, played):
     to 90 minutes is wildly unstable, so the observed rate is given weight
     (elapsed / (elapsed + prior)) and the rest comes from the base rate.
     """
-    h_xg = float(board.get("h_xg") or 0.0)
-    a_xg = float(board.get("a_xg") or 0.0)
+    h_xg = float(board.get("h_xg") or 0.0) * LIVE_XG_INDEX_SCALE
+    a_xg = float(board.get("a_xg") or 0.0) * LIVE_XG_INDEX_SCALE
     sot = 0.0
     for side in ("home", "away"):
         block = stats.get(side) or {}
@@ -398,15 +413,26 @@ def _team_timing_factor(ctx):
     home_cov = (dna.get("home") or {}).get("coverage_pct") or 0
     away_cov = (dna.get("away") or {}).get("coverage_pct") or 0
     if home_cov >= 0.7 and away_cov >= 0.7 and home_arch and away_arch:
-        _defensive_kw = ("defensive", "low block", "deep", "compact",
-                         "sit in", "park the bus", "counter-attack",
-                         "counter attack")
-        home_def = any(k in home_arch.lower() for k in _defensive_kw)
-        away_def = any(k in away_arch.lower() for k in _defensive_kw)
+        # Match against the 7 real DNA archetypes (fixed 2026-10-17 — the
+        # old defensive keyword list matched NONE of them, so every fixture
+        # got +0.05). Defensive: Possession Controller (DRAW/UNDER),
+        # Set-Piece Specialist (CORNERS). Attacking: Box Predator, Elite
+        # Dominator, High-Friction Chaos. Neutral: Balanced, Aggressive
+        # Disruptor (CARDS — not a goal-timing signal).
+        _ha, _aa = home_arch.lower(), away_arch.lower()
+        _def_kw = ("possession controller", "draw/under", "set-piece",
+                   "set piece", "corners")
+        _att_kw = ("box predator", "elite dominator", "high-friction",
+                   "high friction", "chaos", "over/gg", "over", "win/over")
+        home_def = any(k in _ha for k in _def_kw)
+        away_def = any(k in _aa for k in _def_kw)
+        home_att = any(k in _ha for k in _att_kw)
+        away_att = any(k in _aa for k in _att_kw)
         if home_def and away_def:
             arch_adj = -0.05
-        elif not home_def and not away_def:
+        elif home_att and away_att:
             arch_adj = +0.05
+        # Mixed or neutral-involved → no change.
         factor = factor * (1.0 + arch_adj)
     return max(0.7, min(1.4, factor))
 
@@ -422,12 +448,37 @@ def time_remaining_share(played, timing_factor=1.0):
     if played >= 120:
         return 0.0
     if played >= 75:
-        # Late regulation blends into stoppage then ET on one decaying line:
-        # 75' -> ~0.21, 90' -> ~0.08, 95' -> 0.08 (ET kickoff, continuous),
-        # then decay to the 0.02 floor at 120'. No jumps, never zero live.
+        # Late regulation blends into stoppage then ET on one decaying line,
+        # CONTINUOUS with the DNA-shifted knots (fixed 2026-10-17 — the old
+        # branch returned a fixed 0.21 at 75' regardless of timing_factor,
+        # jumping -14%/+19.5% at exactly 75').
+        # Compute the knot value AT 75' under the same rescaling, then decay.
+        knots = _GOAL_TIMING_KNOTS
+        if timing_factor != 1.0:
+            ht_share = min(0.95, max(0.05, LEAGUE_HT_GOAL_SHARE * timing_factor))
+            ft_share = 1.0 - ht_share
+            sh_base = 1.0 - LEAGUE_HT_GOAL_SHARE
+            sh_scale = ft_share / sh_base if sh_base > 0 else 1.0
+            ht_scale = ht_share / LEAGUE_HT_GOAL_SHARE if LEAGUE_HT_GOAL_SHARE > 0 else 1.0
+            knots = tuple(
+                (m, min(1.0, c * ht_scale)) if c <= LEAGUE_HT_GOAL_SHARE
+                else (m, ht_share + (c - LEAGUE_HT_GOAL_SHARE) * sh_scale)
+                for m, c in _GOAL_TIMING_KNOTS
+            )
+        # CDF at 75' under rescaled knots (interpolate 60->75 segment).
+        c60 = c75 = None
+        for m, c in knots:
+            if m == 60:
+                c60 = c
+            if m == 75:
+                c75 = c
+        if c60 is None or c75 is None:
+            c60, c75 = 0.61, 0.79
+        start_rem = max(0.02, 1.0 - c75)
         if played < 90:
             frac = (played - 75) / 15.0
-            return max(0.02, 0.21 - frac * (0.21 - 0.08))
+            # Decay from the rescaled 75' value toward 0.08 at 90'.
+            return max(0.02, start_rem - frac * (start_rem - 0.08))
         if played < 95:
             return 0.08
         return max(0.02, 0.08 * (120 - played) / 25.0)
@@ -472,6 +523,141 @@ def effective_minutes_left(played, is_finished=False):
     return 0
 
 
+def _live_inplay_minute(fx):
+    """Best-effort minute from a raw in-play payload (no board needed).
+
+    Mirrors SupremeOrchestrator.extract_minute: periods first, then events,
+    then elapsed-from-kickoff as tie-break. Never raises.
+    """
+    try:
+        found = [0]
+        for p in (fx or {}).get("periods", []) or []:
+            if not isinstance(p, dict):
+                continue
+            m = p.get("minutes")
+            try:
+                if m is not None:
+                    found.append(int(m))
+            except (TypeError, ValueError):
+                pass
+        for e in (fx or {}).get("events", []) or []:
+            if isinstance(e, dict) and e.get("minute"):
+                try:
+                    found.append(int(e.get("minute") or 0))
+                except (TypeError, ValueError):
+                    pass
+        try:
+            ts = fx.get("starting_at_timestamp")
+            if ts:
+                import datetime as _dt
+                now_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp())
+                elapsed = (now_ts - int(ts)) // 60
+                if 0 < elapsed <= 50:
+                    found.append(elapsed)
+                elif 60 < elapsed <= 110:
+                    found.append(elapsed - 15)
+                elif elapsed > 110:
+                    found.append(90)
+        except Exception:
+            pass
+        return max(found)
+    except Exception:
+        return 0
+
+
+def _synth_board_row(fx):
+    """Build a minimal board row from a raw in-play payload.
+
+    Used when a fixture is live in live_inplay_cache.json but not yet
+    published to orchestrator_board.json (the 2026-10-17 Chelsea gap:
+    search read only the board, so a live match returned "No live match
+    found"). Carries the minute + stats the engine needs; xG/pressure
+    default to 0 so the trace honestly reports them unavailable.
+    """
+    try:
+        parts = (fx or {}).get("participants", []) or []
+        h_id = a_id = None
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            loc = (p.get("meta") or {}).get("location")
+            if loc == "home":
+                h_id = str(p.get("id"))
+            elif loc == "away":
+                a_id = str(p.get("id"))
+        h_stats, a_stats = {}, {}
+        for s in (fx or {}).get("statistics", []) or []:
+            if not isinstance(s, dict):
+                continue
+            pid = str(s.get("participant_id"))
+            typ = s.get("type") or {}
+            code = typ.get("code") if isinstance(typ, dict) else None
+            try:
+                val = float((s.get("data") or {}).get("value", 0))
+            except (TypeError, ValueError):
+                val = 0.0
+            loc = "home" if pid == h_id else ("away" if pid == a_id else None)
+            if not loc or not code:
+                continue
+            (h_stats if loc == "home" else a_stats)[code] = val
+        # Scoreline: CURRENT period preferred, else newest period (cumulative).
+        h_g = a_g = None
+        cur, lat, lat_t = {}, {}, -1
+        for entry in (fx or {}).get("scores", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            s_obj = entry.get("score") or entry
+            side = str(s_obj.get("participant", "")).lower()
+            if side not in ("home", "away"):
+                continue
+            try:
+                val = int(s_obj.get("goals"))
+            except (TypeError, ValueError):
+                continue
+            desc = str(entry.get("description", "")).upper()
+            if "CURRENT" in desc:
+                cur[side] = val
+                continue
+            try:
+                tid = int(entry.get("type_id") or 0)
+            except (TypeError, ValueError):
+                tid = 0
+            if tid >= lat_t:
+                if tid > lat_t:
+                    lat_t = tid
+                    lat = {}
+                lat[side] = val
+        for src in (cur, lat):
+            if src.get("home") is not None and src.get("away") is not None:
+                h_g, a_g = int(src["home"]), int(src["away"])
+                break
+        if h_g is None:
+            h_stats.setdefault("goals", 0)
+        else:
+            h_stats["goals"] = h_g
+        if a_g is None:
+            a_stats.setdefault("goals", 0)
+        else:
+            a_stats["goals"] = a_g
+        return {
+            "id": str(fx.get("id")),
+            "name": fx.get("name"),
+            "minute": _live_inplay_minute(fx),
+            "statistics": {"home": h_stats, "away": a_stats},
+            "h_xg": 0.0,
+            "a_xg": 0.0,
+            "h_pressure": 0.0,
+            "a_pressure": 0.0,
+            "h_sot": h_stats.get("shots-on-target", 0.0),
+            "a_sot": a_stats.get("shots-on-target", 0.0),
+            "h_dangerous_attacks": h_stats.get("dangerous-attacks", 0.0),
+            "a_dangerous_attacks": a_stats.get("dangerous-attacks", 0.0),
+            "_synthetic": True,
+        }
+    except Exception:
+        return None
+
+
 def load_context(fixture_id, _board_cache=None, _danger_cache=None,
                  _prematch_cache=None, _dna_cache=None, _clash_cache=None):
     """
@@ -500,6 +686,22 @@ def load_context(fixture_id, _board_cache=None, _danger_cache=None,
         _clash_cache = _as_rows(_load(STYLE_CLASHES_FILE, []))
     board = next((m for m in _board_cache
                   if str(m.get("id")) == str(fixture_id)), None)
+    _board_synthetic = False
+    if board is None:
+        # Fallback (2026-10-17 Chelsea gap): fixture live in the in-play
+        # feed but not yet on the board. Synthesise a minimal row so the
+        # user gets a LIVE_ONLY reading instead of "No live match found".
+        try:
+            _inplay = _load(LIVE_INPLAY_FILE, {})
+            _rows = (_inplay or {}).get("data", []) if isinstance(
+                _inplay, dict) else []
+            _fx = next((x for x in _rows
+                        if str(x.get("id")) == str(fixture_id)), None)
+            if _fx is not None:
+                board = _synth_board_row(_fx)
+                _board_synthetic = board is not None
+        except Exception:
+            board = None
     if board is None:
         return None
 
@@ -745,12 +947,33 @@ def find_fixtures(query):
     ("denmark portugal", "Denmark vs Portugal", "DENMARK"). Matching is done on
     content words with a containment rule, because a strict equality test on a
     provider name like "Dunajská Streda" fails almost every real query.
+
+    Fallback (2026-10-17 Chelsea gap): the board is written once per scanner
+    cycle, so a fixture can be live in live_inplay_cache.json but absent from
+    the board. Those rows are unioned in (synthesised) so search never says
+    "No live match found" for a match that is genuinely in play.
     """
     wanted = _tokens(query)
     if not wanted:
         return []
     rows = _as_rows((_load(BOARD_FILE, {}) or {}).get("matches", [])
                     if isinstance(_load(BOARD_FILE, {}), dict) else [])
+    try:
+        _board_ids = {str(m.get("id")) for m in rows
+                      if isinstance(m, dict)}
+        _inplay = _load(LIVE_INPLAY_FILE, {})
+        _items = (_inplay or {}).get("data", []) if isinstance(
+            _inplay, dict) else []
+        for _fx in _items or []:
+            if not isinstance(_fx, dict):
+                continue
+            if str(_fx.get("id")) in _board_ids:
+                continue
+            _syn = _synth_board_row(_fx)
+            if _syn is not None:
+                rows = list(rows) + [_syn]
+    except Exception:
+        pass
     hits = []
     for m in rows:
         name = normalise(m.get("name"))
@@ -1013,13 +1236,15 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
         a_press = float(board.get("a_pressure") or 0.0)
         live_share = None
         live_weight = 0.0
-        # xG-share component (quality of chances created)
+        # xG-share component (quality of chances created). Share is unit-free
+        # so the raw index ratio is fine; the VOLUME weight uses goal units.
         total_xg = h_xg + a_xg
+        total_xg_goals = total_xg * LIVE_XG_INDEX_SCALE
         if total_xg > 0.05:
             xg_share = h_xg / total_xg
             # weight by total xG volume (more chances = more reliable)
             live_share = xg_share
-            live_weight = min(total_xg / 3.0, 0.5)
+            live_weight = min(total_xg_goals / 3.0, 0.5)
         # pressure-share component (territorial control)
         total_press = h_press + a_press
         if total_press > 0:
@@ -1047,18 +1272,25 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
                     split_method = split_method + "+live"
     if share is None:
         # Without a 1X2 price the split comes from who is actually creating
-        # chances, which is the best available evidence about the same question.
+        # chances, shrunk toward 0.5 (fixed 2026-10-17 — the old code read a
+        # 5-minute sample raw, so a 3-1 xG start read 0.75 where shrinkage
+        # gives ~0.54). Weight grows with elapsed time and chance volume.
         total_xg = (float(board.get("h_xg") or 0.0)
                     + float(board.get("a_xg") or 0.0))
+        total_xg_goals = total_xg * LIVE_XG_INDEX_SCALE
         if total_xg > 0.05:
-            share = float(board.get("h_xg") or 0.0) / total_xg
-            split_method = "live_xg"
+            raw = float(board.get("h_xg") or 0.0) / total_xg
+            w = min(played / (played + 30.0), 1.0) * min(total_xg_goals / 2.0, 1.0)
+            share = 0.5 + (raw - 0.5) * w
+            split_method = "live_xg_shrunk"
         else:
             h_press = float(board.get("h_pressure") or 0.0)
             a_press = float(board.get("a_pressure") or 0.0)
             if (h_press + a_press) > 0:
-                share = h_press / (h_press + a_press)
-                split_method = "live_pressure"
+                raw = h_press / (h_press + a_press)
+                w = min(played / (played + 30.0), 1.0) * 0.5
+                share = 0.5 + (raw - 0.5) * w
+                split_method = "live_pressure_shrunk"
             # else: leave share as None — no live statistics to split on
             # honestly; treating missing as zero would fabricate a 50/50 split.
         if share is not None:
@@ -1074,23 +1306,30 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
         supporting.append("live_direction")
     share = max(0.05, min(0.95, share + shift))
 
-    # PACE: is the match running hotter than the price implied? Compare the
-    # chance quality generated so far against what the anchor expected by this
-    # point. This is what makes the engine react to the match rather than
-    # replay the pre-match view.
+    # LIVE FACTOR (2026-10-17, evidence-once): is the match running hotter
+    # than the price implied? Compare chance quality generated so far against
+    # what the anchor expected by this point. The old code computed BOTH a
+    # pace multiplier (xG vs expected) AND a tempo multiplier (xG+SOT vs
+    # expected) and applied both — the same xG evidence squared. Now the two
+    # shrunk ratios are blended into ONE factor by elapsed-time weighting,
+    # so the observation is used once. This is what makes the engine react
+    # to the match rather than replay the pre-match view.
     #
     # Two guards the old code lacked:
-    #  1. In fallback mode the anchor IS the observation, so pace would divide
-    #     the observation by itself (self-referential, hot-stays-hot). Pace is
-    #     1.0 there — the observation was already used once.
+    #  1. In fallback mode the anchor IS the observation, so the factor would
+    #     divide the observation by itself (self-referential, hot-stays-hot).
+    #     Factor is 1.0 there — the observation was already used once.
     #  2. Gamma-Poisson shrinkage (observed+a)/(expected+a) per the PRIOR
     #     above, so a lone 0.4 xG shot @10' no longer swings the match 33%.
     if anchor == "live_observation":
         pace = 1.0
         pace_note = "fallback anchor already uses the observation — pace 1.0"
     else:
-        observed = float(board.get("h_xg") or 0.0) \
+        observed_idx = float(board.get("h_xg") or 0.0) \
             + float(board.get("a_xg") or 0.0)
+        # Scale the Stage-6 activity index to goal units before comparing
+        # with the market anchor (see LIVE_XG_INDEX_SCALE).
+        observed = observed_idx * LIVE_XG_INDEX_SCALE
         played_share = 1.0 - time_remaining_share(played, timing_factor)
         expected_so_far = total_goals * max(0.0, played_share)
         a = PACE_PRIOR_STRENGTH
@@ -1099,33 +1338,44 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
         pace = max(0.55, min(2.4, pace))
         pace_note = (f"shrunk pace (obs {observed:.2f} vs exp "
                      f"{expected_so_far:.2f})")
-        # A1: intensity tempo factor from total xG + SOT — separate from,
-        # and additive to, pace. Adjusts how much goal expectation remains;
-        # capped and shrinkage-priored so a single event can't swing the match.
+        # Intensity from total xG + SOT — blended WITH pace (not multiplied
+        # after it). SOT weighted lower; capped and shrinkage-priored so a
+        # single event can't swing the match. Uses the same goal-unit scaling.
         h_sot = float(board.get("h_sot") or 0.0)
         a_sot = float(board.get("a_sot") or 0.0)
         intensity_obs = observed + 0.1 * (h_sot + a_sot)  # SOT weighted lower
         tempo = ((intensity_obs + LIVE_INTENSITY_PRIOR) /
                  (expected_so_far + LIVE_INTENSITY_PRIOR)
                  if (expected_so_far + LIVE_INTENSITY_PRIOR) > 0 else 1.0)
-        # A1: dangerous attacks as confirmatory cross-check only — if DA
-        # run-rate strongly disagrees with xG/SOT intensity, pull tempo
-        # toward neutral (reduce confidence). Never a direct probability input
-        # (avoids double-counting with xG/SOT).
+        # Dangerous attacks as confirmatory cross-check only — compares
+        # PER-MINUTE DA rate to a calibrated band (0.5-1.5 DA/min is normal
+        # open play; raw DA/xG counts are 20-35 in every realistic case so a
+        # raw ratio always "disagrees"). If the DA rate is anomalous, pull
+        # tempo toward neutral (reduce confidence). Never a direct
+        # probability input (avoids double-counting with xG/SOT).
         h_da = float(board.get("h_dangerous_attacks") or 0.0)
         a_da = float(board.get("a_dangerous_attacks") or 0.0)
         total_da = h_da + a_da
-        if total_da > 0 and intensity_obs > 0:
-            da_per_xg = total_da / max(intensity_obs, 0.01)
-            if da_per_xg < DA_CONFIRM_DISAGREE or da_per_xg > (1.0 / DA_CONFIRM_DISAGREE):
+        if total_da > 0 and played > 0:
+            da_rate = total_da / max(played, 1.0)
+            if da_rate < 0.3 or da_rate > 2.5:
                 tempo = 1.0 + (tempo - 1.0) * 0.5
-                pace_note += "; DA/xG disagreement — confidence reduced"
+                pace_note += "; DA rate anomalous — confidence reduced"
         tempo = max(LIVE_INTENSITY_MIN, min(LIVE_INTENSITY_MAX, tempo))
-        remaining_frac = remaining_frac * tempo
-        pace_note = pace_note + f"; intensity tempo {tempo:.2f}"
+        # Evidence-once: blend, don't stack. Weight by elapsed time — early
+        # the prior dominates (both ~1.0, blend ~1.0); late the observation
+        # dominates. The old remaining_frac *= tempo; lam *= pace squared xG.
+        w_obs = min(max(played / 90.0, 0.0), 1.0)
+        live_factor = (1.0 - w_obs) * 1.0 + w_obs * (pace + tempo) / 2.0
+        live_factor = max(0.55, min(2.0, live_factor))
+        remaining_frac = remaining_frac * live_factor
+        pace = live_factor
+        pace_note = pace_note + f"; live factor {live_factor:.2f} (pace+tempo blended)"
 
-    lam_home = total_goals * share * remaining_frac * pace
-    lam_away = total_goals * (1.0 - share) * remaining_frac * pace
+    lam_home = total_goals * share * remaining_frac
+    lam_away = total_goals * (1.0 - share) * remaining_frac
+    # NOTE: remaining_frac already carries the single blended live_factor, so
+    # lam uses the live evidence exactly once (evidence-once rule).
     current = ctx["score"]
     goals_already = current["home"] + current["away"]
 
@@ -1229,13 +1479,28 @@ def predict(fixture_id, history=None, _board_cache=None, _danger_cache=None,
 # The snapshot file is still overwritten each cycle for the API; this log is
 # never overwritten, so Brier / calibration-by-minute can be scored later
 # against final results and the constants tuned walk-forward (Draw precedent).
+#
+# Rotation (2026-10-17): _append_prediction_log rotates daily
+# (stage8_prediction_log_YYYY-MM-DD.jsonl) so the file cannot grow without
+# bound, and each line now carries xG, SOT, cards + MODEL_VERSION for
+# calibration joins.
+MODEL_VERSION = "stage8-20261017-evidence-once"
 PREDICTION_LOG_FILE = os.path.join(DATA_DIR, "stage8_prediction_log.jsonl")
 
 
 def _append_prediction_log(entry):
     try:
-        with open(PREDICTION_LOG_FILE, "a", encoding="utf-8") as f:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        path = os.path.join(DATA_DIR, f"stage8_prediction_log_{day}.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+        # Keep the legacy unrotated path as a symlink-free copy of today for
+        # any reader still pointing at it (best-effort, never breaks cycle).
+        try:
+            with open(PREDICTION_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1269,8 +1534,13 @@ def run_live_prediction_engine():
             # calibration scoring. Failures of the log never break the cycle.
             if rec.get("status") == "OK" and rec.get("predictions"):
                 model = rec.get("model") or {}
+                # Live context for calibration joins (2026-10-17 — the old
+                # log lacked xG, cards, model version).
+                _board_row = next(
+                    (x for x in rows if str(x.get("id")) == str(fid)), {}) or {}
                 _append_prediction_log({
                     "ts": time.time(),
+                    "model_version": MODEL_VERSION,
                     "fixture_id": str(fid),
                     "fixture": rec.get("fixture"),
                     "minute": rec.get("minute"),
@@ -1288,6 +1558,14 @@ def run_live_prediction_engine():
                     "structural_shift": model.get("structural_shift"),
                     "structural_signals": model.get("structural_signals"),
                     "timing_factor": model.get("timing_factor"),
+                    "h_xg": _board_row.get("h_xg"),
+                    "a_xg": _board_row.get("a_xg"),
+                    "h_sot": _board_row.get("h_sot"),
+                    "a_sot": _board_row.get("a_sot"),
+                    "h_dangerous_attacks": _board_row.get(
+                        "h_dangerous_attacks"),
+                    "a_dangerous_attacks": _board_row.get(
+                        "a_dangerous_attacks"),
                     # DNA-enhanced fields for training
                     "dna_available": rec.get("dna_available"),
                     "home_archetype": rec.get("home_archetype"),
