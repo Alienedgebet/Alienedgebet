@@ -201,24 +201,6 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.warning(f"[Shadow Convergence] skipped: {e}")
 
-        # ── 6. STAGE 8: LIVE PREDICTION (judged before it is published) ────
-        # Read-only and zero API calls: it consumes the board Stage 6 just
-        # wrote. Wrapped so a fault here can never stop a stage above.
-        try:
-            from LIVE_SCANNER.live_stage8_live_prediction import (
-                run_live_prediction_engine)
-            run_live_prediction_engine()
-        except Exception as e:
-            logging.warning(f"[Stage 8 Live Prediction] skipped: {e}")
-
-        # ── 7. STAGE 2: REMOVED ─────────────────────────────────────────────
-        # The live validator (live_stage2_verification.py) no longer runs. Its
-        # module is kept on disk so it stays reversible and its contract tests
-        # keep executing, but nothing invokes it, so it costs nothing per cycle.
-        # Its board endpoint is retired with it; the live page now reads team
-        # statistics from the Code 6 board, which already computes them.
-        # Settlement never depended on this stage and is unaffected.
-
         # ── 6. STAGE 6: EVALUATION & USER ALERTS ─────────────────────────────
         # run_single_cycle() performs one full pass (prematch load → live
         # analysis → fire_alert → save_orchestrator_board) and writes
@@ -228,12 +210,37 @@ def live_scanner_master_loop():
         # Stage 6 still runs on a starved cycle: it costs no provider quota, it
         # settles anything already pending, and skipping it would strand
         # alerts fired before the throttle.
+        #
+        # ORDER (fixed 2026-10-17 — the 14'-at-55' freeze): Stage 6 MUST run
+        # BEFORE Stage 8. The old order ran Stage 8 first so it always read
+        # the PREVIOUS cycle's board — one full cycle stale even on a healthy
+        # loop, 30+ min stale when a slow prematch pass held the cycle.
         try:
             orchestrator.run_single_cycle()
         except Exception as e:
             logging.error(f"[Stage 6 Orchestrator] Error: {e}")
 
-        # ── 8. STAGE 9: LIVE UNDER ENGINE (AFTER STAGE 6 ON PURPOSE) ────────
+        # ── 7. STAGE 8: LIVE PREDICTION (judged before it is published) ────
+        # Read-only and zero API calls: it consumes the board Stage 6 just
+        # WROTE THIS CYCLE (moved after Stage 6 on 2026-10-17 — the old
+        # position before Stage 6 left it permanently one cycle behind).
+        # Wrapped so a fault here can never stop a stage above.
+        try:
+            from LIVE_SCANNER.live_stage8_live_prediction import (
+                run_live_prediction_engine)
+            run_live_prediction_engine()
+        except Exception as e:
+            logging.warning(f"[Stage 8 Live Prediction] skipped: {e}")
+
+        # ── 8. STAGE 2: REMOVED ─────────────────────────────────────────────
+        # The live validator (live_stage2_verification.py) no longer runs. Its
+        # module is kept on disk so it stays reversible and its contract tests
+        # keep executing, but nothing invokes it, so it costs nothing per cycle.
+        # Its board endpoint is retired with it; the live page now reads team
+        # statistics from the Code 6 board, which already computes them.
+        # Settlement never depended on this stage and is unaffected.
+
+        # ── 9. STAGE 9: LIVE UNDER ENGINE (AFTER STAGE 6 ON PURPOSE) ────────
         # Read-only and zero API calls: it consumes the board Stage 6 just
         # WROTE THIS CYCLE (moving it after Stage 6 removes the one-cycle-stale
         # board it used to read — the staleness that, together with Stage 1's

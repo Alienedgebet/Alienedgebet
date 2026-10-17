@@ -1014,6 +1014,10 @@ class SupremeOrchestrator:
             "a_xg": intel["away"]["live_xg"],
             "h_sot": intel["home"]["sot"],
             "a_sot": intel["away"]["sot"],
+            # DA cross-check (Stage 8 reads these; previously missing so the
+            # DA/xG guard silently never fired — 2026-10-17).
+            "h_dangerous_attacks": intel["home"]["da"],
+            "a_dangerous_attacks": intel["away"]["da"],
             "structural": structural.get("status", "OK"),
             "key_loss": key_loss,
             "alerts": fired_this,
