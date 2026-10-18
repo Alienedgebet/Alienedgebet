@@ -562,7 +562,51 @@ GATE_PACING_CAP = 60.0      # max seconds smart_get sleeps waiting out a shared
                             # cooldown before it attempts the request anyway
 
 
+# ── IN-RUN HEARTBEAT TICK (2026-10-18) ───────────────────────────────────────
+# The watchdog that reaps wedged pipelines only reads data/pipeline_heartbeat.json,
+# and main.py touches that file ONLY at engine start/end (_safe_exec). A single
+# engine that spent >45 min inside ONE _safe_exec — exactly what happened
+# 2026-10-17, when the Unders Engine ground through 50 minutes of shared-cooldown
+# pacing — looked wedged and was SIGABRTed at 02:15 even though it was making
+# steady API progress. Every subsequent engine (Draw, SOT, FHVI, SHVI, U2S, the
+# whole Win family and every filter) then never ran for that date.
+#
+# This tick refreshes the SAME heartbeat file from inside the request path, so a
+# throttled-but-working run can never look dead. Throttled to one write per
+# _HB_INTERVAL seconds (under the watchdog's 30s poll).
+#
+# PID GUARD: only the process that CREATED the heartbeat may refresh it, so a
+# sibling process sharing smart_get can never mask a genuinely wedged pipeline.
+_HB_FILE = os.path.join(BASE_DIR, "data", "pipeline_heartbeat.json")
+_HB_LAST = {"ts": 0.0}
+_HB_INTERVAL = 25.0
+
+
+def _heartbeat_tick(note="api:progress"):
+    """Refresh the pipeline heartbeat from the request path. Never raises."""
+    now = time.time()
+    if now - _HB_LAST["ts"] < _HB_INTERVAL:
+        return
+    _HB_LAST["ts"] = now
+    try:
+        with open(_HB_FILE, "r", encoding="utf-8") as fh:
+            cur = json.load(fh)
+        if int(cur.get("pid", -1)) != os.getpid():
+            return  # heartbeat belongs to a different process — do not touch
+        from datetime import datetime as _dt
+        cur["ts"] = now
+        cur["iso"] = _dt.now().isoformat()
+        cur["note"] = note
+        tmp = f"{_HB_FILE}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cur, fh)
+        os.replace(tmp, _HB_FILE)
+    except Exception:
+        pass  # telemetry must never break a request
+
+
 def smart_get(url, params=None, **kwargs):
+    _heartbeat_tick("api:request")
     path = rid.request_path(url)
     cache_key = _cache_key(url, params)
 
@@ -619,6 +663,7 @@ def smart_get(url, params=None, **kwargs):
         else:
             print(f"[API GATE] smart_get: shared cooldown active — pacing {pace:.0f}s ",
                   end="", flush=True)
+            _heartbeat_tick("api:gate-pacing")
             time.sleep(pace)
 
     for attempt in range(MAX_429_RETRIES):
@@ -684,6 +729,7 @@ def smart_get(url, params=None, **kwargs):
                 remaining = api_budget_charge(wait)
                 if remaining:
                     print(f"[API BURST: Cooling {wait:.1f}s] ", end="", flush=True)
+                    _heartbeat_tick("api:burst-cooling")
                     time.sleep(wait)
                 else:
                     print(f"[API BURST: budget spent, not sleeping {wait:.1f}s] ",

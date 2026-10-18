@@ -878,6 +878,35 @@ def alienedge_master_system(cli_date_override: str = None):
 
     d = target_date  # shorthand used below in save_date=
 
+    # ── SECOND-CHANCE HANDOFF, QUEUED AT START (2026-10-18) ──────────────────
+    # This used to be written ONLY at the end of a successful run, so a run
+    # killed mid-flight (the 2026-10-17 02:15 watchdog kill of target
+    # 2026-10-18) never queued its date for the 06:00 recovery — the safety
+    # net then happily "healed" the previous, already-healthy date while
+    # 2026-10-18's missing engines (Draw, SOT, Win Psychology/Apex, Win Raw,
+    # every filter) stayed broken all day. Queuing at START means any death —
+    # crash, OOM, watchdog — still leaves the date registered.
+    # MONOTONIC MAX: a manual backfill of an OLDER date must never clobber a
+    # newer queued target, so only a strictly newer date overwrites the file.
+    try:
+        _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "data", "second_chance.env")
+        _queued = ""
+        try:
+            with open(_env_path, "r", encoding="utf-8") as _ef:
+                for _line in _ef:
+                    if _line.startswith("SC_DATE="):
+                        _queued = _line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        if not _queued or target_date > _queued:
+            os.makedirs(os.path.dirname(_env_path), exist_ok=True)
+            with open(_env_path, "w") as _ef:
+                _ef.write(f"SC_DATE={target_date}\n")
+            print(f"🛟 second-chance target queued at start: {target_date}")
+    except Exception as _env_err:
+        print(f"⚠️ second-chance env write skipped: {_env_err}")
+
     start_time = time.time()
 
     # ── PHASE 0: SHARED FUTURE FIXTURE ACQUISITION ───────────────────────────

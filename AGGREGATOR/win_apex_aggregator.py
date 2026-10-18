@@ -902,11 +902,26 @@ def run_win_apex_aggregator(target_date=None):
             cat_priority   = 2
 
         elif (eng and is_psych_lock and not cat1_gate_passed):
-            # Lock fired but Monte Carlo not confident enough — demote
-            final_category = "🔥 CATEGORY 4: LOCK BUT LOW CONFIDENCE"
-            cat_priority   = 4
+            # Lock fired but Monte Carlo not confident enough — demote.
+            # 2026-10-18: a "LOCK" below 40% is not a lock at all. Measured on
+            # 2026-10-17's board: 57 "LOCK" rows with median 44.8% and a floor
+            # of 28.1% — sub-40% rows were presented as locks purely because
+            # psychology fired, which is exactly the "strange low-probability
+            # pick" complaint. A weak lock now lands in BASE PLAYABLE, honestly
+            # labelled, while keeping its Psych_Score on the row.
+            if m_prob >= 40.0:
+                final_category = "🔥 CATEGORY 4: LOCK BUT LOW CONFIDENCE"
+                cat_priority   = 4
+            else:
+                final_category = "📊 CATEGORY 5: BASE PLAYABLE"
+                cat_priority   = 5
 
-        elif eng and (dna_align or vip or hs):
+        elif eng and (dna_align or vip or hs) and m_prob >= 45.0:
+            # 2026-10-18: this branch had NO probability gate, so a 26.7% row
+            # was published as "SOLID MATH WIN" — while Category 3 "AVOID"
+            # rows reached 45.4%, i.e. the AVOID tier outranked the WIN tier on
+            # probability. A math win must at least be plausible: 45% floor
+            # (below every genuine lock, above the measured veto base of 39.3%).
             final_category = "🔥 CATEGORY 4: SOLID MATH WIN"
             cat_priority   = 4
 
@@ -927,6 +942,27 @@ def run_win_apex_aggregator(target_date=None):
             f"T-λ:{t_lam} vs O-λ:{o_lam} "
             f"({'real' if lam_entry else 'fallback'})"
         )
+
+        # ── MARKET TRANSPARENCY (2026-10-18) ──────────────────────────────
+        # Raw implied probability from the target's win odds (100/odds). This
+        # INCLUDES the bookmaker overround (~5-8pp), labelled as raw on purpose
+        # — a de-vig needs all three 1X2 prices and this engine only carries
+        # the target side. The gap column makes a model-vs-market divergence
+        # visible on the row itself (the 2026-10-17 board carried rows where
+        # the model sat 40pp away from the market with nothing on screen to
+        # say so).
+        try:
+            _mk_odds = float(eng.get("odds")) if eng else None
+            if _mk_odds is not None and (_mk_odds != _mk_odds or _mk_odds <= 1.0):
+                _mk_odds = None  # NaN or implausible
+        except (TypeError, ValueError):
+            _mk_odds = None
+        if _mk_odds:
+            _mkt_pct = round(100.0 / _mk_odds, 1)
+            _gap_pp  = round(float(m_prob) - _mkt_pct, 1)
+        else:
+            _mkt_pct = None
+            _gap_pp  = None
 
         final_rows.append({
             "fixture_id":        f_id,
@@ -952,6 +988,10 @@ def run_win_apex_aggregator(target_date=None):
             # than discovered months later. Re-fit and these change.
             "Blend_Fitted_On":  WIN_BLEND_FITTED_ON,
             "Blend_Fitted_N":   WIN_BLEND_FITTED_N,
+            # Market transparency (2026-10-18): raw 100/odds (overround
+            # included) and the model-minus-market gap in percentage points.
+            "Market_Implied_Pct": _mkt_pct,
+            "Model_vs_Market_PP": _gap_pp,
         })
 
     # ──────────────────────────────────────────────────────────────────────

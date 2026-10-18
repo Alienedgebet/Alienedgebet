@@ -35,7 +35,7 @@ GATE_LOCK="$BACKEND/data/api_429_cooldown.lock"
 # A run obeying a server-provided backoff is not hung — it is waiting. The
 # cooldown can legitimately reach ~28 min, so the hang threshold must sit above
 # the longest wait a healthy run can be asked to perform.
-STALE_AFTER=${STALE_AFTER:-2700}     # 45 min
+STALE_AFTER=${STALE_AFTER:-3600}     # 60 min (2026-10-18: was 45min; a legitimate engine exceeded it — see api_cache._heartbeat_tick, which now refreshes the heartbeat DURING throttled API work, so a healthy run should never reach this. 60min covers purely-local stretches; a true wedge (no API, no heartbeat) is still reaped within the hour.)
 
 # The clock above is a floor, not a verdict. While the shared 429 gate is
 # ACTIVE the heartbeat can legitimately go quiet, so a quiet heartbeat during a
