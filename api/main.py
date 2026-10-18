@@ -258,18 +258,13 @@ app = FastAPI(
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
+# NOTE: CORSMiddleware must be added LAST (after all other middleware) so it wraps
+# error responses from auth middleware (401, 429). The add_middleware() call is
+# moved to the END of the file, after all routes and exception handlers.
 _env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
 ALLOW_ORIGINS = [o.strip() for o in _env_origins.split(",") if o.strip()]
 if not ALLOW_ORIGINS and os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower() != "production":
     ALLOW_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
-
-app.add_middleware(
-    CORSMiddleware,
-  allow_origins=ALLOW_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept", "X-Admin-Token", "X-Request-ID"],
-)
 
 
 @app.exception_handler(Exception)
@@ -283,6 +278,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 async def auth_and_rate_limit(request: Request, call_next):
     path = request.url.path
     public_paths = {"/", "/health"}
+    
+    # Allow OPTIONS preflight requests to pass through without authentication
+    # This is required for CORS to work with cross-origin authenticated requests
+    if request.method == "OPTIONS":
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+    
     if path.startswith("/api/auth/") or path in public_paths or path.startswith("/api/admin/"):
         request.state.user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
         response = await call_next(request)
@@ -3634,3 +3641,12 @@ def _assert_dna_route_order(app_obj) -> None:
 
 
 _assert_dna_route_order(app)
+
+# ── CORS (added LAST to wrap all middleware including auth 401/429 responses) ──
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOW_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "X-Admin-Token", "X-Request-ID"],
+)
