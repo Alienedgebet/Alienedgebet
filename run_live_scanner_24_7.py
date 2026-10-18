@@ -232,13 +232,20 @@ def live_scanner_master_loop():
         except Exception as e:
             logging.warning(f"[Stage 8 Live Prediction] skipped: {e}")
 
-        # ── 8. STAGE 2: REMOVED ─────────────────────────────────────────────
-        # The live validator (live_stage2_verification.py) no longer runs. Its
-        # module is kept on disk so it stays reversible and its contract tests
-        # keep executing, but nothing invokes it, so it costs nothing per cycle.
-        # Its board endpoint is retired with it; the live page now reads team
-        # statistics from the Code 6 board, which already computes them.
-        # Settlement never depended on this stage and is unaffected.
+        # ── 8. STAGE 2: LIVE VERIFICATION (RE-ADDED 2026-10-18) ─────────────
+        # Re-added because /api/live/validation reads validated_picks.json /
+        # validation_state.json / validation_board.json, which were frozen
+        # since Sep 27 when this stage was dropped. run_live_validator_once()
+        # is a one-shot pass (no loop), reads only cached/local files, and
+        # persists finished-match verdicts so Verify never loses them when a
+        # fixture leaves the in-play feed. Wrapped so a fault here can never
+        # stop a stage above.
+        try:
+            from LIVE_SCANNER.live_stage2_verification import (
+                run_live_validator_once)
+            run_live_validator_once(cycle_count)
+        except Exception as e:
+            logging.warning(f"[Stage 2 Live Verification] skipped: {e}")
 
         # ── 9. STAGE 9: LIVE UNDER ENGINE (AFTER STAGE 6 ON PURPOSE) ────────
         # Read-only and zero API calls: it consumes the board Stage 6 just

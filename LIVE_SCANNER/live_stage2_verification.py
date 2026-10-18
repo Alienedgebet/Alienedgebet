@@ -3022,16 +3022,25 @@ def run_live_validator_once(cycle_number=1):
     # Finished results can disappear from /livescores/inplay before the next
     # request. Merge the same persistent FT snapshot used by settlement so the
     # verifier retains the result instead of reverting to an empty universe.
+    # Check both today AND yesterday: a match that finished late yesterday is
+    # still in yesterday's FT snapshot bucket but today's archive does not
+    # exist yet (written at 02:00). Without this, finished matches vanish
+    # from Verify until the nightly archive lands.
     try:
         from settlement_service import load_ft_snapshot
-        snapshot_date = datetime.now().strftime("%Y-%m-%d")
-        for fid, std in (load_ft_snapshot(snapshot_date) or {}).items():
-            if str(fid) in live_finished_ids:
-                continue
-            entry = _finished_snapshot_board_entry(std)
-            if entry:
-                cycle_log.append(entry)
-                retained_finished += 1
+        from datetime import timedelta
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        seen_finished_ids = set(live_finished_ids)
+        for snapshot_date in (today, yesterday):
+            for fid, std in (load_ft_snapshot(snapshot_date) or {}).items():
+                if str(fid) in seen_finished_ids:
+                    continue
+                seen_finished_ids.add(str(fid))
+                entry = _finished_snapshot_board_entry(std)
+                if entry:
+                    cycle_log.append(entry)
+                    retained_finished += 1
     except Exception as e:
         fixture_errors.append({
             "fixture_id": "FT_SNAPSHOT",
