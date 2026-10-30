@@ -3,7 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AuthShell } from "@/components/auth/AuthShell";
-import { useAuth } from "@/lib/auth-context";
+import { useAuth, generateRequestId } from "@/lib/auth-context";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -23,7 +23,7 @@ export default function SignupPage() {
     }
     setBusy(true);
     try {
-      const response = await fetch("/api/auth/signup", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ email, password }) });
+      const response = await fetch("/api/auth/signup", { method: "POST", headers: { "Content-Type": "application/json", "x-request-id": generateRequestId() }, credentials: "include", body: JSON.stringify({ email, password }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || "Unable to create account.");
       setUser(data.user);

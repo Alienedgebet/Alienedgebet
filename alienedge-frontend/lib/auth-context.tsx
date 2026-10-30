@@ -11,6 +11,12 @@ export interface AuthUser {
 
 const SESSION_CHECK_TIMEOUT_MS = 3_000;
 
+export function generateRequestId(): string {
+  const timestamp = Date.now().toString(36);
+  const counter = Math.floor(Math.random() * 100000).toString(36);
+  return `ae-${timestamp}-${counter}`;
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUserState] = useState<AuthUser | null>(null);
   const userRef = useRef<AuthUser | null>(null);
@@ -30,6 +36,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       credentials: "include",
       cache: "no-store",
       signal: controller.signal,
+      headers: { "x-request-id": generateRequestId() },
     })
       .then(async (response) => {
         // A 401 is the only definitive signed-out response. Other failures are
@@ -96,7 +103,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // AuthProvider from nothing, so even if the logout POST fails mid-flight
     // the user CANNOT stay on a protected route with dead state.
     try {
-      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include", headers: { "x-request-id": generateRequestId() } });
     } finally {
       userRef.current = null;
       setUserState(null);

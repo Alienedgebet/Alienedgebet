@@ -31,6 +31,14 @@ const api: AxiosInstance = axios.create({
 });
 
 api.interceptors.request.use((config) => {
+  // Request-ID generator
+  let requestIdCounter = 0;
+  function generateRequestId() {
+    const timestamp = Date.now().toString(36);
+    const counter = (requestIdCounter++).toString(36);
+    return `ae-${timestamp}-${counter}`;
+  }
+  config.headers["x-request-id"] = generateRequestId();
   return config;
 });
 
