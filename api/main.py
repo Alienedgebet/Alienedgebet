@@ -51,8 +51,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-DATA_DIR = os.path.join(ROOT, "data")
-OUTPUT_DIR = os.path.join(ROOT, "output")
+DATA_DIR = "/var/lib/alienedge/data"
+OUTPUT_DIR = "/var/lib/alienedge/output"
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -257,6 +257,70 @@ app = FastAPI(
     openapi_url=None if os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower() == "production" else "/openapi.json",
 )
 
+# ── ANTI-CLONING / ANTI-RE HELPERS ────────────────────────────────────────────
+import hashlib
+import hmac as hmac_mod
+
+# HMAC secret for admin endpoint signing.
+ADMIN_HMAC_KEY = os.getenv("ADMIN_HMAC_KEY", "")
+if not ADMIN_HMAC_KEY:
+    ADMIN_HMAC_KEY = secrets.token_hex(32)
+
+# Per-IP rate limits (requests per 60s window)
+_IP_LIMIT_AUTH = 15
+_IP_LIMIT_ADMIN = 20
+_IP_LIMIT_DEFAULT = 60
+
+_ip_request_counts = {}
+_fingerprint_seen = {}
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-real-ip") or request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _fingerprint(request: Request) -> str:
+    parts = [
+        request.headers.get("user-agent", "")[:120],
+        request.headers.get("accept-language", "")[:80],
+        request.headers.get("accept-encoding", "")[:80],
+        request.headers.get("sec-ch-ua", "")[:120],
+        request.headers.get("sec-ch-ua-platform", "")[:40],
+    ]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+def _ip_rate_ok(ip: str, limit: int) -> bool:
+    now = time.time()
+    bucket = _ip_request_counts.get(ip, {"start": now, "count": 0})
+    if now - bucket["start"] > 60:
+        bucket = {"start": now, "count": 0}
+    bucket["count"] += 1
+    _ip_request_counts[ip] = bucket
+    return bucket["count"] <= limit
+
+
+def _verify_admin_signature(request: Request) -> bool:
+    if not ADMIN_HMAC_KEY:
+        return False
+    signature = request.headers.get("x-admin-signature", "")
+    timestamp = request.headers.get("x-admin-timestamp", "")
+    if not signature or not timestamp:
+        return False
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        return False
+    if abs(time.time() - ts) > 300:
+        return False
+    message = f"{ts}{request.url.path}".encode()
+    expected = hmac_mod.new(ADMIN_HMAC_KEY.encode(), message, hashlib.sha256).hexdigest()
+    return hmac_mod.compare_digest(signature, expected)
+
+
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # NOTE: CORSMiddleware must be added LAST (after all other middleware) so it wraps
 # error responses from auth middleware (401, 429). The add_middleware() call is
@@ -275,12 +339,48 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 @app.middleware("http")
-async def auth_and_rate_limit(request: Request, call_next):
+async def anti_cloning_and_auth(request: Request, call_next):
     path = request.url.path
+    ip = _client_ip(request)
+    fp = _fingerprint(request)
+    request_id = request.headers.get("x-request-id") or secrets.token_hex(8)
+
+    # ── Reject /api/* requests without X-Request-ID (blocks naive scanners) ──
+    if path.startswith("/api/") and not request.headers.get("x-request-id"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Missing X-Request-ID header.", "request_id": request_id},
+        )
+
+    # ── Per-IP rate limiting (applies before auth, protects unauthenticated paths) ──
+    if path.startswith("/api/auth/"):
+        if not _ip_rate_ok(ip, _IP_LIMIT_AUTH):
+            return JSONResponse(status_code=429, content={"detail": "Too many requests.", "request_id": request_id})
+    elif path.startswith("/api/admin/"):
+        if not _ip_rate_ok(ip, _IP_LIMIT_ADMIN):
+            return JSONResponse(status_code=429, content={"detail": "Too many requests.", "request_id": request_id})
+        # ── Request signing required on admin endpoints ──
+        if not _verify_admin_signature(request):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Admin request signature required.", "request_id": request_id},
+            )
+    elif path.startswith("/api/"):
+        if not _ip_rate_ok(ip, _IP_LIMIT_DEFAULT):
+            return JSONResponse(status_code=429, content={"detail": "Too many requests.", "request_id": request_id})
+
+    # ── Detect IP rotation from same fingerprint (scanner switching IPs) ──
+    if path.startswith("/api/"):
+        seen = _fingerprint_seen.setdefault(fp, set())
+        if ip not in seen and len(seen) >= 3:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests.", "request_id": request_id},
+            )
+        seen.add(ip)
+
+    # ── Public paths (no auth required) ──
     public_paths = {"/", "/health"}
-    
-    # Allow OPTIONS preflight requests to pass through without authentication
-    # This is required for CORS to work with cross-origin authenticated requests
     if request.method == "OPTIONS":
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -288,9 +388,10 @@ async def auth_and_rate_limit(request: Request, call_next):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["X-Request-ID"] = request_id
         return response
-    
-    if path.startswith("/api/auth/") or path in public_paths or path.startswith("/api/admin/"):
+
+    if path.startswith("/api/auth/") or path in public_paths:
         request.state.user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -298,20 +399,23 @@ async def auth_and_rate_limit(request: Request, call_next):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["X-Request-ID"] = request_id
         return response
 
+    # ── Authenticated API paths ──
     user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
     if not user:
-        return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+        return JSONResponse(status_code=401, content={"detail": "Authentication required.", "request_id": request_id})
     request.state.user = user
     if not check_rate_limit(f"api:{user['user_id']}", 180, 60):
-        return JSONResponse(status_code=429, content={"detail": "Too many requests. Please try again later."})
+        return JSONResponse(status_code=429, content={"detail": "Too many requests. Please try again later.", "request_id": request_id})
     response = await call_next(request)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["X-Request-ID"] = request_id
     return response
 
 
@@ -964,11 +1068,7 @@ ALL_ENGINE_KEYS = [
 @app.get("/", tags=["Health"])
 @app.get("/health", tags=["Health"])
 def health():
-    return {
-        "status": "ok",
-        "service": "AlienEdge Prediction API",
-        "version": "4.0.0",
-    }
+    return {"status": "ok"}
 
 
 @app.get("/api/status/{date}", tags=["Ops"])

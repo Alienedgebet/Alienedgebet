@@ -37,9 +37,9 @@ import re
 import unicodedata
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(ROOT, "output", "cache")
-ARCHIVE_DIR = os.path.join(ROOT, "output")
-DATA_DIR = os.path.join(ROOT, "data")
+CACHE_DIR = "/var/lib/alienedge/output/cache"
+ARCHIVE_DIR = "/var/lib/alienedge/output"
+DATA_DIR = "/var/lib/alienedge/data"
 LEDGER_PATH = os.path.join(DATA_DIR, "signal_ledger.jsonl")
 
 # market -> prediction cache key

@@ -25,7 +25,7 @@ import json
 from datetime import datetime
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(ROOT, "output", "cache")
+CACHE_DIR = "/var/lib/alienedge/output/cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 

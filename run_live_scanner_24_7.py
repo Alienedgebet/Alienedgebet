@@ -54,7 +54,7 @@ def _feeds_populated() -> bool:
     try:
         import json as _json
         for name in ("incoming_predictions.json", "danger_audit.json"):
-            path = os.path.join(ROOT, "data", name)
+            path = os.path.join("/var/lib/alienedge/data", name)
             if not os.path.exists(path):
                 continue
             with open(path, "r", encoding="utf-8") as f:
@@ -83,7 +83,7 @@ def _quota_pressure():
     now = _time.time()
 
     # 1. The shared cooldown lock.
-    lock = os.path.join(ROOT, "data", "api_429_cooldown.lock")
+    lock = os.path.join("/var/lib/alienedge/data", "api_429_cooldown.lock")
     try:
         with open(lock, "r", encoding="utf-8") as f:
             until = float(json.load(f).get("until", 0) or 0)
