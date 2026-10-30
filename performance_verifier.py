@@ -14,7 +14,9 @@ BASE_DIR   = os.path.abspath(os.path.dirname(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 MASTER_DIR = os.path.join(BASE_DIR, "master_aggregator")
 
-API_KEY = os.getenv("SPORTMONKS_API_KEY") or "***REMOVED***"
+API_KEY = os.getenv("SPORTMONKS_API_KEY")
+if not API_KEY:
+    raise RuntimeError("SPORTMONKS_API_KEY is not set; refusing to run without credentials")
 
 # ==============================================================================
 # COLUMN CONTROL
