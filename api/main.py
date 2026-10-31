@@ -1627,7 +1627,7 @@ def get_underdog(date: str):
 
 
 @app.get("/api/team-intelligence/{date}/{team_name}", tags=["Foundation"])
-def get_team_intelligence(date: str, team_name: str):
+def get_team_intelligence(request: Request, date: str, team_name: str):
     # Session validation: require alienedge_session cookie
     # This prevents unauthenticated scraping of per-check team intelligence.
     cookie_val = request.cookies.get("alienedge_session")
@@ -1723,8 +1723,24 @@ def get_calibration(date: str):
 
 @app.get("/api/win/forecast/{date}", tags=["Win"])
 def get_win_forecast(date: str):
+    # Session validation: require alienedge_session cookie
+    cookie_val = request.cookies.get("alienedge_session")
+    if not cookie_val:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Set alienedge_session cookie."},
+        )
+    # Rate limit per IP + session to block automated enumeration
+    ip = request.headers.get("x-real-ip", request.client.host if request.client else "unknown")
+    if not check_rate_limit(f"api_market:{ip}", limit=60, window_seconds=60):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
     return _with_intelligent_pass(
-        "win_apex", read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win"), date)
+        "win_apex",
+        read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win"),
+        date)
 
 
 @app.get("/api/sh-gg-winner/{date}", tags=["Specials"])
@@ -1817,8 +1833,21 @@ def get_gg_psychology(date: str):
 
 @app.get("/api/gg/supreme/{date}", tags=["GG"])
 def get_gg_supreme(date: str):
-    return _with_intelligent_pass(
-        "gg_supreme", read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg"), date)
+    # Session validation: require alienedge_session cookie
+    cookie_val = request.cookies.get("alienedge_session")
+    if not cookie_val:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Set alienedge_session cookie."},
+        )
+    # Rate limit per IP + session to block automated enumeration
+    ip = request.headers.get("x-real-ip", request.client.host if request.client else "unknown")
+    if not check_rate_limit(f"api_market:{ip}", limit=60, window_seconds=60):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
+    return read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg")
 
 
 @app.get("/api/gg/cross-verify", tags=["GG"])
@@ -2052,9 +2081,22 @@ def get_over25_apex(date: str):
 
 @app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
 def get_over25_forecast(date: str):
+    # Session validation: require alienedge_session cookie
+    cookie_val = request.cookies.get("alienedge_session")
+    if not cookie_val:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Set alienedge_session cookie."},
+        )
+    # Rate limit per IP + session to block automated enumeration
+    ip = request.headers.get("x-real-ip", request.client.host if request.client else "unknown")
+    if not check_rate_limit(f"api_market:{ip}", limit=60, window_seconds=60):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
     return _with_intelligent_pass(
         "over25_forecast", read("over25_forecast", date, O25_FORECAST_DEFAULTS, "o25"), date)
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # OVER 1.5
@@ -2128,9 +2170,24 @@ def get_corners_catalyst(date: str):
 
 @app.get("/api/corners/aggregator/{date}", tags=["Corners"])
 def get_corners_aggregator(date: str):
+    # Session validation: require alienedge_session cookie
+    cookie_val = request.cookies.get("alienedge_session")
+    if not cookie_val:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Set alienedge_session cookie."},
+        )
+    # Rate limit per IP + session to block automated enumeration
+    ip = request.headers.get("x-real-ip", request.client.host if request.client else "unknown")
+    if not check_rate_limit(f"api_market:{ip}", limit=60, window_seconds=60):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
     return _with_intelligent_pass(
         "corners_aggregator",
-        read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners"), date)
+        read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners"),
+        date)
 
 
 @app.get("/api/corners/consistency", tags=["Corners"])
@@ -2238,7 +2295,7 @@ def get_unders(date: str):
 # SOT / FHVI / SHVI
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/sot/{date}", tags=["Specials"])
-def get_sot(date: str):
+def get_sot(request: Request, date: str):
     # Session validation: require alienedge_session cookie
     cookie_val = request.cookies.get("alienedge_session")
     if not cookie_val:

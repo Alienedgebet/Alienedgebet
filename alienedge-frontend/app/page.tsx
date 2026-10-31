@@ -42,14 +42,6 @@ export default function Home() {
     if (!loading && user) router.replace("/dashboard");
   }, [loading, user, router]);
 
-  if (user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-bg-primary text-sm text-text-secondary">
-        Loading AlienEdge…
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-bg-primary text-text-primary">
       {/* ── Header ── */}
