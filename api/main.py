@@ -1722,7 +1722,7 @@ def get_calibration(date: str):
 
 
 @app.get("/api/win/forecast/{date}", tags=["Win"])
-def get_win_forecast(date: str):
+def get_win_forecast(request: Request, date: str):
     # Session validation: require alienedge_session cookie
     cookie_val = request.cookies.get("alienedge_session")
     if not cookie_val:
@@ -1832,7 +1832,7 @@ def get_gg_psychology(date: str):
 
 
 @app.get("/api/gg/supreme/{date}", tags=["GG"])
-def get_gg_supreme(date: str):
+def get_gg_supreme(request: Request, date: str):
     # Session validation: require alienedge_session cookie
     cookie_val = request.cookies.get("alienedge_session")
     if not cookie_val:
@@ -2080,7 +2080,7 @@ def get_over25_apex(date: str):
 
 
 @app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
-def get_over25_forecast(date: str):
+def get_over25_forecast(request: Request, date: str):
     # Session validation: require alienedge_session cookie
     cookie_val = request.cookies.get("alienedge_session")
     if not cookie_val:
@@ -2169,7 +2169,7 @@ def get_corners_catalyst(date: str):
 
 
 @app.get("/api/corners/aggregator/{date}", tags=["Corners"])
-def get_corners_aggregator(date: str):
+def get_corners_aggregator(request: Request, date: str):
     # Session validation: require alienedge_session cookie
     cookie_val = request.cookies.get("alienedge_session")
     if not cookie_val:
