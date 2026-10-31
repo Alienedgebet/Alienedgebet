@@ -1628,6 +1628,21 @@ def get_underdog(date: str):
 
 @app.get("/api/team-intelligence/{date}/{team_name}", tags=["Foundation"])
 def get_team_intelligence(date: str, team_name: str):
+    # Session validation: require alienedge_session cookie
+    # This prevents unauthenticated scraping of per-check team intelligence.
+    cookie_val = request.cookies.get("alienedge_session")
+    if not cookie_val:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Set alienedge_session cookie."},
+        )
+    # Rate limit per IP + session to block automated enumeration
+    ip = request.headers.get("x-real-ip", request.client.host if request.client else "unknown")
+    if not check_rate_limit(f"api_team_intel:{ip}", limit=30, window_seconds=60):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
     """Team Intelligence page feed — the team's per-check intelligence across
     every market AlienEdge already produced for this date. Read-only local
     composition (INTELLIGENT_PASS/pass_count.py): NO new SportMonks calls, no
@@ -2224,6 +2239,20 @@ def get_unders(date: str):
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/sot/{date}", tags=["Specials"])
 def get_sot(date: str):
+    # Session validation: require alienedge_session cookie
+    cookie_val = request.cookies.get("alienedge_session")
+    if not cookie_val:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Set alienedge_session cookie."},
+        )
+    # Rate limit per IP + session to block automated enumeration
+    ip = request.headers.get("x-real-ip", request.client.host if request.client else "unknown")
+    if not check_rate_limit(f"api_market:{ip}", limit=60, window_seconds=60):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
     # SOT carries the user's 2-check Intelligent Pass card (psych > 50,
     # under-2.5 probability > 65%) — wrapped like every other counted market.
     return _with_intelligent_pass(

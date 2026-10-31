@@ -29,7 +29,6 @@ import {
   MOCK_GG_SUPREME,
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
-import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortGG, withBorrowed } from "@/lib/cross-engine-ranking";
 
 const supremeColumns: PredictionColumn<GGSupremePick>[] = [
