@@ -111,7 +111,7 @@ def signup(payload: SignupRequest, request: Request, response: Response) -> dict
 
 @router.post("/login")
 def login(payload: LoginRequest, request: Request, response: Response) -> dict:
-    _rate(request, "login", 12)
+    _rate(request, "login", 60)
     try:
         user = authenticate(payload.email, payload.password)
     except InvalidCredentials:

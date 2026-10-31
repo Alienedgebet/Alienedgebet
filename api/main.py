@@ -267,12 +267,11 @@ if not ADMIN_HMAC_KEY:
     ADMIN_HMAC_KEY = secrets.token_hex(32)
 
 # Per-IP rate limits (requests per 60s window)
-_IP_LIMIT_AUTH = 15
+_IP_LIMIT_AUTH = 60
 _IP_LIMIT_ADMIN = 20
 _IP_LIMIT_DEFAULT = 60
 
 _ip_request_counts = {}
-_fingerprint_seen = {}
 
 
 def _client_ip(request: Request) -> str:
@@ -280,17 +279,6 @@ def _client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
-
-
-def _fingerprint(request: Request) -> str:
-    parts = [
-        request.headers.get("user-agent", "")[:120],
-        request.headers.get("accept-language", "")[:80],
-        request.headers.get("accept-encoding", "")[:80],
-        request.headers.get("sec-ch-ua", "")[:120],
-        request.headers.get("sec-ch-ua-platform", "")[:40],
-    ]
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
 
 
 def _ip_rate_ok(ip: str, limit: int) -> bool:
@@ -342,7 +330,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 async def anti_cloning_and_auth(request: Request, call_next):
     path = request.url.path
     ip = _client_ip(request)
-    fp = _fingerprint(request)
     request_id = request.headers.get("x-request-id") or secrets.token_hex(8)
 
     # ── Reject /api/* requests without X-Request-ID (blocks naive scanners) ──
@@ -368,16 +355,6 @@ async def anti_cloning_and_auth(request: Request, call_next):
     elif path.startswith("/api/"):
         if not _ip_rate_ok(ip, _IP_LIMIT_DEFAULT):
             return JSONResponse(status_code=429, content={"detail": "Too many requests.", "request_id": request_id})
-
-    # ── Detect IP rotation from same fingerprint (scanner switching IPs) ──
-    if path.startswith("/api/"):
-        seen = _fingerprint_seen.setdefault(fp, set())
-        if ip not in seen and len(seen) >= 3:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Too many requests.", "request_id": request_id},
-            )
-        seen.add(ip)
 
     # ── Public paths (no auth required) ──
     public_paths = {"/", "/health"}
