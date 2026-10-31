@@ -28,9 +28,9 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path?: s
   const authorization = request.headers.get("authorization");
   if (authorization) headers.set("authorization", authorization);
 
-// Forward the client request ID, or generate one if absent.
-const clientRequestId = request.headers.get("x-request-id");
-headers.set("x-request-id", clientRequestId || crypto.randomUUID());
+  // Forward the client request ID, or generate one if absent.
+  const clientRequestId = request.headers.get("x-request-id");
+  headers.set("x-request-id", clientRequestId || crypto.randomUUID());
 
   const method = request.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
