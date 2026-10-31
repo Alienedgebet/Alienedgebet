@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -34,15 +34,28 @@ const STEPS = [
 export default function Home() {
   const { user, loading } = useAuth();
   const router = useRouter();
+  const [giveUp, setGiveUp] = useState(false);
+
+  // If the session check hangs for any reason (JS error, blocked fetch,
+  // stalled network), stop showing the loading spinner after 8 seconds so the
+  // visitor can still see the landing page or reach the login form.
+  useEffect(() => {
+    const t = window.setTimeout(() => setGiveUp(true), 8_000);
+    return () => window.clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     if (!loading && user) router.replace("/dashboard");
   }, [loading, user, router]);
 
-  if (loading || user) {
+  if (giveUp || (!loading && !user)) {
+    // Session check resolved (or gave up) and no active session → show landing.
+  } else if (loading || user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-bg-primary text-sm text-text-secondary">
-        Loading AlienEdge…
+        {giveUp
+          ? "Still signing you in — refresh the page, or go to /login"
+          : "Loading AlienEdge…"}
       </div>
     );
   }
