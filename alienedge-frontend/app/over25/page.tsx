@@ -21,6 +21,7 @@ import { createIntelligentPassColumn } from "@/components/predictions/Intelligen
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, ScoreBar, type PredictionColumn } from "@/components/predictions";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import {
   MOCK_O25_APEX,
   MOCK_O25_GOLD,

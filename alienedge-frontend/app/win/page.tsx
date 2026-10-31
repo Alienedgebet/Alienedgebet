@@ -26,6 +26,7 @@ import {
   TierBadge,
   type PredictionColumn,
 } from "@/components/predictions";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import {
   MOCK_DNA,
   MOCK_WIN_APEX,

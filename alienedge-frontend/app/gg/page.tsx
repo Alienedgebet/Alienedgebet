@@ -15,6 +15,7 @@ import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import {
   ChainBranch,
