@@ -3,7 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AuthShell } from "@/components/auth/AuthShell";
-import { useAuth, type AuthUser, generateRequestId } from "@/lib/auth-context";
+import { useAuth, type AuthUser } from "@/lib/auth-context";
 
 const LOGIN_TIMEOUT_MS = 8_000;
 
@@ -74,7 +74,7 @@ export default function LoginPage() {
     try {
       const response = await fetch("/api/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-request-id": generateRequestId() },
+        headers: { "Content-Type": "application/json" },
         credentials: "include",
         cache: "no-store",
         signal: controller.signal,

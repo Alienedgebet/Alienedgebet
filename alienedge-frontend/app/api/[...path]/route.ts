@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const UPSTREAM_TIMEOUT_MS = 60_000;
+const UPSTREAM_TIMEOUT_MS = 6_000;
 
 /**
  * Same-origin browser-to-backend proxy. BACKEND_API_URL is server-only and is
@@ -27,10 +27,6 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path?: s
   if (cookie) headers.set("cookie", cookie);
   const authorization = request.headers.get("authorization");
   if (authorization) headers.set("authorization", authorization);
-
-  // Forward the client request ID, or generate one if absent.
-  const clientRequestId = request.headers.get("x-request-id");
-  headers.set("x-request-id", clientRequestId || crypto.randomUUID());
 
   const method = request.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();

@@ -15,7 +15,6 @@ import { useDnaV2 } from "@/lib/use-dna-v2";
 import { createDnaColumn } from "@/components/dna/DnaCountBadge";
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
-import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import {
   ChainBranch,
@@ -30,6 +29,7 @@ import {
   MOCK_GG_SUPREME,
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortGG, withBorrowed } from "@/lib/cross-engine-ranking";
 
 const supremeColumns: PredictionColumn<GGSupremePick>[] = [

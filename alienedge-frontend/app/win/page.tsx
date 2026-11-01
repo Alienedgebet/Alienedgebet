@@ -26,7 +26,6 @@ import {
   TierBadge,
   type PredictionColumn,
 } from "@/components/predictions";
-import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import {
   MOCK_DNA,
   MOCK_WIN_APEX,
@@ -34,6 +33,7 @@ import {
   MOCK_WIN_U2S,
 } from "@/lib/mock-chains";
 import type { AxiosResponse } from "axios";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortWin, sortU2S, withBorrowed, dedupeFixtureSides } from "@/lib/cross-engine-ranking";
 
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";

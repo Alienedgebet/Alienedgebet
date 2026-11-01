@@ -110,7 +110,19 @@ function IntelligentPassCell({
  * table it came from (?market=…) plus the origin page (?from=…) so the
  * report opens ONLY that market's checks and Back returns to the source.
  */
-function ReportLink({ data, team, date, market, className }: { data: IntelligentPassData; team?: string; date?: string; market?: string; className?: string }) {
+function ReportLink({
+  data,
+  team,
+  date,
+  market,
+  className,
+}: {
+  data: IntelligentPassData;
+  team?: string;
+  date?: string;
+  market?: string;
+  className?: string;
+}) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const from = searchParams.toString();

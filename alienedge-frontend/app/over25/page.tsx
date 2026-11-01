@@ -21,7 +21,6 @@ import { createIntelligentPassColumn } from "@/components/predictions/Intelligen
 import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
 import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
 import { ChainStage, TierBadge, ProbCell, ScoreBar, type PredictionColumn } from "@/components/predictions";
-import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import {
   MOCK_O25_APEX,
   MOCK_O25_GOLD,
@@ -31,6 +30,7 @@ import {
 } from "@/lib/mock-chains";
 import { FixtureRiskTag } from "@/components/FixtureRiskTag";
 import { VERIFY_REFRESH_MS } from "@/lib/use-api";
+import { SignalRankToggle } from "@/components/predictions/SignalRankToggle";
 import { sortO25, withBorrowed } from "@/lib/cross-engine-ranking";
 
 // Stage 1 (probabilistic) is the engine that emits the Confidence / Odds pair

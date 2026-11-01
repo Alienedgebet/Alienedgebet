@@ -35,12 +35,17 @@ export default function Home() {
   const { user, loading } = useAuth();
   const router = useRouter();
 
-  // If a session exists, redirect logged-in users to the dashboard.
-  // The landing page itself never waits for the auth check to complete —
-  // visitors always see the landing page and can reach /login immediately.
   useEffect(() => {
     if (!loading && user) router.replace("/dashboard");
   }, [loading, user, router]);
+
+  if (loading || user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-bg-primary text-sm text-text-secondary">
+        Loading AlienEdge…
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-bg-primary text-text-primary">

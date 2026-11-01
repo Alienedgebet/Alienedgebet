@@ -21,7 +21,9 @@ const BASE_URL = process.env.NODE_ENV === "production" ? "" : (process.env.NEXT_
 // requested range inside the request — same work class as the other chains.
 // Any per-request override (config.timeout, including 0 = no timeout) always
 // wins.
-const DEFAULT_TIMEOUT_MS = 45_000; // all endpoints share one timeout budget
+const DEFAULT_TIMEOUT_MS = 10_000; // normal endpoints
+const HEAVY_TIMEOUT_MS = 45_000; // corners stage 1/2, GG, Win, Over 1.5 / Over 2.5 chains
+const HEAVY_ENDPOINT_PATTERN = /^\/api\/(corners|gg|win|over15|over25|sot|fhvi|shvi|underdog|draw|unders|alerts|weekly|filter)\//;
 
 const api: AxiosInstance = axios.create({
   baseURL: BASE_URL,
@@ -31,20 +33,28 @@ const api: AxiosInstance = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  // Request-ID generator
-  let requestIdCounter = 0;
-  function generateRequestId() {
-    const timestamp = Date.now().toString(36);
-    const counter = (requestIdCounter++).toString(36);
-    return `ae-${timestamp}-${counter}`;
+  // axios merges the instance-level `timeout` (DEFAULT_TIMEOUT_MS) into
+  // `config` BEFORE request interceptors run, so `config.timeout` is never
+  // null here — the previous `== null` guard made the HEAVY_TIMEOUT_MS branch
+  // dead code and capped every pick page at the normal timeout. Detect "no
+  // explicit per-request override" by checking for the default value instead,
+  // so heavy analytics chains (corners/gg/win/over15/over25) actually get
+  // HEAVY_TIMEOUT_MS while an explicit override (incl. 0 = no timeout) still wins.
+  if (
+    config.url &&
+    (config.timeout == null || config.timeout === DEFAULT_TIMEOUT_MS)
+  ) {
+    config.timeout = HEAVY_ENDPOINT_PATTERN.test(config.url)
+      ? HEAVY_TIMEOUT_MS
+      : DEFAULT_TIMEOUT_MS;
   }
-  config.headers["x-request-id"] = generateRequestId();
   return config;
 });
 
 api.interceptors.response.use(
   (res) => res,
   (err) => {
+    console.error("[AlienEdge API] request failed", err?.message || "Network error");
     return Promise.reject(err);
   }
 );

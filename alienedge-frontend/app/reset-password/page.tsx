@@ -3,7 +3,6 @@
 import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { generateRequestId } from "@/lib/auth-context";
 import { ArrowLeft, Eye, EyeOff, KeyRound, ShieldCheck } from "lucide-react";
 
 export default function ResetPasswordPage() {
@@ -27,7 +26,7 @@ export default function ResetPasswordPage() {
     try {
       const response = await fetch("/api/auth/reset-password", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-request-id": generateRequestId() },
+        headers: { "Content-Type": "application/json" },
         credentials: "include",
         cache: "no-store",
         body: JSON.stringify({ token, password }),

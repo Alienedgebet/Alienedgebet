@@ -25,7 +25,6 @@ const nextConfig: NextConfig = {
   // server binds the other blocks hydration.
   allowedDevOrigins: ["localhost", "127.0.0.1", "172.20.10.2"],
   experimental: {
-
     // Slow disk: Turbopack FS cache compaction stalls route compiles.
     turbopackFileSystemCacheForDev: false,
   },
