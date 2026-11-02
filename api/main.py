@@ -51,8 +51,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-DATA_DIR = "/var/lib/alienedge/data"
-OUTPUT_DIR = "/var/lib/alienedge/output"
+DATA_DIR = os.path.join(ROOT, "data")
+OUTPUT_DIR = os.path.join(ROOT, "output")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -257,58 +257,6 @@ app = FastAPI(
     openapi_url=None if os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "production")).lower() == "production" else "/openapi.json",
 )
 
-# ── ANTI-CLONING / ANTI-RE HELPERS ────────────────────────────────────────────
-import hashlib
-import hmac as hmac_mod
-
-# HMAC secret for admin endpoint signing.
-ADMIN_HMAC_KEY = os.getenv("ADMIN_HMAC_KEY", "")
-if not ADMIN_HMAC_KEY:
-    ADMIN_HMAC_KEY = secrets.token_hex(32)
-
-# Per-IP rate limits (requests per 60s window)
-_IP_LIMIT_AUTH = 60
-_IP_LIMIT_ADMIN = 20
-_IP_LIMIT_DEFAULT = 60
-
-_ip_request_counts = {}
-
-
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-real-ip") or request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-def _ip_rate_ok(ip: str, limit: int) -> bool:
-    now = time.time()
-    bucket = _ip_request_counts.get(ip, {"start": now, "count": 0})
-    if now - bucket["start"] > 60:
-        bucket = {"start": now, "count": 0}
-    bucket["count"] += 1
-    _ip_request_counts[ip] = bucket
-    return bucket["count"] <= limit
-
-
-def _verify_admin_signature(request: Request) -> bool:
-    if not ADMIN_HMAC_KEY:
-        return False
-    signature = request.headers.get("x-admin-signature", "")
-    timestamp = request.headers.get("x-admin-timestamp", "")
-    if not signature or not timestamp:
-        return False
-    try:
-        ts = int(timestamp)
-    except ValueError:
-        return False
-    if abs(time.time() - ts) > 300:
-        return False
-    message = f"{ts}{request.url.path}".encode()
-    expected = hmac_mod.new(ADMIN_HMAC_KEY.encode(), message, hashlib.sha256).hexdigest()
-    return hmac_mod.compare_digest(signature, expected)
-
-
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # NOTE: CORSMiddleware must be added LAST (after all other middleware) so it wraps
 # error responses from auth middleware (401, 429). The add_middleware() call is
@@ -327,12 +275,43 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 @app.middleware("http")
-async def anti_cloning_and_auth(request: Request, call_next):
-    # Public API — no session, no rate-limit, no X-Request-ID requirement.
-    # All /api/* paths are publicly readable; session cookie optional.
-    request_id = request.headers.get("x-request-id") or secrets.token_hex(8)
+async def auth_and_rate_limit(request: Request, call_next):
+    path = request.url.path
+    public_paths = {"/", "/health"}
+    
+    # Allow OPTIONS preflight requests to pass through without authentication
+    # This is required for CORS to work with cross-origin authenticated requests
+    if request.method == "OPTIONS":
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+    
+    if path.startswith("/api/auth/") or path in public_paths or path.startswith("/api/admin/"):
+        request.state.user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+    user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
+    if not user:
+        return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+    request.state.user = user
+    if not check_rate_limit(f"api:{user['user_id']}", 180, 60):
+        return JSONResponse(status_code=429, content={"detail": "Too many requests. Please try again later."})
     response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return response
 
 
@@ -985,7 +964,11 @@ ALL_ENGINE_KEYS = [
 @app.get("/", tags=["Health"])
 @app.get("/health", tags=["Health"])
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "service": "AlienEdge Prediction API",
+        "version": "4.0.0",
+    }
 
 
 @app.get("/api/status/{date}", tags=["Ops"])
@@ -1567,7 +1550,7 @@ def get_underdog(date: str):
 
 
 @app.get("/api/team-intelligence/{date}/{team_name}", tags=["Foundation"])
-def get_team_intelligence(request: Request, date: str, team_name: str):
+def get_team_intelligence(date: str, team_name: str):
     """Team Intelligence page feed — the team's per-check intelligence across
     every market AlienEdge already produced for this date. Read-only local
     composition (INTELLIGENT_PASS/pass_count.py): NO new SportMonks calls, no
@@ -1647,11 +1630,9 @@ def get_calibration(date: str):
 
 
 @app.get("/api/win/forecast/{date}", tags=["Win"])
-def get_win_forecast(request: Request, date: str):
+def get_win_forecast(date: str):
     return _with_intelligent_pass(
-        "win_apex",
-        read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win"),
-        date)
+        "win_apex", read("win_forecast", date, WIN_FORECAST_DEFAULTS, "win"), date)
 
 
 @app.get("/api/sh-gg-winner/{date}", tags=["Specials"])
@@ -1743,8 +1724,9 @@ def get_gg_psychology(date: str):
 
 
 @app.get("/api/gg/supreme/{date}", tags=["GG"])
-def get_gg_supreme(request: Request, date: str):
-    return read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg")
+def get_gg_supreme(date: str):
+    return _with_intelligent_pass(
+        "gg_supreme", read("gg_supreme", date, GG_SUPREME_DEFAULTS, "gg"), date)
 
 
 @app.get("/api/gg/cross-verify", tags=["GG"])
@@ -1977,9 +1959,10 @@ def get_over25_apex(date: str):
 
 
 @app.get("/api/over25/forecast/{date}", tags=["Over 2.5"])
-def get_over25_forecast(request: Request, date: str):
+def get_over25_forecast(date: str):
     return _with_intelligent_pass(
         "over25_forecast", read("over25_forecast", date, O25_FORECAST_DEFAULTS, "o25"), date)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # OVER 1.5
@@ -2052,11 +2035,10 @@ def get_corners_catalyst(date: str):
 
 
 @app.get("/api/corners/aggregator/{date}", tags=["Corners"])
-def get_corners_aggregator(request: Request, date: str):
+def get_corners_aggregator(date: str):
     return _with_intelligent_pass(
         "corners_aggregator",
-        read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners"),
-        date)
+        read("corners_aggregator", date, CORNER_AGG_DEFAULTS, "corners"), date)
 
 
 @app.get("/api/corners/consistency", tags=["Corners"])
@@ -2164,7 +2146,9 @@ def get_unders(date: str):
 # SOT / FHVI / SHVI
 # ════════════════════════════════════════════════════════════════════════════
 @app.get("/api/sot/{date}", tags=["Specials"])
-def get_sot(request: Request, date: str):
+def get_sot(date: str):
+    # SOT carries the user's 2-check Intelligent Pass card (psych > 50,
+    # under-2.5 probability > 65%) — wrapped like every other counted market.
     return _with_intelligent_pass(
         "sot", read("sot", date, SOT_DEFAULTS, "sot"), date)
 
@@ -3217,6 +3201,9 @@ def get_live_alerts(request: Request, date: str | None = None):
     falling back to everything, so a bad tab can never masquerade as "all
     alerts".
     """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
     path = os.path.join(OUTPUT_DIR, "ready_to_push.json")
     if not os.path.exists(path):
         return []
