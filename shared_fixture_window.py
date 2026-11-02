@@ -327,26 +327,18 @@ def lookup_for_request(path, params):
     number exists, and the strict safety gate confirms the stored canonical
     superset really contains everything the caller asked for. Any doubt →
     None → the global cache falls through to a normal (cached) API call.
-
-    TODAY'S DATE is also served (not just future dates) when the entry was
-    freshly acquired during this pipeline run, so every engine sees the same
-    fixture universe for the target day instead of each making independent
-    API calls that can return different results under 429 throttling.
     """
     m = _DATE_RE.match(str(path))
     if not m:
         return None
     date = m.group(1)
+    if not is_future_date(date):
+        return None                      # window serves FUTURE dates only
     entry = _day_entry(date)
     if not entry or not entry.get("acquisition_ok"):
         return None
     age = time.time() - float(entry.get("fetched_at") or 0)
-    # Today's fixtures: only serve if freshly acquired (within this pipeline run).
-    # Never serve yesterday's stored copy for today's engines.
-    if not is_future_date(date):
-        if age >= DAY_FRESH_SECONDS:
-            return None  # today's data must be fresh — never stale-served
-    elif age > DAY_STALE_MAX_SECONDS:
+    if age > DAY_STALE_MAX_SECONDS:
         return None
     slot = (entry.get("pages") or {}).get(rid.requested_page(params))
     if not slot:

@@ -328,65 +328,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 @app.middleware("http")
 async def anti_cloning_and_auth(request: Request, call_next):
-    path = request.url.path
-    ip = _client_ip(request)
+    # Public API — no session, no rate-limit, no X-Request-ID requirement.
+    # All /api/* paths are publicly readable; session cookie optional.
     request_id = request.headers.get("x-request-id") or secrets.token_hex(8)
-
-    # ── Reject /api/* requests without X-Request-ID (blocks naive scanners) ──
-    if path.startswith("/api/") and not request.headers.get("x-request-id"):
-        return JSONResponse(
-            status_code=400,
-            content={"detail": "Missing X-Request-ID header.", "request_id": request_id},
-        )
-
-    # ── Per-IP rate limiting (applies before auth, protects unauthenticated paths) ──
-    if path.startswith("/api/auth/"):
-        if not _ip_rate_ok(ip, _IP_LIMIT_AUTH):
-            return JSONResponse(status_code=429, content={"detail": "Too many requests.", "request_id": request_id})
-    elif path.startswith("/api/admin/"):
-        if not _ip_rate_ok(ip, _IP_LIMIT_ADMIN):
-            return JSONResponse(status_code=429, content={"detail": "Too many requests.", "request_id": request_id})
-        # ── Request signing required on admin endpoints ──
-        if not _verify_admin_signature(request):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Admin request signature required.", "request_id": request_id},
-            )
-    elif path.startswith("/api/"):
-        if not _ip_rate_ok(ip, _IP_LIMIT_DEFAULT):
-            return JSONResponse(status_code=429, content={"detail": "Too many requests.", "request_id": request_id})
-
-    # ── Public paths (no auth required) ──
-    public_paths = {"/", "/health"}
-    if request.method == "OPTIONS":
-        response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-    if path.startswith("/api/auth/") or path in public_paths:
-        request.state.user = get_user_for_session(request.cookies.get(SESSION_COOKIE))
-        response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-    # All /api/* paths are publicly readable — session cookie optional.
-    request.state.user = get_user_for_session(request.cookies.get(SESSION_COOKIE))  # may be None
     response = await call_next(request)
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -3272,9 +3217,6 @@ def get_live_alerts(request: Request, date: str | None = None):
     falling back to everything, so a bad tab can never masquerade as "all
     alerts".
     """
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="Authentication required.")
     path = os.path.join(OUTPUT_DIR, "ready_to_push.json")
     if not os.path.exists(path):
         return []
