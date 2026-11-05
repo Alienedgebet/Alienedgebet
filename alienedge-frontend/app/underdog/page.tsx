@@ -1,0 +1,191 @@
+"use client";
+
+import { useMemo } from "react";
+import { Swords } from "lucide-react";
+import {
+  underdogApi,
+  type UnderdogMasterPick,
+  type UnderdogBasePick,
+} from "@/lib/api";
+import { useSelectedDate } from "@/lib/date-context";
+import { createVerifyColumn } from "@/components/predictions/createVerifyColumn";
+import {
+  createPickStatsColumn,
+  splitFixtureTeams,
+} from "@/components/dna/PickStatsCell";
+import { useDnaV2 } from "@/lib/use-dna-v2";
+import { createIntelligentPassColumn } from "@/components/predictions/IntelligentPassColumn";
+import { QuickHistoryStrip } from "@/components/layout/QuickHistoryStrip";
+import { ChainStage, TierBadge, ProbCell, type PredictionColumn } from "@/components/predictions";
+import { MOCK_UD_AUDIT, MOCK_UD_BASE } from "@/lib/mock-chains";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+import { VERIFY_REFRESH_MS } from "@/lib/use-api";
+
+const auditColumns: PredictionColumn<UnderdogMasterPick>[] = [
+  {
+    key: "fixture",
+    header: "Fixture",
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
+  },
+  { key: "underdog", header: "Underdog", render: (r) => r.underdog_team },
+  {
+    key: "audit_prob",
+    header: "Audit Real Prob",
+    render: (r) => <ProbCell value={r.Audit_Real_Prob} showBar={false} />,
+  },
+  {
+    key: "dog_score",
+    header: "Dog Score Prob",
+    render: (r) => <ProbCell value={r.Dog_Score_Prob} showBar={false} />,
+  },
+  { key: "fav_spear", header: "Fav Spear Power", render: (r) => r.Fav_Spear_Power },
+  { key: "dominance", header: "Dominance Gap", align: "right", render: (r) => r.Dominance_Gap },
+  { key: "verdict", header: "Audit Verdict", render: (r) => <TierBadge tier={r.Audit_Verdict} /> },
+  {
+    key: "flags",
+    header: "Flags",
+    render: (r) => (
+      <div className="flex flex-wrap gap-1 text-2xs">
+        {r.dog_is_hot && <span className="text-accent-amber">Hot</span>}
+        {r.dog_due_goal && <span className="text-accent-cyan">Due</span>}
+      </div>
+    ),
+  },
+];
+
+const baseColumns: PredictionColumn<UnderdogBasePick>[] = [
+  {
+    key: "fixture",
+    header: "Fixture",
+    render: (r) => <FixtureRiskTag row={r} label={r.fixture} className="font-medium text-text-primary" />,
+  },
+  { key: "league", header: "League", render: (r) => r.league },
+  { key: "underdog", header: "Underdog", render: (r) => r.underdog_team },
+  {
+    key: "score_prob",
+    header: "Dog Score Prob",
+    render: (r) => <ProbCell value={r.dog_score_prob} showBar={false} />,
+  },
+  { key: "odds", header: "Dog Odds", align: "right", render: (r) => r.dog_odds.toFixed(2) },
+  { key: "parity", header: "Parity Gap", align: "right", render: (r) => r.parity_gap },
+  { key: "att", header: "Dog Att Strength", align: "right", render: (r) => r.dog_att_strength },
+  { key: "def", header: "Fav Def Weakness", align: "right", render: (r) => r.fav_def_weakness },
+  {
+    key: "flags",
+    header: "Flags",
+    render: (r) => (
+      <div className="flex flex-wrap gap-1 text-2xs">
+        {r.dog_is_hot && <span className="text-accent-amber">Hot</span>}
+        {r.dog_due_goal && <span className="text-accent-cyan">Due</span>}
+        {r.both_no_draw_3 && <span className="text-accent-green">No-Draw-3</span>}
+      </div>
+    ),
+  },
+];
+
+export default function UnderdogPage() {
+  const { date } = useSelectedDate();
+  // (2026-10-04) Supplies each team's real history for the DNA columns.
+  const { data: dnaV2 } = useDnaV2();
+
+  // 2. Audit (Verify -> Rest)
+  const auditColumnsWithVerify = useMemo(
+    () => [
+      createVerifyColumn<UnderdogMasterPick>(),
+      // DNA added 2026-10-04, labelled DNA like every other page. Underdog has no
+      // factor set, so this opens the team's real history. These rows DO carry a
+      // fixture_id, so the head-to-head resolves too.
+      createPickStatsColumn<UnderdogMasterPick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: (r) => r.fixture_id,
+        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
+      }),
+      createIntelligentPassColumn<UnderdogMasterPick>({
+        market: "u2s",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...auditColumns,
+    ],
+    [date, dnaV2]
+  );
+
+  // 3. Base (Verify -> DNA -> Rest)
+  const baseColumnsWithVerify = useMemo(
+    () => [
+      createVerifyColumn<UnderdogBasePick>(),
+      createPickStatsColumn<UnderdogBasePick>({
+        dna: dnaV2,
+        date,
+        getFixtureId: (r) => r.fixture_id,
+        getHomeTeam: (r) => splitFixtureTeams(r.fixture).home,
+        getAwayTeam: (r) => splitFixtureTeams(r.fixture).away,
+      }),
+      createIntelligentPassColumn<UnderdogBasePick>({
+        market: "u2s",
+        getLabel: (r) => r.fixture,
+        date,
+      }),
+      ...baseColumns,
+    ],
+    [date, dnaV2]
+  );
+
+  return (
+    <div
+      className="flex flex-col gap-4 p-3.5 sm:p-5 md:p-6"
+    >
+      {/* ── 1. SLEEK COMPACT TOP BANNER ──────────────────────────────── */}
+      <div className="glass flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0c1220]/90 px-4 py-3 shadow-panel backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent-red/30 bg-accent-red/10 shadow-[0_0_12px_rgba(244,63,94,0.2)]">
+            <Swords className="h-4 w-4 text-accent-red" />
+          </div>
+          <div>
+            <h1 className="text-sm font-black uppercase tracking-wider text-text-primary">
+              Underdog to Score Intelligence
+            </h1>
+            <p className="text-[11px] text-text-secondary">
+              U2S intelligence — master audit &amp; foundation base
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* ── 2. 5-DAY HISTORY AUDIT STRIP ─────────────────────────────── */}
+      <QuickHistoryStrip />
+
+      {/* ── 3. STAGE 2: Underdog Master Audit → Underdog 2 ────────────── */}
+      <div>
+        <ChainStage
+          title="Underdog 2"
+          description="Audit layer"
+          fetcher={() => underdogApi.getAudit(date)}
+          deps={[date]}
+          columns={auditColumnsWithVerify}
+          rowKey={(r, i) => `${r.fixture_id}-${i}`}
+          emptyMessage="No audit picks for this date."
+          fallbackData={MOCK_UD_AUDIT}
+          refreshMs={VERIFY_REFRESH_MS}
+        />
+      </div>
+
+      {/* ── 5. STAGE 3: Underdog Base Engine → Underdog ───────────────── */}
+      <div>
+        <ChainStage
+          title="Underdog"
+          description="Foundation base"
+          fetcher={() => underdogApi.getBase(date)}
+          deps={[date]}
+          columns={baseColumnsWithVerify}
+          rowKey={(r, i) => `${r.fixture_id}-${i}`}
+          emptyMessage="No base picks for this date."
+          fallbackData={MOCK_UD_BASE}
+          refreshMs={VERIFY_REFRESH_MS}
+        />
+      </div>
+    </div>
+  );
+}

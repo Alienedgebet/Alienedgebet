@@ -1,0 +1,493 @@
+"use client";
+
+import { useCallback, useMemo } from "react";
+import Link from "next/link";
+import { AlertTriangle, ChevronRight, Handshake, Radio } from "lucide-react";
+import {
+  getChemistryColor,
+  liveApi,
+  type LiveAggregatorReport,
+  type LiveDangerReport,
+  type LiveIncomingPick,
+} from "@/lib/api";
+import { useApi } from "@/lib/use-api";
+import { useSelectedDate } from "@/lib/date-context";
+import {
+  MOCK_LIVE_AGG,
+  MOCK_LIVE_DANGER,
+  MOCK_LIVE_INCOMING,
+} from "@/lib/mock-chains";
+import {
+  normalizeAggregator,
+  normalizeDanger,
+  normalizeIncoming,
+} from "@/app/live/normalize";
+import {
+  ChainBranch,
+  type PredictionColumn,
+} from "@/components/predictions";
+import { Skeleton } from "@/components/ui/skeleton";
+import { LiveRefreshButton } from "@/components/live/LiveRefreshButton";
+import { cn } from "@/lib/utils";
+
+/**
+ * Incoming Live Matches — codes 3→4→5:
+ * forensic pick stream → danger audit → master handshake chemistry.
+ */
+
+function liveRows<T>(data: T[] | null): T[] {
+  return data ?? [];
+}
+
+function pickLabel(p: LiveIncomingPick["picks"][number]): string {
+  if (p.target_name) return `${p.type} · ${p.target_name}`;
+  if (p.target_loc) return `${p.type} · ${p.target_loc}`;
+  return p.type;
+}
+
+const incomingColumns: PredictionColumn<LiveIncomingPick>[] = [
+  {
+    // P0-5: one column instead of two. `fixture` is now the real
+    // "Home vs Away" name resolved server-side (api/main.py
+    // _fixture_name_index); the numeric id, which used to be rendered a
+    // second time in its own column, is demoted to the cell tooltip.
+    key: "fixture",
+    header: "fixture",
+    // Clickable since 2026-09-28: the fixture name opens the drill-down page
+    // carrying the full key-11 table, the keeper assessment, the signed impact
+    // and the Code 3 / Code 5 reconciliation. The link wraps only the name, so
+    // the row's other cells stay inert and the shared PredictionTable needs no
+    // row-click plumbing.
+    render: (r) => (
+      <Link
+        href={`/live/incoming/${r.fixture_id}`}
+        className="font-medium text-text-primary underline-offset-2 hover:text-accent-cyan hover:underline"
+        title={`Open the full forensic breakdown for ${r.fixture}`}
+      >
+        {r.fixture}
+        <ChevronRight className="ml-1 inline h-3 w-3 align-[-1px] text-text-dim" />
+      </Link>
+    ),
+  },
+  {
+    // P0-4: live score/minute/state from the in-play cache (data/live_inplay_cache.json).
+    // Additive only — rows without a matching live entry render "—". `live_data` is a
+    // duck-typed alias so the column type doesn't need to know the optional shape.
+    key: "live",
+    header: "live",
+    className: "w-24 shrink-0",
+    render: (r) => {
+      const live = (r as unknown as Record<string, unknown>).live as LiveIncomingPick["live"] | undefined;
+      if (!live) return <span className="font-mono text-2xs text-text-dim">—</span>;
+      const stateLabel =
+        live.is_finished ? "FT" : live.state.replace(/^INPLAY_/, "").replace(/_/g, " ");
+      return (
+        <span className="flex items-center gap-1.5">
+          <span className="font-mono text-2xs text-text-secondary">{live.score}</span>
+          <span className="text-2xs text-text-dim">{live.minute}'</span>
+          <span className="text-2xs text-text-dim truncate max-w-[60px]" title={live.state}>
+            {stateLabel}
+          </span>
+        </span>
+      );
+    },
+  },
+  {
+    key: "picks",
+    header: "picks",
+    align: "right",
+    render: (r) => <span className="font-mono">{r.picks.length}</span>,
+  },
+  {
+    key: "types",
+    header: "types",
+    className: "max-w-[280px]",
+    render: (r) => (
+      <span className="line-clamp-2 text-2xs text-text-secondary">
+        {r.picks.map(pickLabel).join(" · ") || "—"}
+      </span>
+    ),
+  },
+  {
+    key: "reason",
+    header: "lead_reason",
+    className: "max-w-[280px]",
+    render: (r) => (
+      <span className="line-clamp-2 text-2xs text-text-dim">
+        {r.picks[0]?.reason ?? "—"}
+      </span>
+    ),
+  },
+];
+
+const dangerColumns: PredictionColumn<LiveDangerReport>[] = [
+  {
+    key: "fixture",
+    header: "fixture",
+    render: (r) => <span className="font-medium text-text-primary">{r.fixture}</span>,
+  },
+  {
+    // P0-4: live score/minute/state from the in-play cache.
+    key: "live",
+    header: "live",
+    className: "w-24 shrink-0",
+    render: (r) => {
+      const live = (r as unknown as Record<string, unknown>).live as LiveDangerReport["live"] | undefined;
+      if (!live) return <span className="font-mono text-2xs text-text-dim">—</span>;
+      const stateLabel =
+        live.is_finished ? "FT" : live.state.replace(/^INPLAY_/, "").replace(/_/g, " ");
+      return (
+        <span className="flex items-center gap-1.5">
+          <span className="font-mono text-2xs text-text-secondary">{live.score}</span>
+          <span className="text-2xs text-text-dim">{live.minute}'</span>
+          <span className="text-2xs text-text-dim truncate max-w-[60px]" title={live.state}>
+            {stateLabel}
+          </span>
+        </span>
+      );
+    },
+  },
+  {
+    key: "align",
+    header: "style_align",
+    render: (r) => (
+      <span className="font-mono text-2xs text-text-secondary">{r.style_alignment}</span>
+    ),
+  },
+  {
+    key: "home",
+    header: "home",
+    render: (r) => <DangerSideCell side={r.home_team} fixtureId={r.fixture_id} label="home" />,
+  },
+  {
+    key: "away",
+    header: "away",
+    render: (r) => <DangerSideCell side={r.away_team} fixtureId={r.fixture_id} label="away" />,
+  },
+  {
+    key: "gg",
+    header: "gg_chem",
+    render: (r) => (
+      <span className={cn("font-mono text-2xs", getChemistryColor(r.match_chemistry_list.Gg))}>
+        {r.match_chemistry_list.Gg}
+      </span>
+    ),
+  },
+];
+
+/**
+ * The percentage beside the badge is a BLACK BOX: `vulnerability_pct` is a
+ * count of absences, not the severity the badge reports, so a BLESSING can sit
+ * next to 87.1% and read as a contradiction. Clicking the cell opens the full
+ * derivation — numerator, denominator, the per-player list and the signed
+ * verdict — so the number can be checked rather than believed.
+ */
+function DangerSideCell({
+  side,
+  fixtureId,
+  label,
+}: {
+  side: LiveDangerReport["home_team"];
+  fixtureId: number | string;
+  label: string;
+}) {
+  const pct = side.vulnerability_pct;
+  const gk = side.gk_leak;
+  return (
+    <Link
+      href={`/live/danger/${fixtureId}?side=${label}`}
+      className="group flex flex-col gap-0.5 rounded px-1 py-0.5 -m-px transition-colors hover:bg-white/5 focus-visible:outline focus-visible:outline-1 focus-visible:outline-cyan-400"
+      title="Open the full danger derivation for this team"
+    >
+      <span
+        className={cn(
+          "font-mono text-2xs font-semibold",
+          side.breach ? "text-accent-red" : "text-accent-green"
+        )}
+      >
+        {side.danger_level}
+      </span>
+      <span className="font-mono text-2xs text-text-dim group-hover:text-cyan-300">
+        {pct === null || pct === undefined ? "N/A" : `${pct}%`} · GK{" "}
+        {gk === null || gk === undefined ? "N/A" : gk.toFixed(2)}
+        <span className="ml-1 opacity-0 transition-opacity group-hover:opacity-100">
+          →
+        </span>
+      </span>
+    </Link>
+  );
+}
+
+function AggregatorCard({ row }: { row: LiveAggregatorReport }) {
+  const chem = Object.entries(row.match_chemistry_list);
+  const live = (row as unknown as Record<string, unknown>).live as LiveAggregatorReport["live"] | undefined;
+  const stateLabel = live
+    ? (live.is_finished ? "FT" : live.state.replace(/^INPLAY_/, "").replace(/_/g, " "))
+    : null;
+  return (
+    <article className="rounded-xl border border-border/70 bg-bg-elevated/25 shadow-panel">
+      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border/60 px-4 py-3">
+        <div>
+          <p className="font-mono text-2xs text-text-dim">ID {row.fixture_id}</p>
+          <h3 className="text-sm font-semibold text-text-primary">{row.fixture}</h3>
+        </div>
+        <div className="flex flex-wrap gap-1.5 font-mono text-2xs">
+          <SyncChip label="H" report={row.danger_report.home} />
+          <SyncChip label="A" report={row.danger_report.away} />
+        </div>
+      </div>
+
+      {/* P0-4: live score/minute/state */}
+      {live && (
+        <div className="border-b border-border/50 px-4 py-2">
+          <span className="flex items-center gap-1.5 font-mono text-2xs">
+            <span className="text-text-secondary">{live.score}</span>
+            <span className="text-text-dim">{live.minute}'</span>
+            <span className="text-text-dim">{stateLabel}</span>
+          </span>
+        </div>
+      )}
+
+      <div className="border-b border-border/50 px-4 py-2.5">
+        <p className="mb-1.5 text-2xs uppercase tracking-wide text-text-dim">
+          Incoming ({row.incoming_probabilities.length})
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {row.incoming_probabilities.length === 0 ? (
+            <span className="font-mono text-2xs text-text-dim">No picks</span>
+          ) : (
+            row.incoming_probabilities.map((p, i) => {
+              const type = String((p as { type?: string }).type ?? "—");
+              const target = String(
+                (p as { target_name?: string }).target_name ??
+                  (p as { target_loc?: string }).target_loc ??
+                  ""
+              );
+              return (
+                <span
+                  key={`${type}-${i}`}
+                  className="rounded border border-border/70 bg-bg-card/40 px-1.5 py-0.5 font-mono text-2xs text-text-secondary"
+                >
+                  {type}
+                  {target ? ` · ${target}` : ""}
+                </span>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 px-4 py-3 sm:grid-cols-4">
+        {chem.map(([market, status]) => (
+          <div key={market} className="rounded border border-border/50 px-2 py-1.5">
+            <p className="text-2xs text-text-dim">{market}</p>
+            <p className={cn("font-mono text-xs font-semibold", getChemistryColor(String(status)))}>
+              {String(status)}
+            </p>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function SyncChip({
+  label,
+  report,
+}: {
+  label: string;
+  report: LiveAggregatorReport["danger_report"]["home"];
+}) {
+  return (
+    <span
+      className={cn(
+        "rounded border px-1.5 py-0.5",
+        report.breach
+          ? "border-accent-red/40 bg-accent-red/10 text-accent-red"
+          : "border-accent-green/30 bg-accent-green/10 text-accent-green"
+      )}
+    >
+      {label}: {report.sync}
+      {report.breach ? " · BREACH" : ""}
+    </span>
+  );
+}
+
+export default function LiveIncomingPage() {
+  // Date-scoped cache keys — see the identical fix on /live/edges. These were
+  // bare strings, so the 24h persistent localStorage tier could replay one
+  // day's feeds on the next. This page only *seemed* immune because its feeds
+  // churn every 45s; the edges board is written once per fixture and stayed
+  // stale, which is why the two pages disagreed about what "today" meant.
+  const { date } = useSelectedDate();
+  const incoming = useApi(
+    () => liveApi.getIncoming().then(normalizeIncoming),
+    [],
+    {
+      fallback: MOCK_LIVE_INCOMING,
+      cacheKey: `live-incoming-incoming:${date}`,
+      refreshMs: 45_000,
+      revalidateOnMount: true,
+    }
+  );
+  const danger = useApi(
+    () => liveApi.getDanger().then(normalizeDanger),
+    [],
+    {
+      fallback: MOCK_LIVE_DANGER,
+      cacheKey: `live-incoming-danger:${date}`,
+      refreshMs: 45_000,
+      revalidateOnMount: true,
+    }
+  );
+  const aggregator = useApi(
+    () => liveApi.getAggregator().then(normalizeAggregator),
+    [],
+    {
+      fallback: MOCK_LIVE_AGG,
+      cacheKey: `live-incoming-aggregator:${date}`,
+      refreshMs: 45_000,
+      revalidateOnMount: true,
+    }
+  );
+
+  const incomingRows = liveRows(incoming.data);
+  const dangerRows = liveRows(danger.data);
+  const aggRows = liveRows(aggregator.data);
+
+  // One button refreshes every feed on the page. `refetch()` bumps the same tick
+  // the poller uses, so it bypasses both the session cache and the 24h
+  // localStorage tier — this genuinely re-reads the backend.
+  const refreshing =
+    incoming.loading ||
+    incoming.isRefetching ||
+    danger.loading ||
+    danger.isRefetching ||
+    aggregator.loading ||
+    aggregator.isRefetching;
+
+  const handleRefresh = useCallback(() => {
+    incoming.refetch();
+    danger.refetch();
+    aggregator.refetch();
+  }, [incoming, danger, aggregator]);
+
+  const stats = useMemo(() => {
+    const breaches = dangerRows.filter(
+      (r) => r.home_team.breach || r.away_team.breach
+    ).length;
+    const pickCount = incomingRows.reduce((n, r) => n + r.picks.length, 0);
+    return {
+      fixtures: Math.max(incomingRows.length, dangerRows.length, aggRows.length),
+      picks: pickCount,
+      breaches,
+      handshakes: aggRows.length,
+    };
+  }, [aggRows.length, dangerRows, incomingRows]);
+
+  return (
+    <div className="relative flex flex-col gap-5 p-6">
+      <div className="pointer-events-none absolute inset-0 -z-10 bg-hero-glow opacity-70" />
+
+      <section className="relative overflow-hidden rounded-2xl border border-accent-cyan/20 bg-nebula shadow-elevated">
+        <div className="relative z-10 flex flex-wrap items-start justify-between gap-3 px-5 py-3.5 md:px-6">
+          <div>
+            <h1 className="text-xl font-extrabold tracking-tight text-text-primary sm:text-2xl">
+              Incoming Forensics
+            </h1>
+            <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-text-secondary">
+              Structural pick stream from live lineups, squad danger audit (GK leak / missing stars),
+              then master handshake chemistry across GG · Win · O2.5 · Corners · Unders.
+            </p>
+          </div>
+          <LiveRefreshButton onRefresh={handleRefresh} refreshing={refreshing} />
+        </div>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-cyan/15 text-accent-cyan">
+            <Radio className="h-4 w-4" />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">
+              Incoming Forensic Engine
+            </h2>
+            <p className="text-2xs text-text-dim">
+              Rules 1–8 → incoming_predictions.json · {incomingRows.length} fixtures
+              {" · "}
+              <span className="text-accent-cyan/80">
+                click a fixture for the full breakdown
+              </span>
+            </p>
+          </div>
+        </div>
+        <ChainBranch
+          title="INCOMING_FEED"
+          description="Forensic picks from rules 1–8 with pick type and lead reason"
+          data={incomingRows}
+          loading={incoming.loading}
+          error={incoming.error}
+          columns={incomingColumns}
+          rowKey={(r) => r.fixture_id}
+          emptyMessage="No incoming forensic picks yet."
+          isRefetching={incoming.isRefetching}
+          defaultOpen
+        />
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-red/15 text-accent-red">
+            <AlertTriangle className="h-4 w-4" />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">
+              Code 4 — Danger Forensic Aggregator
+            </h2>
+            <p className="text-2xs text-text-dim">
+              Vulnerability · GK leak · missing stars · style alignment
+            </p>
+          </div>
+        </div>
+        <ChainBranch
+          title="DANGER_AUDIT"
+          description="Vulnerability audit — GK leak, missing stars, style alignment, match chemistry"
+          data={dangerRows}
+          loading={danger.loading}
+          error={danger.error}
+          columns={dangerColumns}
+          rowKey={(r) => String(r.fixture_id)}
+          emptyMessage="No danger audit profiles yet."
+          isRefetching={danger.isRefetching}
+          defaultOpen
+        />
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-green/15 text-accent-green">
+            <Handshake className="h-4 w-4" />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">
+              Code 5 — Master Aggregator Handshake
+            </h2>
+            <p className="text-2xs text-text-dim">
+              Incoming + danger → market chemistry list · {aggRows.length} matches
+            </p>
+          </div>
+        </div>
+        {aggregator.loading && aggRows.length === 0 ? (
+          <Skeleton className="h-48 rounded-xl bg-bg-elevated" />
+        ) : (
+          <div className="grid gap-3">
+            {aggRows.map((row) => (
+              <AggregatorCard key={String(row.fixture_id)} row={row} />
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}

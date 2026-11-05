@@ -1,0 +1,714 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import type { AxiosResponse } from "axios";
+import { 
+  Calendar, 
+  ShieldCheck, 
+  Flame, 
+  Zap, 
+  SlidersHorizontal, 
+  ChevronDown, 
+  ChevronUp, 
+  CheckCircle2, 
+  Sparkles,
+  TrendingUp,
+  LayoutGrid,
+  Table as TableIcon,
+  ShieldAlert
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { getTodayDate } from "@/lib/api";
+import { DEMO_MODE_ENABLED } from "@/lib/use-api";
+import { MarketFilterConfig, MOCK_WEEKLY_RESULTS } from "./filter-config";
+import { FixtureRiskTag } from "@/components/FixtureRiskTag";
+
+interface FilterTabProps {
+  config: MarketFilterConfig;
+  fetchSingle: (date: string, params: Record<string, unknown>) => Promise<AxiosResponse<unknown>>;
+  fetchWeekly: (params: Record<string, unknown>) => Promise<AxiosResponse<unknown>>;
+}
+
+/**
+ * Per-side goals scored and conceded over the engine's form window.
+ *
+ * 2026-09-29. These four figures were already computed by
+ * Engine/over25_forecast.py (get_complex_metrics returns gs/gc per side and
+ * both sides feed the Poisson lambda and parity_diff) but were never written
+ * to the CSV, so they could not be shown. The engine now emits them; this
+ * renders them.
+ *
+ * WINDOW TOGGLE
+ * The engine writes BOTH a 5-match and a 3-match set, from the same history
+ * slice in the same provider call. `window` picks which pair is displayed.
+ * Both sets are display-only: no filter gate, vote or Poisson term reads
+ * either of them, so switching the toggle never changes WHICH fixtures are
+ * recommended — only how their recent form is described.
+ *
+ * A 3-match window is a noisier read than a 5-match one, not a better one.
+ * That is why the window size is stated in the label rather than left
+ * implicit: the same number means different confidence at each setting.
+ *
+ * Renders NOTHING when the selected window's fields are absent, so a fixture
+ * graded before this change degrades to exactly the old card rather than
+ * showing a row of zeros or "—". The Weekly cache keeps dated artefacts, so
+ * rows graded by an earlier pipeline run legitimately lack these columns.
+ */
+function GoalFormStats({
+  row,
+  window,
+}: {
+  row: Record<string, unknown>;
+  window: 3 | 5;
+}) {
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+
+  const homeScored = num(row[`home_goals_scored_last_${window}`]);
+  const awayScored = num(row[`away_goals_scored_last_${window}`]);
+  const homeConceded = num(row[`home_goals_conceded_last_${window}`]);
+  const awayConceded = num(row[`away_goals_conceded_last_${window}`]);
+
+  // All four travel together. If any is missing the set is not trustworthy,
+  // so show nothing rather than a partial row that implies completeness.
+  if (
+    homeScored === null ||
+    awayScored === null ||
+    homeConceded === null ||
+    awayConceded === null
+  ) {
+    return null;
+  }
+
+  const cell = (label: string, value: number, tone: string) => (
+    <div className="flex items-center gap-1 whitespace-nowrap">
+      <span className="text-slate-500">{label}</span>
+      <span className={cn("font-semibold", tone)}>{value}</span>
+    </div>
+  );
+
+  return (
+    <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-white/5 pt-1.5 text-[11px]">
+      {cell("Home scored", homeScored, "text-emerald-400")}
+      {cell("Away scored", awayScored, "text-emerald-400")}
+      {cell("Home conceded", homeConceded, "text-rose-400")}
+      {cell("Away conceded", awayConceded, "text-rose-400")}
+      <div className="col-span-2 text-[9px] uppercase tracking-wider text-slate-600">
+        last {window} matches
+      </div>
+    </div>
+  );
+}
+
+export function FilterTab({ config, fetchSingle, fetchWeekly }: FilterTabProps) {
+  // Navigation & Scope
+  const [scope, setScope] = useState<"single" | "weekly">("weekly");
+  const [date, setDate] = useState(getTodayDate());
+  // The default scope is "7-Day Range", but both bounds previously defaulted to
+  // today, making the weekly request silently collapse to a single (usually
+  // empty) day. Anchor the start 6 days back so "weekly" is actually a week.
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date(Date.now() - 6 * 86400000);
+    return d.toISOString().split("T")[0];
+  });
+  const [endDate, setEndDate] = useState(getTodayDate());
+
+  // 2026-09-30. The L5/L3 form-window toggle is GONE. It was display-only —
+  // no gate read the 3-window — so it was not a filter, and it sat down by
+  // the results implying it was one. Recent goal form is now expressed as
+  // four real gates in the Mathematical Precision Thresholds drawer
+  // (min_home_goals / min_away_goals / max_home_conceded / max_away_conceded),
+  // all defaulting to 0 = off.
+  //
+  // The per-card goal-form READOUT is retained and always shows the 5-window,
+  // which is the window the engine's own lambda and the gates use.
+  const FORM_WINDOW = 5 as const;
+
+  // Mode & Risk State
+  const [mode, setMode] = useState<"public" | "tipster" | "advanced">("public");
+  const [riskLevel, setRiskLevel] = useState<string>(config.riskOptions[0].key);
+  const [oddsBand, setOddsBand] = useState<string>(config.oddsBands[0]);
+
+  // Advanced Drawer & Display Mode
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [viewFormat, setViewFormat] = useState<"cards" | "table">("cards");
+  const [customParams, setCustomParams] = useState<Record<string, any>>({});
+  // Bumped by Reset so the uncontrolled number inputs (which render
+  // `defaultValue`) remount and visibly return to their engine defaults.
+  const [resetKey, setResetKey] = useState(0);
+
+  // 2026-10-01. A drawer box that renders live, accepts a number and then
+  // changes nothing is worse than an absent box — it reads as a working filter
+  // and it is not. Two of those existed and were reported as "the boxes do
+  // nothing": the four O2.5 goal-form gates (absent from O25_NARROW, so dropped
+  // in Public mode — now wired) and the WIN `strict_mode` checkbox (the Public
+  // WIN filter has no soft/strict branch at all — still impossible, so it is
+  // now disabled and says why).
+  //
+  // This returns a reason only in Public mode, so a control is disabled exactly
+  // when the engine genuinely cannot enforce it and never otherwise.
+  const unsupportedReason = (key: string): string | undefined =>
+    mode === "public"
+      ? config.publicUnsupported?.find((u) => u.key === key)?.reason
+      : undefined;
+  
+  // Data State — starts empty; real results are fetched on mount and on every
+  // control change (mock only ever appears if NEXT_PUBLIC_DEMO_MODE is set).
+  const [rows, setRows] = useState<Record<string, any>[]>(
+    DEMO_MODE_ENABLED ? (MOCK_WEEKLY_RESULTS[config.key] || []) : []
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Sync default options when switching between tabs
+  useEffect(() => {
+    setRiskLevel(config.riskOptions[0].key);
+    setOddsBand(config.oddsBands[0]);
+  }, [config.key]);
+
+  // Filter Runner — shared by the auto-fetch effect and the manual button.
+  const runFilter = () => {
+    setLoading(true);
+    setError(null);
+
+    const payload = {
+      mode,
+      risk_level: riskLevel,
+      odds_band: oddsBand,
+      ...customParams
+    };
+
+    const apiCall = scope === "single"
+      ? fetchSingle(date, payload)
+      : fetchWeekly({ ...payload, start_date: startDate, end_date: endDate });
+
+    apiCall
+      .then((res: any) => {
+        const raw = res?.data?.results || res?.data?.picks || res?.data;
+        setRows(Array.isArray(raw) ? raw : []);
+      })
+      .catch((err: any) => {
+        setRows([]);
+        setError(err?.message || "Filter request failed");
+      })
+      .finally(() => setLoading(false));
+  };
+
+  const handleRunFilter = () => runFilter();
+
+  // ── Drawer sensitivity (ADDITIVE) ─────────────────────────────────────────
+  // The drawer's own values used to be sent ONLY when the Run button was
+  // pressed, and the API ignored them anyway. They are now sent automatically,
+  // debounced so dragging a slider / typing a number issues ONE request per
+  // settle instead of one per keystroke, while the Run button still works
+  // exactly as before (and now uses the latest values immediately).
+  const [debouncedParams, setDebouncedParams] = useState<Record<string, unknown>>({});
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedParams(customParams), 400);
+    return () => clearTimeout(timer);
+  }, [customParams]);
+
+  // Auto-fetch real results on mount and whenever the filter controls change
+  // (debouncedParams = the Mathematical Precision Thresholds drawer).
+  useEffect(() => {
+    runFilter();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, mode, riskLevel, oddsBand, date, startDate, endDate, config.key, debouncedParams]);
+
+  const getRiskIcon = (iconName: string) => {
+    if (iconName === "shield") return <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />;
+    if (iconName === "sparkles") return <Sparkles className="h-3.5 w-3.5 text-cyan-400" />;
+    return <Flame className="h-3.5 w-3.5 text-amber-400" />;
+  };
+
+  return (
+    <div className="flex flex-col gap-5 w-full">
+      
+      {/* ── 1. PRIMARY FILTER CONTROL PANEL ───────────────────────────── */}
+      <div className="glass rounded-2xl border border-white/10 bg-[#0c1220]/90 p-5 shadow-2xl backdrop-blur-xl">
+        
+        {/* Top Header: Title & Scope Buttons */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+          <div>
+            <h2 className="text-base font-black uppercase tracking-wider text-white flex items-center gap-2">
+              <Zap className="h-4 w-4 text-cyan-400 fill-cyan-400/30" />
+              {config.label}
+            </h2>
+            <p className="text-xs text-slate-400 mt-0.5">{config.description}</p>
+          </div>
+
+          <div className="flex items-center rounded-xl bg-black/40 p-1 border border-white/10">
+            <button
+              onClick={() => setScope("weekly")}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                scope === "weekly"
+                  ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-glow"
+                  : "text-slate-400 hover:text-white"
+              )}
+            >
+              <Calendar className="h-3.5 w-3.5" />
+              7-Day Range
+            </button>
+            <button
+              onClick={() => setScope("single")}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                scope === "single"
+                  ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-glow"
+                  : "text-slate-400 hover:text-white"
+              )}
+            >
+              Single Date
+            </button>
+          </div>
+        </div>
+
+        {/* Date Selector Row */}
+        <div className="flex flex-wrap items-center gap-4 pt-4">
+          {scope === "weekly" ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-col gap-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Anchor / Start</span>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 font-mono text-xs text-white outline-none focus:border-cyan-400"
+                />
+              </div>
+              <span className="text-slate-500 self-end pb-2">→</span>
+              <div className="flex flex-col gap-1">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">End Range</span>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 font-mono text-xs text-white outline-none focus:border-cyan-400"
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Target Match Date</span>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="w-44 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 font-mono text-xs text-white outline-none focus:border-cyan-400"
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Mode Selector (Public / Tipster / Advanced) */}
+        <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-white/10 pt-4">
+          <span className="text-xs font-bold text-slate-300 mr-2">Execution Engine:</span>
+          {(["public", "tipster", "advanced"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={cn(
+                "rounded-lg px-3.5 py-1.5 text-xs font-bold capitalize transition-all border",
+                mode === m
+                  ? "border-cyan-400 bg-cyan-500/10 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+                  : "border-white/5 bg-white/5 text-slate-400 hover:border-white/20 hover:text-white"
+              )}
+            >
+              {m === "public" ? "🎯 Public Presets" : m === "tipster" ? "📊 Tipster Sliders" : "⚡ Forensic Aggregator"}
+            </button>
+          ))}
+        </div>
+
+        {/* Risk Profile (Public presets) + Odds Corridor (ALL modes) */}
+        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 rounded-xl bg-black/30 p-4 border border-white/5">
+          {/* Risk Selection — public presets (the engines' own risk profiles) */}
+          {mode === "public" && (
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
+                Algorithm Risk Profile
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {config.riskOptions.map((opt) => (
+                  <button
+                    key={opt.key}
+                    onClick={() => setRiskLevel(opt.key)}
+                    className={cn(
+                      "flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-bold transition-all",
+                      riskLevel === opt.key
+                        ? "border-cyan-500/50 bg-cyan-950/50 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+                        : "border-white/10 bg-white/5 text-slate-400 hover:text-white"
+                    )}
+                  >
+                    {getRiskIcon(opt.icon)}
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Odds Band Selection — available in EVERY mode (additive: the
+              corridor previously vanished in Tipster/Advanced) */}
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
+              Target Odds Corridor
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {config.oddsBands.map((band) => (
+                <button
+                  key={band}
+                  onClick={() => setOddsBand(band)}
+                  className={cn(
+                    "rounded-lg border px-3 py-2 font-mono text-xs font-bold transition-all",
+                    oddsBand === band
+                      ? "border-indigo-500/50 bg-indigo-950/50 text-indigo-300 shadow-[0_0_12px_rgba(99,102,241,0.2)]"
+                      : "border-white/10 bg-white/5 text-slate-400 hover:text-white"
+                  )}
+                >
+                  @{band}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Collapsible Advanced Parameters */}
+        <div className="mt-4 border-t border-white/10 pt-3">
+          <button
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className="flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-cyan-300 transition-colors"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5 text-cyan-400" />
+            <span>{showAdvanced ? "Hide" : "Show"} Mathematical Precision Thresholds</span>
+            {showAdvanced ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          </button>
+
+          {/* ADDITIVE: one-click return to the engine's own defaults. The
+              backend treats a request with no drawer values as the shipped
+              baseline, so this genuinely restores the default result set. */}
+          {showAdvanced && Object.keys(customParams).length > 0 && (
+            <button
+              onClick={() => { setCustomParams({}); setResetKey((k) => k + 1); }}
+              className="ml-3 text-[11px] font-bold text-slate-500 hover:text-cyan-300 transition-colors"
+            >
+              Reset to engine defaults
+            </button>
+          )}
+
+          {showAdvanced && Object.keys(customParams).length > 0 && (
+            <div className="mt-2 rounded-lg border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-300/80">
+                  Sending to the filter ({mode}):
+                </span>
+                {Object.entries(customParams).map(([k, v]) => (
+                  <span
+                    key={k}
+                    className="rounded bg-cyan-500/15 px-1.5 py-0.5 font-mono text-[10px] text-cyan-200"
+                  >
+                    {k}={String(v)}
+                  </span>
+                ))}
+              </div>
+              <p className="mt-1 text-[10px] leading-tight text-slate-500">
+                Every box above is sent on each request. If a value is listed
+                here and the fixture count does not change, the gate is not
+                reaching the filter — that is a bug, not a setting.
+              </p>
+            </div>
+          )}
+
+          {showAdvanced && (
+            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              {mode === "public"
+                ? "Public Presets: the engine applies its own risk profile first, then narrows the survivors with the thresholds below. Every box below is enforced. A threshold of 0 means off."
+                : "Tipster / Forensic Aggregator: every threshold below is passed straight into the engine's own gates."}
+            </p>
+          )}
+
+          {showAdvanced && (
+            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 rounded-xl bg-black/40 p-4 border border-white/5 animate-in fade-in">
+              {config.fields.map((f) => {
+                const blocked = unsupportedReason(f.key);
+                return (
+                <div
+                  key={`${f.key}-${resetKey}`}
+                  className={cn("flex flex-col gap-1", blocked && "opacity-50")}
+                  title={blocked}
+                >
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{f.label}</label>
+                  {f.type === "checkbox" ? (
+                    <label className={cn("flex items-center gap-2 mt-1", blocked ? "cursor-not-allowed" : "cursor-pointer")}>
+                      <input
+                        type="checkbox"
+                        disabled={Boolean(blocked)}
+                        checked={customParams[f.key] ?? f.defaultValue ?? false}
+                        onChange={(e) => setCustomParams({ ...customParams, [f.key]: e.target.checked })}
+                        className="h-4 w-4 rounded border-white/20 bg-white/5 accent-cyan-400 disabled:cursor-not-allowed"
+                      />
+                      <span className="text-xs text-slate-300 font-medium">Enabled</span>
+                    </label>
+                  ) : (
+                    <input
+                      type="number"
+                      step={f.step || 1}
+                      disabled={Boolean(blocked)}
+                      defaultValue={f.defaultValue}
+                      onChange={(e) => {
+                        // Empty input = "back to the engine default" — never send
+                        // Number('') (which is 0 and would silently gate rows out).
+                        const raw = e.target.value;
+                        setCustomParams((prev) => {
+                          const next = { ...prev };
+                          if (raw === "") delete next[f.key];
+                          else next[f.key] = Number(raw);
+                          return next;
+                        });
+                      }}
+                      className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 font-mono text-xs text-white outline-none focus:border-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
+                    />
+                  )}
+                  {blocked && (
+                    <span className="text-[10px] leading-tight text-amber-400/80">
+                      Not enforced in Public mode
+                    </span>
+                  )}
+                </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Action Button */}
+        <div className="mt-5 flex items-center justify-between border-t border-white/10 pt-4">
+          <span className="text-xs text-slate-400">
+            {rows.length} verified picks available matching parameters
+          </span>
+          <Button
+            onClick={handleRunFilter}
+            disabled={loading}
+            className="bg-gradient-to-r from-cyan-500 via-blue-600 to-indigo-600 px-6 font-bold text-white shadow-[0_0_20px_rgba(6,182,212,0.3)] hover:opacity-90"
+          >
+            {loading ? "Calculating Forensic Gates…" : "🚀 Run Precision Filter"}
+          </Button>
+        </div>
+
+      </div>
+
+      {/* ── UNCHECKED-GATE WARNING ────────────────────────────────────────
+          A goal-form threshold that cannot be evaluated must never look like
+          one that passed. Engine/over25_forecast.py only began recording the
+          per-side recent-goal figures on 2026-09-30, so for any earlier date
+          the engine skips the gate silently and the pick set comes back
+          unchanged. This says so plainly, instead of leaving the user to
+          conclude the box is broken. */}
+      {(() => {
+        const unchecked = Array.from(
+          new Set(
+            rows
+              .map((r) => r?._goal_form_note)
+              .filter((n): n is string => typeof n === "string" && n.length > 0)
+          )
+        );
+        if (unchecked.length === 0) return null;
+        return (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3">
+            <div className="flex items-start gap-2">
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-amber-300">
+                  Goal-form thresholds were NOT applied to{" "}
+                  {unchecked.length} of these {rows.length} fixtures
+                </p>
+                <ul className="mt-1 space-y-0.5 text-[11px] leading-snug text-amber-200/80">
+                  {unchecked.map((n) => (
+                    <li key={n}>
+                      • {n.replace(/^Goal-form thresholds were NOT applied to this fixture: /, "")}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1.5 text-[11px] leading-snug text-slate-400">
+                  The engine only began recording recent-goal figures on{" "}
+                  <strong className="text-slate-300">2026-09-30</strong>. Earlier
+                  dates have no data to compare against, so those fixtures were
+                  left untouched. Pick a date from 2026-09-30 onward to see
+                  these gates actually filter.
+                </p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── 2. RESULTS & MATCH CARDS SECTION ─────────────────────────── */}
+      <div className="flex flex-col gap-3">
+        {/* Results Header + View Switcher */}
+        <div className="flex items-center justify-between px-1">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-black uppercase tracking-wider text-slate-300">
+              Verified Forensic Results
+            </h3>
+            <span className="rounded-full bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.5 font-mono text-[10px] font-bold text-cyan-300">
+              {rows.length} SURVIVED
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1 rounded-lg bg-black/40 p-1 border border-white/10">
+            <button
+              onClick={() => setViewFormat("cards")}
+              className={cn("p-1.5 rounded", viewFormat === "cards" ? "bg-cyan-500/20 text-cyan-300" : "text-slate-500")}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setViewFormat("table")}
+              className={cn("p-1.5 rounded", viewFormat === "table" ? "bg-cyan-500/20 text-cyan-300" : "text-slate-500")}
+            >
+              <TableIcon className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {loading && rows.length === 0 && (
+          <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm text-slate-400">
+            Loading filter results…
+          </div>
+        )}
+        {error && (
+          <div className="rounded-xl border border-red-500/30 bg-red-950/20 p-6 text-center text-sm text-red-300">
+            {error}
+          </div>
+        )}
+        {!loading && !error && rows.length === 0 && (
+          <div className="rounded-xl border border-white/10 bg-[#0d1322]/90 p-6 text-center text-sm text-slate-400">
+            No picks survived these filter gates.
+          </div>
+        )}
+        {/* Results View: Cards Mode */}
+        {viewFormat === "cards" ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {rows.map((row, idx) => {
+              const fixture = row.fixture || `${row.home_team} vs ${row.away_team}`;
+              const prob = row.poisson_win_prob || row.gg_prob_pct || row.poisson_over_prob_num || 80.0;
+              const odds = row.win_odds || row.gg_odds || row.o25_odds || 1.65;
+              const tier = row.tier || "🔥 VERIFIED PICK";
+
+              return (
+                <div
+                  key={idx}
+                  className="glass relative flex flex-col justify-between rounded-xl border border-white/10 bg-[#0d1322]/90 p-4 shadow-xl backdrop-blur-md transition-all hover:border-cyan-500/40"
+                >
+                  <div>
+                    {/* Top Tier Badge & Odds */}
+                    <div className="flex items-center justify-between gap-2 mb-2.5">
+                      <span className="rounded-md border border-cyan-500/30 bg-cyan-950/40 px-2 py-0.5 text-[10px] font-black tracking-wide text-cyan-300">
+                        {tier}
+                      </span>
+                      <span className="rounded-md border border-indigo-500/30 bg-indigo-950/50 px-2 py-0.5 font-mono text-xs font-bold text-indigo-300">
+                        @{typeof odds === "number" ? odds.toFixed(2) : odds}
+                      </span>
+                    </div>
+
+                    {/* Fixture Name */}
+                    <h4 className="text-sm font-bold text-white mb-2 line-clamp-1">
+                      <FixtureRiskTag row={row} label={fixture} textClassName="text-white" />
+                    </h4>
+
+                    {/* Key Stats Pill Bar (Tailored to Engine) */}
+                    <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-slate-300 border-t border-white/5 pt-2 mb-3">
+                      {row.parity_score !== undefined && (
+                        <div className="flex items-center gap-1">
+                          <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                          <span>Parity: +{row.parity_score}</span>
+                        </div>
+                      )}
+                      {row.verification_days && (
+                        <div className="flex items-center gap-1">
+                          <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                          <span>{row.verification_days}/7 Days Ver.</span>
+                        </div>
+                      )}
+                      {row.council_votes && (
+                        <div className="flex items-center gap-1">
+                          <TrendingUp className="h-3 w-3 text-cyan-400" />
+                          <span>Votes: {row.council_votes}</span>
+                        </div>
+                      )}
+                      {row.opp_last_5_conceded_raw !== undefined && (
+                        <div>Opp Conceded: {row.opp_last_5_conceded_raw}</div>
+                      )}
+                      {row.last_5_wins_overall !== undefined && (
+                        <div>Form: {row.last_5_wins_overall}/5 Wins</div>
+                      )}
+                      {row.table_distance !== undefined && (
+                        <div>Distance: {row.table_distance} pos</div>
+                      )}
+                      {row.pos_gap !== undefined && (
+                        <div>Pos Gap: {row.pos_gap}</div>
+                      )}
+                      <GoalFormStats row={row} window={FORM_WINDOW} />
+                    </div>
+                  </div>
+
+                  {/* Bottom Confidence Bar */}
+                  <div className="flex items-center justify-between border-t border-white/10 pt-2.5">
+                    <span className="text-[10px] font-bold uppercase text-slate-400">Probability / Math</span>
+                    <span className="font-mono text-xs font-black text-emerald-400">
+                      {typeof prob === "number" ? `${prob.toFixed(1)}%` : prob}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          /* Results View: Dense Table Mode */
+          <div className="glass overflow-x-auto rounded-xl border border-white/10 bg-[#0d1322]/90 shadow-xl">
+            <table className="w-full text-left text-xs font-mono">
+              <thead className="border-b border-white/10 bg-white/5 text-[10px] uppercase tracking-wider text-slate-400">
+                <tr>
+                  <th className="p-3">Fixture</th>
+                  <th className="p-3">Tier</th>
+                  <th className="p-3">Odds</th>
+                  <th className="p-3">Prob / Math</th>
+                  <th className="p-3">Forensic Highlights</th>
+                  <th className="p-3">Goal Form (L{FORM_WINDOW})</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5 text-slate-200">
+                {rows.map((row, idx) => (
+                  <tr key={idx} className="hover:bg-white/5 transition-colors">
+                    <td className="p-3 font-bold text-white">
+                      <FixtureRiskTag
+                        row={row}
+                        label={row.fixture || `${row.home_team} vs ${row.away_team}`}
+                        textClassName="text-white"
+                      />
+                    </td>
+                    <td className="p-3 text-cyan-300">{row.tier || "VERIFIED"}</td>
+                    <td className="p-3 font-bold text-indigo-300">@{row.win_odds || row.gg_odds || row.o25_odds || "1.65"}</td>
+                    <td className="p-3 font-bold text-emerald-400">
+                      {typeof (row.poisson_win_prob || row.gg_prob_pct || row.poisson_over_prob_num) === "number"
+                        ? `${(row.poisson_win_prob || row.gg_prob_pct || row.poisson_over_prob_num).toFixed(1)}%`
+                        : row.poisson_win_prob || "80.0%"}
+                    </td>
+                    <td className="p-3 text-slate-400">
+                      {row.parity_score ? `Parity +${row.parity_score}` : row.verification_days ? `${row.verification_days}/7 Days` : row.council_votes ? `Votes: ${row.council_votes}` : "Kill-Switch Passed"}
+                    </td>
+                    <td className="p-3">
+                      <GoalFormStats row={row} window={FORM_WINDOW} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+    </div>
+  );
+}

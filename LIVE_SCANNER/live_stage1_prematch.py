@@ -1,0 +1,953 @@
+import os
+import sys
+import time
+import random
+import json
+import requests
+from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
+
+# ── SHARED 429 COOLDOWN GATE (live-stage side) ───────────────────────────────
+# The archiver broadcasts a cooldown window into data/api_429_cooldown.lock
+# whenever it sees an HTTP 429. Every GET() wrapper here paces itself through
+# that window before firing, so the three components stop triggering each
+# other's burst limits. The gate file lives in the backend root so all stages
+# and the archiver share one canonical path.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GATE_FILE = os.path.join(_BASE_DIR, "data", "api_429_cooldown.lock")
+
+
+def _api_gate_pace(tag=""):
+    """Sleep while a shared 429 cooldown is active (cheap no-op otherwise).
+    A few seconds of JITTER stagger the wake-up so siblings stop firing in
+    lockstep and re-triggering the burst limit (the cooling circle)."""
+    try:
+        with open(_GATE_FILE, "r") as f:
+            gate = json.load(f)
+        until = float(gate.get("until", 0)) if isinstance(gate, dict) else 0.0
+        remaining = until - time.time()
+        if remaining > 0:
+            sleep_s = min(remaining, 15.0) + random.random() * 3.0
+            print(f"[API GATE] {tag}: shared cooldown active — pacing {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+    except Exception:
+        pass
+
+
+def _api_gate_broadcast(wait_s, tag=""):
+    """Record a shared cooldown so sibling processes also back off."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": time.time() + wait_s, "by": tag or "live-stage"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
+def _api_gate_clear(tag=""):
+    """A 200 just came back from the provider — the burst window is clearly
+    over, so DISARM the shared cooldown instead of letting every sibling keep
+    pacing until the old expiry (gate hygiene)."""
+    try:
+        os.makedirs(os.path.dirname(_GATE_FILE), exist_ok=True)
+        with open(_GATE_FILE + ".tmp", "w") as f:
+            json.dump({"until": 0, "by": f"cleared:{tag or 'live-stage'}"}, f)
+        os.replace(_GATE_FILE + ".tmp", _GATE_FILE)
+    except Exception:
+        pass
+
+
+# --- 1. HOSTING & VS CODE ENVIRONMENT SETUP ---
+load_dotenv()
+
+# --- 2. DYNAMIC PATHS FOR SERVERS (Shared Memory) ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+PREDICTIONS_FILE = os.path.join(DATA_DIR, "live_predictions.json")
+# Stage 1 keeps its own FLAT squad cache ({pid: {...}}) and must not read the
+# shared squad_cache.json written by stages 3/6 in the NEW
+# {"players": {...}, "team_avg_leak": ...} format — loading that here makes
+# get_squad_data_standardized() return the wrong shape and raises
+# KeyError('pos') for every fixture on subsequent cycles.
+CACHE_FILE = os.path.join(DATA_DIR, "squad_cache_stage1_prematch.json")
+# NEW: persists the GK liability + missing-key-player audit that was
+# previously only printed to console. Additive-only — does not change
+# PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED, or anything Live Match Edges
+# already reads.
+PREMATCH_TEAM_AUDIT_FILE = os.path.join(DATA_DIR, "prematch_team_audit.json")
+
+# FEED WRITE GUARD (see live_cache.write_feed): acquired feeds are written through
+# this helper so a FAILED SportMonks acquisition can never empty a good feed.
+try:
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+except ImportError:  # running this file directly rather than via the package
+    sys.path.insert(0, BASE_DIR)
+    from live_cache import note_acquisition, acquisition_failed, write_feed
+
+# SHARED FIXTURE-STATE CLASSIFIER — one canonical implementation of
+# live / finished / not-started plus the Code 1 admission rule, so Stage 1,
+# Stage 2 and the API can never disagree about a fixture's status again.
+try:
+    from LIVE_SCANNER.live_state_classifier import (
+        admit_to_prematch_board, classify_fixture, official_lineup_players,
+        parse_kickoff_utc, has_official_lineup, has_full_formation,
+    )
+except ImportError:  # executed as a plain script from the backend root
+    sys.path.insert(0, os.path.join(BASE_DIR, "LIVE_SCANNER"))
+    from live_state_classifier import (
+        admit_to_prematch_board, classify_fixture, official_lineup_players,
+        parse_kickoff_utc, has_official_lineup, has_full_formation,
+    )
+
+# ==============================================================================
+# CONFIGURATION & WORLD STANDARDS (100% UNTOUCHED)
+# ==============================================================================
+API_TOKEN = os.getenv("SPORTMONKS_API_KEY")
+BASE_URL = "https://api.sportmonks.com/v3/football"
+
+MARKET_ID_1X2  = 1
+MARKET_ID_OU   = 12
+
+RATING_ID = 118
+MINUTES_ID = 119
+STAR_FACTOR_ID = 211
+CORNER_TAKEN_ID = 34
+CROSSES_ID = 98
+
+SQUAD_CACHE = {}
+
+PERSONNEL_WEIGHTS = {
+    "Goalkeeper": 50.0, "Defender": 9.0, "Midfielder": 4.5, "Attacker": 1.5, "Unknown": 3.0
+}
+
+# ==============================================================================
+# ODDS CACHE (reduces API calls and 429 errors)
+# ==============================================================================
+# Odds don't change frequently for pre-match fixtures. Cache them for 10 minutes
+# to dramatically reduce API calls. This is the primary fix for the 429 issue.
+ODDS_CACHE = {}
+ODDS_CACHE_FILE = os.path.join(DATA_DIR, "odds_cache.json")
+ODDS_CACHE_TTL = 600  # 10 minutes
+
+def _load_odds_cache():
+    global ODDS_CACHE
+    if os.path.exists(ODDS_CACHE_FILE):
+        try:
+            with open(ODDS_CACHE_FILE, 'r') as f:
+                ODDS_CACHE = json.load(f)
+        except Exception:
+            ODDS_CACHE = {}
+
+def _save_odds_cache():
+    try:
+        tmp = f"{ODDS_CACHE_FILE}.tmp"
+        with open(tmp, 'w') as f:
+            json.dump(ODDS_CACHE, f)
+        os.replace(tmp, ODDS_CACHE_FILE)
+    except Exception:
+        pass
+
+def _get_cached_odds(fixture_id):
+    """Return (odds_dict, is_fresh) for a fixture_id."""
+    key = str(fixture_id)
+    entry = ODDS_CACHE.get(key)
+    if entry:
+        age = time.time() - entry.get("timestamp", 0)
+        if age < ODDS_CACHE_TTL:
+            return entry.get("data"), True
+        # Stale but usable
+        return entry.get("data"), False
+    return None, False
+
+def _cache_odds(fixture_id, odds_data):
+    """Cache odds for a fixture."""
+    key = str(fixture_id)
+    ODDS_CACHE[key] = {
+        "timestamp": time.time(),
+        "data": odds_data
+    }
+
+# ==============================================================================
+# PERSISTENT CACHE MANAGERS
+# ==============================================================================
+def load_cache():
+    """Restore the persisted squad cache, DISCARDING poisoned empty entries.
+
+    2026-09-29. An empty `{}` entry can only be written by an older build that
+    cached a FAILED provider pull as "this team has no history" (the guard now
+    lives in get_squad_data_standardized). Those entries are worse than absent:
+    `if tid_str in SQUAD_CACHE: return SQUAD_CACHE[tid_str]` serves them without
+    refetching, so the team stays FULL STRENGTH / 0 missing / KMV 0.0% with no XI
+    table indefinitely — a missed call rendered as a finding.
+
+    73 entries were poisoned this way and 6 sides of the live board were still
+    reading from them after the write guard was fixed, because the guard stops
+    NEW poisoning but cannot un-poison what is already on disk.
+
+    Dropping them on load is the only place that clears it: the entries are then
+    simply absent, so the next cycle refetches those teams properly. A team that
+    genuinely has no history is re-fetched once and cached as `{}` again, which
+    is correct — the cost is one call per such team per restart, not per cycle.
+    """
+    global SQUAD_CACHE
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                SQUAD_CACHE = {k: v for k, v in loaded.items() if v}
+                purged = len(loaded) - len(SQUAD_CACHE)
+                if purged:
+                    print(f"[SQUAD] purged {purged} poisoned empty entr(ies) "
+                          f"from squad cache — those teams will be refetched.")
+                print(f"--- MEMORY RESTORED: {len(SQUAD_CACHE)} teams loaded from squad_cache.json ---")
+            else:
+                SQUAD_CACHE = {}
+        except:
+            SQUAD_CACHE = {}
+    else:
+        SQUAD_CACHE = {}
+
+def save_cache():
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(SQUAD_CACHE, f)
+    except Exception as e:
+        print(f"Error saving cache: {e}")
+
+
+# ==============================================================================
+# FIXTURE DATE CACHE — resolves HTTP 429 on /fixtures/date/{date}
+# ==============================================================================
+# Stage 1 calls /fixtures/date/{date} every cycle with NO cache between calls.
+# At ~27 cycles/hour that consumes a large share of the API budget for data
+# that changes slowly (fixtures for a given date are fixed once published).
+# A 15-minute disk cache with stale-fallback on 429 removes the majority of
+# these calls and guarantees that a rate-limit rejection can never empty the
+# Stage 1 output — there is always a last-known-good fixture list to process.
+# ==============================================================================
+FIXTURE_CACHE_FILE = os.path.join(DATA_DIR, "fixture_date_cache.json")
+FIXTURE_CACHE_TTL = 15 * 60  # 15 minutes
+
+# Retention (2026-10-02). The cache was append-only with no pruning, so it grew
+# without bound: 226 MB across 17 dates by 2026-10-02, gaining ~11 MB/day.
+#
+# It is re-read in full twice per cycle (`_save_fixture_cache_entry` and
+# `_get_fixture_cache` each call `_load_fixture_cache`), and a measured load of
+# the 226 MB file costs 872 MB RSS with a 1098 MB peak. That load happens inside
+# the loop that ALSO has to run alongside the pre-match pipeline on a 3.9 GB
+# box — it is the mechanism behind the RSS spikes recorded in the unit file's
+# OOM comment ("history-cache load drove RSS to 3.5GB").
+#
+# Only yesterday and today are ever requested (run_prematch_engine builds
+# dates_to_check from now-1day and now). Anything older is never read again, so
+# keeping it buys nothing and costs memory on every single cycle. KEEP_FIXTURE_
+# CACHE_DAYS retains a small margin over that 2-day working set.
+KEEP_FIXTURE_CACHE_DAYS = 3
+
+
+def _prune_fixture_cache(cache, now=None):
+    """Drop cached dates older than the retention window.
+
+    Mutates and returns `cache`. Never raises: pruning is an optimisation, and a
+    failure here must not cost the caller the cycle's data (the same reasoning
+    as the write guard below — a cache problem must never empty the feed).
+
+    Ages are measured against each entry's own timestamp, falling back to the
+    date key itself for entries written before `timestamp` existed.
+    """
+    try:
+        now = now or time.time()
+        cutoff = now - (KEEP_FIXTURE_CACHE_DAYS * 86400)
+        keep = {}
+        for key, entry in cache.items():
+            ts = entry.get("timestamp") if isinstance(entry, dict) else None
+            if not ts:
+                # Fall back to parsing the ISO date key so a legacy entry is
+                # judged on its date rather than being kept forever.
+                try:
+                    ts = datetime.strptime(key, "%Y-%m-%d").replace(
+                        tzinfo=timezone.utc).timestamp()
+                except Exception:
+                    ts = now  # unparseable -> retain, it is likely live data
+            if ts >= cutoff:
+                keep[key] = entry
+        return keep
+    except Exception:
+        return cache
+
+
+def _load_fixture_cache():
+    """Load the fixture date cache from disk. Returns dict {date: entry}."""
+    if os.path.exists(FIXTURE_CACHE_FILE):
+        try:
+            with open(FIXTURE_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_fixture_cache_entry(target_date, fixtures, acquisition_ok=True):
+    """Atomically save a fixture date listing to the cache.
+
+    A FAILED acquisition (acquisition_ok=False) must never overwrite a
+    previously cached non-empty fixture list — the last-known-good data is
+    preserved so a 429 can never empty the Stage 1 output.
+    """
+    cache = _load_fixture_cache()
+    existing = cache.get(target_date, {})
+
+    if not acquisition_ok and existing.get("data"):
+        age = int(time.time() - existing.get("timestamp", 0))
+        print(
+            f"[FIXTURE CACHE] {target_date}: acquisition FAILED — "
+            f"existing cache ({len(existing.get('data', []))} entries, "
+            f"age {age}s) PRESERVED."
+        )
+        return False
+
+    cache[target_date] = {
+        "timestamp": time.time(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(fixtures) if isinstance(fixtures, list) else 0,
+        "data": fixtures if isinstance(fixtures, list) else [],
+        "_acquisition_ok": acquisition_ok,
+    }
+
+    # Prune on every write. The cache is re-read whole twice per cycle, so its
+    # size is a direct, recurring tax on RSS — see the retention note above.
+    # Pruning HERE (rather than on load) means the file shrinks as soon as the
+    # next cycle writes, instead of only shrinking the copy held in memory.
+    cache = _prune_fixture_cache(cache)
+
+    try:
+        tmp = f"{FIXTURE_CACHE_FILE}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, FIXTURE_CACHE_FILE)
+    except Exception as e:
+        print(f"[FIXTURE CACHE ERROR] {e}")
+        return False
+    return True
+
+
+def _get_fixture_cache(target_date):
+    """Return (fixtures_list, is_fresh) for a date.
+
+    - Fresh cache hit:  (list_of_fixtures, True)
+    - Stale cache:      (list_of_fixtures_or_empty, False)
+    - No cache:         ([], False)
+    """
+    cache = _load_fixture_cache()
+    entry = cache.get(target_date, {})
+    if not entry:
+        return [], False
+    age = time.time() - entry.get("timestamp", 0)
+    data = entry.get("data", [])
+    if data and age < FIXTURE_CACHE_TTL:
+        return data, True
+    return data, False
+
+# ==============================================================================
+# UTILITIES & ENGINE ENGINE (100% UNTOUCHED)
+# ==============================================================================
+def safe_get(d, *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur: return default
+        cur = cur[k]
+    return cur
+
+def GET(path, params=None, max_retries=3):
+    if params is None: params = {}
+    params.setdefault("api_token", API_TOKEN)
+    url = f"{BASE_URL}{path}"
+    problem = None
+    _api_gate_pace("stage1")
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            if r.status_code == 200:
+                _api_gate_clear("stage1")
+                body = r.json()
+                # A 200 carrying an empty payload AND a provider message is the
+                # subscription/quota shape ("...you don't have access ... via your
+                # current subscription"). Tag it so an empty feed can never be
+                # mistaken for a genuinely quiet day. (See live_cache.write_feed.)
+                if isinstance(body, dict) and not body.get("data") and body.get("message"):
+                    return note_acquisition(body, r.status_code, body.get("message"))
+                return body
+            if r.status_code == 429:
+                problem = "HTTP 429 rate limit"
+                try:
+                    gate_wait = float(r.headers.get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    gate_wait = 0.0
+                gate_wait = max(gate_wait, (2 ** attempt) + random.random())
+                # CAP the shared window (see stage3): giant Retry-After values
+                # (~20 min) must not freeze every sibling process.
+                _api_gate_broadcast(min(gate_wait, 120.0), "stage1")
+                time.sleep(min(gate_wait, 30.0) + random.random() * 2); continue
+            return note_acquisition({"data":[]}, r.status_code, f"HTTP {r.status_code}")
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
+            time.sleep((2 ** attempt) + random.random())
+    return note_acquisition({"data":[]}, None, f"retries exhausted ({problem})")
+
+def normalize_odd_value(value):
+    try:
+        val = float(value)
+        if 1.01 <= val <= 30.0: return val
+        if val > 100: return (val / 100) + 1
+        if val < -100: return (100 / abs(val)) + 1
+        return None
+    except: return None
+
+def get_fixture_odds_safe(fixture_id):
+    raw_data = GET(f"/odds/pre-match/fixtures/{fixture_id}")
+    odds_list = raw_data.get("data",[])
+    result = {"home_win": None, "away_win": None, "o25": None}
+    for o in odds_list:
+        if o.get("market_id") == MARKET_ID_1X2:
+            label = str(o.get("label", "")).lower()
+            val = normalize_odd_value(o.get("value"))
+            if not val: continue
+            if "1" in label or "home" in label: result["home_win"] = val
+            elif "2" in label or "away" in label: result["away_win"] = val
+            
+    for o in odds_list:
+        mid, desc = o.get("market_id"), str(o.get("market_description", "")).lower()
+        if not desc: desc = str(o.get("name", "")).lower()
+        if mid == MARKET_ID_OU or (("goals" in desc or "over/under" in desc) and not any(x in desc for x in["corner", "card", "asian", "handicap"])):
+            label, total = str(o.get("label", "")).lower(), str(o.get("total", ""))
+            if "over" in label and "2.5" in total:
+                val = normalize_odd_value(o.get("value"))
+                if val: result["o25"] = val
+    return result
+
+def calculate_gk_vulnerability_pro(master_gk, today_ids, all_lineup_data, squad_map):
+    starting_gk_id = None
+    for pid in today_ids:
+        if squad_map.get(pid, {}).get('pos') == "Goalkeeper":
+            starting_gk_id = pid; break
+
+    if not starting_gk_id: return 85.0, True, "DEBUT/UNKNOWN GK (Max Risk)"
+
+    starter = squad_map[starting_gk_id]
+    on_bench = False
+    if master_gk and master_gk['id'] != starting_gk_id:
+        on_bench = any(str(l.get('player_id')) == master_gk['id'] for l in all_lineup_data if l.get('type_id') == 12)
+
+    apps, c_p90, vuln = starter.get('apps', 0), starter.get('c_p90', 0.0), starter.get('vuln', 0.0)
+    is_liability = False
+    status_note = ""
+    vuln_score = 0.0
+
+    if apps == 0:
+        is_liability = True; status_note = "NO DATA (High Risk)"; vuln_score = 85.0
+    elif apps < 3 and c_p90 >= 1.50:
+        is_liability = True; status_note = f"Small Sample Leak ({c_p90:.1f} per 90)"; vuln_score = min(100.0, 50 + (vuln * 10))
+    elif c_p90 > 1.50 or vuln > 2.50:
+        is_liability = True; status_note = f"Proven Liability ({c_p90:.1f} per 90)"; vuln_score = min(100.0, 50 + (vuln * 10))
+    else:
+        is_liability = False; status_note = f"Solid Form ({c_p90:.1f} per 90)"; vuln_score = max(0.0, vuln * 10)
+
+    if on_bench and is_liability:
+        status_note = "🚨 DOWNGRADE: " + status_note
+        vuln_score = min(100.0, vuln_score + 15.0)
+
+    return vuln_score, is_liability, status_note
+
+def get_squad_data_standardized(team_id):
+    tid_str = str(team_id)
+    if tid_str in SQUAD_CACHE: return SQUAD_CACHE[tid_str]
+    now_ts = datetime.now(timezone.utc).timestamp()
+    start_dt = (datetime.now(timezone.utc).date() - timedelta(days=150)).isoformat()
+    end_dt = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+
+    resp = GET(f"/fixtures/between/{start_dt}/{end_dt}/{team_id}", params={
+        "include": "lineups.details.type;lineups.player.position;lineups.player.detailedPosition;scores;participants",
+        "filter": "fixtureStates:5", "per_page": 25
+    })
+
+    # A FAILED pull must never be cached as an empty squad. This function is the
+    # only source of the key eleven, so caching `{}` on a 429 makes the team read
+    # as FULL STRENGTH with 0 missing, KMV 0.0% and no XI table — presented as a
+    # finding when it is really a missed call. Burundi (18834) was cached empty
+    # this way: 73 of the cache's entries were empty, and Burundi's 150-day
+    # window demonstrably holds 19 usable lineup rows.
+    #
+    # `{}` is still cached when the pull genuinely succeeded with no usable rows,
+    # because that is a real answer and refetching it every cycle would spend
+    # quota to learn the same thing.
+    if acquisition_failed(resp):
+        cached = SQUAD_CACHE.get(tid_str)
+        if cached:
+            return cached
+        print(f"[SQUAD] team {tid_str}: acquisition FAILED "
+              f"({resp.get('_failure')}) — NOT cached as an empty squad.")
+        return {}
+
+    squad_stats = {}
+    for fx in resp.get("data",[]):
+        raw_at = fx['starting_at'].replace('Z', '+00:00')
+        fx_date = datetime.fromisoformat(raw_at).astimezone(timezone.utc)
+        days_ago = int((now_ts - fx_date.timestamp()) / 86400)
+        weight = 1.0 if days_ago <= 30 else (0.4 if days_ago <= 75 else 0.1)
+        
+        hid, aid = None, None
+        for pt in fx.get("participants",[]):
+            loc = pt.get("meta", {}).get("location")
+            if loc == "home": hid = str(pt.get("id"))
+            if loc == "away": aid = str(pt.get("id"))
+
+        h_g, a_g = 0, 0
+        for entry in fx.get("scores",[]):
+            s_obj = entry.get("score") or entry
+            g = s_obj.get("goals") if isinstance(s_obj, dict) else entry.get("goals")
+            if g is not None:
+                try: val = int(g)
+                except: continue
+                pid = str(entry.get("participant_id"))
+                part_str = str(s_obj.get("participant") or entry.get("participant")).lower()
+                if pid == hid or part_str == "home": h_g = max(h_g, val)
+                elif pid == aid or part_str == "away": a_g = max(a_g, val)
+                    
+        is_home = (str(team_id) == hid)
+        opp_goals = a_g if is_home else h_g
+
+        for l in fx.get("lineups",[]):
+            if str(l.get("team_id")) == str(team_id):
+                pid = str(l.get("player_id"))
+                if not l.get("player"): continue
+                m_val = r_val = 0.0; c_val = -1.0
+                
+                for d in l.get("details",[]):
+                    type_name = str(d.get('type', {}).get('name', '')).lower()
+                    val_data = d.get("data", {}).get("value") if isinstance(d.get("data"), dict) else None
+                    raw_val = val_data if val_data is not None else d.get("value")
+                    try:
+                        if isinstance(raw_val, dict): val = float(list(raw_val.values())[0])
+                        else: val = float(str(raw_val).replace('%', '').strip())
+                    except: continue
+
+                    if "minutes" in type_name: m_val = val
+                    elif "rating" in type_name: r_val = val
+                    elif "conceded" in type_name: c_val = val
+                
+                if m_val == 0 and str(l.get("formation_position")) == "1": m_val = 90.0
+                if c_val == -1.0: c_val = float(opp_goals)
+
+                if pid not in squad_stats:
+                    p_obj = l["player"]
+                    pos_name = safe_get(p_obj, "position", "name", default="Unknown")
+                    squad_stats[pid] = {
+                        "name": p_obj.get("display_name", "Unknown"), "pos": pos_name, 
+                        "det_pos": safe_get(p_obj, "detailedPosition", "name", default=pos_name),
+                        "weighted_mins": 0, "monthly_apps": 0, "ratings":[], "apps": 0, "mins": 0, "conceded": 0, "clean_sheets": 0
+                    }
+                    
+                if days_ago <= 30: squad_stats[pid]["monthly_apps"] += 1
+                squad_stats[pid]["weighted_mins"] += (m_val * weight)
+                squad_stats[pid]["mins"] += m_val
+                squad_stats[pid]["apps"] += 1
+                if r_val > 0: squad_stats[pid]["ratings"].append(r_val)
+                if m_val > 0:
+                    squad_stats[pid]["conceded"] += c_val
+                    if c_val == 0: squad_stats[pid]["clean_sheets"] += 1
+
+    processed = {}
+    for pid, d in squad_stats.items():
+        avg_r = sum(d["ratings"])/len(d["ratings"]) if d["ratings"] else 6.0
+        worth = (d["monthly_apps"] * 8000) + (d["weighted_mins"] * avg_r)
+        c_p90 = (d["conceded"] / d["mins"]) * 90 if d["mins"] > 0 else 0.0
+        c_ratio = d["clean_sheets"] / d["apps"] if d["apps"] > 0 else 0.0
+        vuln = (c_p90 * 0.6) + ((1 - c_ratio) * 2) + ((6.5 - avg_r) * 0.4)
+        processed[pid] = {"id": pid, "name": d["name"], "pos": d["pos"], "det_pos": d["det_pos"], "worth": worth, "avg_rating": avg_r, "apps": d["apps"], "mins": d["mins"], "c_p90": c_p90, "vuln": vuln}
+        
+    SQUAD_CACHE[tid_str] = processed
+    return processed
+
+# ==============================================================================
+# 📦 MAIN EXECUTION (WRAPPED FOR ARCHITECTURE)
+# ==============================================================================
+def run_prematch_engine():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    
+    if not API_TOKEN:
+        print("CRITICAL: SPORTMONKS_API_KEY is missing!")
+        return {}
+
+    load_cache()
+    FINAL_PREDICTIONS_FEED = {} 
+    # NEW: separate feed for the GK liability + missing-player audit, keyed
+    # the same way as FINAL_PREDICTIONS_FEED. Populated alongside it, saved
+    # to its own file, never merged into it.
+    TEAM_AUDIT_FEED = {}
+    
+    now_aware = datetime.now(timezone.utc)
+    dates_to_check =[
+        (now_aware - timedelta(days=1)).strftime("%Y-%m-%d"),
+        now_aware.strftime("%Y-%m-%d")
+    ]
+
+    print(f"\nMASTER ENGINE A: STRATEGIC AUDIT - {now_aware.strftime('%Y-%m-%d %H:%M')} UTC\n")
+    processed_fixtures = set()
+    acq_failed = False   # an acquisition that FAILED must never empty the feed
+
+    for target_date in dates_to_check:
+        # ── FIXTURE DATE CACHE ──────────────────────────────────────────────
+        # Serve the fixture listing from a 15-minute disk cache. A cache miss
+        # fetches fresh from SportMonks and persists the result for the next
+        # cycle, so consecutive cycles never hammer the same endpoint.
+        # ──────────────────────────────────────────────────────────────────────
+        cached_fixtures, is_fresh = _get_fixture_cache(target_date)
+
+        if is_fresh:
+            fixtures = cached_fixtures
+            fetch_from_api = False
+            print(f"[FIXTURE CACHE] {target_date}: cache HIT ({len(fixtures)} entries)")
+        else:
+            # Cache miss or stale — fetch fresh, then cache the result.
+            fetch_from_api = True
+
+        if fetch_from_api:
+            # Fetch ALL pages for this date (pagination loop).
+            page = 1
+            has_more_pages = True
+            all_fixtures = []
+            page_acq_failed = False
+
+            while has_more_pages:
+                resp = GET(
+                    f"/fixtures/date/{target_date}",
+                    params={
+                        # `formations` and `state` are DEEPENINGS of this same
+                        # endpoint - no new SportMonks call, no extra request.
+                        # `state` supplies the authoritative in-play state
+                        # STRING (FT / AET / INPLAY_2ND_HALF ...) that the old
+                        # numeric-only check could not see, and `formations` is
+                        # what the board's "about to start" admission rule
+                        # requires alongside the official lineup.
+                        "include": "participants;state;formations;"
+                                   "lineups.details.type;"
+                                   "lineups.player.position;"
+                                   "lineups.player.detailedPosition",
+                        "page": page,
+                    },
+                )
+
+                if acquisition_failed(resp):
+                    page_acq_failed = True
+                    if not acq_failed:
+                        acq_failed = True
+                        print(
+                            f"[ACQUISITION] /fixtures/date/{target_date} page {page} "
+                            f"FAILED — reason={resp.get('_failure')} | "
+                            f"http_status={resp.get('_http_status')} "
+                            f"| will attempt cache fallback."
+                        )
+                    # Stop paginating on acquisition failure — use whatever
+                    # we have (cache if available, else empty).
+                    break
+
+                page_fixtures = resp.get("data", [])
+                if not page_fixtures:
+                    break
+
+                all_fixtures.extend(page_fixtures)
+                pagination = resp.get("pagination", {})
+                has_more_pages = pagination.get("has_more", False)
+                page += 1
+
+            fixtures = all_fixtures
+
+            # Persist to cache (only a successful acquisition overwrites a
+            # previously cached non-empty list).
+            _save_fixture_cache_entry(target_date, fixtures, acquisition_ok=not page_acq_failed)
+
+            # ── STALE-FALLBACK ON FAILED FETCH ─────────────────────────────
+            # If SportMonks rejected every page, fall back to the last-known-
+            # good cached fixture list so a 429 can never empty the Stage 1
+            # output. If no cache exists either, process nothing (the write
+            # guard will preserve whatever the previous run left on disk).
+            # ────────────────────────────────────────────────────────────────
+            if not fixtures and not page_acq_failed is False:
+                pass  # empty result from API with no cache fallback available
+            elif not fixtures and page_acq_failed:
+                cached_fallback, _ = _get_fixture_cache(target_date)
+                if cached_fallback:
+                    fixtures = cached_fallback
+                    print(
+                        f"[FIXTURE CACHE] {target_date}: 429/empty — "
+                        f"falling back to {len(fixtures)} cached entries."
+                    )
+                else:
+                    print(
+                        f"[FIXTURE CACHE] {target_date}: acquisition FAILED — "
+                        f"no cached data available, processing none."
+                    )
+
+        if not fixtures:
+            continue
+
+        # ── Process fixtures (unchanged logic) ─────────────────────────────
+        current_page = 1; has_more_pages = True
+
+        for fx in fixtures:
+                f_id = str(fx.get("id"))
+                if f_id in processed_fixtures: continue
+                
+                # ── SHARED STATE CLASSIFIER (single source of truth) ────────
+                # The old inline check was:
+                #     is_live = state_id in [2,3,4,6,7,12,13,21,22]
+                #     is_upcoming = (0 <= time_diff_mins <= 65)
+                #     if not (is_live or is_upcoming): continue
+                # Three defects lived in those three lines:
+                #   1. state_ids 6 (after extra time) and 7 (after penalties)
+                #      are FINISHED states and were inside the "live" list, so
+                #      a completed match stayed on the board labelled LIVE.
+                #   2. the 65-minute upcoming cap meant a fixture dropped off
+                #      the board while still waiting to kick off. Per the user
+                #      a fixture is retained for as long as it takes, so the cap
+                #      is gone - lineup+formation is the only gate now.
+                #   3. `starting_at` is naive, and .astimezone() on a naive
+                #      datetime silently reinterprets it as machine-local time.
+                #      On this UTC+1 host that shifted every kickoff back an
+                #      hour and skewed the "starts in Nm" countdown.
+                # The classifier fixes all three; nothing here re-implements
+                # the rule. The 429 feed-write guard downstream is untouched, so
+                # a rate-limit still can never wipe this feed.
+                admit = admit_to_prematch_board(fx, now=now_aware)
+                start_dt = admit.get("kickoff_utc") or now_aware
+                is_live = admit["is_live"]
+                lineups_raw = fx.get("lineups", [])
+                official_lineups = official_lineup_players(fx)
+                formations = admit.get("formations") or {}
+
+                if not admit["admitted"]:
+                    if admit["is_finished"] or admit["is_stale"]:
+                        print(f"[CULL] {fx.get('name')}: {admit['admit_reason']}")
+                    else:
+                        print(f"[WAIT] {fx.get('name')}: {admit['admit_reason']}")
+                    continue
+
+                processed_fixtures.add(f_id)
+                if is_live:
+                    status_text = "LIVE"
+                else:
+                    mins_out = int((start_dt - now_aware).total_seconds() / 60)
+                    status_text = f"STARTS IN {mins_out}m · LINEUPS + FORMATION CONFIRMED"
+                print(f"\n{'='*120}\nMATCH: {fx['name']} | KICKOFF: {start_dt.strftime('%H:%M')} UTC ({status_text})\n{'='*120}")
+                
+                odds_data = get_fixture_odds_safe(f_id)
+                print(f"ODDS SCAN > Home: {odds_data['home_win']} | Away: {odds_data['away_win']} | O2.5: {odds_data['o25']}")
+
+                m_stats =[]
+                # NEW: captures the GK status text per team_id, purely for
+                # the new audit file. Reset per fixture, read after the
+                # team loop, never touches m_stats or the print board.
+                team_gk_notes = {}
+                for team in fx.get("participants",[]):
+                    tid, loc = team['id'], team.get('meta', {}).get('location')
+                    squad_map = get_squad_data_standardized(tid)
+                    worth_list = list(squad_map.values())
+                    
+                    gks = sorted([p for p in worth_list if p['pos'] == "Goalkeeper"], key=lambda x: x['worth'], reverse=True)
+                    master_gk = gks[0] if gks else None
+                    key_11 = (gks[:1] if gks else[]) + sorted([p for p in worth_list if p['pos'] != "Goalkeeper"], key=lambda x: x['worth'], reverse=True)[:10]
+                    today_team_ids =[str(l.get('player_id')) for l in official_lineups if str(l.get('team_id')) == str(tid)]
+
+                    gk_p, gk_m, gk_n = calculate_gk_vulnerability_pro(master_gk, today_team_ids, lineups_raw, squad_map)
+                    team_gk_notes[str(tid)] = {"gk_vuln_score": gk_p, "gk_out": gk_m, "gk_status": gk_n}
+                    
+                    print(f"\n--- {team['name'].upper()} ({loc.upper()}) ---\n{'Player Name':<28} | {'Pos':<12} | {'Apps':<4} | {'Mins':<6} | {'Rating':<6} | {'Status'}\n" + "-"*115)
+                    km_w = tot_w = m_c = w_l = def_miss = mid_miss = att_miss = 0; l_w_m = r_w_m = False
+                    
+                    for p in key_11:
+                        base_w = PERSONNEL_WEIGHTS.get(p['pos'], 3.0); tot_w += base_w
+                        is_playing = p['id'] in today_team_ids
+                        status = "STARTING"
+                        
+                        if is_playing and p['pos'] == "Goalkeeper": status = gk_n
+                        if not is_playing:
+                            if p['pos'] == "Goalkeeper":
+                                if gk_m: km_w += gk_p; status = f"MISSING ({gk_n})"
+                                else: km_w += 0.0; status = f"MISSING (Covered by: {gk_n})"
+                            else:
+                                km_w += base_w; status = "MISSING !!!"
+                                
+                            m_c += 1; w_l += p['worth']
+                            if p['pos'] == "Defender": def_miss += 1
+                            elif p['pos'] == "Midfielder": mid_miss += 1
+                            elif p['pos'] == "Attacker": att_miss += 1
+                            if p['det_pos'] in["Left Wing", "Left Midfielder", "Left Winger"]: l_w_m = True
+                            if p['det_pos'] in["Right Wing", "Right Midfielder", "Right Winger"]: r_w_m = True
+                            
+                        print(f"{p['name'][:28]:<28} | {p['pos']:<12} | {p['apps']:<4} | {p['mins']:<6} | {p['avg_rating']:<6.2f} | {status}")
+
+                    kmv = (km_w / tot_w * 100) if tot_w > 0 else 0
+                    rep_w = sum(squad_map.get(rid, {'worth': 10})['worth'] for rid in[p for p in today_team_ids if p not in[x['id'] for x in key_11]])
+                    rv = max(kmv, kmv * (1 + ((w_l - rep_w) / max(1, w_l)))) if w_l > 0 else 0
+                    
+                    m_stats.append({
+                        "id": tid, "name": team['name'], "loc": loc, "miss": m_c, "kmv": kmv, "rv": rv,
+                        "gk_out": gk_m, "def_miss": def_miss, "mid_miss": mid_miss, "att_miss": att_miss,
+                        "l_wing_miss": l_w_m, "r_wing_miss": r_w_m,
+                        "players": [
+                            {
+                                "name": p['name'],
+                                "pos": p.get('pos', 'Unknown'),
+                                "apps": int(p.get('apps', 0) or 0),
+                                "mins": int(p.get('mins', 0) or 0),
+                                "rating": float(p.get('avg_rating', 0.0) or 0.0),
+                                "status": "STARTING" if p['id'] in today_team_ids
+                                    else (f"MISSING" if p.get('pos') != "Goalkeeper"
+                                          else (f"MISSING (GK Out: {gk_n})" if gk_m else "MISSING")),
+                            }
+                            for p in key_11
+                        ] if key_11 else [],
+                    })
+                    print(f"\n>> KEY MISSING VULNERABILITY (The Hole): {kmv:.1f}%")
+                    print(f">> REPLACEMENT VULNERABILITY (The Doom): {rv:.1f}%")
+
+                if len(m_stats) == 2:
+                    h, a = (m_stats[0], m_stats[1]) if m_stats[0]['loc'] == 'home' else (m_stats[1], m_stats[0])
+
+                    match_picks =[]
+                    print(f"\n[PRE-MATCH STRATEGIC PREDICTIONS]")
+                    
+                    if (h['miss'] + a['miss']) >= 9:
+                        # Heavily rotated sides at BOTH ends of an O/U market is
+                        # not evidence for both directions. High rotation
+                        # degrades attacking quality, so the only defensible read
+                        # from this condition alone is UNDER 2.5. Emitting U2.5
+                        # and O2.5 together made one of them unresolvable by
+                        # construction.
+                        print("- [PICK] UNDER 2.5: High structural rotation degrades attacking quality.")
+                        # Canonical label. "U2.5" was the old abbreviation and
+                        # is what made UNDER unreadable downstream - Stage 2 had
+                        # to substring-match for "UNDER" and never matched, so
+                        # the market silently fell through every gate.
+                        match_picks.append({"type": "UNDER 2.5", "target_loc": "match"})
+                    if h['gk_out']:
+                        print(f"-[PICK] {a['name'].upper()} TO SCORE: {h['name']} Keeper Liability.")
+                        match_picks.append({"type": "TO_SCORE", "target_loc": "away"})
+                    if a['gk_out']:
+                        print(f"- [PICK] {h['name'].upper()} TO SCORE: {a['name']} Keeper Liability.")
+                        match_picks.append({"type": "TO_SCORE", "target_loc": "home"})
+                    if h['gk_out'] and a['gk_out']:
+                        print("- [PICK] GG: Both teams starting vulnerable keepers.")
+                        match_picks.append({"type": "GG"})
+
+                    h_odd, o25, kp = odds_data['home_win'], odds_data['o25'],[]
+                    if h_odd and 1.40 <= h_odd <= 1.65 and h['gk_out'] and h['def_miss'] >= 1: 
+                        kp.append(f"FALSE FAVORITE: {a['name']} TO SCORE/DRAW")
+                    if h_odd and 1.20 <= h_odd <= 1.60 and h['miss'] <= 2 and a['miss'] >= 4 and (a['gk_out'] or a['def_miss'] >= 2) and a['kmv'] > 30.0:
+                        kp.append(f"TITAN LOCK: {h['name']} -1.5 HANDICAP")
+                    if o25 and 1.60 <= o25 <= 1.90 and h['gk_out'] and a['gk_out'] and (h['miss'] + a['miss']) > 4: 
+                        kp.append("BROKEN SHIELD: OVER 2.5 GOALS")
+                    
+                    if kp:
+                        print("\n[ADVANCED KILLER RULES TRIGGERED]")
+                        for r in kp: print(f"*** {r}")
+                        # FIX: killer rules are INFORMATIONAL notes, not
+                        # actionable picks. They used to be extended into
+                        # match_picks as raw strings, and Stage 2's
+                        # process_triple_phase_audit() then crashed on
+                        # pick['type'] (TypeError: string indices must be
+                        # integers, not 'str') — killing the whole fixture's
+                        # verification. Wrap each note in a structured
+                        # non-actionable record so the message survives but
+                        # can never be mistaken for a prediction. Stage 2
+                        # skips KILLER_NOTE entries explicitly.
+                        match_picks.extend(
+                            {"type": "KILLER_NOTE", "note": r} for r in kp
+                        )
+                    if match_picks: FINAL_PREDICTIONS_FEED[f_id] = match_picks
+
+                    # NEW: build the persisted team audit entry for this
+                    # fixture using data already computed above (m_stats +
+                    # team_gk_notes) and the match_picks/killer rules just
+                    # calculated. Purely additive — does not affect the h/a
+                    # objects or the verdict/pick logic above.
+                    TEAM_AUDIT_FEED[f_id] = {
+                        "fixture_id": str(f_id),
+                        "fixture": fx.get('name'),
+                        "kickoff_utc": start_dt.strftime('%H:%M'),
+                        "status_text": status_text,
+                        # Explicit lifecycle flags so the frontend never has to
+                        # re-derive them (and never re-introduces the old
+                        # "isFinished only tints a badge, every row renders" bug).
+                        "state": admit.get("state"),
+                        "is_live": bool(is_live),
+                        "is_finished": bool(admit.get("is_finished")),
+                        "is_upcoming": bool(admit.get("is_upcoming")),
+                        "has_lineup": bool(admit.get("has_lineup")),
+                        "has_formation": bool(admit.get("has_formation")),
+                        "formations": {str(k): str(v) for k, v in (formations or {}).items()},
+                        "admit_reason": admit.get("admit_reason"),
+                        "odds_home_win": odds_data['home_win'],
+                        "odds_away_win": odds_data['away_win'],
+                        "odds_o25": odds_data['o25'],
+                        "picks": [dict(p) for p in match_picks] if match_picks else [],
+                        "killer_rules": kp if kp else [],
+                        "combined_miss": int(h['miss'] + a['miss']),
+                        "home": {
+                            "loc": h['loc'],
+                            "miss": int(h['miss']),
+                            "team_id": str(h['id']),
+                            "team_name": h['name'],
+                            "gk_out": h['gk_out'],
+                            "gk_status": team_gk_notes.get(str(h['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(h['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": int(h['miss']),
+                            "def_miss": int(h['def_miss']),
+                            "mid_miss": int(h['mid_miss']),
+                            "att_miss": int(h['att_miss']),
+                            "l_wing_miss": bool(h.get('l_wing_miss', False)),
+                            "r_wing_miss": bool(h.get('r_wing_miss', False)),
+                            "kmv": float(h['kmv']),
+                            "rv": float(h['rv']),
+                            "players": h.get('players', []),
+                        },
+                        "away": {
+                            "loc": a['loc'],
+                            "miss": int(a['miss']),
+                            "team_id": str(a['id']),
+                            "team_name": a['name'],
+                            "gk_out": a['gk_out'],
+                            "gk_status": team_gk_notes.get(str(a['id']), {}).get("gk_status", ""),
+                            "gk_vuln_score": team_gk_notes.get(str(a['id']), {}).get("gk_vuln_score", 0.0),
+                            "missing_count": int(a['miss']),
+                            "def_miss": int(a['def_miss']),
+                            "mid_miss": int(a['mid_miss']),
+                            "att_miss": int(a['att_miss']),
+                            "l_wing_miss": bool(a.get('l_wing_miss', False)),
+                            "r_wing_miss": bool(a.get('r_wing_miss', False)),
+                            "kmv": float(a['kmv']),
+                            "rv": float(a['rv']),
+                            "players": a.get('players', []),
+                        },
+                    }
+
+    write_feed(PREDICTIONS_FILE, FINAL_PREDICTIONS_FEED,
+               acquisition_ok=not acq_failed, label="live_predictions.json")
+
+    # NEW: save the GK liability + missing-player audit to its own file.
+    # PREDICTIONS_FILE above is untouched — this is a second, independent
+    # write, for Code 6 to read.
+    write_feed(PREMATCH_TEAM_AUDIT_FILE, TEAM_AUDIT_FEED,
+               acquisition_ok=not acq_failed, label="prematch_team_audit.json")
+
+    save_cache()
+    print(f"\n--- SCAN COMPLETE: {len(FINAL_PREDICTIONS_FEED)} FEED SYNCED IN DATA DIR ---")
+    return FINAL_PREDICTIONS_FEED
+
+if __name__ == "__main__":
+    run_prematch_engine()
