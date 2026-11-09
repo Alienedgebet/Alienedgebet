@@ -14,7 +14,7 @@ BASE_DIR   = os.path.abspath(os.path.dirname(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 MASTER_DIR = os.path.join(BASE_DIR, "master_aggregator")
 
-API_KEY = os.getenv("SPORTMONKS_API_KEY") or "7ST9IhxYqJG7zaGlC47MICTW5bFKe8HyJGIZfIK7t52TkAOKHe8EsmXGrogM"
+API_KEY = os.getenv("SPORTMONKS_API_KEY") or "chVBLtLfwEQXvEFbg7m53mUkYwUCz3gjBDGhLlMX5DqeQANL1IfUTW0DEAsn"
 
 # ==============================================================================
 # COLUMN CONTROL

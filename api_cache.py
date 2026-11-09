@@ -302,6 +302,56 @@ def breaker_should_bypass():
 API_WAIT_BUDGET_S = 5400.0        # 90 min of total API sleeping per run
 _api_budget = {"spent": 0.0}
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3b. PROACTIVE PER-ENDPOINT PACING (2026-11-09) — prevent 429s before they happen
+# ═══════════════════════════════════════════════════════════════════════════════
+# Reactive 429 handling (sleep after a 429) is not enough on weekends when
+# fixture volume spikes: the burst limiter fires on the FIRST call of a minute
+# if calls are clustered. We now pace PROACTIVELY: track the last call time
+# per endpoint path and enforce a minimum interval before any request goes to
+# the wire. On Saturday/Sunday the interval is doubled automatically.
+#
+# Defaults are conservative but not crippling: 1.0s between calls to the same
+# endpoint on weekdays, 2.5s on weekends. The shared cooldown gate (429 lock
+# file) still takes precedence — if it is active we wait for it first.
+_PROACTIVE_MIN_INTERVAL_WEEKDAY = 1.0     # seconds between calls to same endpoint
+_PROACTIVE_MIN_INTERVAL_WEEKEND = 2.5     # seconds between calls to same endpoint (Sat/Sun)
+_proactive_last_call = {}                 # path -> last call timestamp (epoch)
+
+def _is_weekend():
+    """True when today is Saturday or Sunday (local time)."""
+    return time.localtime().tm_wday >= 5  # 5=Sat, 6=Sun
+
+def _proactive_pace(path):
+    """Enforce a minimum interval between calls to the same endpoint path.
+
+    Returns the number of seconds actually slept (0.0 if no pacing needed).
+    Called BEFORE every real API request in smart_get, so bursts never form.
+    """
+    now = time.time()
+    min_interval = (_PROACTIVE_MIN_INTERVAL_WEEKEND if _is_weekend()
+                    else _PROACTIVE_MIN_INTERVAL_WEEKDAY)
+    last = _proactive_last_call.get(path, 0.0)
+    elapsed = now - last
+    if elapsed >= min_interval:
+        _proactive_last_call[path] = now
+        return 0.0
+    sleep_for = min_interval - elapsed
+    # Cap proactive pacing so a single stale endpoint can't freeze the run.
+    sleep_for = min(sleep_for, 30.0)
+    if sleep_for > 0:
+        # Charge against the API wait budget; if exhausted, skip the wait.
+        if api_budget_charge(sleep_for):
+            print(f"[API PACE] {path}: proactive pacing {sleep_for:.1f}s "
+                  f"({'weekend' if _is_weekend() else 'weekday'})",
+                  end="", flush=True)
+            time.sleep(sleep_for)
+        else:
+            print(f"[API PACE] {path}: budget exhausted, skipping {sleep_for:.1f}s pace",
+                  end="", flush=True)
+    _proactive_last_call[path] = time.time()
+    return sleep_for
+
 # ── PROVIDER SUSPENSION (2026-10-02) ────────────────────────────────────────
 # Measured on 2026-10-02 while trying to rebuild 2026-10-02:
 #     /leagues                 HTTP 200  x-ratelimit-remaining: 176/180
@@ -620,6 +670,12 @@ def smart_get(url, params=None, **kwargs):
             print(f"[API GATE] smart_get: shared cooldown active — pacing {pace:.0f}s ",
                   end="", flush=True)
             time.sleep(pace)
+
+    # ── PROACTIVE PACING BEFORE ANY WIRE REQUEST ────────────────────────────
+    # Enforce per-endpoint minimum interval so bursts never form. This runs
+    # BEFORE the first attempt and before every retry, so even a 429 storm
+    # cannot re-fire calls faster than the provider allows.
+    _proactive_pace(path)
 
     for attempt in range(MAX_429_RETRIES):
         try:

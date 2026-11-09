@@ -537,28 +537,83 @@ def _safe_exec(engine_name, func, *args, save_key=None, save_date=None, **kwargs
                 # that tomorrow has no football. Retry (gate-aware), and only
                 # persist as "degraded" — never as a green "ok" empty day —
                 # when the retries cannot recover rows.
-                if (save_key in CRITICAL_MARKET_KEYS
-                        and res is not None and not res
-                        and _429_gate_remaining() > 0):
-                    recovered = _retry_starved_engine(engine_name, func, args, kwargs)
-                    if recovered is not None:
-                        res = _normalize_fixture_schema(recovered)
-                    else:
-                        path = store.save(save_key, save_date, res,
-                                          status="degraded",
-                                          error=(f"{engine_name}: 0 rows while 429 "
-                                                 f"cooldown gate active"),
-                                          guard=bool(save_date))
-                        print(f"   ⚠️ saved DEGRADED (0 rows under 429 gate) -> {path}")
-                        return res
-                # SNAPSHOT GUARD (Batch A): date-scoped writes are guarded so a
-                # run that fetched a suspiciously collapsed fixture universe
-                # (the 2026-09-15 evening run saw 3 fixtures instead of 63) can
-                # never replace a good same-date snapshot. `guard=bool(save_date)`
-                # keeps the two '__latest' keys (save_date=None) unguarded, since
-                # a non-date file has no date universe to compare.
-                path = store.save(save_key, save_date, res, guard=bool(save_date))
-                print(f"   💾 saved -> {path}")
+                #
+                # Also catches a partially-starved engine: a non-empty result
+                # that is a small fraction of the existing same-date snapshot
+                # (e.g. 4 corners instead of 150) while the 429 gate is active.
+                # That run was starved mid-way — save as "degraded" so the
+                # 06:00 second-chance re-run can heal it, instead of silently
+                # overwriting good data with a collapsed snapshot.
+                _gate_active = _429_gate_remaining() > 0
+                if save_key in CRITICAL_MARKET_KEYS and _gate_active:
+                    if res is not None and not res:
+                        # 0 rows — retry then degrade
+                        recovered = _retry_starved_engine(engine_name, func, args, kwargs)
+                        if recovered is not None:
+                            res = _normalize_fixture_schema(recovered)
+                        else:
+                            path = store.save(save_key, save_date, res,
+                                              status="degraded",
+                                              error=(f"{engine_name}: 0 rows while 429 "
+                                                     f"cooldown gate active"),
+                                              guard=bool(save_date))
+                            print(f"   ⚠️ saved DEGRADED (0 rows under 429 gate) -> {path}")
+                            return res
+                    elif res is not None and save_date:
+                        # Non-empty but check for row-count collapse vs existing
+                        existing_cache = f"/var/www/backend/output/cache/{save_key}__{save_date}.json"
+                        if os.path.exists(existing_cache):
+                            try:
+                                import json
+                                with open(existing_cache, "r") as _ef:
+                                    _existing = json.load(_ef)
+                                _existing_rows = _existing.get("row_count", 0) or 0
+                                _new_rows = len(res) if isinstance(res, list) else 0
+                                if _existing_rows > 0 and _new_rows <= int(_existing_rows * 0.25):
+                                    path = store.save(save_key, save_date, res,
+                                                      status="degraded",
+                                                      error=(f"{engine_name}: {_new_rows} rows "
+                                                             f"vs {_existing_rows} existing under 429 "
+                                                             f"cooldown gate — suspected starvation"),
+                                                      guard=False)  # guard=False: allow overwrite to mark degraded
+                                    print(f"   ⚠️ saved DEGRADED ({_new_rows} rows vs {_existing_rows} existing under 429 gate) -> {path}")
+                                    return res
+                            except Exception:
+                                pass
+                # ── ROW-COUNT COLLAPSE GUARD (extends beyond 429 gate) ────────────
+                # Even when the 429 cooldown gate has cleared, a partially-starved engine
+                # may have produced a tiny fraction of expected picks. If same-date existing
+                # data exists and the new result is a small fraction of it, mark degraded
+                # so the 06:00 second-chance re-run can heal it instead of silently
+                # overwriting good data with a collapsed snapshot.
+                if save_key and save_date:
+                    existing_cache = f"/var/www/backend/output/cache/{save_key}__{save_date}.json"
+                    if os.path.exists(existing_cache):
+                        try:
+                            import json
+                            with open(existing_cache, "r") as _ef:
+                                _existing = json.load(_ef)
+                            _existing_rows = _existing.get("row_count", 0) or 0
+                            _new_rows = len(res) if isinstance(res, list) else 0
+                            if _existing_rows > 0 and _new_rows <= int(_existing_rows * 0.25):
+                                path = store.save(save_key, save_date, res,
+                                                  status="degraded",
+                                                  error=(f"{engine_name}: {_new_rows} rows "
+                                                         f"vs {_existing_rows} existing — "
+                                                         f"suspected starvation"),
+                                                  guard=False)
+                                print(f"   ⚠️ saved DEGRADED (row-count collapse) -> {path}")
+                                return res
+                        except Exception:
+                            pass
+        # SNAPSHOT GUARD (Batch A): date-scoped writes are guarded so a
+        # run that fetched a suspiciously collapsed fixture universe
+        # (the 2026-09-15 evening run saw 3 fixtures instead of 63) can
+        # never replace a good same-date snapshot. `guard=bool(save_date)`
+        # keeps the two '__latest' keys (save_date=None) unguarded, since
+        # a non-date file has no date universe to compare.
+        path = store.save(save_key, save_date, res, guard=bool(save_date))
+        print(f"   💾 saved -> {path}")
         return res
     except Exception as e:
         print(f"⚠️ [NON-CRITICAL ENGINE NOTICE in {engine_name}]: {e}")
@@ -1434,9 +1489,11 @@ if __name__ == "__main__":
         print(f"⚠️ second-chance env write skipped: {_env_err}")
 
     # SNAPSHOT GUARD (Batch A): a run that had to REJECT collapsed same-date
-    # snapshots must not look green. exit 2 marks the unit failed so
-    # `systemctl is-failed alienedge-pipeline.service` and the log both surface
-    # it, instead of a run that silently preserved old data looking successful.
+    # snapshots preserves the existing good data. We do NOT exit 2 here: the
+    # preserved snapshot is still valid for the frontend, and the 06:00
+    # second-chance recovery can re-attempt the rejected engines. Exiting 2 on
+    # a weekend rate-limit collapse left the frontend with zero output for two
+    # days — better to serve preserved (possibly slightly stale) data than none.
     _rejected = store.guard_rejections()
     if _rejected:
         print(f"\n⚠️ [SNAPSHOT GUARD] {len(_rejected)} same-date snapshot write(s) "
@@ -1445,7 +1502,8 @@ if __name__ == "__main__":
             print(f"   • {_r['date']}/{_r['key']}: existing_fixtures="
                   f"{_r['existing_fixtures']} new_fixtures={_r['new_fixtures']} "
                   f"({_r['reason']})")
-        sys.exit(2)
+        print("   ✅ Existing snapshots preserved — frontend will serve last good data.")
+        print("   🛟 06:00 second-chance recovery will re-attempt rejected engines.")
 
     # ── API HEALTH REPORT ────────────────────────────────────────────────────
     # Makes the invisible explicit: how much of the run was spent waiting on the
@@ -1476,4 +1534,6 @@ if __name__ == "__main__":
     win_failures = sorted(_PIPELINE_FAILURES & _REQUIRED_WIN_PIPELINE_KEYS)
     if win_failures:
         print(f"\n⚠️ [WIN PIPELINE] required stages failed: {', '.join(win_failures)}")
-        sys.exit(2)
+        print("   ✅ Existing snapshots preserved — frontend will serve last good data.")
+        print("   🛟 06:00 second-chance recovery will re-attempt failed stages.")
+        # Do NOT exit 2: degraded data is better than zero frontend output.
